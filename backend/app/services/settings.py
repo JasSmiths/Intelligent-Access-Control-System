@@ -13,6 +13,7 @@ from app.models import SystemSetting
 SECRET_KEYS = {
     "home_assistant_token",
     "apprise_urls",
+    "dvla_api_key",
     "openai_api_key",
     "gemini_api_key",
     "anthropic_api_key",
@@ -45,6 +46,14 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
     "home_assistant_presence_entities": ("integrations", settings.home_assistant_presence_entities, "Person-to-HA entity mapping."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
+    "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
+    "dvla_vehicle_enquiry_url": (
+        "integrations",
+        "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
+        "DVLA Vehicle Enquiry Service endpoint URL.",
+    ),
+    "dvla_test_registration_number": ("integrations", "AA19AAA", "VRN used for DVLA connection tests."),
+    "dvla_timeout_seconds": ("integrations", 10.0, "DVLA Vehicle Enquiry Service HTTP timeout."),
     "llm_provider": ("llm", settings.llm_provider, "Active LLM provider."),
     "llm_timeout_seconds": ("llm", settings.llm_timeout_seconds, "LLM HTTP timeout."),
     "openai_api_key": ("llm", settings.openai_api_key or "", "OpenAI API key."),
@@ -81,6 +90,10 @@ class RuntimeConfig:
     home_assistant_default_media_player: str
     home_assistant_presence_entities: dict[str, str]
     apprise_urls: str
+    dvla_api_key: str
+    dvla_vehicle_enquiry_url: str
+    dvla_test_registration_number: str
+    dvla_timeout_seconds: float
     llm_provider: str
     llm_timeout_seconds: float
     openai_api_key: str
@@ -181,6 +194,10 @@ async def get_runtime_config() -> RuntimeConfig:
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
         home_assistant_presence_entities=dict(values["home_assistant_presence_entities"] or {}),
         apprise_urls=str(values["apprise_urls"] or ""),
+        dvla_api_key=str(values["dvla_api_key"] or ""),
+        dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
+        dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),
+        dvla_timeout_seconds=float(values["dvla_timeout_seconds"]),
         llm_provider=str(values["llm_provider"]),
         llm_timeout_seconds=float(values["llm_timeout_seconds"]),
         openai_api_key=str(values["openai_api_key"] or ""),

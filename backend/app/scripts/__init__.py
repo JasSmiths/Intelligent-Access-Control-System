@@ -1,1 +1,1 @@
-"""Operational helper scripts for local development and demos."""
+"""Operational helper scripts for local development."""

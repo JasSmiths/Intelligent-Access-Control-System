@@ -8,7 +8,9 @@ from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Anomaly, Person, Presence, User
 from app.models.enums import AccessDecision, AccessDirection
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, normalize_registration_number
 from app.modules.notifications.base import NotificationContext
+from app.services.dvla import lookup_vehicle_registration
 from app.services.notifications import get_notification_service
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -118,6 +120,22 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=get_system_users,
+        ),
+        AgentTool(
+            name="lookup_dvla_vehicle",
+            description="Look up UK vehicle details from the DVLA Vehicle Enquiry Service by registration number.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "registration_number": {
+                        "type": "string",
+                        "description": "Vehicle registration number without spaces or punctuation.",
+                    },
+                },
+                "required": ["registration_number"],
+                "additionalProperties": False,
+            },
+            handler=lookup_dvla_vehicle,
         ),
     ]
     return {tool.name: tool for tool in tools}
@@ -288,6 +306,23 @@ async def get_system_users(arguments: dict[str, Any]) -> dict[str, Any]:
         if include_inactive or user.is_active
     ]
     return {"users": records, "count": len(records)}
+
+
+async def lookup_dvla_vehicle(arguments: dict[str, Any]) -> dict[str, Any]:
+    registration_number = normalize_registration_number(str(arguments.get("registration_number") or ""))
+    if not registration_number:
+        return {"error": "registration_number is required."}
+    try:
+        vehicle = await lookup_vehicle_registration(registration_number)
+    except DvlaVehicleEnquiryError as exc:
+        return {
+            "registration_number": registration_number,
+            "error": str(exc),
+        }
+    return {
+        "registration_number": registration_number,
+        "vehicle": vehicle,
+    }
 
 
 async def _person_map(session) -> dict[str, dict[str, str]]:

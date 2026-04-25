@@ -27,6 +27,7 @@ Primary goals:
 - Icons: `lucide-react`.
 - Notifications: Apprise.
 - Home Assistant: REST service calls plus WebSocket state listener.
+- DVLA: Vehicle Enquiry Service API lookup integration.
 - LLM providers: local fallback, OpenAI Responses API, Gemini, Claude, Ollama.
 
 ## Ports and Access
@@ -217,7 +218,7 @@ Dynamic settings live in `system_settings` and are edited through the UI/API:
 - General: app name, log level, timezone.
 - Auth options: cookie name, token lifetimes, secure-cookie flag.
 - LPR tuning: debounce quiet/max seconds and similarity threshold.
-- Integrations: Home Assistant, Apprise.
+- Integrations: Home Assistant, Apprise, DVLA Vehicle Enquiry Service.
 - LLM providers: active provider, timeout, base URLs, models, API keys.
 
 Backend service:
@@ -371,6 +372,33 @@ Rules:
   logs or invented context.
 - `IACS_APPRISE_URLS` may be comma-separated or newline-separated.
 
+## DVLA Vehicle Enquiry Integration
+
+DVLA client:
+
+- `backend/app/modules/dvla/vehicle_enquiry.py`
+
+Service wrapper:
+
+- `backend/app/services/dvla.py`
+
+Configuration lives in dynamic encrypted settings:
+
+- `dvla_api_key`
+- `dvla_vehicle_enquiry_url`
+- `dvla_test_registration_number`
+- `dvla_timeout_seconds`
+
+Rules:
+
+- Send Vehicle Registration Numbers in the POST JSON body, never as URL query
+  parameters.
+- Normalize VRNs by removing spaces and non-alphanumeric characters before
+  calling DVLA.
+- Do not log or expose the `x-api-key` value.
+- Surface DVLA HTTP/API failures back to the caller; do not report a successful
+  lookup unless DVLA returned a successful response.
+
 ## AI Agent
 
 Provider wrappers:
@@ -411,6 +439,7 @@ AI tools:
 - `calculate_visit_duration`
 - `trigger_anomaly_alert`
 - `get_system_users`
+- `lookup_dvla_vehicle`
 
 Memory:
 
@@ -491,6 +520,7 @@ Integrations:
 - `POST /api/v1/integrations/gate/open`
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
+- `POST /api/v1/integrations/dvla/lookup`
 
 AI:
 
@@ -638,6 +668,21 @@ npm install
 npm run build
 ```
 
+After changing frontend code or other container-baked assets, rebuild and
+restart the affected container before handing back for inspection. For dashboard
+changes, run:
+
+```bash
+docker compose up -d --build frontend
+```
+
+After backend code changes, restart the backend container so the bind-mounted
+app reloads cleanly:
+
+```bash
+docker compose restart backend
+```
+
 Compose validation:
 
 ```bash
@@ -704,6 +749,7 @@ table and is managed through the Settings/API UI, not `.env`:
 
 - Home Assistant tokens.
 - Apprise URLs.
+- DVLA API keys.
 - OpenAI/Gemini/Anthropic API keys.
 
 Gate-opening and notification actions are real-world effects. Keep endpoint
@@ -751,6 +797,8 @@ Completed:
   AI tool.
 - Dynamic Configuration: database-backed settings, encrypted secrets,
   settings pages, integration tiles, and connection-test API.
+- DVLA Lookup: encrypted API-key setting, connection test, lookup endpoint, and
+  AI tool access to the Vehicle Enquiry Service API.
 
 Still pending or intentionally incomplete:
 

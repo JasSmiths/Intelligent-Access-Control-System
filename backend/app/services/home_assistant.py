@@ -15,6 +15,17 @@ from app.services.settings import get_runtime_config
 
 logger = get_logger(__name__)
 
+FRONT_DOOR_ENTITY_ID = "binary_sensor.front_door"
+BACK_DOOR_ENTITY_ID = "binary_sensor.back_door"
+MAIN_GARAGE_DOOR_ENTITY_ID = "cover.main_garage_door"
+MUMS_GARAGE_DOOR_ENTITY_ID = "cover.mums_garage_door"
+DOOR_ENTITY_IDS = {
+    FRONT_DOOR_ENTITY_ID: "front_door",
+    BACK_DOOR_ENTITY_ID: "back_door",
+    MAIN_GARAGE_DOOR_ENTITY_ID: "main_garage_door",
+    MUMS_GARAGE_DOOR_ENTITY_ID: "mums_garage_door",
+}
+
 
 class HomeAssistantIntegrationService:
     """Keeps Home Assistant state synchronized with IACS realtime state."""
@@ -56,11 +67,24 @@ class HomeAssistantIntegrationService:
             "presence_entities": config.home_assistant_presence_entities,
             "last_gate_state": self._last_gate_state.value,
         }
-        if status["configured"] and config.home_assistant_gate_entity_id:
-            status["current_gate_state"] = (
-                await HomeAssistantGateController(self._client).current_state()
-            ).value
+        if status["configured"]:
+            if config.home_assistant_gate_entity_id:
+                status["current_gate_state"] = (
+                    await HomeAssistantGateController(self._client).current_state()
+                ).value
+            status["front_door_state"] = await self._door_state(FRONT_DOOR_ENTITY_ID)
+            status["back_door_state"] = await self._door_state(BACK_DOOR_ENTITY_ID)
+            status["main_garage_door_state"] = await self._door_state(MAIN_GARAGE_DOOR_ENTITY_ID)
+            status["mums_garage_door_state"] = await self._door_state(MUMS_GARAGE_DOOR_ENTITY_ID)
         return status
+
+    async def _door_state(self, entity_id: str) -> str:
+        try:
+            state = await self._client.get_state(entity_id)
+        except Exception as exc:
+            logger.warning("home_assistant_door_state_failed", extra={"entity_id": entity_id, "error": str(exc)})
+            return GateState.UNKNOWN.value
+        return map_home_assistant_gate_state(state.state).value
 
     async def _listen(self) -> None:
         async for message in self._client.subscribe_state_changed():
@@ -78,6 +102,8 @@ class HomeAssistantIntegrationService:
             config = await get_runtime_config()
             if entity_id == config.home_assistant_gate_entity_id:
                 await self._sync_gate_state(state_value, entity_id)
+            if entity_id in DOOR_ENTITY_IDS:
+                await self._sync_door_state(state_value, entity_id)
             await self._sync_presence_state(entity_id, state_value, config.home_assistant_presence_entities)
 
     async def _sync_gate_state(self, state_value: str, entity_id: str) -> None:
@@ -88,6 +114,19 @@ class HomeAssistantIntegrationService:
                 "source": "home_assistant",
                 "entity_id": entity_id,
                 "state": self._last_gate_state.value,
+                "raw_state": state_value,
+            },
+        )
+
+    async def _sync_door_state(self, state_value: str, entity_id: str) -> None:
+        door_state = map_home_assistant_gate_state(state_value)
+        await event_bus.publish(
+            "door.state_changed",
+            {
+                "source": "home_assistant",
+                "entity_id": entity_id,
+                "door": DOOR_ENTITY_IDS[entity_id],
+                "state": door_state.value,
                 "raw_state": state_value,
             },
         )

@@ -47,7 +47,10 @@ class Person(Base, TimestampMixin):
     __tablename__ = "people"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    first_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    last_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -64,6 +67,7 @@ class Vehicle(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
     registration_number: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    vehicle_photo_data_url: Mapped[str | None] = mapped_column(Text)
     make: Mapped[str | None] = mapped_column(String(80))
     model: Mapped[str | None] = mapped_column(String(120))
     color: Mapped[str | None] = mapped_column(String(80))

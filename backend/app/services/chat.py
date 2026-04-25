@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -24,9 +25,10 @@ logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
 Answer concisely and use tool results as the source of truth for presence,
-events, anomalies, schedules, and access rhythm. If the user asks a follow-up
-with pronouns like they, he, she, or it, use the session memory context.
-Never invent access events or people that are not present in tool results."""
+events, anomalies, schedules, access rhythm, and DVLA vehicle lookups. If the
+user asks a follow-up with pronouns like they, he, she, or it, use the session
+memory context. Never invent access events, people, or DVLA vehicle records
+that are not present in tool results."""
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,17 @@ class ChatService:
                 )
             )
 
+        if any(word in lower for word in ["dvla", "vehicle enquiry", "vehicle lookup", "mot", "tax status", "taxed"]):
+            registration_number = self._registration_from_message(message)
+            if registration_number:
+                calls.append(
+                    ToolCall(
+                        "planned-dvla-lookup",
+                        "lookup_dvla_vehicle",
+                        {"registration_number": registration_number},
+                    )
+                )
+
         if any(word in lower for word in ["summary", "summarize", "rhythm", "report"]):
             calls.append(
                 ToolCall(
@@ -253,10 +266,6 @@ class ChatService:
             return {"group": "gardener"}
         if "contractor" in lower:
             return {"group": "contractor"}
-        if "steph" in lower:
-            return {"person": "Steph"}
-        if "bob" in lower:
-            return {"person": "Bob"}
         if any(token in lower.split() for token in ["they", "them", "he", "she", "their"]):
             if memory.get("last_group"):
                 return {"group": memory["last_group"]}
@@ -270,6 +279,13 @@ class ChatService:
         if "person" in subject:
             return {"person": subject["person"]}
         return {}
+
+    def _registration_from_message(self, message: str) -> str | None:
+        for match in re.finditer(r"\b[A-Z0-9][A-Z0-9 -]{1,10}[A-Z0-9]\b", message.upper()):
+            candidate = re.sub(r"[^A-Z0-9]", "", match.group(0))
+            if 2 <= len(candidate) <= 8 and any(char.isalpha() for char in candidate) and any(char.isdigit() for char in candidate):
+                return candidate
+        return None
 
     async def _execute_tool_call(self, call: ToolCall) -> dict[str, Any]:
         tool = self._tools.get(call.name)

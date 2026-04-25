@@ -1,5 +1,6 @@
 from difflib import SequenceMatcher
 import re
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -10,20 +11,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, normalize_registration_number
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.modules.gate.home_assistant import HomeAssistantGateController
 from app.models import User
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, HomeAssistantState
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.apprise_client import normalize_apprise_url, split_apprise_urls, validate_apprise_urls
+from app.services.dvla import lookup_vehicle_registration
 from app.services.home_assistant import get_home_assistant_service
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config, update_settings
 
 router = APIRouter()
 
+GARAGE_COVER_ENTITIES = {
+    "main_garage_door": "cover.main_garage_door",
+    "mums_garage_door": "cover.mums_garage_door",
+}
+
 
 class GateOpenRequest(BaseModel):
+    reason: str = Field(default="Manual dashboard command", max_length=240)
+
+
+class CoverCommandRequest(BaseModel):
+    target: Literal["main_garage_door", "mums_garage_door"]
+    action: Literal["open", "close"]
     reason: str = Field(default="Manual dashboard command", max_length=240)
 
 
@@ -40,6 +54,10 @@ class TestNotificationRequest(BaseModel):
 
 class AddAppriseUrlRequest(BaseModel):
     url: str = Field(min_length=6, max_length=1200)
+
+
+class DvlaLookupRequest(BaseModel):
+    registration_number: str = Field(min_length=1, max_length=20)
 
 
 @router.get("/home-assistant/status")
@@ -107,6 +125,20 @@ async def remove_apprise_url(index: int, _: User = Depends(admin_user)) -> dict:
     return {"urls": [_apprise_url_summary(row_index, url) for row_index, url in enumerate(urls)]}
 
 
+@router.post("/dvla/lookup")
+async def dvla_lookup(request: DvlaLookupRequest, _: User = Depends(current_user)) -> dict[str, object]:
+    registration_number = normalize_registration_number(request.registration_number)
+    try:
+        vehicle = await lookup_vehicle_registration(registration_number)
+    except DvlaVehicleEnquiryError as exc:
+        status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else 503
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return {
+        "registration_number": registration_number,
+        "vehicle": vehicle,
+    }
+
+
 @router.post("/gate/open")
 async def open_gate(request: GateOpenRequest) -> dict:
     result = await HomeAssistantGateController().open_gate(request.reason)
@@ -116,6 +148,26 @@ async def open_gate(request: GateOpenRequest) -> dict:
         "accepted": result.accepted,
         "state": result.state.value,
         "detail": result.detail,
+    }
+
+
+@router.post("/cover/command")
+async def cover_command(request: CoverCommandRequest, _: User = Depends(current_user)) -> dict:
+    entity_id = GARAGE_COVER_ENTITIES[request.target]
+    service_name = "cover.open_cover" if request.action == "open" else "cover.close_cover"
+    client = HomeAssistantClient()
+    try:
+        await client.call_service(service_name, {"entity_id": entity_id})
+        state = await client.get_state(entity_id)
+    except HomeAssistantError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "accepted": True,
+        "entity_id": entity_id,
+        "target": request.target,
+        "action": request.action,
+        "state": state.state,
+        "detail": request.reason,
     }
 
 

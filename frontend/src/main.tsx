@@ -17,6 +17,7 @@ import {
   Clock3,
   Command,
   Database,
+  DoorClosed,
   DoorOpen,
   FileText,
   Gauge,
@@ -47,9 +48,17 @@ import {
   UserPlus,
   UserRound,
   Users,
+  Warehouse,
   X
 } from "lucide-react";
 import "./styles.css";
+
+type DoorCommandAction = "open" | "close";
+type DashboardCommand = {
+  target: "top_gate" | "main_garage_door" | "mums_garage_door";
+  label: string;
+  action: DoorCommandAction;
+};
 
 type Presence = {
   person_id: string;
@@ -80,7 +89,11 @@ type Anomaly = {
 
 type Person = {
   id: string;
+  first_name: string;
+  last_name: string;
   display_name: string;
+  profile_photo_data_url: string | null;
+  group_id: string | null;
   group: string | null;
   category: string | null;
   is_active: boolean;
@@ -90,9 +103,12 @@ type Person = {
 type Vehicle = {
   id: string;
   registration_number: string;
+  vehicle_photo_data_url?: string | null;
   description: string | null;
   make: string | null;
   model: string | null;
+  color?: string | null;
+  person_id?: string | null;
   owner?: string | null;
   is_active?: boolean;
 };
@@ -107,11 +123,25 @@ type TimeSlot = {
   is_active: boolean;
 };
 
+type Group = {
+  id: string;
+  name: string;
+  category: string;
+  subtype: string | null;
+  description: string | null;
+  people_count: number;
+};
+
 type IntegrationStatus = {
   configured: boolean;
   gate_entity_id: string | null;
   default_media_player: string | null;
   last_gate_state: string;
+  current_gate_state?: string;
+  front_door_state?: string;
+  back_door_state?: string;
+  main_garage_door_state?: string;
+  mums_garage_door_state?: string;
 };
 
 type RealtimeMessage = {
@@ -161,6 +191,16 @@ type AppriseUrlSummary = {
   preview: string;
 };
 
+type DvlaLookupResponse = {
+  registration_number: string;
+  vehicle: {
+    make?: string | null;
+    model?: string | null;
+    colour?: string | null;
+    color?: string | null;
+  } & Record<string, unknown>;
+};
+
 type UserAccount = {
   id: string;
   username: string;
@@ -190,6 +230,7 @@ type ProfilePreferences = {
 type ViewKey =
   | "dashboard"
   | "people"
+  | "groups"
   | "vehicles"
   | "events"
   | "reports"
@@ -204,6 +245,7 @@ type ViewKey =
 const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
   { key: "people", label: "People", icon: UserRound },
+  { key: "groups", label: "Groups", icon: Users },
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "events", label: "Events", icon: CalendarDays },
   { key: "reports", label: "Reports", icon: BarChart3 },
@@ -222,6 +264,7 @@ const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.Element
 const viewPaths: Record<ViewKey, string> = {
   dashboard: "/",
   people: "/people",
+  groups: "/groups",
   vehicles: "/vehicles",
   events: "/events",
   reports: "/reports",
@@ -238,6 +281,13 @@ const pathViews = Object.entries(viewPaths).reduce<Record<string, ViewKey>>((acc
   acc[path] = viewKey as ViewKey;
   return acc;
 }, {});
+
+const groupCategoryOptions = [
+  { value: "family", label: "Family" },
+  { value: "friends", label: "Friends" },
+  { value: "visitors", label: "Visitors" },
+  { value: "contractors", label: "Contractors" }
+] as const;
 
 function isViewKey(value: string | null): value is ViewKey {
   return Boolean(value && Object.prototype.hasOwnProperty.call(viewPaths, value));
@@ -303,6 +353,43 @@ function wsUrl(path: string) {
   return `${protocol}://${window.location.host}${path}`;
 }
 
+function applyIntegrationRealtimeEvent(
+  event: RealtimeMessage,
+  setIntegrationStatus: React.Dispatch<React.SetStateAction<IntegrationStatus | null>>
+) {
+  if (event.type === "gate.state_changed") {
+    const state = stringPayload(event.payload.state);
+    if (!state) return false;
+    setIntegrationStatus((current) => current ? { ...current, current_gate_state: state, last_gate_state: state } : current);
+    return true;
+  }
+
+  if (event.type === "door.state_changed") {
+    const door = stringPayload(event.payload.door);
+    const state = stringPayload(event.payload.state);
+    const stateKey = doorStateKey(door);
+    if (!state || !stateKey) return false;
+    setIntegrationStatus((current) => current ? { ...current, [stateKey]: state } : current);
+    return true;
+  }
+
+  return false;
+}
+
+function stringPayload(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function doorStateKey(door: string) {
+  const keys: Record<string, keyof IntegrationStatus> = {
+    back_door: "back_door_state",
+    front_door: "front_door_state",
+    main_garage_door: "main_garage_door_state",
+    mums_garage_door: "mums_garage_door_state"
+  };
+  return keys[door] ?? null;
+}
+
 function App() {
   const [view, setView] = React.useState<ViewKey>(() => initialViewFromLocation());
   const [theme, setTheme] = useTheme();
@@ -314,6 +401,7 @@ function App() {
   const [anomalies, setAnomalies] = React.useState<Anomaly[]>([]);
   const [people, setPeople] = React.useState<Person[]>([]);
   const [vehicles, setVehicles] = React.useState<Vehicle[]>([]);
+  const [groups, setGroups] = React.useState<Group[]>([]);
   const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
@@ -356,13 +444,14 @@ function App() {
   }, [refreshAuth]);
 
   const refresh = React.useCallback(async () => {
-    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextSlots, nextStatus] =
+    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSlots, nextStatus] =
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
         api.get<Anomaly[]>("/api/v1/anomalies?limit=30"),
         api.get<Person[]>("/api/v1/people"),
         api.get<Vehicle[]>("/api/v1/vehicles"),
+        api.get<Group[]>("/api/v1/groups"),
         api.get<TimeSlot[]>("/api/v1/time-slots"),
         api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status")
       ]);
@@ -371,9 +460,14 @@ function App() {
     setAnomalies(nextAnomalies);
     setPeople(nextPeople);
     setVehicles(nextVehicles);
+    setGroups(nextGroups);
     setTimeSlots(nextSlots);
     setIntegrationStatus(nextStatus);
     setLoading(false);
+  }, []);
+
+  const refreshIntegrationStatus = React.useCallback(async () => {
+    setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"));
   }, []);
 
   React.useEffect(() => {
@@ -383,10 +477,21 @@ function App() {
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
+    const timer = window.setInterval(() => {
+      refreshIntegrationStatus().catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [authStatus?.authenticated, refreshIntegrationStatus]);
+
+  React.useEffect(() => {
+    if (!authStatus?.authenticated) return;
     const socket = new WebSocket(wsUrl("/api/v1/realtime/ws"));
     socket.onmessage = (event) => {
       const parsed = JSON.parse(event.data) as RealtimeMessage;
       setRealtime((current) => [parsed, ...current].slice(0, 80));
+      if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
+        return;
+      }
       if (parsed.type !== "connection.ready") {
         refresh().catch(() => undefined);
       }
@@ -538,7 +643,7 @@ function App() {
             </label>
             <button className="icon-button notification-button" onClick={() => refresh()} type="button" aria-label="Refresh alerts">
               <Bell size={20} />
-              <span>3</span>
+              {anomalies.length ? <span>{Math.min(anomalies.length, 99)}</span> : null}
             </button>
             <button className="icon-button refresh-button" onClick={() => refresh()} type="button" aria-label="Refresh">
               <RefreshCcw size={17} />
@@ -558,6 +663,7 @@ function App() {
             anomalies={anomalies}
             people={people}
             vehicles={vehicles}
+            groups={groups}
             timeSlots={timeSlots}
             integrationStatus={integrationStatus}
             realtime={realtime}
@@ -753,6 +859,7 @@ function View(props: {
   anomalies: Anomaly[];
   people: Person[];
   vehicles: Vehicle[];
+  groups: Group[];
   timeSlots: TimeSlot[];
   integrationStatus: IntegrationStatus | null;
   realtime: RealtimeMessage[];
@@ -762,9 +869,11 @@ function View(props: {
 }) {
   switch (props.view) {
     case "people":
-      return <PeopleView people={props.people} query={props.search} />;
+      return <PeopleView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
+    case "groups":
+      return <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
     case "vehicles":
-      return <VehiclesView vehicles={props.vehicles} query={props.search} />;
+      return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
     case "events":
       return <EventsView events={props.events} query={props.search} />;
     case "reports":
@@ -794,6 +903,7 @@ function Dashboard({
   anomalies,
   integrationStatus,
   people,
+  vehicles,
   refresh,
   currentUser
 }: {
@@ -802,24 +912,77 @@ function Dashboard({
   anomalies: Anomaly[];
   integrationStatus: IntegrationStatus | null;
   people: Person[];
+  vehicles: Vehicle[];
   refresh: () => Promise<void>;
   currentUser: UserAccount;
 }) {
   const [now, setNow] = React.useState(() => new Date());
+  const [simulatorPlate, setSimulatorPlate] = React.useState("");
+  const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
+  const [commandLoading, setCommandLoading] = React.useState(false);
+  const [commandError, setCommandError] = React.useState("");
   const present = presence.filter((item) => item.state === "present").length;
+  const exited = presence.filter((item) => item.state === "exited").length;
+  const unknown = Math.max(presence.length - present - exited, 0);
   const latestEvent = events[0];
   const critical = anomalies.filter((item) => item.severity === "critical").length;
   const displayEvents = getDashboardEvents(events);
   const displayAnomalies = getDashboardAnomalies(anomalies);
-  const expected = Math.max(people.length, presence.length, 2);
-  const exitedToday = Math.max(events.filter((event) => event.direction === "exit").length, 0);
+  const expected = Math.max(people.length, presence.length);
+  const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
+  const exitedToday = todayEvents.filter((event) => event.direction === "exit").length;
+  const deniedToday = todayEvents.filter((event) => event.decision === "denied").length;
+  const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
+  const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
+  const topGateState = integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
+  const siteStatusTitle = critical ? "Action needed" : deniedToday ? "Attention required" : "All systems normal";
+  const siteStatusDetail = critical
+    ? `${critical} critical alert${critical === 1 ? "" : "s"}`
+    : deniedToday
+      ? `${deniedToday} denied attempt${deniedToday === 1 ? "" : "s"} today`
+      : "No active alerts";
   const greeting = greetingForDate(now);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
+  const selectedPlate = simulatorPlate || vehicles[0]?.registration_number || "";
 
   React.useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  React.useEffect(() => {
+    if (!simulatorPlate && vehicles[0]) {
+      setSimulatorPlate(vehicles[0].registration_number);
+      return;
+    }
+    if (simulatorPlate && !vehicles.some((vehicle) => vehicle.registration_number === simulatorPlate)) {
+      setSimulatorPlate(vehicles[0]?.registration_number ?? "");
+    }
+  }, [simulatorPlate, vehicles]);
+
+  const runDashboardCommand = async () => {
+    if (!pendingCommand || commandLoading) return;
+    setCommandLoading(true);
+    setCommandError("");
+    try {
+      if (pendingCommand.target === "top_gate") {
+        await api.post("/api/v1/integrations/gate/open", { reason: "Dashboard Top Gate status command" });
+      } else {
+        await api.post("/api/v1/integrations/cover/command", {
+          target: pendingCommand.target,
+          action: pendingCommand.action,
+          reason: `Dashboard ${pendingCommand.label} ${pendingCommand.action} command`
+        });
+      }
+      setPendingCommand(null);
+      await refresh();
+      window.setTimeout(() => refresh().catch(() => undefined), 2500);
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : `Unable to ${pendingCommand.action} ${pendingCommand.label}.`);
+    } finally {
+      setCommandLoading(false);
+    }
+  };
 
   return (
     <section className="dashboard-page">
@@ -840,50 +1003,63 @@ function Dashboard({
           <div className="site-status-main">
             <ShieldCheck size={54} />
             <div>
-              <strong>All systems normal</strong>
-              <span>{critical ? `${critical} critical alert${critical === 1 ? "" : "s"}` : "No active alerts"}</span>
+              <strong>{siteStatusTitle}</strong>
+              <span>{siteStatusDetail}</span>
             </div>
           </div>
           <div className="status-metrics">
-            <StatusMetric label="Controllers online" value="12 / 12" />
-            <StatusMetric label="Cameras online" value="28 / 28" />
-            <StatusMetric label="Network" value="Healthy" />
+            <StatusMetric label="People tracked" value={String(people.length)} />
+            <StatusMetric label="Active vehicles" value={String(activeVehicles)} />
+            <StatusMetric label="Live sources" value={String(liveSources)} />
           </div>
         </div>
 
         <div className="card gate-card">
-          <PanelHeader title="Gate Status" action="View all" />
+          <PanelHeader title="Status" action="View all" />
           <div className="gate-list">
-            <GateRow icon={DoorOpen} label="Main Gate" state={integrationStatus?.last_gate_state ?? "open"} />
-            <GateRow icon={LogOut} label="Service Gate" state="closed" />
-            <GateRow icon={Car} label="Residents Gate" state="open" />
-            <GateRow icon={Activity} label="Delivery Gate" state="closed" />
+            <GateRow
+              icon={Car}
+              label="Top Gate"
+              state={commandLoading && pendingCommand?.target === "top_gate" ? "opening" : topGateState}
+              onActionClick={commandForDevice("Top Gate", "top_gate", topGateState, ["closed"], setPendingCommand, setCommandError)}
+            />
+            <GarageDoorRow
+              label="Main Garage Door"
+              state={commandLoading && pendingCommand?.target === "main_garage_door" ? inProgressState(pendingCommand.action) : integrationStatus?.main_garage_door_state ?? "unknown"}
+              onActionClick={commandForDevice("Main Garage Door", "main_garage_door", integrationStatus?.main_garage_door_state ?? "unknown", ["open", "closed"], setPendingCommand, setCommandError)}
+            />
+            <GarageDoorRow
+              label="Mums Garage Door"
+              state={commandLoading && pendingCommand?.target === "mums_garage_door" ? inProgressState(pendingCommand.action) : integrationStatus?.mums_garage_door_state ?? "unknown"}
+              onActionClick={commandForDevice("Mums Garage Door", "mums_garage_door", integrationStatus?.mums_garage_door_state ?? "unknown", ["open", "closed"], setPendingCommand, setCommandError)}
+            />
+            <DoorRow label="Back Door" state={integrationStatus?.back_door_state ?? "unknown"} />
           </div>
         </div>
 
         <div className="card presence-summary-card">
           <PanelHeader title="Presence Summary" action="View all" />
           <div className="presence-stats">
-            <PresenceStat label="Inside Now" value={String(present)} trend="12%" tone="green" />
-            <PresenceStat label="Expected" value={String(expected)} trend="for today" tone="blue" />
-            <PresenceStat label="Exited Today" value={String(exitedToday)} trend="8%" tone="gray" />
+            <PresenceStat label="Inside Now" value={String(present)} trend="current" tone="green" />
+            <PresenceStat label="Expected" value={String(expected)} trend="profiles" tone="blue" />
+            <PresenceStat label="Exited Today" value={String(exitedToday)} trend="events" tone="gray" />
           </div>
           <div className="presence-bar" aria-label="Presence mix">
-            <span className="residents" style={{ width: "57%" }} />
-            <span className="staff" style={{ width: "28%" }} />
-            <span className="visitors" style={{ width: "15%" }} />
+            <span className="residents" style={{ width: `${presenceSegmentWidth(present, presence.length)}%` }} />
+            <span className="staff" style={{ width: `${presenceSegmentWidth(exited, presence.length)}%` }} />
+            <span className="visitors" style={{ width: `${presenceSegmentWidth(unknown, presence.length)}%` }} />
           </div>
           <div className="presence-legend">
-            <LegendDot className="residents" label="Residents" value="84" />
-            <LegendDot className="staff" label="Staff" value="32" />
-            <LegendDot className="visitors" label="Visitors" value="12" />
+            <LegendDot className="residents" label="Present" value={String(present)} />
+            <LegendDot className="staff" label="Exited" value={String(exited)} />
+            <LegendDot className="visitors" label="Unknown" value={String(unknown)} />
           </div>
         </div>
 
         <div className="card recent-events-card">
           <PanelHeader title="Recent Events" action="View all" />
           <div className="event-feed">
-            {displayEvents.map((event) => {
+            {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
               return (
                 <div className="event-feed-row" key={`${event.time}-${event.label}`}>
@@ -899,7 +1075,7 @@ function Dashboard({
                   <Badge tone={event.status === "IN" ? "green" : "gray"}>{event.status}</Badge>
                 </div>
               );
-            })}
+            }) : <EmptyState icon={CalendarDays} label="No recent events" />}
           </div>
           <p className="card-footnote">Showing latest 5 events</p>
         </div>
@@ -907,7 +1083,7 @@ function Dashboard({
         <div className="card anomaly-card">
           <PanelHeader title="Anomalies" action="View all" />
           <div className="anomaly-feed">
-            {displayAnomalies.map((item) => (
+            {displayAnomalies.length ? displayAnomalies.map((item) => (
               <div className="anomaly-feed-row" key={`${item.time}-${item.title}`}>
                 <span className={`anomaly-icon ${item.severity}`}>
                   <AlertTriangle size={20} />
@@ -918,9 +1094,9 @@ function Dashboard({
                 </div>
                 <time>{item.time}</time>
               </div>
-            ))}
+            )) : <EmptyState icon={CheckCircle2} label="No anomalies" />}
           </div>
-          <p className="unresolved-count">{Math.max(anomalies.length, critical || 3)} unresolved</p>
+          <p className="unresolved-count">{anomalies.length} unresolved</p>
         </div>
 
         <div className="card chart-card">
@@ -933,9 +1109,10 @@ function Dashboard({
           <div className="simulator-form">
             <label>
               <span>Select Credential</span>
-              <select defaultValue="STEPH26">
-                <option value="STEPH26">Plate - STEPH26</option>
-                <option value="BOB123">Plate - BOB123</option>
+              <select value={selectedPlate} onChange={(event) => setSimulatorPlate(event.target.value)} disabled={!vehicles.length}>
+                {vehicles.length ? vehicles.map((vehicle) => (
+                  <option value={vehicle.registration_number} key={vehicle.id}>Plate - {vehicle.registration_number}</option>
+                )) : <option value="">No vehicles available</option>}
               </select>
             </label>
             <label>
@@ -952,22 +1129,85 @@ function Dashboard({
                 <span>{formatSimulatorDate(new Date())}</span>
               </div>
             </label>
-            <button className="primary-button simulate-primary" onClick={() => simulate("/api/v1/simulation/arrival/STEPH26", refresh)} type="button">
+            <button className="primary-button simulate-primary" onClick={() => simulate(`/api/v1/simulation/arrival/${selectedPlate}`, refresh)} type="button" disabled={!selectedPlate}>
               <Play size={17} /> Simulate Access
             </button>
           </div>
           <div className="simulator-footer-line">
             <p className="muted-line">
-              Simulate how a credential will be evaluated at a gate and see the expected result.
+              {vehicles.length ? "Run a synthetic access event for a registered plate." : "Add a vehicle before running synthetic access events."}
               {latestEvent ? ` Latest: ${latestEvent.registration_number} ${latestEvent.decision}.` : ""}
             </p>
-            <button className="misread-link" onClick={() => simulate("/api/v1/simulation/misread-sequence/STEPH26", refresh)} type="button">
+            <button className="misread-link" onClick={() => simulate(`/api/v1/simulation/misread-sequence/${selectedPlate}`, refresh)} type="button" disabled={!selectedPlate}>
               <SlidersHorizontal size={14} /> Simulate misread sequence
             </button>
           </div>
         </div>
       </div>
+
+      {pendingCommand ? (
+        <GateConfirmModal
+          action={pendingCommand.action}
+          error={commandError}
+          label={pendingCommand.label}
+          loading={commandLoading}
+          onCancel={() => {
+            if (commandLoading) return;
+            setPendingCommand(null);
+            setCommandError("");
+          }}
+          onConfirm={runDashboardCommand}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function GateConfirmModal({
+  action,
+  error,
+  label,
+  loading,
+  onCancel,
+  onConfirm
+}: {
+  action: DoorCommandAction;
+  error: string;
+  label: string;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const actionLabel = titleCase(action);
+  const isGarage = label.toLowerCase().includes("garage");
+  const Icon = isGarage
+    ? Warehouse
+    : action === "open" ? DoorOpen : DoorClosed;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="gate-confirm-title">
+        <div className="modal-header">
+          <div className="gate-confirm-title">
+            <span className="gate-confirm-icon">
+              <Icon size={20} />
+            </span>
+            <div>
+              <h2 id="gate-confirm-title">{actionLabel} {label}?</h2>
+            </div>
+          </div>
+        </div>
+        {error ? <div className="auth-error inline-error">{error}</div> : null}
+        <div className="modal-actions">
+          <button className="secondary-button" disabled={loading} onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button className="primary-button" disabled={loading} onClick={onConfirm} type="button">
+            <Icon size={16} />
+            {loading ? `${titleCase(inProgressState(action))}...` : `${actionLabel} ${label}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -998,15 +1238,80 @@ function StatusMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function GateRow({ icon: Icon, label, state }: { icon: React.ElementType; label: string; state: string }) {
-  const normalized = state === "open" || state === "opening" ? "open" : "closed";
+function GateRow({
+  icon: Icon,
+  label,
+  state,
+  onActionClick
+}: {
+  icon: React.ElementType;
+  label: string;
+  state: string;
+  onActionClick?: () => void;
+}) {
+  const normalized = normalizeGateState(state);
+  const display = gateStateDisplay(state);
+  const hasAction = (normalized === "closed" || normalized === "open") && display.actionable && onActionClick;
   return (
     <div className="gate-row">
       <Icon size={18} />
       <strong>{label}</strong>
-      <Badge tone={normalized === "open" ? "green" : "gray"}>{normalized === "open" ? "Open" : "Closed"}</Badge>
+      {hasAction ? (
+        <button className={`badge ${display.tone} badge-action`} onClick={onActionClick} type="button">
+          {display.label}
+        </button>
+      ) : (
+        <Badge tone={display.tone}>{display.label}</Badge>
+      )}
     </div>
   );
+}
+
+function DoorRow({ label, state }: { label: string; state: string }) {
+  const normalized = normalizeGateState(state);
+  const Icon = normalized === "open" ? DoorOpen : DoorClosed;
+  return <GateRow icon={Icon} label={label} state={state} />;
+}
+
+function GarageDoorRow({ label, state, onActionClick }: { label: string; state: string; onActionClick?: () => void }) {
+  return <GateRow icon={Warehouse} label={label} state={state} onActionClick={onActionClick} />;
+}
+
+function commandForDevice(
+  label: string,
+  target: DashboardCommand["target"],
+  state: string,
+  allowedStates: Array<"open" | "closed">,
+  setPendingCommand: React.Dispatch<React.SetStateAction<DashboardCommand | null>>,
+  setCommandError: React.Dispatch<React.SetStateAction<string>>
+) {
+  const normalized = normalizeGateState(state);
+  if (!allowedStates.includes(normalized as "open" | "closed")) return undefined;
+  const action = normalized === "open" ? "close" : "open";
+  return () => {
+    setCommandError("");
+    setPendingCommand({ target, label, action });
+  };
+}
+
+function inProgressState(action: DoorCommandAction) {
+  return action === "open" ? "opening" : "closing";
+}
+
+function gateStateDisplay(state: string): { label: string; tone: BadgeTone; actionable: boolean } {
+  const normalized = state.toLowerCase();
+  if (normalized === "open") return { label: "Open", tone: "green", actionable: true };
+  if (normalized === "opening") return { label: "Opening", tone: "amber", actionable: false };
+  if (normalized === "closed") return { label: "Closed", tone: "gray", actionable: true };
+  if (normalized === "closing") return { label: "Closing", tone: "amber", actionable: false };
+  return { label: "Unknown", tone: "amber", actionable: false };
+}
+
+function normalizeGateState(state: string) {
+  const normalized = state.toLowerCase();
+  if (["open", "opening"].includes(normalized)) return "open";
+  if (["closed", "closing"].includes(normalized)) return "closed";
+  return "unknown";
 }
 
 function PresenceStat({ label, value, trend, tone }: { label: string; value: string; trend: string; tone: "green" | "blue" | "gray" }) {
@@ -1014,10 +1319,14 @@ function PresenceStat({ label, value, trend, tone }: { label: string; value: str
     <div className="presence-stat">
       <span>{label}</span>
       <strong className={tone}>{value}</strong>
-      <small>{tone === "blue" ? "—" : "↗"} {trend}</small>
-      <em>{tone === "blue" ? "" : "vs yesterday"}</em>
+      <small>{trend}</small>
     </div>
   );
+}
+
+function presenceSegmentWidth(value: number, total: number) {
+  if (!total || !value) return 0;
+  return Math.max((value / total) * 100, 6);
 }
 
 function LegendDot({ className, label, value }: { className: string; label: string; value: string }) {
@@ -1040,16 +1349,6 @@ type DashboardEvent = {
 };
 
 function getDashboardEvents(events: AccessEvent[]): DashboardEvent[] {
-  if (!events.length) {
-    return [
-      { time: "09:39 AM", label: "Steph", subtitle: "Main Gate  •  LPR", status: "IN", tone: "green", icon: LogIn },
-      { time: "09:36 AM", label: "KA01AB1234", subtitle: "Parking Entry  •  LPR", status: "IN", tone: "blue", icon: Car },
-      { time: "09:31 AM", label: "Bob", subtitle: "Service Gate  •  LPR", status: "IN", tone: "green", icon: LogIn },
-      { time: "09:21 AM", label: "Visitor Access", subtitle: "Residents Gate  •  Manual", status: "OUT", tone: "gray", icon: LogOut },
-      { time: "09:12 AM", label: "TN09CD5678", subtitle: "Main Gate  •  LPR", status: "OUT", tone: "blue", icon: Car }
-    ];
-  }
-
   return events.slice(0, 5).map((event) => ({
     time: formatTime(event.occurred_at),
     label: event.registration_number,
@@ -1068,15 +1367,6 @@ type DashboardAnomaly = {
 };
 
 function getDashboardAnomalies(anomalies: Anomaly[]): DashboardAnomaly[] {
-  if (!anomalies.length) {
-    return [
-      { title: "Forced Open Detected", detail: "Service Gate Controller", time: "09:28 AM", severity: "critical" },
-      { title: "Tailgating Detected", detail: "Residents Gate", time: "09:17 AM", severity: "warning" },
-      { title: "Door Held Open", detail: "Main Gate", time: "08:52 AM", severity: "warning" },
-      { title: "Unrecognized Plate", detail: "Main Gate  •  Camera 1", time: "08:41 AM", severity: "warning" }
-    ];
-  }
-
   return anomalies.slice(0, 4).map((item) => ({
     title: titleCase(item.type),
     detail: item.message,
@@ -1086,30 +1376,22 @@ function getDashboardAnomalies(anomalies: Anomaly[]): DashboardAnomaly[] {
 }
 
 function DailyEntriesChart({ events }: { events: AccessEvent[] }) {
-  const sample = [
-    { day: "May 16", entries: 235, exits: 210 },
-    { day: "May 17", entries: 236, exits: 212 },
-    { day: "May 18", entries: 250, exits: 222 },
-    { day: "May 19", entries: 251, exits: 222 },
-    { day: "May 20", entries: 267, exits: 242 },
-    { day: "May 21", entries: 238, exits: 226 },
-    { day: "May 22", entries: Math.max(events.filter((event) => event.direction === "entry").length * 40, 238), exits: Math.max(events.filter((event) => event.direction === "exit").length * 40, 202), projected: true }
-  ];
-  const max = 300;
+  const days = lastSevenDayBuckets(events);
+  const max = Math.max(...days.flatMap((item) => [item.entries, item.exits]), 1);
 
   return (
     <div className="daily-chart">
       <div className="chart-grid-lines" aria-hidden="true">
-        <span>300</span>
-        <span>200</span>
-        <span>100</span>
+        <span>{max}</span>
+        <span>{Math.ceil(max * 0.66)}</span>
+        <span>{Math.ceil(max * 0.33)}</span>
         <span>0</span>
       </div>
       <div className="chart-bars">
-        {sample.map((item) => (
+        {days.map((item) => (
           <div className="chart-day" key={item.day}>
             <div className="chart-pair">
-              <span className={item.projected ? "entry projected" : "entry"} style={{ height: `${(item.entries / max) * 100}%` }} />
+              <span className="entry" style={{ height: `${(item.entries / max) * 100}%` }} />
               <span className="exit" style={{ height: `${(item.exits / max) * 100}%` }} />
             </div>
             <small>{item.day}</small>
@@ -1122,6 +1404,26 @@ function DailyEntriesChart({ events }: { events: AccessEvent[] }) {
       </div>
     </div>
   );
+}
+
+function lastSevenDayBuckets(events: AccessEvent[]) {
+  const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() - (6 - index));
+    const nextDate = new Date(date);
+    nextDate.setDate(date.getDate() + 1);
+    const dayEvents = events.filter((event) => {
+      const occurred = new Date(event.occurred_at);
+      return occurred >= date && occurred < nextDate;
+    });
+    return {
+      day: formatter.format(date),
+      entries: dayEvents.filter((event) => event.direction === "entry").length,
+      exits: dayEvents.filter((event) => event.direction === "exit").length
+    };
+  });
 }
 
 function MetricCard({ icon: Icon, label, value, detail, tone }: { icon: React.ElementType; label: string; value: string; detail: string; tone: BadgeTone }) {
@@ -1225,53 +1527,899 @@ function RhythmChart({ events }: { events: AccessEvent[] }) {
   );
 }
 
-function PeopleView({ people, query }: { people: Person[]; query: string }) {
-  const filtered = people.filter((item) => matches(item.display_name, query) || matches(item.group ?? "", query));
+function GroupsView({
+  groups,
+  people,
+  query,
+  refresh
+}: {
+  groups: Group[];
+  people: Person[];
+  query: string;
+  refresh: () => Promise<void>;
+}) {
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [selectedGroup, setSelectedGroup] = React.useState<Group | null>(null);
+  const [error, setError] = React.useState("");
+  const peopleByGroup = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const person of people) {
+      if (person.group_id) counts.set(person.group_id, (counts.get(person.group_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [people]);
+  const filtered = groups.filter((group) =>
+    matches(group.name, query) ||
+    matches(titleCase(group.category), query) ||
+    matches(group.subtype ?? "", query)
+  );
+
+  const openCreate = () => {
+    setSelectedGroup(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (group: Group) => {
+    setSelectedGroup(group);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setSelectedGroup(null);
+  };
+
   return (
-    <section className="view-stack">
-      <Toolbar title="Profiles" count={filtered.length} icon={Users} />
-      <div className="table-card">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Group</th>
-              <th>Vehicles</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((person) => (
-              <tr key={person.id}>
-                <td><strong>{person.display_name}</strong></td>
-                <td>{person.group}</td>
-                <td>{person.vehicles.map((vehicle) => vehicle.registration_number).join(", ")}</td>
-                <td><Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "active" : "inactive"}</Badge></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <section className="view-stack users-page">
+      <div className="users-hero card">
+        <div>
+          <span className="eyebrow">Directory</span>
+          <h1>Groups</h1>
+          <p>Create access groups for family, friends, visitors, and contractors.</p>
+        </div>
+        <button className="primary-button" onClick={openCreate} type="button">
+          <Plus size={17} /> Add Group
+        </button>
       </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="card users-card groups-card">
+        <PanelHeader title="Group Directory" action={`${filtered.length} groups`} actionKind="select" />
+        {filtered.length ? (
+          <div className="users-table groups-table">
+            {filtered.map((group) => {
+              const peopleCount = group.people_count ?? peopleByGroup.get(group.id) ?? 0;
+              return (
+                <article
+                  className="user-row group-row group-row-button"
+                  key={group.id}
+                  onClick={() => openEdit(group)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openEdit(group);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <span className={`group-mark ${group.category}`}>
+                    <Users size={17} />
+                  </span>
+                  <div>
+                    <strong>{group.name}</strong>
+                    <span>{group.subtype || group.description || "General access group"}</span>
+                  </div>
+                  <Badge tone={groupCategoryTone(group.category)}>{titleCase(group.category)}</Badge>
+                  <span className="member-count">{peopleCount} {peopleCount === 1 ? "person" : "people"}</span>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState icon={Users} label="No groups match this view" />
+        )}
+      </div>
+
+      {modalOpen ? (
+        <GroupModal
+          group={selectedGroup}
+          members={selectedGroup ? people.filter((person) => person.group_id === selectedGroup.id) : []}
+          mode={selectedGroup ? "edit" : "create"}
+          onClose={closeModal}
+          onSaved={async () => {
+            await refresh();
+            closeModal();
+          }}
+          setPageError={setError}
+        />
+      ) : null}
     </section>
   );
 }
 
-function VehiclesView({ vehicles, query }: { vehicles: Vehicle[]; query: string }) {
-  const filtered = vehicles.filter((item) => matches(item.registration_number, query) || matches(item.owner ?? "", query));
+function GroupModal({
+  group,
+  members,
+  mode,
+  onClose,
+  onSaved,
+  setPageError
+}: {
+  group: Group | null;
+  members: Person[];
+  mode: "create" | "edit";
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  setPageError: (message: string) => void;
+}) {
+  const [form, setForm] = React.useState({
+    name: group?.name ?? "",
+    category: group?.category ?? "family",
+    subtype: group?.subtype ?? "",
+    description: group?.description ?? ""
+  });
+  const [error, setError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const update = (field: keyof typeof form, value: string) => setForm((current) => ({ ...current, [field]: value }));
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setPageError("");
+    setSubmitting(true);
+    try {
+      const payload = {
+        name: form.name,
+        category: form.category,
+        subtype: form.subtype || null,
+        description: form.description || null
+      };
+      if (mode === "edit" && group) {
+        await api.patch<Group>(`/api/v1/groups/${group.id}`, payload);
+      } else {
+        await api.post<Group>("/api/v1/groups", payload);
+      }
+      await onSaved();
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Unable to save group";
+      setError(message);
+      setPageError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <section className="view-stack">
-      <Toolbar title="Fleet" count={filtered.length} icon={Car} />
-      <div className="bento-list">
-        {filtered.map((vehicle) => (
-          <article className="card vehicle-card" key={vehicle.id}>
-            <div className="plate">{vehicle.registration_number}</div>
-            <h2>{vehicle.description ?? `${vehicle.make ?? ""} ${vehicle.model ?? ""}`}</h2>
-            <p>{vehicle.owner ?? "Unassigned"}</p>
-            <Badge tone={vehicle.is_active ? "green" : "gray"}>{vehicle.is_active ? "authorized" : "inactive"}</Badge>
-          </article>
-        ))}
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card group-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <div>
+            <h2>{mode === "edit" ? "Edit Group" : "Add Group"}</h2>
+            <p>{mode === "edit" ? "Update group details and review assigned members." : "Define a membership bucket for access schedules and directory profiles."}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        {error ? <div className="auth-error">{error}</div> : null}
+        <label className="field">
+          <span>Group name</span>
+          <div className="field-control">
+            <Users size={17} />
+            <input value={form.name} onChange={(event) => update("name", event.target.value)} required />
+          </div>
+        </label>
+        <div className="field-grid">
+          <label className="field">
+            <span>Category</span>
+            <select value={form.category} onChange={(event) => update("category", event.target.value)}>
+              {groupCategoryOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Subtype</span>
+            <div className="field-control">
+              <CircleDot size={17} />
+              <input value={form.subtype} onChange={(event) => update("subtype", event.target.value)} placeholder="Gardener, overnight guest..." />
+            </div>
+          </label>
+        </div>
+        <label className="field">
+          <span>Description</span>
+          <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
+        </label>
+        {mode === "edit" ? (
+          <div className="group-members-panel">
+            <div className="panel-header">
+              <h2>Members</h2>
+              <span className="member-count">{members.length} {members.length === 1 ? "person" : "people"}</span>
+            </div>
+            {members.length ? (
+              <div className="group-member-list">
+                {members.map((member) => (
+                  <div className="group-member-row" key={member.id}>
+                    <PersonAvatar person={member} />
+                    <div>
+                      <strong>{member.display_name}</strong>
+                      <span>{member.vehicles.length ? member.vehicles.map((vehicle) => vehicle.registration_number).join(", ") : "No vehicles"}</span>
+                    </div>
+                    <Badge tone={member.is_active ? "green" : "gray"}>{member.is_active ? "Active" : "Inactive"}</Badge>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state compact">No members assigned</div>
+            )}
+          </div>
+        ) : null}
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" disabled={submitting} type="submit">
+            {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
+            {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Group"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function PeopleView({
+  groups,
+  people,
+  query,
+  refresh,
+  vehicles
+}: {
+  groups: Group[];
+  people: Person[];
+  query: string;
+  refresh: () => Promise<void>;
+  vehicles: Vehicle[];
+}) {
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
+  const [error, setError] = React.useState("");
+  const filtered = people.filter((item) =>
+    matches(item.display_name, query) ||
+    matches(item.group ?? "", query) ||
+    item.vehicles.some((vehicle) => matches(vehicle.registration_number, query))
+  );
+  const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
+
+  const openCreate = () => {
+    setSelectedPerson(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (person: Person) => {
+    setSelectedPerson(person);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setSelectedPerson(null);
+  };
+
+  return (
+    <section className="view-stack users-page">
+      <div className="users-hero card">
+        <div>
+          <span className="eyebrow">Directory</span>
+          <h1>People</h1>
+          <p>Manage profiles, access groups, and vehicle assignments.</p>
+        </div>
+        <button className="primary-button" onClick={openCreate} type="button">
+          <UserPlus size={17} /> Add Person
+        </button>
       </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="card users-card people-card">
+        <PanelHeader title="Profile Roster" action={`${filtered.length} profiles`} actionKind="select" />
+        {filtered.length ? (
+          <div className="users-table people-table">
+            {filtered.map((person) => (
+              <article
+                className="user-row person-row person-row-button"
+                key={person.id}
+                onClick={() => openEdit(person)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openEdit(person);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <PersonAvatar person={person} />
+                <div>
+                  <strong>{person.display_name}</strong>
+                  <span>{person.category ? titleCase(person.category) : "No category"}{person.group ? ` • ${person.group}` : ""}</span>
+                </div>
+                <Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "Active" : "Inactive"}</Badge>
+                <div className="vehicle-chip-list">
+                  {person.vehicles.length ? person.vehicles.map((vehicle) => (
+                    <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
+                  )) : <span className="muted-value">No vehicles</span>}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState icon={Users} label="No people match this view" />
+        )}
+      </div>
+
+      {modalOpen ? (
+        <PersonModal
+          assignedVehicleIds={assignedVehicleIds}
+          groups={groups}
+          mode={selectedPerson ? "edit" : "create"}
+          onClose={closeModal}
+          onSaved={async () => {
+            await refresh();
+            closeModal();
+          }}
+          person={selectedPerson}
+          setPageError={setError}
+          vehicles={vehicles}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function PersonModal({
+  assignedVehicleIds,
+  groups,
+  mode,
+  onClose,
+  onSaved,
+  person,
+  setPageError,
+  vehicles
+}: {
+  assignedVehicleIds: Set<string>;
+  groups: Group[];
+  mode: "create" | "edit";
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  person: Person | null;
+  setPageError: (message: string) => void;
+  vehicles: Vehicle[];
+}) {
+  const [form, setForm] = React.useState({
+    first_name: person?.first_name ?? "",
+    last_name: person?.last_name ?? "",
+    profile_photo_data_url: person?.profile_photo_data_url ?? "",
+    group_id: person?.group_id ?? groups[0]?.id ?? "",
+    vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
+    is_active: person?.is_active ?? true
+	  });
+  const [error, setError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
+
+	  const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file.");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError("Profile images must be 8 MB or smaller.");
+      return;
+    }
+    setError("");
+    update("profile_photo_data_url", await fileToDataUrl(file));
+  };
+
+  const toggleVehicle = (vehicleId: string) => {
+    update(
+      "vehicle_ids",
+      form.vehicle_ids.includes(vehicleId)
+        ? form.vehicle_ids.filter((id) => id !== vehicleId)
+        : [...form.vehicle_ids, vehicleId]
+    );
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setPageError("");
+    setSubmitting(true);
+    const payload = {
+      first_name: form.first_name,
+      last_name: form.last_name,
+      profile_photo_data_url: form.profile_photo_data_url || null,
+      group_id: form.group_id || null,
+      vehicle_ids: form.vehicle_ids,
+      is_active: form.is_active
+    };
+    try {
+      if (mode === "edit" && person) {
+        await api.patch<Person>(`/api/v1/people/${person.id}`, payload);
+      } else {
+        await api.post<Person>("/api/v1/people", payload);
+      }
+      await onSaved();
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Unable to save person";
+      setError(message);
+      setPageError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const previewPerson: Person = {
+    id: "preview",
+    first_name: form.first_name,
+    last_name: form.last_name,
+    display_name: `${form.first_name} ${form.last_name}`.trim() || "New person",
+    profile_photo_data_url: form.profile_photo_data_url || null,
+    group_id: form.group_id || null,
+    group: groups.find((group) => group.id === form.group_id)?.name ?? null,
+    category: groups.find((group) => group.id === form.group_id)?.category ?? null,
+    is_active: form.is_active,
+    vehicles: []
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card person-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <div>
+            <h2>{mode === "edit" ? "Edit Person" : "Add Person"}</h2>
+            <p>{mode === "edit" ? "Update the profile, group, and vehicle assignments." : "Create a directory profile and assign registered vehicles."}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        {error ? <div className="auth-error">{error}</div> : null}
+        <div className="profile-upload-row">
+          <PersonAvatar person={previewPerson} size="large" />
+          <label className="upload-button">
+            <Camera size={16} />
+            <span>{form.profile_photo_data_url ? "Change photo" : "Upload profile picture"}</span>
+            <input accept="image/*" onChange={uploadPhoto} type="file" />
+          </label>
+          {form.profile_photo_data_url ? (
+            <button className="secondary-button" onClick={() => update("profile_photo_data_url", "")} type="button">
+              Remove
+            </button>
+          ) : null}
+        </div>
+        <div className="field-grid">
+          <label className="field">
+            <span>First name</span>
+            <div className="field-control">
+              <UserRound size={17} />
+              <input value={form.first_name} onChange={(event) => update("first_name", event.target.value)} autoComplete="given-name" required />
+            </div>
+          </label>
+          <label className="field">
+            <span>Last name</span>
+            <div className="field-control">
+              <UserRound size={17} />
+              <input value={form.last_name} onChange={(event) => update("last_name", event.target.value)} autoComplete="family-name" required />
+            </div>
+          </label>
+        </div>
+        <div className="field-grid">
+          <label className="field">
+            <span>Group</span>
+            <select value={form.group_id} onChange={(event) => update("group_id", event.target.value)}>
+              <option value="">No group</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>{group.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Status</span>
+            <select value={form.is_active ? "active" : "inactive"} onChange={(event) => update("is_active", event.target.value === "active")}>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </label>
+        </div>
+        <div className="field">
+          <span>Vehicles</span>
+          <div className="vehicle-picker">
+            {vehicles.length ? vehicles.map((vehicle) => {
+              const selected = form.vehicle_ids.includes(vehicle.id);
+              const assigned = assignedVehicleIds.has(vehicle.id) && !selected;
+              return (
+                <label className={selected ? "vehicle-option selected" : "vehicle-option"} key={vehicle.id}>
+                  <input checked={selected} onChange={() => toggleVehicle(vehicle.id)} type="checkbox" />
+                  <span>
+                    <strong>{vehicle.registration_number}</strong>
+                    <small>{vehicle.description ?? ([vehicle.make, vehicle.model].filter(Boolean).join(" ") || "Registered vehicle")}</small>
+                  </span>
+                  {selected ? <Badge tone="blue">Selected</Badge> : assigned ? <Badge tone="amber">Assigned</Badge> : <Badge tone="gray">Available</Badge>}
+                </label>
+              );
+            }) : <div className="empty-state compact">No vehicles available</div>}
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" disabled={submitting} type="submit">
+            {mode === "edit" ? <Check size={16} /> : <UserPlus size={16} />}
+            {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Person"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function VehiclesView({
+  people,
+  query,
+  refresh,
+  vehicles
+}: {
+  people: Person[];
+  query: string;
+  refresh: () => Promise<void>;
+  vehicles: Vehicle[];
+}) {
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
+  const [error, setError] = React.useState("");
+  const filtered = vehicles.filter((item) =>
+    matches(item.registration_number, query) ||
+    matches(item.owner ?? "", query) ||
+    matches(item.make ?? "", query) ||
+    matches(item.model ?? "", query) ||
+    matches(item.color ?? "", query)
+  );
+
+  const openCreate = () => {
+    setSelectedVehicle(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (vehicle: Vehicle) => {
+    setSelectedVehicle(vehicle);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setSelectedVehicle(null);
+  };
+
+  const deleteVehicle = async (vehicle: Vehicle) => {
+    if (!window.confirm(`Delete ${vehicle.registration_number}?`)) return;
+    setError("");
+    try {
+      await api.delete(`/api/v1/vehicles/${vehicle.id}`);
+      await refresh();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
+    }
+  };
+
+  return (
+    <section className="view-stack users-page">
+      <div className="users-hero card">
+        <div>
+          <span className="eyebrow">Directory</span>
+          <h1>Vehicles</h1>
+          <p>Manage registered vehicles, photos, plates, and assigned drivers.</p>
+        </div>
+        <button className="primary-button" onClick={openCreate} type="button">
+          <Plus size={17} /> Add Vehicle
+        </button>
+      </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="card users-card vehicles-card">
+        <PanelHeader title="Fleet Roster" action={`${filtered.length} vehicles`} actionKind="select" />
+        {filtered.length ? (
+          <div className="users-table vehicles-table">
+            {filtered.map((vehicle) => (
+              <article
+                className="user-row vehicle-row vehicle-row-button"
+                key={vehicle.id}
+                onClick={() => openEdit(vehicle)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openEdit(vehicle);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <VehiclePhoto vehicle={vehicle} />
+                <div>
+                  <strong>{vehicle.registration_number}</strong>
+                  <span>{vehicleTitle(vehicle)}</span>
+                </div>
+                <span className="vehicle-owner">{vehicle.owner ?? "Unassigned"}</span>
+                <Badge tone={vehicle.is_active !== false ? "green" : "gray"}>{vehicle.is_active !== false ? "Active" : "Inactive"}</Badge>
+                <button
+                  className="icon-button danger"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    deleteVehicle(vehicle).catch(() => undefined);
+                  }}
+                  type="button"
+                  aria-label={`Delete ${vehicle.registration_number}`}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState icon={Car} label="No vehicles match this view" />
+        )}
+      </div>
+
+      {modalOpen ? (
+        <VehicleModal
+          mode={selectedVehicle ? "edit" : "create"}
+          onClose={closeModal}
+          onSaved={async () => {
+            await refresh();
+            closeModal();
+          }}
+          people={people}
+          setPageError={setError}
+          vehicle={selectedVehicle}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function VehicleModal({
+  mode,
+  onClose,
+  onSaved,
+  people,
+  setPageError,
+  vehicle
+}: {
+  mode: "create" | "edit";
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  people: Person[];
+  setPageError: (message: string) => void;
+  vehicle: Vehicle | null;
+}) {
+  const [form, setForm] = React.useState({
+    registration_number: vehicle?.registration_number ?? "",
+    vehicle_photo_data_url: vehicle?.vehicle_photo_data_url ?? "",
+    make: vehicle?.make ?? "",
+    model: vehicle?.model ?? "",
+    color: vehicle?.color ?? "",
+    person_id: vehicle?.person_id ?? "",
+    is_active: vehicle?.is_active ?? true
+  });
+  const [error, setError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [dvlaLookup, setDvlaLookup] = React.useState<{ status: "idle" | "loading" | "found" | "error"; message: string }>({
+    status: "idle",
+    message: ""
+  });
+  const lookupRequestRef = React.useRef(0);
+  const lastLookupRegistrationRef = React.useRef("");
+  const initialRegistrationRef = React.useRef(vehicle?.registration_number ?? "");
+
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
+
+  React.useEffect(() => {
+    const registrationNumber = normalizePlateInput(form.registration_number);
+    const initialRegistration = normalizePlateInput(initialRegistrationRef.current);
+    if (registrationNumber.length < 2 || (mode === "edit" && registrationNumber === initialRegistration)) {
+      setDvlaLookup({ status: "idle", message: "" });
+      return;
+    }
+    if (registrationNumber === lastLookupRegistrationRef.current) return;
+
+    const requestId = lookupRequestRef.current + 1;
+    lookupRequestRef.current = requestId;
+    setDvlaLookup({ status: "loading", message: "Looking up DVLA vehicle details" });
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await api.post<DvlaLookupResponse>("/api/v1/integrations/dvla/lookup", {
+          registration_number: registrationNumber
+        });
+        if (lookupRequestRef.current !== requestId) return;
+        lastLookupRegistrationRef.current = registrationNumber;
+        const make = typeof result.vehicle.make === "string" ? result.vehicle.make : "";
+        const model = typeof result.vehicle.model === "string" ? result.vehicle.model : "";
+        const color = typeof (result.vehicle.colour ?? result.vehicle.color) === "string" ? String(result.vehicle.colour ?? result.vehicle.color) : "";
+        setForm((current) => ({
+          ...current,
+          registration_number: result.registration_number || current.registration_number,
+          make: make || current.make,
+          model: model || current.model,
+          color: color || current.color
+        }));
+        setDvlaLookup({ status: "found", message: "DVLA details applied" });
+      } catch (lookupError) {
+        if (lookupRequestRef.current !== requestId) return;
+        const message = lookupError instanceof Error ? lookupError.message : "DVLA lookup failed";
+        if (message.toLowerCase().includes("api key is not configured")) {
+          lastLookupRegistrationRef.current = registrationNumber;
+          setDvlaLookup({ status: "idle", message: "" });
+          return;
+        }
+        setDvlaLookup({ status: "error", message });
+      }
+    }, 850);
+
+    return () => window.clearTimeout(timer);
+  }, [form.registration_number, mode]);
+
+  const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file.");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError("Vehicle images must be 8 MB or smaller.");
+      return;
+    }
+    setError("");
+    update("vehicle_photo_data_url", await fileToDataUrl(file));
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setPageError("");
+    setSubmitting(true);
+    const payload = {
+      registration_number: form.registration_number,
+      vehicle_photo_data_url: form.vehicle_photo_data_url || null,
+      make: form.make || null,
+      model: form.model || null,
+      color: form.color || null,
+      person_id: form.person_id || null,
+      is_active: form.is_active
+    };
+    try {
+      if (mode === "edit" && vehicle) {
+        await api.patch<Vehicle>(`/api/v1/vehicles/${vehicle.id}`, payload);
+      } else {
+        await api.post<Vehicle>("/api/v1/vehicles", payload);
+      }
+      await onSaved();
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Unable to save vehicle";
+      setError(message);
+      setPageError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const previewVehicle: Vehicle = {
+    id: vehicle?.id ?? "preview",
+    registration_number: form.registration_number || "NEW",
+    vehicle_photo_data_url: form.vehicle_photo_data_url || null,
+    description: vehicle?.description ?? null,
+    make: form.make || null,
+    model: form.model || null,
+    color: form.color || null,
+    person_id: form.person_id || null,
+    owner: people.find((person) => person.id === form.person_id)?.display_name ?? null,
+    is_active: form.is_active
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card vehicle-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <div>
+            <h2>{mode === "edit" ? "Edit Vehicle" : "Add Vehicle"}</h2>
+            <p>{mode === "edit" ? "Update vehicle details and assignment." : "Register a vehicle and assign it to a person."}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        {error ? <div className="auth-error">{error}</div> : null}
+        <div className="vehicle-upload-row">
+          <VehiclePhoto vehicle={previewVehicle} size="large" />
+          <label className="upload-button">
+            <Camera size={16} />
+            <span>{form.vehicle_photo_data_url ? "Change photo" : "Upload vehicle photo"}</span>
+            <input accept="image/*" onChange={uploadPhoto} type="file" />
+          </label>
+          {form.vehicle_photo_data_url ? (
+            <button className="secondary-button" onClick={() => update("vehicle_photo_data_url", "")} type="button">
+              Remove
+            </button>
+          ) : null}
+        </div>
+        <label className="field">
+          <span>Vehicle Registration</span>
+          <div className="field-control">
+            <Car size={17} />
+            <input value={form.registration_number} onChange={(event) => update("registration_number", event.target.value.toUpperCase())} required />
+          </div>
+          {dvlaLookup.status !== "idle" ? (
+            <small className={`field-hint dvla-lookup-hint ${dvlaLookup.status}`}>
+              {dvlaLookup.status === "loading" ? <span className="inline-spinner" aria-hidden="true" /> : null}
+              {dvlaLookup.message}
+            </small>
+          ) : null}
+        </label>
+        <div className="field-grid">
+          <label className="field">
+            <span>Vehicle Make</span>
+            <div className="field-control">
+              <Car size={17} />
+              <input value={form.make} onChange={(event) => update("make", event.target.value)} />
+            </div>
+          </label>
+          <label className="field">
+            <span>Vehicle Model</span>
+            <div className="field-control">
+              <Car size={17} />
+              <input value={form.model} onChange={(event) => update("model", event.target.value)} />
+            </div>
+          </label>
+        </div>
+        <div className="field-grid">
+          <label className="field">
+            <span>Colour</span>
+            <div className="field-control">
+              <CircleDot size={17} />
+              <input value={form.color} onChange={(event) => update("color", event.target.value)} />
+            </div>
+          </label>
+          <label className="field">
+            <span>Status</span>
+            <select value={form.is_active ? "active" : "inactive"} onChange={(event) => update("is_active", event.target.value === "active")}>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </label>
+        </div>
+        <label className="field">
+          <span>Assigned person</span>
+          <select value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
+            <option value="">Unassigned</option>
+            {people.map((person) => (
+              <option key={person.id} value={person.id}>{person.display_name}</option>
+            ))}
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" disabled={submitting} type="submit">
+            {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
+            {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Vehicle"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -1428,6 +2576,33 @@ function integrationDefinitions(status: IntegrationStatus | null, values: Settin
         href: "https://github.com/caronc/apprise/wiki",
         help: "For Pushover use pover://USER_KEY@APP_TOKEN. The app also accepts pushover://USER_KEY/APP_TOKEN and normalizes it."
       }]
+    },
+    {
+      key: "dvla",
+      title: "DVLA Lookup",
+      description: "Vehicle Enquiry Service API plate lookups.",
+      icon: Search,
+      statusLabel: values.dvla_api_key ? "Configured" : "Not Configured",
+      statusTone: values.dvla_api_key ? "green" : "gray",
+      fields: [
+        {
+          key: "dvla_api_key",
+          label: "DVLA API Key",
+          type: "password",
+          href: "https://developer-portal.driver-vehicle-licensing.api.gov.uk/apis/vehicle-enquiry-service/vehicle-enquiry-service-description.html"
+        },
+        {
+          key: "dvla_vehicle_enquiry_url",
+          label: "Vehicle enquiry URL",
+          help: "Production endpoint for the DVLA Vehicle Enquiry Service API."
+        },
+        {
+          key: "dvla_test_registration_number",
+          label: "Test VRN",
+          help: "Used only when this modal tests the DVLA connection."
+        },
+        { key: "dvla_timeout_seconds", label: "Timeout seconds", type: "number", min: 1, step: 1 }
+      ]
     },
     {
       key: "openai",
@@ -2086,7 +3261,7 @@ function SettingsView({ slots }: { slots: TimeSlot[] }) {
         <div className="compact-row">
           <div className="avatar">F</div>
           <div>
-            <strong>Family dashboard logins</strong>
+            <strong>Dashboard logins</strong>
             <span>Local auth phase</span>
           </div>
           <Badge tone="amber">pending</Badge>
@@ -2581,7 +3756,7 @@ type SettingFieldDefinition = {
   help?: string;
 };
 
-const secretSettingKeys = new Set(["home_assistant_token", "apprise_urls", "openai_api_key", "gemini_api_key", "anthropic_api_key"]);
+const secretSettingKeys = new Set(["home_assistant_token", "apprise_urls", "dvla_api_key", "openai_api_key", "gemini_api_key", "anthropic_api_key"]);
 
 function SettingField({
   field,
@@ -2699,7 +3874,10 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     openai_base_url: "https://api.openai.com/v1",
     gemini_base_url: "https://generativelanguage.googleapis.com/v1beta",
     anthropic_base_url: "https://api.anthropic.com/v1",
-    ollama_base_url: "http://host.docker.internal:11434"
+    ollama_base_url: "http://host.docker.internal:11434",
+    dvla_vehicle_enquiry_url: "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
+    dvla_test_registration_number: "AA19AAA",
+    dvla_timeout_seconds: "10"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
@@ -2756,7 +3934,8 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       "lpr_debounce_quiet_seconds",
       "lpr_debounce_max_seconds",
       "lpr_similarity_threshold",
-      "llm_timeout_seconds"
+      "llm_timeout_seconds",
+      "dvla_timeout_seconds"
     ].includes(key)) {
       payload[key] = Number(value);
     } else {
@@ -2932,6 +4111,22 @@ function titleCase(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function groupCategoryTone(category: string): BadgeTone {
+  if (category === "family") return "green";
+  if (category === "friends") return "blue";
+  if (category === "visitors") return "amber";
+  if (category === "contractors") return "gray";
+  return "gray";
+}
+
+function vehicleTitle(vehicle: Vehicle) {
+  return [vehicle.color, vehicle.make, vehicle.model].filter(Boolean).join(" ") || vehicle.description || "Vehicle details pending";
+}
+
+function normalizePlateInput(value: string) {
+  return value.replace(/[^a-z0-9]/gi, "").toUpperCase();
+}
+
 function initials(value: string) {
   const parts = value.trim().split(/\s+/).filter(Boolean);
   return (parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "");
@@ -2947,10 +4142,32 @@ function userInitials(user: Pick<UserAccount, "first_name" | "last_name" | "full
   return (first + last || initials(user.full_name)).toUpperCase();
 }
 
+function personInitials(person: Pick<Person, "first_name" | "last_name" | "display_name">) {
+  const first = person.first_name?.trim()[0] ?? "";
+  const last = person.last_name?.trim()[0] ?? "";
+  return (first + last || initials(person.display_name)).toUpperCase();
+}
+
 function UserAvatar({ user, size = "normal" }: { user: UserAccount; size?: "normal" | "large" }) {
   return (
     <span className={size === "large" ? "profile-photo large" : "profile-photo"} aria-label={displayUserName(user)}>
       {user.profile_photo_data_url ? <img alt="" src={user.profile_photo_data_url} /> : userInitials(user)}
+    </span>
+  );
+}
+
+function PersonAvatar({ person, size = "normal" }: { person: Person; size?: "normal" | "large" }) {
+  return (
+    <span className={size === "large" ? "profile-photo large" : "profile-photo"} aria-label={person.display_name}>
+      {person.profile_photo_data_url ? <img alt="" src={person.profile_photo_data_url} /> : personInitials(person)}
+    </span>
+  );
+}
+
+function VehiclePhoto({ vehicle, size = "normal" }: { vehicle: Vehicle; size?: "normal" | "large" }) {
+  return (
+    <span className={size === "large" ? "vehicle-photo large" : "vehicle-photo"} aria-label={vehicle.registration_number}>
+      {vehicle.vehicle_photo_data_url ? <img alt="" src={vehicle.vehicle_photo_data_url} /> : <Car size={size === "large" ? 24 : 18} />}
     </span>
   );
 }
@@ -2997,10 +4214,19 @@ function formatLongDate(value: Date) {
 
 function greetingForDate(value: Date) {
   const hour = value.getHours();
-  if (hour < 12) return "Good morning";
-  if (hour < 17) return "Good afternoon";
-  if (hour < 22) return "Good evening";
-  return "Good night";
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  if (hour < 22) return "Good Evening";
+  return "Good Night";
+}
+
+function isToday(value: string, now = new Date()) {
+  const date = new Date(value);
+  return (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  );
 }
 
 function clearChatTeaserDismissals() {

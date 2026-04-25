@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.api.dependencies import admin_user, current_user
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config, list_settings, update_settings
 
@@ -66,6 +67,8 @@ async def test_connection(
             await _test_home_assistant(values)
         elif integration == "apprise":
             await _test_apprise(values)
+        elif integration == "dvla":
+            await _test_dvla(values)
         elif integration == "openai":
             await _test_openai(values)
         elif integration == "gemini":
@@ -96,6 +99,10 @@ async def _test_apprise(values: dict[str, Any]) -> None:
     if not urls:
         urls = (await get_runtime_config()).apprise_urls.strip()
     validate_apprise_urls(urls)
+
+
+async def _test_dvla(values: dict[str, Any]) -> None:
+    await test_vehicle_enquiry_connection(values)
 
 
 async def _test_openai(values: dict[str, Any]) -> None:

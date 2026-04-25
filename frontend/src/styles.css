@@ -382,7 +382,7 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 24px;
+  padding: 0 24px 0 14px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
@@ -436,6 +436,10 @@ h2 {
   outline: 0;
   background: transparent;
   color: var(--text);
+}
+
+.search input {
+  font-size: 13px;
 }
 
 .search input::placeholder,
@@ -647,11 +651,14 @@ h2 {
 }
 
 .site-status-main {
-  min-height: 108px;
+  min-height: 94px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 20px;
+  justify-content: center;
+  gap: 8px;
   color: var(--green);
+  text-align: center;
 }
 
 .site-status-main strong {
@@ -664,7 +671,6 @@ h2 {
 
 .site-status-main span {
   display: block;
-  margin-top: 8px;
   color: var(--muted);
   font-size: 14px;
 }
@@ -673,7 +679,8 @@ h2 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
-  padding-top: 18px;
+  margin-top: 18px;
+  padding-top: 24px;
   border-top: 1px solid var(--line);
 }
 
@@ -1227,6 +1234,21 @@ h2 {
   font-weight: 560;
   line-height: 1;
   white-space: nowrap;
+}
+
+.badge-action {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.badge-action:hover {
+  filter: brightness(0.97);
+}
+
+.badge-action:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .metric-label,
@@ -2031,6 +2053,30 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.dvla-lookup-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.dvla-lookup-hint.found {
+  color: var(--green);
+}
+
+.dvla-lookup-hint.error {
+  color: var(--amber);
+}
+
+.inline-spinner {
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  border: 2px solid color-mix(in srgb, var(--blue) 18%, var(--line));
+  border-top-color: var(--blue);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
 .field-control,
 .field select,
 .field textarea {
@@ -2111,6 +2157,18 @@ tr:last-child td {
   min-height: 420px;
 }
 
+.people-card {
+  min-height: 360px;
+}
+
+.groups-card {
+  min-height: 360px;
+}
+
+.vehicles-card {
+  min-height: 360px;
+}
+
 .users-table {
   display: grid;
   gap: 8px;
@@ -2126,7 +2184,130 @@ tr:last-child td {
   border-bottom: 1px solid var(--line);
 }
 
+.person-row {
+  grid-template-columns: 42px minmax(180px, 1fr) auto minmax(210px, 0.8fr);
+}
+
+.group-row {
+  grid-template-columns: 42px minmax(180px, 1fr) auto minmax(120px, auto);
+}
+
+.vehicle-row {
+  grid-template-columns: 56px minmax(180px, 1fr) minmax(130px, 0.7fr) auto auto;
+}
+
+.person-row-button {
+  cursor: pointer;
+  border-radius: 8px;
+  padding-inline: 8px;
+  margin-inline: -8px;
+}
+
+.group-row-button {
+  cursor: pointer;
+  border-radius: 8px;
+  padding-inline: 8px;
+  margin-inline: -8px;
+}
+
+.vehicle-row-button {
+  cursor: pointer;
+  border-radius: 8px;
+  padding-inline: 8px;
+  margin-inline: -8px;
+}
+
+.person-row-button:hover,
+.person-row-button:focus-visible,
+.group-row-button:hover,
+.group-row-button:focus-visible,
+.vehicle-row-button:hover,
+.vehicle-row-button:focus-visible {
+  background: var(--surface-soft);
+  outline: 0;
+}
+
+.person-row-button:focus-visible,
+.group-row-button:focus-visible,
+.vehicle-row-button:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 28%, transparent);
+}
+
+.group-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--gray-soft);
+  color: var(--gray);
+}
+
+.group-mark.family {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.group-mark.friends {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.group-mark.visitors {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.group-mark.contractors {
+  background: var(--gray-soft);
+  color: var(--gray);
+}
+
+.member-count {
+  justify-self: end;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 540;
+}
+
+.vehicle-owner {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 540;
+}
+
+.vehicle-photo {
+  width: 48px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.vehicle-photo.large {
+  width: 96px;
+  height: 72px;
+}
+
+.vehicle-photo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
 .profile-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0 2px;
+}
+
+.vehicle-upload-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2168,6 +2349,150 @@ tr:last-child td {
 .temporary-password-card span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.vehicle-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.vehicle-chip {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text);
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 580;
+  line-height: 1;
+}
+
+.muted-value {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.person-modal {
+  width: min(680px, 100%);
+}
+
+.group-modal {
+  width: min(640px, 100%);
+}
+
+.vehicle-modal {
+  width: min(680px, 100%);
+}
+
+.group-members-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.group-members-panel .panel-header {
+  padding: 0;
+}
+
+.group-member-list {
+  display: grid;
+  gap: 8px;
+}
+
+.group-member-row {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.group-member-row strong,
+.group-member-row div > span {
+  display: block;
+}
+
+.group-member-row strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 580;
+}
+
+.group-member-row div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vehicle-picker {
+  max-height: 230px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.vehicle-option {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.vehicle-option.selected {
+  border-color: color-mix(in srgb, var(--blue) 38%, var(--line));
+  background: var(--blue-soft);
+}
+
+.vehicle-option input {
+  width: 16px;
+  height: 16px;
+}
+
+.vehicle-option strong,
+.vehicle-option small {
+  display: block;
+}
+
+.vehicle-option strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.vehicle-option small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-state.compact {
+  min-height: 72px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .user-actions {
@@ -2215,6 +2540,40 @@ tr:last-child td {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow-strong);
+}
+
+.gate-confirm-modal {
+  width: min(430px, calc(100vw - 32px));
+}
+
+.gate-confirm-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.gate-confirm-title h2 {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.gate-confirm-title p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.gate-confirm-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  color: var(--blue);
+  background: var(--blue-soft);
 }
 
 .integration-modal {
@@ -2783,7 +3142,12 @@ tr:last-child td {
   }
 
   .field-grid,
-  .user-row {
+  .user-row,
+  .group-row,
+  .group-member-row,
+  .person-row,
+  .vehicle-row,
+  .vehicle-option {
     grid-template-columns: 1fr;
   }
 
@@ -2796,6 +3160,19 @@ tr:last-child td {
 
   .user-actions {
     justify-content: flex-start;
+  }
+
+  .vehicle-chip-list {
+    justify-content: flex-start;
+  }
+
+  .member-count {
+    justify-self: start;
+  }
+
+  .vehicle-upload-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .table-card {

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     public_base_url: AnyHttpUrl | None = None
     root_path: str = ""
     auto_create_schema: bool = True
-    seed_demo_data: bool = True
+    seed_demo_data: bool = False
 
     auth_secret_key: str = "change-me-before-production"
     auth_cookie_name: str = "iacs_session"
