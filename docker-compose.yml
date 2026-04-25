@@ -1,0 +1,99 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: iacs-frontend
+    ports:
+      - "0.0.0.0:${FRONTEND_PORT:-8089}:80"
+    volumes:
+      # Bind mount for access logs only; static assets are baked into the image.
+      - ./logs/frontend:/var/log/nginx
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: iacs-backend
+    environment:
+      IACS_ENVIRONMENT: ${IACS_ENVIRONMENT:-development}
+      IACS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-iacs}:${POSTGRES_PASSWORD:-iacs_dev_password}@postgres:5432/${POSTGRES_DB:-iacs}
+      IACS_REDIS_URL: redis://redis:6379/0
+      IACS_DATA_DIR: /app/data
+      IACS_LOG_DIR: /app/logs
+      IACS_CORS_ORIGINS: ${IACS_CORS_ORIGINS:-http://localhost:5173,http://localhost:3000,http://localhost:8088}
+      IACS_TRUSTED_HOSTS: ${IACS_TRUSTED_HOSTS:-*}
+      IACS_PUBLIC_BASE_URL: ${IACS_PUBLIC_BASE_URL:-}
+      IACS_ROOT_PATH: ${IACS_ROOT_PATH:-}
+      IACS_AUTO_CREATE_SCHEMA: ${IACS_AUTO_CREATE_SCHEMA:-true}
+      IACS_SEED_DEMO_DATA: ${IACS_SEED_DEMO_DATA:-true}
+      IACS_AUTH_SECRET_KEY: ${IACS_AUTH_SECRET_KEY:-change-me-before-production}
+      IACS_LPR_ADAPTER: ${IACS_LPR_ADAPTER:-ubiquiti}
+      IACS_GATE_CONTROLLER: ${IACS_GATE_CONTROLLER:-home_assistant}
+      IACS_NOTIFICATION_SENDER: ${IACS_NOTIFICATION_SENDER:-apprise}
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    ports:
+      - "0.0.0.0:${BACKEND_PORT:-8088}:8000"
+    volumes:
+      # Bind mounts only. These paths are intentionally visible on the host.
+      - ./data/backend:/app/data
+      - ./logs/backend:/app/logs
+      - ./backend/app:/app/app:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: iacs-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-iacs}
+      POSTGRES_USER: ${POSTGRES_USER:-iacs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iacs_dev_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Bind mount, not a named Docker volume.
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iacs} -d ${POSTGRES_DB:-iacs}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: iacs-redis
+    command: ["redis-server", "--appendonly", "yes", "--dir", "/data"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      # Bind mount, not a named Docker volume.
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  default:
+    name: iacs-network

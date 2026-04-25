@@ -1,0 +1,15 @@
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+node_modules/
+dist/
+build/
+
+# Runtime state is mounted into containers as host directories.
+data/
+logs/
