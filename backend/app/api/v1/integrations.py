@@ -1,6 +1,5 @@
 from difflib import SequenceMatcher
 import re
-from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -11,10 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
-from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, normalize_registration_number
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.modules.gate.home_assistant import HomeAssistantGateController
 from app.models import User
+from app.modules.home_assistant.covers import (
+    cover_entity_state_payload,
+    command_cover,
+    detected_garage_door_entities,
+    detected_gate_entities,
+    enabled_cover_entities,
+    normalize_cover_entities,
+)
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, HomeAssistantState
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.apprise_client import normalize_apprise_url, split_apprise_urls, validate_apprise_urls
@@ -36,8 +43,9 @@ class GateOpenRequest(BaseModel):
 
 
 class CoverCommandRequest(BaseModel):
-    target: Literal["main_garage_door", "mums_garage_door"]
-    action: Literal["open", "close"]
+    entity_id: str | None = Field(default=None, max_length=255)
+    target: str | None = Field(default=None, max_length=120)
+    action: str = Field(pattern="^(open|close)$")
     reason: str = Field(default="Manual dashboard command", max_length=240)
 
 
@@ -78,10 +86,14 @@ async def home_assistant_entities(
     cover_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")]
     media_players = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("media_player.")]
     person_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("person.")]
+    gate_suggestions = [cover_entity_state_payload(entity) for entity in detected_gate_entities(states)]
+    garage_door_suggestions = [cover_entity_state_payload(entity) for entity in detected_garage_door_entities(states)]
     users = (await session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.first_name, User.last_name))).all()
 
     return {
         "cover_entities": cover_entities,
+        "gate_suggestions": gate_suggestions,
+        "garage_door_suggestions": garage_door_suggestions,
         "media_player_entities": media_players,
         "person_entities": person_entities,
         "presence_mappings": [
@@ -89,6 +101,42 @@ async def home_assistant_entities(
             for user in users
         ],
     }
+
+
+@router.post("/home-assistant/gates/auto-detect")
+async def auto_detect_home_assistant_gates(_: User = Depends(admin_user)) -> dict:
+    try:
+        states = await HomeAssistantClient().list_states()
+    except HomeAssistantError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    detected = detected_gate_entities(states)
+    config = await get_runtime_config()
+    merged = _merge_cover_entities(
+        config.home_assistant_gate_entities,
+        detected,
+        default_open_service=config.home_assistant_gate_open_service,
+    )
+    await update_settings({"home_assistant_gate_entities": merged})
+    return {"gate_entities": [cover_entity_state_payload(entity) for entity in merged]}
+
+
+@router.post("/home-assistant/garage-doors/auto-detect")
+async def auto_detect_home_assistant_garage_doors(_: User = Depends(admin_user)) -> dict:
+    try:
+        states = await HomeAssistantClient().list_states()
+    except HomeAssistantError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    detected = detected_garage_door_entities(states)
+    config = await get_runtime_config()
+    merged = _merge_cover_entities(
+        config.home_assistant_garage_door_entities,
+        detected,
+        default_open_service=config.home_assistant_gate_open_service,
+    )
+    await update_settings({"home_assistant_garage_door_entities": merged})
+    return {"garage_door_entities": [cover_entity_state_payload(entity) for entity in merged]}
 
 
 @router.get("/apprise/urls")
@@ -136,6 +184,7 @@ async def dvla_lookup(request: DvlaLookupRequest, _: User = Depends(current_user
     return {
         "registration_number": registration_number,
         "vehicle": vehicle,
+        "display_vehicle": display_vehicle_record(vehicle, registration_number),
     }
 
 
@@ -153,20 +202,32 @@ async def open_gate(request: GateOpenRequest) -> dict:
 
 @router.post("/cover/command")
 async def cover_command(request: CoverCommandRequest, _: User = Depends(current_user)) -> dict:
-    entity_id = GARAGE_COVER_ENTITIES[request.target]
-    service_name = "cover.open_cover" if request.action == "open" else "cover.close_cover"
+    entity_id = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
+    if not entity_id:
+        raise HTTPException(status_code=400, detail="A configured garage door entity is required.")
+
+    config = await get_runtime_config()
+    configured_entities = {
+        str(entity["entity_id"]): entity
+        for entity in enabled_cover_entities(
+            config.home_assistant_garage_door_entities,
+            default_open_service=config.home_assistant_gate_open_service,
+        )
+    }
+    entity = configured_entities.get(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
+
     client = HomeAssistantClient()
-    try:
-        await client.call_service(service_name, {"entity_id": entity_id})
-        state = await client.get_state(entity_id)
-    except HomeAssistantError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    outcome = await command_cover(client, entity, request.action, request.reason)
+    if not outcome.accepted:
+        raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
     return {
         "accepted": True,
-        "entity_id": entity_id,
-        "target": request.target,
+        "entity_id": outcome.entity_id,
+        "target": request.target or outcome.entity_id,
         "action": request.action,
-        "state": state.state,
+        "state": outcome.state,
         "detail": request.reason,
     }
 
@@ -209,11 +270,28 @@ async def send_test_notification(request: TestNotificationRequest) -> dict[str, 
 
 def _serialize_ha_entity(state: HomeAssistantState) -> dict[str, str | None]:
     friendly_name = state.attributes.get("friendly_name")
+    device_class = state.attributes.get("device_class")
     return {
         "entity_id": state.entity_id,
         "name": str(friendly_name) if friendly_name else _title_from_entity_id(state.entity_id),
         "state": state.state,
+        "device_class": str(device_class) if device_class else None,
     }
+
+
+def _merge_cover_entities(
+    existing: list[dict],
+    detected: list[dict],
+    *,
+    default_open_service: str = "cover.open_cover",
+) -> list[dict]:
+    merged = normalize_cover_entities(existing, default_open_service=default_open_service)
+    by_entity_id = {str(entity["entity_id"]): entity for entity in merged}
+    for entity in normalize_cover_entities(detected, default_open_service=default_open_service):
+        if entity["entity_id"] not in by_entity_id:
+            merged.append(entity)
+            by_entity_id[str(entity["entity_id"])] = entity
+    return merged
 
 
 def _apprise_url_summary(index: int, url: str) -> dict[str, str | int]:

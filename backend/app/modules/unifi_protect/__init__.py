@@ -1,0 +1,2 @@
+"""UniFi Protect integration boundary."""
+

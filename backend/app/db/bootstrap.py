@@ -22,6 +22,7 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS garage_door_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb"))
             await conn.execute(
                 text(
                     """

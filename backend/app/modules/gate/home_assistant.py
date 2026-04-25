@@ -1,4 +1,5 @@
 from app.modules.gate.base import GateCommandResult, GateController, GateState
+from app.modules.home_assistant.covers import command_cover, enabled_cover_entities, legacy_gate_entities, normalize_cover_entities
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
 from app.services.settings import get_runtime_config
 
@@ -11,24 +12,44 @@ class HomeAssistantGateController(GateController):
 
     async def open_gate(self, reason: str) -> GateCommandResult:
         config = await get_runtime_config()
-        if not config.home_assistant_gate_entity_id:
+        configured_gate_entities = normalize_cover_entities(
+            config.home_assistant_gate_entities,
+            default_open_service=config.home_assistant_gate_open_service,
+        )
+        gate_entities = (
+            enabled_cover_entities(configured_gate_entities, default_open_service=config.home_assistant_gate_open_service)
+            if configured_gate_entities
+            else legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+        )
+        if not gate_entities:
             return GateCommandResult(False, GateState.UNKNOWN, "Gate entity is not configured.")
 
-        try:
-            await self._client.call_service(
-                config.home_assistant_gate_open_service,
-                {"entity_id": config.home_assistant_gate_entity_id},
+        outcomes = [await command_cover(self._client, entity, "open", reason) for entity in gate_entities]
+        failed = [outcome for outcome in outcomes if not outcome.accepted]
+        if failed:
+            detail = "; ".join(
+                f"{outcome.name}: {outcome.detail or 'command failed'}"
+                for outcome in failed
             )
-            return GateCommandResult(True, await self.current_state(), reason)
-        except HomeAssistantError as exc:
-            return GateCommandResult(False, GateState.FAULT, str(exc))
+            return GateCommandResult(False, GateState.FAULT, detail)
+
+        return GateCommandResult(True, await self.current_state(), reason)
 
     async def current_state(self) -> GateState:
         config = await get_runtime_config()
-        if not config.home_assistant_gate_entity_id:
+        configured_gate_entities = normalize_cover_entities(
+            config.home_assistant_gate_entities,
+            default_open_service=config.home_assistant_gate_open_service,
+        )
+        gate_entities = (
+            enabled_cover_entities(configured_gate_entities, default_open_service=config.home_assistant_gate_open_service)
+            if configured_gate_entities
+            else legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+        )
+        if not gate_entities:
             return GateState.UNKNOWN
         try:
-            state = await self._client.get_state(config.home_assistant_gate_entity_id)
+            state = await self._client.get_state(str(gate_entities[0]["entity_id"]))
             return map_home_assistant_gate_state(state.state)
         except HomeAssistantError:
             return GateState.UNKNOWN

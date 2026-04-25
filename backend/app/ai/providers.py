@@ -1,3 +1,4 @@
+import base64
 import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -44,6 +45,10 @@ class LlmProvider(Protocol):
 
 class ProviderNotConfiguredError(RuntimeError):
     """Raised when a selected provider is missing required credentials."""
+
+
+class ImageAnalysisUnsupportedError(RuntimeError):
+    """Raised when the selected provider cannot analyze images."""
 
 
 class BaseHttpProvider:
@@ -123,6 +128,33 @@ class OpenAIResponsesProvider(BaseHttpProvider):
             raw=data,
         )
 
+    async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
+        config = await get_runtime_config()
+        if not config.openai_api_key:
+            raise ProviderNotConfiguredError("OpenAI API key is not configured.")
+
+        data_url = _image_data_url(image_bytes, mime_type)
+        data = await self._post(
+            f"{config.openai_base_url.rstrip('/')}/responses",
+            headers={
+                "Authorization": f"Bearer {config.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json_body={
+                "model": config.openai_model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {"type": "input_image", "image_url": data_url, "detail": "auto"},
+                        ],
+                    }
+                ],
+            },
+        )
+        return LlmResult(text=self._extract_text(data), raw=data)
+
     def _split_messages(self, messages: list[ChatMessageInput]) -> tuple[str, list[dict[str, str]]]:
         instructions = "\n".join(message.content for message in messages if message.role == "system")
         input_items = [
@@ -193,6 +225,33 @@ class GeminiProvider(BaseHttpProvider):
         )
         return LlmResult(text=self._extract_text(data), raw=data)
 
+    async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
+        config = await get_runtime_config()
+        if not config.gemini_api_key:
+            raise ProviderNotConfiguredError("Gemini API key is not configured.")
+
+        data = await self._post(
+            f"{config.gemini_base_url.rstrip('/')}/models/{config.gemini_model}:generateContent"
+            f"?key={config.gemini_api_key}",
+            json_body={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": _image_base64(image_bytes),
+                                }
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+        return LlmResult(text=self._extract_text(data), raw=data)
+
     def _plain_prompt(
         self, messages: list[ChatMessageInput], tool_results: list[dict[str, Any]] | None
     ) -> str:
@@ -252,6 +311,46 @@ class ClaudeProvider(BaseHttpProvider):
             raw=data,
         )
 
+    async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
+        config = await get_runtime_config()
+        if not config.anthropic_api_key:
+            raise ProviderNotConfiguredError("Anthropic API key is not configured.")
+
+        data = await self._post(
+            f"{config.anthropic_base_url.rstrip('/')}/messages",
+            headers={
+                "x-api-key": config.anthropic_api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json_body={
+                "model": config.anthropic_model,
+                "max_tokens": 1200,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": _image_base64(image_bytes),
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            },
+        )
+        return LlmResult(
+            text="\n".join(
+                item.get("text", "") for item in data.get("content", []) if item.get("type") == "text"
+            ).strip(),
+            raw=data,
+        )
+
 
 class OllamaProvider(BaseHttpProvider):
     name = "ollama"
@@ -277,6 +376,30 @@ class OllamaProvider(BaseHttpProvider):
         )
         return LlmResult(text=data.get("message", {}).get("content", ""), raw=data)
 
+    async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
+        config = await get_runtime_config()
+        if not _looks_like_ollama_vision_model(config.ollama_model):
+            raise ImageAnalysisUnsupportedError(
+                f"Ollama model '{config.ollama_model}' is not marked as vision-capable. "
+                "Select a vision model such as llama3.2-vision, llava, bakllava, or qwen-vl."
+            )
+
+        data = await self._post(
+            f"{config.ollama_base_url.rstrip('/')}/api/chat",
+            json_body={
+                "model": config.ollama_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [_image_base64(image_bytes)],
+                    }
+                ],
+                "stream": False,
+            },
+        )
+        return LlmResult(text=data.get("message", {}).get("content", ""), raw=data)
+
 
 class LocalProvider:
     """Deterministic fallback so the assistant remains useful without API keys."""
@@ -299,6 +422,9 @@ class LocalProvider:
             )
         )
 
+    async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
+        raise ImageAnalysisUnsupportedError("The local fallback provider cannot analyze camera images.")
+
     def _summarize_tools(self, tool_results: list[dict[str, Any]]) -> str:
         summaries: list[str] = []
         for result in tool_results:
@@ -316,6 +442,10 @@ class LocalProvider:
                 summaries.append(self._summarize_rhythm(output))
             elif tool_name == "trigger_anomaly_alert":
                 summaries.append(f"Alert queued: {output.get('title')}")
+            elif tool_name == "lookup_dvla_vehicle":
+                summaries.append(self._summarize_dvla_vehicle(output))
+            elif tool_name == "analyze_camera_snapshot":
+                summaries.append(self._summarize_camera_analysis(output))
             else:
                 summaries.append(f"{tool_name}: {json.dumps(output, default=str)}")
         return "\n".join(summaries)
@@ -357,6 +487,91 @@ class LocalProvider:
             f"{output.get('entries')} entries, {output.get('exits')} exits, "
             f"{output.get('denials')} denials, {output.get('anomaly_events')} anomaly events."
         )
+
+    def _summarize_dvla_vehicle(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"DVLA lookup for {output.get('registration_number') or 'that vehicle'} failed: {output.get('error')}"
+
+        vehicle = output.get("display_vehicle") or output.get("vehicle")
+        if not isinstance(vehicle, dict):
+            return "DVLA returned no vehicle details for that registration."
+
+        registration_number = output.get("registration_number") or vehicle.get("registrationNumber")
+        details = [
+            ("Registration", registration_number),
+            ("Make", vehicle.get("make")),
+            ("Colour", vehicle.get("colour")),
+            ("Tax status", vehicle.get("taxStatus")),
+            ("Tax due date", vehicle.get("taxDueDate")),
+            ("MOT status", vehicle.get("motStatus")),
+            ("MOT expiry", vehicle.get("motExpiryDate")),
+            ("Year of manufacture", vehicle.get("yearOfManufacture")),
+            ("Fuel type", vehicle.get("fuelType")),
+            ("Engine capacity", _format_engine_capacity(vehicle.get("engineCapacity"))),
+            ("CO2 emissions", _format_co2(vehicle.get("co2Emissions"))),
+            ("Euro status", vehicle.get("euroStatus")),
+        ]
+        lines = [f"{label}: {value}" for label, value in details if value not in {None, ""}]
+        if not lines:
+            return "DVLA returned a vehicle record, but it did not include displayable details."
+        return "DVLA vehicle details:\n" + "\n".join(f"- {line}" for line in lines)
+
+    def _summarize_camera_analysis(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"Camera analysis failed: {output.get('error')}"
+        return str(output.get("analysis") or "Camera analysis returned no text.")
+
+
+def _format_engine_capacity(value: Any) -> str | None:
+    if value in {None, ""}:
+        return None
+    return f"{value} cc"
+
+
+def _format_co2(value: Any) -> str | None:
+    if value in {None, ""}:
+        return None
+    return f"{value} g/km"
+
+
+async def analyze_image_with_provider(
+    provider_name: str,
+    *,
+    prompt: str,
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+) -> LlmResult:
+    provider = get_llm_provider(provider_name)
+    analyze = getattr(provider, "analyze_image", None)
+    if not callable(analyze):
+        raise ImageAnalysisUnsupportedError(f"{provider.name} does not support image analysis.")
+    return await analyze(prompt, image_bytes, mime_type)
+
+
+def _image_base64(image_bytes: bytes) -> str:
+    return base64.b64encode(image_bytes).decode("ascii")
+
+
+def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
+    return f"data:{mime_type};base64,{_image_base64(image_bytes)}"
+
+
+def _looks_like_ollama_vision_model(model: str) -> bool:
+    normalized = model.lower()
+    markers = (
+        "vision",
+        "llava",
+        "bakllava",
+        "moondream",
+        "minicpm-v",
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
+        "gemma3",
+        "granite3.2-vision",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def get_llm_provider(provider_name: str) -> LlmProvider:

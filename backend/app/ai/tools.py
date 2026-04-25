@@ -8,10 +8,14 @@ from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Anomaly, Person, Presence, User
 from app.models.enums import AccessDecision, AccessDirection
-from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, normalize_registration_number
+from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
+from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext
 from app.services.dvla import lookup_vehicle_registration
 from app.services.notifications import get_notification_service
+from app.services.settings import get_runtime_config
+from app.services.unifi_protect import get_unifi_protect_service
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -136,6 +140,25 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=lookup_dvla_vehicle,
+        ),
+        AgentTool(
+            name="analyze_camera_snapshot",
+            description="Fetch a current UniFi Protect camera snapshot and ask the active vision-capable AI provider to analyze it.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "camera_id": {"type": "string"},
+                    "camera_name": {"type": "string"},
+                    "prompt": {
+                        "type": "string",
+                        "description": "What to inspect in the snapshot.",
+                    },
+                    "provider": {"type": "string"},
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+            handler=analyze_camera_snapshot,
         ),
     ]
     return {tool.name: tool for tool in tools}
@@ -322,6 +345,38 @@ async def lookup_dvla_vehicle(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "registration_number": registration_number,
         "vehicle": vehicle,
+        "display_vehicle": display_vehicle_record(vehicle, registration_number),
+    }
+
+
+async def analyze_camera_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
+    camera_identifier = str(arguments.get("camera_id") or arguments.get("camera_name") or "").strip()
+    if not camera_identifier:
+        return {"error": "camera_id or camera_name is required."}
+    prompt = str(arguments.get("prompt") or "Describe what is visible in this camera snapshot.").strip()
+    runtime = await get_runtime_config()
+    provider = str(arguments.get("provider") or runtime.llm_provider)
+
+    try:
+        media = await get_unifi_protect_service().snapshot(
+            camera_identifier,
+            width=runtime.unifi_protect_snapshot_width,
+            height=runtime.unifi_protect_snapshot_height,
+        )
+        result = await analyze_image_with_provider(
+            provider,
+            prompt=prompt,
+            image_bytes=media.content,
+            mime_type=media.content_type,
+        )
+    except (UnifiProtectError, ImageAnalysisUnsupportedError, Exception) as exc:
+        return {"camera": camera_identifier, "provider": provider, "error": str(exc)}
+
+    return {
+        "camera": camera_identifier,
+        "provider": provider,
+        "analysis": result.text,
+        "snapshot_retained": False,
     }
 
 

@@ -10,6 +10,7 @@ from app.modules.notifications.apprise_client import validate_apprise_urls
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config, list_settings, update_settings
+from app.services.unifi_protect import get_unifi_protect_service
 
 router = APIRouter()
 
@@ -52,6 +53,8 @@ async def patch_settings(
         service = get_home_assistant_service()
         await service.stop()
         await service.start()
+    if any(key.startswith("unifi_protect_") for key in request.values):
+        await get_unifi_protect_service().restart()
     return rows
 
 
@@ -69,6 +72,8 @@ async def test_connection(
             await _test_apprise(values)
         elif integration == "dvla":
             await _test_dvla(values)
+        elif integration == "unifi_protect":
+            await _test_unifi_protect(values)
         elif integration == "openai":
             await _test_openai(values)
         elif integration == "gemini":
@@ -103,6 +108,10 @@ async def _test_apprise(values: dict[str, Any]) -> None:
 
 async def _test_dvla(values: dict[str, Any]) -> None:
     await test_vehicle_enquiry_connection(values)
+
+
+async def _test_unifi_protect(values: dict[str, Any]) -> None:
+    await get_unifi_protect_service().test_connection(values)
 
 
 async def _test_openai(values: dict[str, Any]) -> None:

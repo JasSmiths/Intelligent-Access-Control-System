@@ -11,6 +11,8 @@ from app.api.dependencies import current_user
 from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import Group, Person, TimeSlot, User, Vehicle
 from app.models.enums import GroupCategory
+from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
+from app.services.settings import get_runtime_config
 
 router = APIRouter()
 
@@ -35,6 +37,7 @@ class PersonResponse(BaseModel):
     group: str | None
     category: str | None
     is_active: bool
+    garage_door_entity_ids: list[str]
     vehicles: list[PersonVehicleResponse]
 
 
@@ -44,6 +47,7 @@ class CreatePersonRequest(BaseModel):
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     group_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
+    garage_door_entity_ids: list[str] = Field(default_factory=list)
     is_active: bool = True
 
 
@@ -53,6 +57,7 @@ class UpdatePersonRequest(BaseModel):
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     group_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] | None = None
+    garage_door_entity_ids: list[str] | None = None
     is_active: bool | None = None
 
 
@@ -131,6 +136,10 @@ def normalize_registration_number(registration_number: str) -> str:
     return registration_number.strip().upper().replace(" ", "")
 
 
+def normalize_vehicle_text(value: str | None) -> str | None:
+    return friendly_vehicle_text(value) if value else None
+
+
 def serialize_vehicle(vehicle: Vehicle) -> dict:
     return {
         "id": str(vehicle.id),
@@ -157,6 +166,7 @@ def serialize_person(person: Person) -> dict:
         "group": person.group.name if person.group else None,
         "category": person.group.category.value if person.group else None,
         "is_active": person.is_active,
+        "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "vehicles": [
                 {
                     "id": str(vehicle.id),
@@ -205,6 +215,25 @@ async def get_vehicles_or_404(session: AsyncSession, vehicle_ids: list[uuid.UUID
     return list(vehicles)
 
 
+async def validate_garage_door_entity_ids(entity_ids: list[str]) -> list[str]:
+    selected_entity_ids = list(dict.fromkeys(entity_id.strip() for entity_id in entity_ids if entity_id.strip()))
+    if not selected_entity_ids:
+        return []
+
+    config = await get_runtime_config()
+    configured_ids = {
+        str(entity["entity_id"])
+        for entity in config.home_assistant_garage_door_entities
+    }
+    unknown = [entity_id for entity_id in selected_entity_ids if entity_id not in configured_ids]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Garage door entity is not configured: {unknown[0]}",
+        )
+    return selected_entity_ids
+
+
 @router.post("/people", response_model=PersonResponse, status_code=status.HTTP_201_CREATED)
 async def add_person(
     request: CreatePersonRequest,
@@ -213,6 +242,7 @@ async def add_person(
 ) -> PersonResponse:
     group = await get_group_or_404(session, request.group_id)
     vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
+    garage_door_entity_ids = await validate_garage_door_entity_ids(request.garage_door_entity_ids)
 
     person = Person(
         first_name=request.first_name.strip(),
@@ -220,6 +250,7 @@ async def add_person(
         display_name=compose_person_name(request.first_name, request.last_name),
         profile_photo_data_url=request.profile_photo_data_url,
         group_id=group.id if group else None,
+        garage_door_entity_ids=garage_door_entity_ids,
         is_active=request.is_active,
     )
     session.add(person)
@@ -266,6 +297,9 @@ async def update_person(
                 vehicle.person_id = None
         for vehicle in vehicles:
             vehicle.person_id = person.id
+
+    if request.garage_door_entity_ids is not None:
+        person.garage_door_entity_ids = await validate_garage_door_entity_ids(request.garage_door_entity_ids)
 
     if request.first_name is not None:
         person.first_name = request.first_name.strip()
@@ -316,9 +350,9 @@ async def add_vehicle(
         person_id=owner.id if owner else None,
         registration_number=normalize_registration_number(request.registration_number),
         vehicle_photo_data_url=request.vehicle_photo_data_url,
-        make=request.make.strip() if request.make else None,
-        model=request.model.strip() if request.model else None,
-        color=request.color.strip() if request.color else None,
+        make=normalize_vehicle_text(request.make),
+        model=normalize_vehicle_text(request.model),
+        color=normalize_vehicle_text(request.color),
         is_active=request.is_active,
     )
     session.add(vehicle)
@@ -363,11 +397,11 @@ async def update_vehicle(
     if "vehicle_photo_data_url" in request.model_fields_set:
         vehicle.vehicle_photo_data_url = request.vehicle_photo_data_url
     if "make" in request.model_fields_set:
-        vehicle.make = request.make.strip() if request.make else None
+        vehicle.make = normalize_vehicle_text(request.make)
     if "model" in request.model_fields_set:
-        vehicle.model = request.model.strip() if request.model else None
+        vehicle.model = normalize_vehicle_text(request.model)
     if "color" in request.model_fields_set:
-        vehicle.color = request.color.strip() if request.color else None
+        vehicle.color = normalize_vehicle_text(request.color)
     if request.is_active is not None:
         vehicle.is_active = request.is_active
 

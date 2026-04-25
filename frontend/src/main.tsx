@@ -19,6 +19,7 @@ import {
   Database,
   DoorClosed,
   DoorOpen,
+  Download,
   FileText,
   Gauge,
   Home,
@@ -55,7 +56,8 @@ import "./styles.css";
 
 type DoorCommandAction = "open" | "close";
 type DashboardCommand = {
-  target: "top_gate" | "main_garage_door" | "mums_garage_door";
+  kind: "gate" | "garage_door";
+  entity_id?: string;
   label: string;
   action: DoorCommandAction;
 };
@@ -97,6 +99,7 @@ type Person = {
   group: string | null;
   category: string | null;
   is_active: boolean;
+  garage_door_entity_ids: string[];
   vehicles: Vehicle[];
 };
 
@@ -135,6 +138,8 @@ type Group = {
 type IntegrationStatus = {
   configured: boolean;
   gate_entity_id: string | null;
+  gate_entities?: HomeAssistantManagedCover[];
+  garage_door_entities?: HomeAssistantManagedCover[];
   default_media_player: string | null;
   last_gate_state: string;
   current_gate_state?: string;
@@ -166,6 +171,16 @@ type HomeAssistantEntity = {
   entity_id: string;
   name: string | null;
   state: string | null;
+  device_class?: string | null;
+};
+
+type HomeAssistantManagedCover = {
+  entity_id: string;
+  name: string;
+  state?: string | null;
+  enabled?: boolean;
+  open_service?: string;
+  close_service?: string;
 };
 
 type HomeAssistantPresenceSuggestion = {
@@ -179,6 +194,8 @@ type HomeAssistantPresenceSuggestion = {
 
 type HomeAssistantDiscovery = {
   cover_entities: HomeAssistantEntity[];
+  gate_suggestions?: HomeAssistantManagedCover[];
+  garage_door_suggestions?: HomeAssistantManagedCover[];
   media_player_entities: HomeAssistantEntity[];
   person_entities: HomeAssistantEntity[];
   presence_mappings: HomeAssistantPresenceSuggestion[];
@@ -199,7 +216,143 @@ type DvlaLookupResponse = {
     colour?: string | null;
     color?: string | null;
   } & Record<string, unknown>;
+  display_vehicle?: {
+    make?: string | null;
+    model?: string | null;
+    colour?: string | null;
+    color?: string | null;
+  } & Record<string, unknown>;
 };
+
+type UnifiProtectStatus = {
+  configured: boolean;
+  connected: boolean;
+  last_error: string | null;
+  camera_count: number;
+  host: string;
+  port: number;
+  verify_ssl: boolean;
+  snapshot_width: number;
+  snapshot_height: number;
+};
+
+type UnifiProtectCamera = {
+  id: string;
+  name: string;
+  model: string | null;
+  state: string | null;
+  is_recording: boolean;
+  is_recording_enabled: boolean;
+  is_video_ready: boolean;
+  is_motion_detected: boolean;
+  is_smart_detected: boolean;
+  last_motion_at: string | null;
+  last_smart_detect_at: string | null;
+  snapshot_url: string;
+  channels: Array<{
+    id: string;
+    name: string;
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    bitrate: number | null;
+    is_rtsp_enabled: boolean;
+    is_package: boolean;
+  }>;
+  feature_flags: {
+    has_smart_detect: boolean;
+    has_package_camera: boolean;
+    has_mic: boolean;
+    smart_detect_types: string[];
+    smart_detect_audio_types: string[];
+  };
+  detections: {
+    active: string[];
+  };
+};
+
+type UnifiProtectEvent = {
+  id: string;
+  type: string;
+  camera_id: string;
+  camera_name: string;
+  start: string | null;
+  end: string | null;
+  score: number;
+  smart_detect_types: string[];
+  thumbnail_url: string;
+  video_url: string | null;
+};
+
+type UnifiProtectAnalysis = {
+  camera_id: string;
+  provider: string;
+  text: string;
+  snapshot_retained: boolean;
+};
+
+type UnifiProtectUpdateStatus = {
+  package: string;
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  active_package: {
+    mode: string;
+    version?: string | null;
+    path?: string | null;
+    installed_at?: string | null;
+  };
+  installed_overlays: Array<{ version: string; path: string }>;
+  latest_summary?: Record<string, unknown>;
+};
+
+type UnifiProtectReleaseNotes = {
+  source: string;
+  title: string;
+  body: string;
+  published_at?: string | null;
+  html_url?: string | null;
+};
+
+type UnifiProtectUpdateAnalysis = {
+  package: string;
+  current_version: string;
+  target_version: string;
+  latest_version: string;
+  update_available: boolean;
+  provider: string;
+  analysis: string;
+  release_notes: UnifiProtectReleaseNotes;
+};
+
+type UnifiProtectBackup = {
+  id: string;
+  created_at: string;
+  reason: string;
+  package_version: string;
+  settings_count: number;
+  size_bytes: number;
+  download_url: string;
+  active_package?: {
+    mode: string;
+    version?: string | null;
+  };
+};
+
+type UnifiProtectUpdateApplyResult = {
+  ok: boolean;
+  previous_version: string;
+  current_version: string;
+  target_version: string;
+  backup: UnifiProtectBackup;
+  verification: {
+    package_version?: string;
+    camera_count?: number;
+    snapshot_bytes?: number;
+  };
+};
+
+type ProtectIntegrationTab = "general" | "exposes" | "updates";
 
 type UserAccount = {
   id: string;
@@ -359,25 +512,74 @@ function applyIntegrationRealtimeEvent(
 ) {
   if (event.type === "gate.state_changed") {
     const state = stringPayload(event.payload.state);
+    const entityId = stringPayload(event.payload.entity_id);
     if (!state) return false;
-    setIntegrationStatus((current) => current ? { ...current, current_gate_state: state, last_gate_state: state } : current);
+    setIntegrationStatus((current) => {
+      if (!current) return current;
+      const gate_entities = updateManagedCoverState(current.gate_entities, entityId, state);
+      return { ...current, gate_entities, current_gate_state: state, last_gate_state: state };
+    });
     return true;
   }
 
   if (event.type === "door.state_changed") {
     const door = stringPayload(event.payload.door);
+    const entityId = stringPayload(event.payload.entity_id);
     const state = stringPayload(event.payload.state);
     const stateKey = doorStateKey(door);
-    if (!state || !stateKey) return false;
-    setIntegrationStatus((current) => current ? { ...current, [stateKey]: state } : current);
+    if (!state || (!stateKey && door !== "garage_door")) return false;
+    setIntegrationStatus((current) => {
+      if (!current) return current;
+      if (door === "garage_door") {
+        return { ...current, garage_door_entities: updateManagedCoverState(current.garage_door_entities, entityId, state) };
+      }
+      return { ...current, [stateKey]: state };
+    });
     return true;
   }
 
   return false;
 }
 
+function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
+  if (event.type !== "access_event.finalized") return null;
+  const eventId = stringPayload(event.payload.event_id);
+  const registrationNumber = stringPayload(event.payload.registration_number);
+  const direction = stringPayload(event.payload.direction);
+  const decision = stringPayload(event.payload.decision);
+  const source = stringPayload(event.payload.source);
+  const occurredAt = stringPayload(event.payload.occurred_at);
+  const timingClassification = stringPayload(event.payload.timing_classification);
+  if (!eventId || !registrationNumber || !isAccessDirection(direction) || !isAccessDecision(decision) || !source || !occurredAt) {
+    return null;
+  }
+  return {
+    id: eventId,
+    registration_number: registrationNumber,
+    direction,
+    decision,
+    confidence: numberPayload(event.payload.confidence),
+    source,
+    occurred_at: occurredAt,
+    timing_classification: timingClassification || "unknown",
+    anomaly_count: numberPayload(event.payload.anomaly_count)
+  };
+}
+
+function isAccessDirection(value: string): value is AccessEvent["direction"] {
+  return ["entry", "exit", "denied"].includes(value);
+}
+
+function isAccessDecision(value: string): value is AccessEvent["decision"] {
+  return ["granted", "denied"].includes(value);
+}
+
 function stringPayload(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+function numberPayload(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function doorStateKey(door: string) {
@@ -388,6 +590,11 @@ function doorStateKey(door: string) {
     mums_garage_door: "mums_garage_door_state"
   };
   return keys[door] ?? null;
+}
+
+function updateManagedCoverState(entities: HomeAssistantManagedCover[] | undefined, entityId: string, state: string) {
+  if (!entities?.length || !entityId) return entities;
+  return entities.map((entity) => entity.entity_id === entityId ? { ...entity, state } : entity);
 }
 
 function App() {
@@ -490,6 +697,12 @@ function App() {
       const parsed = JSON.parse(event.data) as RealtimeMessage;
       setRealtime((current) => [parsed, ...current].slice(0, 80));
       if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
+        return;
+      }
+      const finalizedEvent = accessEventFromRealtime(parsed);
+      if (finalizedEvent) {
+        setEvents((current) => [finalizedEvent, ...current.filter((item) => item.id !== finalizedEvent.id)].slice(0, 40));
+        refresh().catch(() => undefined);
         return;
       }
       if (parsed.type !== "connection.ready") {
@@ -869,7 +1082,7 @@ function View(props: {
 }) {
   switch (props.view) {
     case "people":
-      return <PeopleView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
+      return <PeopleView garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
     case "groups":
       return <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
     case "vehicles":
@@ -934,7 +1147,9 @@ function Dashboard({
   const deniedToday = todayEvents.filter((event) => event.decision === "denied").length;
   const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
   const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
-  const topGateState = integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
+  const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
+  const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
+  const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
   const siteStatusTitle = critical ? "Action needed" : deniedToday ? "Attention required" : "All systems normal";
   const siteStatusDetail = critical
     ? `${critical} critical alert${critical === 1 ? "" : "s"}`
@@ -965,11 +1180,11 @@ function Dashboard({
     setCommandLoading(true);
     setCommandError("");
     try {
-      if (pendingCommand.target === "top_gate") {
+      if (pendingCommand.kind === "gate") {
         await api.post("/api/v1/integrations/gate/open", { reason: "Dashboard Top Gate status command" });
       } else {
         await api.post("/api/v1/integrations/cover/command", {
-          target: pendingCommand.target,
+          entity_id: pendingCommand.entity_id,
           action: pendingCommand.action,
           reason: `Dashboard ${pendingCommand.label} ${pendingCommand.action} command`
         });
@@ -1017,22 +1232,30 @@ function Dashboard({
         <div className="card gate-card">
           <PanelHeader title="Status" action="View all" />
           <div className="gate-list">
-            <GateRow
-              icon={Car}
-              label="Top Gate"
-              state={commandLoading && pendingCommand?.target === "top_gate" ? "opening" : topGateState}
-              onActionClick={commandForDevice("Top Gate", "top_gate", topGateState, ["closed"], setPendingCommand, setCommandError)}
-            />
-            <GarageDoorRow
-              label="Main Garage Door"
-              state={commandLoading && pendingCommand?.target === "main_garage_door" ? inProgressState(pendingCommand.action) : integrationStatus?.main_garage_door_state ?? "unknown"}
-              onActionClick={commandForDevice("Main Garage Door", "main_garage_door", integrationStatus?.main_garage_door_state ?? "unknown", ["open", "closed"], setPendingCommand, setCommandError)}
-            />
-            <GarageDoorRow
-              label="Mums Garage Door"
-              state={commandLoading && pendingCommand?.target === "mums_garage_door" ? inProgressState(pendingCommand.action) : integrationStatus?.mums_garage_door_state ?? "unknown"}
-              onActionClick={commandForDevice("Mums Garage Door", "mums_garage_door", integrationStatus?.mums_garage_door_state ?? "unknown", ["open", "closed"], setPendingCommand, setCommandError)}
-            />
+            {gateEntities.length ? gateEntities.map((gate) => (
+              <GateRow
+                icon={Car}
+                key={gate.entity_id}
+                label={gate.name || "Gate"}
+                state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : gate.state ?? topGateState}
+                onActionClick={commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
+              />
+            )) : (
+              <GateRow
+                icon={Car}
+                label="Top Gate"
+                state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : topGateState}
+                onActionClick={commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
+              />
+            )}
+            {garageDoorEntities.map((door) => (
+              <GarageDoorRow
+                key={door.entity_id}
+                label={door.name || door.entity_id}
+                state={commandLoading && pendingCommand?.kind === "garage_door" && pendingCommand.entity_id === door.entity_id ? inProgressState(pendingCommand.action) : door.state ?? "unknown"}
+                onActionClick={commandForGarageDoor(door, setPendingCommand, setCommandError)}
+              />
+            ))}
             <DoorRow label="Back Door" state={integrationStatus?.back_door_state ?? "unknown"} />
           </div>
         </div>
@@ -1277,21 +1500,36 @@ function GarageDoorRow({ label, state, onActionClick }: { label: string; state: 
   return <GateRow icon={Warehouse} label={label} state={state} onActionClick={onActionClick} />;
 }
 
-function commandForDevice(
+function commandForGate(
   label: string,
-  target: DashboardCommand["target"],
   state: string,
-  allowedStates: Array<"open" | "closed">,
   setPendingCommand: React.Dispatch<React.SetStateAction<DashboardCommand | null>>,
   setCommandError: React.Dispatch<React.SetStateAction<string>>
 ) {
   const normalized = normalizeGateState(state);
-  if (!allowedStates.includes(normalized as "open" | "closed")) return undefined;
+  if (normalized !== "closed") return undefined;
+  return () => {
+    setCommandError("");
+    setPendingCommand({ kind: "gate", label, action: "open" });
+  };
+}
+
+function commandForGarageDoor(
+  door: HomeAssistantManagedCover,
+  setPendingCommand: React.Dispatch<React.SetStateAction<DashboardCommand | null>>,
+  setCommandError: React.Dispatch<React.SetStateAction<string>>
+) {
+  const normalized = normalizeGateState(door.state ?? "unknown");
+  if (!["open", "closed"].includes(normalized)) return undefined;
   const action = normalized === "open" ? "close" : "open";
   return () => {
     setCommandError("");
-    setPendingCommand({ target, label, action });
+    setPendingCommand({ kind: "garage_door", entity_id: door.entity_id, label: door.name || door.entity_id, action });
   };
+}
+
+function activeManagedCovers(entities: HomeAssistantManagedCover[] | undefined) {
+  return (entities ?? []).filter((entity) => entity.enabled !== false);
 }
 
 function inProgressState(action: DoorCommandAction) {
@@ -1770,12 +2008,14 @@ function GroupModal({
 }
 
 function PeopleView({
+  garageDoors,
   groups,
   people,
   query,
   refresh,
   vehicles
 }: {
+  garageDoors: HomeAssistantManagedCover[];
   groups: Group[];
   people: Person[];
   query: string;
@@ -1785,12 +2025,15 @@ function PeopleView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
+  const availableGarageDoors = React.useMemo(() => activeManagedCovers(garageDoors), [garageDoors]);
   const filtered = people.filter((item) =>
     matches(item.display_name, query) ||
     matches(item.group ?? "", query) ||
-    item.vehicles.some((vehicle) => matches(vehicle.registration_number, query))
+    item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
+    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoors.find((door) => door.entity_id === entityId)?.name ?? entityId, query))
   );
   const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
+  const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
 
   const openCreate = () => {
     setSelectedPerson(null);
@@ -1850,6 +2093,9 @@ function PeopleView({
                   {person.vehicles.length ? person.vehicles.map((vehicle) => (
                     <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
                   )) : <span className="muted-value">No vehicles</span>}
+                  {(person.garage_door_entity_ids ?? []).map((entityId) => (
+                    <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
+                  ))}
                 </div>
               </article>
             ))}
@@ -1862,6 +2108,7 @@ function PeopleView({
       {modalOpen ? (
         <PersonModal
           assignedVehicleIds={assignedVehicleIds}
+          garageDoors={availableGarageDoors}
           groups={groups}
           mode={selectedPerson ? "edit" : "create"}
           onClose={closeModal}
@@ -1880,6 +2127,7 @@ function PeopleView({
 
 function PersonModal({
   assignedVehicleIds,
+  garageDoors,
   groups,
   mode,
   onClose,
@@ -1889,6 +2137,7 @@ function PersonModal({
   vehicles
 }: {
   assignedVehicleIds: Set<string>;
+  garageDoors: HomeAssistantManagedCover[];
   groups: Group[];
   mode: "create" | "edit";
   onClose: () => void;
@@ -1903,6 +2152,7 @@ function PersonModal({
     profile_photo_data_url: person?.profile_photo_data_url ?? "",
     group_id: person?.group_id ?? groups[0]?.id ?? "",
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
+    garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
     is_active: person?.is_active ?? true
 	  });
   const [error, setError] = React.useState("");
@@ -1934,6 +2184,15 @@ function PersonModal({
     );
   };
 
+  const toggleGarageDoor = (entityId: string) => {
+    update(
+      "garage_door_entity_ids",
+      form.garage_door_entity_ids.includes(entityId)
+        ? form.garage_door_entity_ids.filter((id) => id !== entityId)
+        : [...form.garage_door_entity_ids, entityId]
+    );
+  };
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
@@ -1945,6 +2204,7 @@ function PersonModal({
       profile_photo_data_url: form.profile_photo_data_url || null,
       group_id: form.group_id || null,
       vehicle_ids: form.vehicle_ids,
+      garage_door_entity_ids: form.garage_door_entity_ids,
       is_active: form.is_active
     };
     try {
@@ -1973,6 +2233,7 @@ function PersonModal({
     group: groups.find((group) => group.id === form.group_id)?.name ?? null,
     category: groups.find((group) => group.id === form.group_id)?.category ?? null,
     is_active: form.is_active,
+    garage_door_entity_ids: form.garage_door_entity_ids,
     vehicles: []
   };
 
@@ -2053,6 +2314,24 @@ function PersonModal({
                 </label>
               );
             }) : <div className="empty-state compact">No vehicles available</div>}
+          </div>
+        </div>
+        <div className="field">
+          <span>Garage Doors</span>
+          <div className="vehicle-picker garage-door-picker">
+            {garageDoors.length ? garageDoors.map((door) => {
+              const selected = form.garage_door_entity_ids.includes(door.entity_id);
+              return (
+                <label className={selected ? "vehicle-option garage-door-option selected" : "vehicle-option garage-door-option"} key={door.entity_id}>
+                  <input checked={selected} onChange={() => toggleGarageDoor(door.entity_id)} type="checkbox" />
+                  <span>
+                    <strong>{door.name || door.entity_id}</strong>
+                    <small>{door.entity_id}</small>
+                  </span>
+                  {selected ? <Badge tone="blue">Selected</Badge> : <Badge tone="gray">Available</Badge>}
+                </label>
+              );
+            }) : <div className="empty-state compact">No garage doors configured</div>}
           </div>
         </div>
         <div className="modal-actions">
@@ -2247,9 +2526,10 @@ function VehicleModal({
         });
         if (lookupRequestRef.current !== requestId) return;
         lastLookupRegistrationRef.current = registrationNumber;
-        const make = typeof result.vehicle.make === "string" ? result.vehicle.make : "";
-        const model = typeof result.vehicle.model === "string" ? result.vehicle.model : "";
-        const color = typeof (result.vehicle.colour ?? result.vehicle.color) === "string" ? String(result.vehicle.colour ?? result.vehicle.color) : "";
+        const displayVehicle = result.display_vehicle ?? result.vehicle;
+        const make = typeof displayVehicle.make === "string" ? displayVehicle.make : "";
+        const model = typeof displayVehicle.model === "string" ? displayVehicle.model : "";
+        const color = typeof (displayVehicle.colour ?? displayVehicle.color) === "string" ? String(displayVehicle.colour ?? displayVehicle.color) : "";
         setForm((current) => ({
           ...current,
           registration_number: result.registration_number || current.registration_number,
@@ -2475,7 +2755,52 @@ function ReportsView({ events, presence }: { events: AccessEvent[]; presence: Pr
 function IntegrationsView({ status, refresh }: { status: IntegrationStatus | null; refresh: () => Promise<void> }) {
   const { values, loading, save, reload } = useSettings();
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
-  const tiles = integrationDefinitions(status, values);
+  const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
+  const [protectStatus, setProtectStatus] = React.useState<UnifiProtectStatus | null>(null);
+  const [protectCameras, setProtectCameras] = React.useState<UnifiProtectCamera[]>([]);
+  const [protectSnapshotRefreshToken, setProtectSnapshotRefreshToken] = React.useState(0);
+  const [protectUpdateStatus, setProtectUpdateStatus] = React.useState<UnifiProtectUpdateStatus | null>(null);
+  const [protectLoading, setProtectLoading] = React.useState(false);
+  const [protectError, setProtectError] = React.useState("");
+  const loadProtect = React.useCallback(async (forceRefresh = false) => {
+    setProtectLoading(true);
+    setProtectError("");
+    try {
+      const refreshSuffix = forceRefresh ? "?refresh=true" : "";
+      const nextStatus = await api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status");
+      setProtectStatus(nextStatus);
+      if (nextStatus.configured) {
+        const result = await api.get<{ cameras: UnifiProtectCamera[] }>(`/api/v1/integrations/unifi-protect/cameras${refreshSuffix}`);
+        setProtectCameras(result.cameras);
+        setProtectSnapshotRefreshToken(Date.now());
+      } else {
+        setProtectCameras([]);
+      }
+    } catch (error) {
+      setProtectError(error instanceof Error ? error.message : "Unable to load UniFi Protect cameras.");
+    } finally {
+      setProtectLoading(false);
+    }
+  }, []);
+  const loadProtectUpdateStatus = React.useCallback(async () => {
+    try {
+      setProtectUpdateStatus(await api.get<UnifiProtectUpdateStatus>("/api/v1/integrations/unifi-protect/update/status"));
+    } catch {
+      setProtectUpdateStatus(null);
+    }
+  }, []);
+  const reloadSettingsAndProtect = React.useCallback(async () => {
+    await reload();
+    await loadProtect(true);
+    await loadProtectUpdateStatus();
+  }, [loadProtect, loadProtectUpdateStatus, reload]);
+
+  React.useEffect(() => {
+    loadProtect(false).catch(() => undefined);
+    loadProtectUpdateStatus().catch(() => undefined);
+  }, [loadProtect, loadProtectUpdateStatus]);
+
+  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus);
   return (
     <section className="view-stack integrations-page">
       <Toolbar title="API & Integrations" count={tiles.length} icon={PlugZap} />
@@ -2483,14 +2808,23 @@ function IntegrationsView({ status, refresh }: { status: IntegrationStatus | nul
         {tiles.map((tile) => {
           const Icon = tile.icon;
           return (
-            <button className="card integration-tile" key={tile.key} onClick={() => setActive(tile)} type="button">
-              <span className="integration-icon"><Icon size={22} /></span>
-              <div>
-                <strong>{tile.title}</strong>
-                <span>{tile.description}</span>
-              </div>
-              <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
-            </button>
+            <article className="card integration-tile" key={tile.key}>
+              <button
+                className="integration-tile-main"
+                onClick={() => {
+                  setActive(tile);
+                  setActiveTab(tile.key === "unifi_protect" && tile.updateAvailable ? "updates" : "general");
+                }}
+                type="button"
+              >
+                <span className="integration-icon"><Icon size={22} /></span>
+                <div>
+                  <strong>{tile.title}</strong>
+                  <span>{tile.description}</span>
+                </div>
+                <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
+              </button>
+            </article>
           );
         })}
       </div>
@@ -2503,16 +2837,36 @@ function IntegrationsView({ status, refresh }: { status: IntegrationStatus | nul
       {active ? (
         <IntegrationModal
           definition={active}
+          initialTab={active.key === "unifi_protect" ? activeTab : "general"}
           loading={loading}
+          protectCameras={protectCameras}
+          protectError={protectError || protectStatus?.last_error || ""}
+          protectLoading={protectLoading}
+          protectStatus={protectStatus}
+          protectUpdateStatus={protectUpdateStatus}
           values={values}
           onClose={() => setActive(null)}
-          onSettingsChanged={reload}
+          onProtectUpdateChanged={async () => {
+            await loadProtectUpdateStatus();
+            await loadProtect(true);
+          }}
+          onProtectRefresh={() => loadProtect(true)}
+          onSettingsChanged={reloadSettingsAndProtect}
           onSaved={async (updates) => {
             await save(updates);
+            await loadProtect(true);
             setActive(null);
           }}
         />
       ) : null}
+      <UnifiProtectCameraSection
+        cameras={protectCameras}
+        error={protectError || protectStatus?.last_error || ""}
+        loading={protectLoading}
+        onRefresh={() => loadProtect(true)}
+        refreshToken={protectSnapshotRefreshToken}
+        status={protectStatus}
+      />
     </section>
   );
 }
@@ -2526,6 +2880,7 @@ type IntegrationDefinition = {
   statusLabel: string;
   statusTone: BadgeTone;
   oauth?: boolean;
+  updateAvailable?: boolean;
 };
 
 type IntegrationFeedback = {
@@ -2535,7 +2890,12 @@ type IntegrationFeedback = {
   activeStep?: number;
 };
 
-function integrationDefinitions(status: IntegrationStatus | null, values: SettingsMap): IntegrationDefinition[] {
+function integrationDefinitions(
+  status: IntegrationStatus | null,
+  values: SettingsMap,
+  protectStatus: UnifiProtectStatus | null,
+  protectUpdateStatus: UnifiProtectUpdateStatus | null
+): IntegrationDefinition[] {
   const activeProvider = String(values.llm_provider || "local");
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
     if (activeProvider === key) return { statusLabel: "Connected", statusTone: "green" };
@@ -2543,6 +2903,8 @@ function integrationDefinitions(status: IntegrationStatus | null, values: Settin
     if (key === "ollama" && values.ollama_base_url) return { statusLabel: "Configured", statusTone: "blue" };
     return { statusLabel: "Not Configured", statusTone: "gray" };
   };
+
+  const protectUpdateAvailable = Boolean(protectStatus?.connected && protectUpdateStatus?.update_available);
 
   return [
     {
@@ -2555,8 +2917,9 @@ function integrationDefinitions(status: IntegrationStatus | null, values: Settin
       fields: [
         { key: "home_assistant_url", label: "URL" },
         { key: "home_assistant_token", label: "Long-lived token", type: "password" },
-        { key: "home_assistant_gate_entity_id", label: "Gate entity" },
-        { key: "home_assistant_gate_open_service", label: "Open service" },
+        { key: "home_assistant_gate_entities", label: "Gate entities" },
+        { key: "home_assistant_gate_open_service", label: "Cover open service" },
+        { key: "home_assistant_garage_door_entities", label: "Garage doors" },
         { key: "home_assistant_tts_service", label: "TTS service" },
         { key: "home_assistant_default_media_player", label: "Default media player" },
         { key: "home_assistant_presence_entities", label: "Presence mapping" }
@@ -2602,6 +2965,30 @@ function integrationDefinitions(status: IntegrationStatus | null, values: Settin
           help: "Used only when this modal tests the DVLA connection."
         },
         { key: "dvla_timeout_seconds", label: "Timeout seconds", type: "number", min: 1, step: 1 }
+      ]
+    },
+    {
+      key: "unifi_protect",
+      title: "UniFi Protect",
+      description: "Camera snapshots, detection events, and AI image analysis.",
+      icon: Camera,
+      statusLabel: protectUpdateAvailable ? `Update ${protectUpdateStatus?.latest_version}` : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured",
+      statusTone: protectUpdateAvailable ? "amber" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray",
+      updateAvailable: protectUpdateAvailable,
+      fields: [
+        { key: "unifi_protect_host", label: "Console host" },
+        { key: "unifi_protect_port", label: "HTTPS port", type: "number", min: 1, max: 65535, step: 1 },
+        { key: "unifi_protect_username", label: "Local username", type: "password" },
+        { key: "unifi_protect_password", label: "Local password", type: "password" },
+        {
+          key: "unifi_protect_api_key",
+          label: "Integration API key",
+          type: "password",
+          href: "https://uiprotect.readthedocs.io"
+        },
+        { key: "unifi_protect_verify_ssl", label: "Verify TLS", type: "select", options: ["false", "true"] },
+        { key: "unifi_protect_snapshot_width", label: "Snapshot width", type: "number", min: 160, max: 4096, step: 1 },
+        { key: "unifi_protect_snapshot_height", label: "Snapshot height", type: "number", min: 90, max: 2160, step: 1 }
       ]
     },
     {
@@ -2660,21 +3047,767 @@ function integrationDefinitions(status: IntegrationStatus | null, values: Settin
   ];
 }
 
+function UnifiProtectCameraSection({
+  cameras,
+  error,
+  loading,
+  onRefresh,
+  refreshToken,
+  status
+}: {
+  cameras: UnifiProtectCamera[];
+  error: string;
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+  refreshToken: number;
+  status: UnifiProtectStatus | null;
+}) {
+  const [snapshotNonce, setSnapshotNonce] = React.useState<Record<string, number>>({});
+  const [eventsByCamera, setEventsByCamera] = React.useState<Record<string, UnifiProtectEvent[]>>({});
+  const [eventsLoading, setEventsLoading] = React.useState<Record<string, boolean>>({});
+  const [analysisDrafts, setAnalysisDrafts] = React.useState<Record<string, string>>({});
+  const [analysisByCamera, setAnalysisByCamera] = React.useState<Record<string, UnifiProtectAnalysis | string>>({});
+  const [analysisLoading, setAnalysisLoading] = React.useState<Record<string, boolean>>({});
+
+  const refreshSnapshot = (cameraId: string) => {
+    setSnapshotNonce((current) => ({ ...current, [cameraId]: Date.now() }));
+  };
+
+  const loadEvents = async (cameraId: string) => {
+    setEventsLoading((current) => ({ ...current, [cameraId]: true }));
+    try {
+      const result = await api.get<{ events: UnifiProtectEvent[] }>(`/api/v1/integrations/unifi-protect/events?camera_id=${encodeURIComponent(cameraId)}&limit=5`);
+      setEventsByCamera((current) => ({ ...current, [cameraId]: result.events }));
+    } catch (loadError) {
+      setAnalysisByCamera((current) => ({
+        ...current,
+        [cameraId]: loadError instanceof Error ? loadError.message : "Unable to load recent camera events."
+      }));
+    } finally {
+      setEventsLoading((current) => ({ ...current, [cameraId]: false }));
+    }
+  };
+
+  const analyzeSnapshot = async (camera: UnifiProtectCamera) => {
+    const prompt = analysisDrafts[camera.id]?.trim() || "Describe what is visible in this access-control camera snapshot. Call out people, vehicles, animals, packages, and anything unusual.";
+    setAnalysisLoading((current) => ({ ...current, [camera.id]: true }));
+    setAnalysisByCamera((current) => ({ ...current, [camera.id]: "" }));
+    try {
+      const result = await api.post<UnifiProtectAnalysis>(`/api/v1/integrations/unifi-protect/cameras/${encodeURIComponent(camera.id)}/analyze`, { prompt });
+      setAnalysisByCamera((current) => ({ ...current, [camera.id]: result }));
+    } catch (analysisError) {
+      setAnalysisByCamera((current) => ({
+        ...current,
+        [camera.id]: analysisError instanceof Error ? analysisError.message : "Camera analysis failed."
+      }));
+    } finally {
+      setAnalysisLoading((current) => ({ ...current, [camera.id]: false }));
+    }
+  };
+
+  const configured = status?.configured ?? false;
+  const connected = status?.connected ?? false;
+
+  return (
+    <section className="protect-section">
+      <div className="protect-section-header">
+        <div className="card-title">
+          <Camera size={18} />
+          <h2>UniFi Protect Cameras</h2>
+        </div>
+        <div className="protect-section-actions">
+          <Badge tone={connected ? "green" : configured ? "blue" : "gray"}>{connected ? "Connected" : configured ? "Configured" : "Not Configured"}</Badge>
+          <button className="secondary-button" onClick={onRefresh} disabled={loading} type="button">
+            <RefreshCcw size={15} /> {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {!configured ? (
+        <div className="empty-state">Configure UniFi Protect to load cameras</div>
+      ) : loading && !cameras.length ? (
+        <div className="empty-state">Loading cameras</div>
+      ) : cameras.length ? (
+        <div className="protect-camera-grid">
+          {cameras.map((camera) => {
+            const events = eventsByCamera[camera.id] ?? [];
+            const analysis = analysisByCamera[camera.id];
+            const detectionLabels = camera.detections.active.length ? camera.detections.active : camera.is_motion_detected ? ["motion"] : [];
+            const snapshotUrl = `${camera.snapshot_url}?width=640&height=360&_=${snapshotNonce[camera.id] ?? refreshToken}`;
+            return (
+              <article className="protect-camera-card" key={camera.id}>
+                <div className="protect-camera-media">
+                  <img alt="" src={snapshotUrl} />
+                  <div className="protect-camera-badges">
+                    <Badge tone={camera.is_video_ready ? "green" : "amber"}>{camera.is_video_ready ? "Video Ready" : "Video Pending"}</Badge>
+                    {camera.is_recording ? <Badge tone="blue">Recording</Badge> : null}
+                  </div>
+                </div>
+                <div className="protect-camera-body">
+                  <div className="protect-camera-title">
+                    <div>
+                      <strong>{camera.name}</strong>
+                      <span>{camera.model || "UniFi Protect camera"} · {camera.state || "unknown"}</span>
+                    </div>
+                    <button className="icon-button" onClick={() => refreshSnapshot(camera.id)} type="button" aria-label={`Refresh ${camera.name} snapshot`}>
+                      <RefreshCcw size={15} />
+                    </button>
+                  </div>
+
+                  <div className="protect-detection-row">
+                    {detectionLabels.length ? detectionLabels.map((label) => (
+                      <Badge tone={label === "motion" ? "amber" : "blue"} key={label}>{titleCase(label)}</Badge>
+                    )) : <Badge tone="gray">Clear</Badge>}
+                    {camera.feature_flags.has_mic ? <Badge tone="gray">Mic</Badge> : null}
+                    {camera.feature_flags.has_package_camera ? <Badge tone="gray">Package Cam</Badge> : null}
+                  </div>
+
+                  <div className="protect-channel-row">
+                    {camera.channels.slice(0, 3).map((channel) => (
+                      <span key={channel.id}>
+                        {channel.width ?? "-"}x{channel.height ?? "-"} {channel.fps ? `${channel.fps}fps` : ""}
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="protect-camera-actions">
+                    <button className="secondary-button" onClick={() => loadEvents(camera.id)} disabled={eventsLoading[camera.id]} type="button">
+                      <Play size={15} /> {eventsLoading[camera.id] ? "Loading..." : "Recent Events"}
+                    </button>
+                  </div>
+
+                  {events.length ? (
+                    <div className="protect-event-list">
+                      {events.map((event) => (
+                        <div className="protect-event-row" key={event.id}>
+                          <img alt="" src={`${event.thumbnail_url}?width=96&height=54`} />
+                          <div>
+                            <strong>{titleCase(event.type)}</strong>
+                            <span>{event.start ? formatDate(event.start) : "Time pending"} · {event.smart_detect_types.map(titleCase).join(", ") || "motion"}</span>
+                          </div>
+                          {event.video_url ? <a className="icon-button" href={event.video_url} target="_blank" rel="noreferrer" aria-label="Open event clip"><Play size={14} /></a> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="protect-analysis-box">
+                    <input
+                      value={analysisDrafts[camera.id] ?? ""}
+                      onChange={(event) => setAnalysisDrafts((current) => ({ ...current, [camera.id]: event.target.value }))}
+                      placeholder="Ask what to inspect"
+                    />
+                    <button className="primary-button" onClick={() => analyzeSnapshot(camera)} disabled={analysisLoading[camera.id]} type="button">
+                      <Bot size={15} /> {analysisLoading[camera.id] ? "Analyzing..." : "Analyze"}
+                    </button>
+                  </div>
+                  {analysis ? (
+                    <div className={typeof analysis === "string" ? "protect-analysis-result error" : "protect-analysis-result"}>
+                      {typeof analysis === "string" ? analysis : analysis.text}
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state">No Protect cameras returned</div>
+      )}
+    </section>
+  );
+}
+
+type ProtectExposeRow = {
+  name: string;
+  value: string;
+};
+
+function UnifiProtectExposesPanel({
+  cameras,
+  error,
+  loading,
+  onRefresh,
+  status
+}: {
+  cameras: UnifiProtectCamera[];
+  error: string;
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+  status: UnifiProtectStatus | null;
+}) {
+  const rows = buildProtectExposeRows(status, cameras);
+  return (
+    <div className="protect-exposes-panel">
+      <div className="protect-exposes-header">
+        <div>
+          <strong>Exposed entities</strong>
+          <span>Current values from UniFi Protect discovery and camera state.</span>
+        </div>
+        <button className="secondary-button" onClick={onRefresh} disabled={loading} type="button">
+          <RefreshCcw size={15} /> {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {!status?.configured ? (
+        <div className="empty-state">Configure UniFi Protect to see exposed entities</div>
+      ) : (
+        <div className="protect-exposes-grid">
+          <ProtectExposeTable title="Console" rows={rows.console} defaultOpen />
+          <ProtectExposeTable title="Cameras" rows={rows.cameras} defaultOpen />
+          <ProtectExposeTable title="Sensors" rows={rows.sensors} defaultOpen />
+          <ProtectExposeTable title="Detections" rows={rows.detections} defaultOpen />
+          <ProtectExposeTable title="Channels" rows={rows.channels} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProtectExposeTable({
+  defaultOpen = false,
+  rows,
+  title
+}: {
+  defaultOpen?: boolean;
+  rows: ProtectExposeRow[];
+  title: string;
+}) {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <section className="protect-expose-table-card">
+      <button className="protect-expose-table-toggle" onClick={() => setOpen((current) => !current)} type="button" aria-expanded={open}>
+        <div>
+          <strong>{title}</strong>
+          <span>{rows.length} item{rows.length === 1 ? "" : "s"}</span>
+        </div>
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {open ? (
+        rows.length ? (
+          <table className="protect-expose-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Current value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={`${title}-${row.name}`}>
+                  <td>{row.name}</td>
+                  <td>{row.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="empty-state compact">No {title.toLowerCase()} exposed yet</div>
+        )
+      ) : null}
+    </section>
+  );
+}
+
+function buildProtectExposeRows(status: UnifiProtectStatus | null, cameras: UnifiProtectCamera[]) {
+  const consoleRows: ProtectExposeRow[] = [
+    { name: "Connection", value: status?.connected ? "Connected" : status?.configured ? "Configured" : "Not configured" },
+    { name: "Console", value: status?.host ? `${status.host}:${status.port}` : "Not configured" },
+    { name: "TLS verification", value: formatExposeValue(status?.verify_ssl) },
+    { name: "Camera count", value: String(status?.camera_count ?? cameras.length) },
+    { name: "Snapshot dimensions", value: status ? `${status.snapshot_width}x${status.snapshot_height}` : "Unknown" }
+  ];
+
+  const cameraRows = cameras.map((camera) => ({
+    name: camera.name,
+    value: [
+      camera.state || "unknown",
+      camera.is_video_ready ? "video ready" : "video pending",
+      camera.is_recording ? "recording" : "not recording"
+    ].join(" · ")
+  }));
+
+  const sensorRows = cameras.flatMap((camera) => [
+    { name: `${camera.name} motion`, value: formatExposeValue(camera.is_motion_detected) },
+    { name: `${camera.name} smart detection`, value: formatExposeValue(camera.is_smart_detected) },
+    { name: `${camera.name} recording enabled`, value: formatExposeValue(camera.is_recording_enabled) },
+    { name: `${camera.name} microphone`, value: formatExposeValue(camera.feature_flags.has_mic) },
+    { name: `${camera.name} package camera`, value: formatExposeValue(camera.feature_flags.has_package_camera) }
+  ]);
+
+  const detectionRows = cameras.flatMap((camera) => [
+    { name: `${camera.name} active detections`, value: camera.detections.active.length ? camera.detections.active.map(titleCase).join(", ") : "Clear" },
+    { name: `${camera.name} supported smart detections`, value: camera.feature_flags.smart_detect_types.length ? camera.feature_flags.smart_detect_types.map(titleCase).join(", ") : "None" },
+    { name: `${camera.name} supported audio detections`, value: camera.feature_flags.smart_detect_audio_types.length ? camera.feature_flags.smart_detect_audio_types.map(titleCase).join(", ") : "None" },
+    { name: `${camera.name} last motion`, value: camera.last_motion_at ? formatDate(camera.last_motion_at) : "None" },
+    { name: `${camera.name} last smart detection`, value: camera.last_smart_detect_at ? formatDate(camera.last_smart_detect_at) : "None" }
+  ]);
+
+  const channelRows = cameras.flatMap((camera) => camera.channels.map((channel) => ({
+    name: `${camera.name} · ${channel.name || channel.id}`,
+    value: [
+      channel.width && channel.height ? `${channel.width}x${channel.height}` : "resolution unknown",
+      channel.fps ? `${channel.fps}fps` : null,
+      channel.bitrate ? `${channel.bitrate}kbps` : null,
+      channel.is_rtsp_enabled ? "RTSP enabled" : "RTSP disabled",
+      channel.is_package ? "package channel" : null
+    ].filter(Boolean).join(" · ")
+  })));
+
+  return {
+    console: consoleRows,
+    cameras: cameraRows,
+    sensors: sensorRows,
+    detections: detectionRows,
+    channels: channelRows
+  };
+}
+
+function formatExposeValue(value: boolean | string | number | null | undefined) {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (value === null || value === undefined || value === "") return "Unknown";
+  return String(value);
+}
+
+type ProtectUpdateConfirmAction =
+  | { kind: "apply" }
+  | { kind: "restore"; backup: UnifiProtectBackup }
+  | { kind: "delete"; backup: UnifiProtectBackup };
+
+function UnifiProtectUpdatesPanel({
+  status,
+  onChanged
+}: {
+  status: UnifiProtectUpdateStatus | null;
+  onChanged: () => Promise<void>;
+}) {
+  const [updateStatus, setUpdateStatus] = React.useState<UnifiProtectUpdateStatus | null>(status);
+  const [targetVersion, setTargetVersion] = React.useState(status?.latest_version ?? "");
+  const [analysis, setAnalysis] = React.useState<UnifiProtectUpdateAnalysis | null>(null);
+  const [backups, setBackups] = React.useState<UnifiProtectBackup[]>([]);
+  const [result, setResult] = React.useState<UnifiProtectUpdateApplyResult | null>(null);
+  const [confirmAction, setConfirmAction] = React.useState<ProtectUpdateConfirmAction | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const loadUpdateData = React.useCallback(async () => {
+    setError("");
+    try {
+      const [nextStatus, backupResult] = await Promise.all([
+        api.get<UnifiProtectUpdateStatus>("/api/v1/integrations/unifi-protect/update/status"),
+        api.get<{ backups: UnifiProtectBackup[] }>("/api/v1/integrations/unifi-protect/backups")
+      ]);
+      setUpdateStatus(nextStatus);
+      setTargetVersion((current) => current || nextStatus.latest_version);
+      setBackups(backupResult.backups);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load UniFi Protect update data.");
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadUpdateData().catch(() => undefined);
+  }, [loadUpdateData]);
+
+  const analyze = async () => {
+    setLoading(true);
+    setError("");
+    setAnalysis(null);
+    try {
+      setAnalysis(await api.post<UnifiProtectUpdateAnalysis>("/api/v1/integrations/unifi-protect/update/analyze", {
+        target_version: targetVersion || undefined
+      }));
+    } catch (analysisError) {
+      setError(analysisError instanceof Error ? analysisError.message : "Unable to analyze the update.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createBackup = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const backup = await api.post<UnifiProtectBackup>("/api/v1/integrations/unifi-protect/backups", {});
+      setBackups((current) => [backup, ...current]);
+    } catch (backupError) {
+      setError(backupError instanceof Error ? backupError.message : "Unable to create backup.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const applyUpdate = async () => {
+    if (!analysis) {
+      setError("Analyze the release notes before applying the update.");
+      return;
+    }
+    setConfirmAction({ kind: "apply" });
+  };
+
+  const runApplyUpdate = async () => {
+    if (!analysis) return;
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const applied = await api.post<UnifiProtectUpdateApplyResult>("/api/v1/integrations/unifi-protect/update/apply", {
+        target_version: analysis.target_version,
+        confirmed: true
+      });
+      setResult(applied);
+      await loadUpdateData();
+      await onChanged();
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "Unable to apply the update.");
+      await loadUpdateData();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const restore = async (backup: UnifiProtectBackup) => {
+    setConfirmAction({ kind: "restore", backup });
+  };
+
+  const deleteBackup = async (backup: UnifiProtectBackup) => {
+    setConfirmAction({ kind: "delete", backup });
+  };
+
+  const runRestore = async (backup: UnifiProtectBackup) => {
+    setLoading(true);
+    setError("");
+    try {
+      await api.post(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}/restore`, {});
+      await loadUpdateData();
+      await onChanged();
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : "Unable to restore backup.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runDeleteBackup = async (backup: UnifiProtectBackup) => {
+    setLoading(true);
+    setError("");
+    try {
+      await api.delete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}`);
+      setBackups((current) => current.filter((item) => item.id !== backup.id));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete backup.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const currentVersion = updateStatus?.current_version ?? status?.current_version ?? "unknown";
+  const latestVersion = updateStatus?.latest_version ?? status?.latest_version ?? "unknown";
+  const updateAvailable = Boolean(updateStatus?.update_available);
+  const updateApplied = Boolean(result?.ok);
+
+  return (
+    <div className="protect-update-panel">
+        {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+        <div className="protect-update-summary">
+          <div>
+            <span>Current</span>
+            <strong>{currentVersion}</strong>
+          </div>
+          <div>
+            <span>Latest</span>
+            <strong>{latestVersion}</strong>
+          </div>
+          <Badge tone={updateAvailable ? "amber" : "green"}>{updateAvailable ? "Update Available" : "Up To Date"}</Badge>
+        </div>
+
+        <div className="protect-update-actions">
+          <label className="field protect-version-field">
+            <span>Target version</span>
+            <input value={targetVersion} onChange={(event) => setTargetVersion(event.target.value)} placeholder={latestVersion} />
+          </label>
+          <button className="secondary-button" onClick={createBackup} disabled={loading} type="button">
+            <Download size={15} /> Backup
+          </button>
+        </div>
+
+        <div className="protect-review-cta">
+          <button className="primary-button" onClick={analyze} disabled={loading} type="button">
+            <Bot size={15} /> {loading && !analysis ? "Reviewing..." : "Review Changes to Verify Compatibility"}
+          </button>
+        </div>
+
+        {analysis ? (
+          <section className="protect-update-analysis">
+            <div className="protect-update-analysis-head">
+              <div>
+                <strong>AI Review</strong>
+                <span>{analysis.provider} · {analysis.current_version} to {analysis.target_version}</span>
+              </div>
+              {analysis.release_notes.html_url ? <a href={analysis.release_notes.html_url} target="_blank" rel="noreferrer">Release notes</a> : null}
+            </div>
+            <ProtectAnalysisReview analysis={analysis.analysis} />
+            <button className={updateApplied ? "secondary-button full" : "primary-button full"} onClick={applyUpdate} disabled={loading || updateApplied} type="button">
+              {updateApplied ? <CheckCircle2 size={15} /> : <RefreshCcw size={15} />}
+              {updateApplied ? "Update Complete" : loading ? "Applying..." : "Apply Update & Verify"}
+            </button>
+          </section>
+        ) : (
+          <div className="empty-state">Run analysis before applying a UniFi Protect package update</div>
+        )}
+
+        {result ? (
+          <div className="protect-update-result">
+            <CheckCircle2 size={17} />
+            <div>
+              <strong>Updated to {result.current_version}</strong>
+              <span>{result.verification.camera_count ?? 0} cameras verified, sample snapshot {result.verification.snapshot_bytes ?? 0} bytes. Backup {result.backup.id} was created first.</span>
+            </div>
+          </div>
+        ) : null}
+
+        <section className="protect-backup-panel">
+          <div className="protect-backup-title">
+            <strong>Backups</strong>
+            <span>Encrypted integration settings and package state.</span>
+          </div>
+          {backups.length ? backups.map((backup) => (
+            <div className="protect-backup-row" key={backup.id}>
+              <div>
+                <strong>{backup.reason}</strong>
+                <span>{formatDate(backup.created_at)} · package {backup.package_version} · {backup.settings_count} settings</span>
+              </div>
+              <a className="icon-button" href={backup.download_url} aria-label={`Download backup ${backup.id}`}>
+                <Download size={14} />
+              </a>
+              <button className="icon-button danger" onClick={() => deleteBackup(backup)} disabled={loading} type="button" aria-label={`Delete backup ${backup.id}`}>
+                <Trash2 size={14} />
+              </button>
+              <button className="secondary-button" onClick={() => restore(backup)} disabled={loading} type="button">
+                Restore
+              </button>
+            </div>
+          )) : (
+            <div className="empty-state">No UniFi Protect backups yet</div>
+          )}
+        </section>
+
+        {confirmAction ? (
+          <ProtectUpdateConfirmModal
+            action={confirmAction}
+            loading={loading}
+            onCancel={() => setConfirmAction(null)}
+            onConfirm={async () => {
+              const action = confirmAction;
+              setConfirmAction(null);
+              if (action.kind === "apply") {
+                await runApplyUpdate();
+              } else if (action.kind === "restore") {
+                await runRestore(action.backup);
+              } else {
+                await runDeleteBackup(action.backup);
+              }
+            }}
+          />
+        ) : null}
+    </div>
+  );
+}
+
+function ProtectAnalysisReview({ analysis }: { analysis: string }) {
+  const sections = parseProtectAnalysisSections(analysis);
+  const riskSection = findAnalysisSection(sections, "risk level");
+  const recommendationSection = findAnalysisSection(sections, "recommendation");
+  const risk = firstMeaningfulAnalysisLine(riskSection?.body) || "Review";
+  const recommendation = firstMeaningfulAnalysisLine(recommendationSection?.body) || "Review the notes before applying.";
+  const riskTone = analysisTone(risk);
+  const recommendationTone = analysisTone(recommendation);
+  const detailSections = sections.filter((section) => !["risk level", "recommendation"].includes(section.title.toLowerCase()));
+
+  return (
+    <div className="protect-analysis-review">
+      <div className="protect-analysis-summary">
+        <div className={`protect-analysis-callout ${riskTone}`}>
+          <span>Risk Level</span>
+          <strong>{risk}</strong>
+        </div>
+        <div className={`protect-analysis-callout ${recommendationTone}`}>
+          <span>Recommendation</span>
+          <strong>{recommendation}</strong>
+        </div>
+      </div>
+      <div className="protect-analysis-sections">
+        {detailSections.length ? detailSections.map((section) => (
+          <section className="protect-analysis-section" key={section.title}>
+            <h4>{section.title}</h4>
+            <div className="protect-analysis-lines">
+              {section.body.map((line, index) => (
+                <ProtectAnalysisLine line={line} key={`${section.title}-${index}`} />
+              ))}
+            </div>
+          </section>
+        )) : (
+          <section className="protect-analysis-section">
+            <h4>Review</h4>
+            <div className="protect-analysis-lines">
+              {analysis.split(/\r?\n/).map((line, index) => <ProtectAnalysisLine line={line} key={index} />)}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProtectAnalysisLine({ line }: { line: string }) {
+  if (!line.trim()) return null;
+  const leadingSpaces = line.match(/^\s*/)?.[0].length ?? 0;
+  const cleanLine = line.trim().replace(/^[-*]\s+/, "");
+  const isBullet = /^\s*[-*]\s+/.test(line);
+  return (
+    <div className={isBullet ? "protect-analysis-line bullet" : "protect-analysis-line"} style={isBullet ? { "--analysis-indent": String(Math.min(leadingSpaces / 2, 3)) } as React.CSSProperties : undefined}>
+      {isBullet ? <span className="analysis-dot" aria-hidden="true" /> : null}
+      <span>{renderInlineMarkdown(cleanLine)}</span>
+    </div>
+  );
+}
+
+type ProtectAnalysisSection = {
+  title: string;
+  body: string[];
+};
+
+function parseProtectAnalysisSections(markdown: string): ProtectAnalysisSection[] {
+  const sections: ProtectAnalysisSection[] = [];
+  let current: ProtectAnalysisSection | null = null;
+  for (const line of markdown.split(/\r?\n/)) {
+    const heading = line.match(/^#{1,3}\s+(.+)$/);
+    if (heading) {
+      current = { title: cleanInlineMarkdown(heading[1]), body: [] };
+      sections.push(current);
+      continue;
+    }
+    if (!current) {
+      current = { title: "Review", body: [] };
+      sections.push(current);
+    }
+    current.body.push(line);
+  }
+  return sections.filter((section) => section.title || section.body.some((line) => line.trim()));
+}
+
+function findAnalysisSection(sections: ProtectAnalysisSection[], title: string) {
+  return sections.find((section) => section.title.toLowerCase().includes(title));
+}
+
+function firstMeaningfulAnalysisLine(lines: string[] | undefined) {
+  return cleanInlineMarkdown(lines?.find((line) => line.trim()) ?? "");
+}
+
+function cleanInlineMarkdown(value: string) {
+  return value.replace(/^[-*]\s+/, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
+}
+
+function analysisTone(value: string): "green" | "amber" | "red" | "blue" {
+  const normalized = value.toLowerCase();
+  if (normalized.includes("no-go") || normalized.includes("no go") || normalized.includes("high") || normalized.includes("critical")) return "red";
+  if (normalized.includes("medium") || normalized.includes("caution") || normalized.includes("manual")) return "amber";
+  if (normalized.includes("go") || normalized.includes("low")) return "green";
+  return "blue";
+}
+
+function renderInlineMarkdown(value: string) {
+  const parts = value.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index}>{part.slice(1, -1)}</code>;
+    }
+    return <React.Fragment key={index}>{part}</React.Fragment>;
+  });
+}
+
+function ProtectUpdateConfirmModal({
+  action,
+  loading,
+  onCancel,
+  onConfirm
+}: {
+  action: ProtectUpdateConfirmAction;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const isApply = action.kind === "apply";
+  const isDelete = action.kind === "delete";
+  return (
+    <div className="modal-backdrop nested-modal-backdrop" role="presentation">
+      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="protect-update-confirm-title">
+        <div className="gate-confirm-title">
+          <span className="gate-confirm-icon">
+            {isApply ? <RefreshCcw size={19} /> : isDelete ? <Trash2 size={19} /> : <ShieldCheck size={19} />}
+          </span>
+          <div>
+            <h2 id="protect-update-confirm-title">
+              {isApply ? "Apply UniFi Protect update?" : isDelete ? "Delete UniFi Protect backup?" : "Restore UniFi Protect backup?"}
+            </h2>
+            <p>
+              {isApply
+                ? "A backup will be created first, then the package update will be applied and cameras verified."
+                : isDelete
+                  ? `Permanently delete backup ${action.backup.id}. This cannot be restored later.`
+                  : `Restore backup ${action.backup.id} and verify the integration afterwards.`}
+            </p>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onCancel} disabled={loading} type="button">Cancel</button>
+          <button className={isDelete ? "danger-button" : "primary-button"} onClick={onConfirm} disabled={loading} type="button">
+            {isApply ? <RefreshCcw size={15} /> : isDelete ? <Trash2 size={15} /> : <ShieldCheck size={15} />}
+            {loading ? "Working..." : isApply ? "Apply Update" : isDelete ? "Delete Backup" : "Restore Backup"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function IntegrationModal({
   definition,
+  initialTab,
   values,
   loading,
+  protectCameras,
+  protectError,
+  protectLoading,
+  protectStatus,
+  protectUpdateStatus,
   onClose,
+  onProtectUpdateChanged,
+  onProtectRefresh,
   onSettingsChanged,
   onSaved
 }: {
   definition: IntegrationDefinition;
+  initialTab: ProtectIntegrationTab;
   values: SettingsMap;
   loading: boolean;
+  protectCameras?: UnifiProtectCamera[];
+  protectError?: string;
+  protectLoading?: boolean;
+  protectStatus?: UnifiProtectStatus | null;
+  protectUpdateStatus?: UnifiProtectUpdateStatus | null;
   onClose: () => void;
+  onProtectUpdateChanged?: () => Promise<void>;
+  onProtectRefresh?: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
   onSaved: (updates: Record<string, unknown>) => Promise<void>;
 }) {
+  const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
   const [form, setForm] = React.useState<Record<string, string>>(() => integrationInitialValues(definition, values));
   const [testing, setTesting] = React.useState(false);
   const [sendingTest, setSendingTest] = React.useState(false);
@@ -2687,14 +3820,16 @@ function IntegrationModal({
   const [appriseLoading, setAppriseLoading] = React.useState(false);
   const isHomeAssistant = definition.key === "home_assistant";
   const isApprise = definition.key === "apprise";
+  const isUnifiProtect = definition.key === "unifi_protect";
 
   React.useEffect(() => {
     setForm(integrationInitialValues(definition, values));
+    setActiveTab(initialTab);
     setFeedback(null);
     setHaDiscovery(null);
     setHaDiscoveryError("");
     setAppriseUrls([]);
-  }, [definition.key]);
+  }, [definition.key, initialTab]);
 
   const update = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
 
@@ -2850,7 +3985,7 @@ function IntegrationModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card integration-modal" onSubmit={save}>
+      <div className="modal-card integration-modal">
         <div className="modal-header">
           <div>
             <h2>{definition.title}</h2>
@@ -2858,6 +3993,52 @@ function IntegrationModal({
           </div>
           <button className="icon-button" onClick={onClose} type="button" aria-label="Close"><X size={16} /></button>
         </div>
+        {isUnifiProtect ? (
+          <div className="integration-modal-tabs" role="tablist" aria-label="UniFi Protect settings sections">
+            <button
+              aria-selected={activeTab === "general"}
+              className={activeTab === "general" ? "integration-modal-tab active" : "integration-modal-tab"}
+              onClick={() => setActiveTab("general")}
+              role="tab"
+              type="button"
+            >
+              <Settings size={15} /> General
+            </button>
+            <button
+              aria-selected={activeTab === "exposes"}
+              className={activeTab === "exposes" ? "integration-modal-tab active" : "integration-modal-tab"}
+              onClick={() => setActiveTab("exposes")}
+              role="tab"
+              type="button"
+            >
+              <Activity size={15} /> Exposes
+            </button>
+            <button
+              aria-selected={activeTab === "updates"}
+              className={activeTab === "updates" ? "integration-modal-tab active" : "integration-modal-tab"}
+              onClick={() => setActiveTab("updates")}
+              role="tab"
+              type="button"
+            >
+              <RefreshCcw size={15} /> Updates
+            </button>
+          </div>
+        ) : null}
+        {isUnifiProtect && activeTab === "exposes" ? (
+          <UnifiProtectExposesPanel
+            cameras={protectCameras ?? []}
+            error={protectError ?? ""}
+            loading={Boolean(protectLoading)}
+            onRefresh={onProtectRefresh ?? onSettingsChanged}
+            status={protectStatus ?? null}
+          />
+        ) : isUnifiProtect && activeTab === "updates" ? (
+          <UnifiProtectUpdatesPanel
+            status={protectUpdateStatus ?? null}
+            onChanged={onProtectUpdateChanged ?? onSettingsChanged}
+          />
+        ) : (
+          <form className="integration-settings-form" onSubmit={save}>
         {definition.oauth ? (
           <button className="secondary-button full" onClick={() => setFeedback({
             tone: "info",
@@ -2921,7 +4102,9 @@ function IntegrationModal({
             </button>
           )}
         </div>
-      </form>
+          </form>
+        )}
+      </div>
     </div>
   );
 }
@@ -3085,7 +4268,39 @@ function HomeAssistantSettingsFields({
   onChange: (key: string, value: string) => void;
   onReload: () => Promise<void>;
 }) {
+  type HomeAssistantTab = "setup" | "gates" | "garages" | "presence";
+  const [activeTab, setActiveTab] = React.useState<HomeAssistantTab>("setup");
   const presenceMapping = parsePresenceMapping(form.home_assistant_presence_entities);
+  const gateEntities = parseManagedCovers(form.home_assistant_gate_entities);
+  const garageDoorEntities = parseManagedCovers(form.home_assistant_garage_door_entities);
+  const tabs: Array<{ key: HomeAssistantTab; label: string; meta: string; icon: React.ElementType }> = [
+    { key: "setup", label: "Setup", meta: discovery ? "Discovery ready" : "Credentials", icon: Home },
+    { key: "gates", label: "Gates", meta: `${gateEntities.length} configured`, icon: DoorOpen },
+    { key: "garages", label: "Garage doors", meta: `${garageDoorEntities.length} configured`, icon: Warehouse },
+    { key: "presence", label: "Presence", meta: `${Object.keys(presenceMapping).length} mapped`, icon: Users }
+  ];
+
+  const updateGateEntities = (entities: HomeAssistantManagedCover[]) => {
+    onChange("home_assistant_gate_entities", JSON.stringify(normalizeManagedCoversForSave(entities), null, 2));
+  };
+
+  const updateGarageDoorEntities = (entities: HomeAssistantManagedCover[]) => {
+    onChange("home_assistant_garage_door_entities", JSON.stringify(normalizeManagedCoversForSave(entities), null, 2));
+  };
+
+  const autoDetectGateEntities = () => {
+    const suggestions = discovery?.gate_suggestions?.length
+      ? discovery.gate_suggestions
+      : (discovery?.cover_entities ?? []).filter(isGateCandidate).map(managedCoverFromEntity);
+    updateGateEntities(mergeManagedCovers(gateEntities, suggestions));
+  };
+
+  const autoDetectGarageDoors = () => {
+    const suggestions = discovery?.garage_door_suggestions?.length
+      ? discovery.garage_door_suggestions
+      : (discovery?.cover_entities ?? []).filter(isGarageDoorCandidate).map(managedCoverFromEntity);
+    updateGarageDoorEntities(mergeManagedCovers(garageDoorEntities, suggestions));
+  };
 
   const updatePresenceMapping = (localName: string, entityId: string) => {
     const next = { ...presenceMapping };
@@ -3098,59 +4313,109 @@ function HomeAssistantSettingsFields({
   };
 
   return (
-    <div className="ha-config-stack">
-      <div className="settings-form-grid">
-        <SettingField
-          field={{ key: "home_assistant_url", label: "URL" }}
-          value={form.home_assistant_url ?? ""}
-          onChange={(value) => onChange("home_assistant_url", value)}
-        />
-        <SettingField
-          field={{ key: "home_assistant_token", label: "Long-lived token", type: "password" }}
-          value={form.home_assistant_token ?? ""}
-          onChange={(value) => onChange("home_assistant_token", value)}
-        />
-        <SettingField
-          field={{ key: "home_assistant_gate_open_service", label: "Open service" }}
-          value={form.home_assistant_gate_open_service ?? ""}
-          onChange={(value) => onChange("home_assistant_gate_open_service", value)}
-        />
-        <SettingField
-          field={{ key: "home_assistant_tts_service", label: "TTS service" }}
-          value={form.home_assistant_tts_service ?? ""}
-          onChange={(value) => onChange("home_assistant_tts_service", value)}
-        />
-      </div>
-
-      <div className="ha-discovery-header">
-        <div>
-          <strong>Home Assistant entities</strong>
-          <span>{discovery ? "Pulled from the configured Home Assistant instance." : "Save valid credentials, then refresh entity discovery."}</span>
-        </div>
-        <button className="secondary-button" onClick={onReload} disabled={discoveryLoading} type="button">
-          <RefreshCcw size={15} /> {discoveryLoading ? "Refreshing..." : "Refresh"}
-        </button>
+    <div className="ha-config-shell">
+      <div className="ha-tabs" role="tablist" aria-label="Home Assistant settings">
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              aria-selected={activeTab === tab.key}
+              className={activeTab === tab.key ? "ha-tab active" : "ha-tab"}
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              role="tab"
+              type="button"
+            >
+              <Icon size={16} />
+              <span>
+                <strong>{tab.label}</strong>
+                <small>{tab.meta}</small>
+              </span>
+            </button>
+          );
+        })}
       </div>
       {discoveryError ? <div className="auth-error inline-error">{discoveryError}</div> : null}
 
-      <div className="settings-form-grid">
-        <EntitySelectField
-          label="Gate entity"
-          value={form.home_assistant_gate_entity_id ?? ""}
-          entities={discovery?.cover_entities ?? []}
-          domainLabel="cover"
-          onChange={(value) => onChange("home_assistant_gate_entity_id", value)}
-        />
-        <EntitySelectField
-          label="Default media player"
-          value={form.home_assistant_default_media_player ?? ""}
-          entities={discovery?.media_player_entities ?? []}
-          domainLabel="media_player"
-          onChange={(value) => onChange("home_assistant_default_media_player", value)}
-        />
-      </div>
+      <div className="ha-tab-panel" role="tabpanel">
+        {activeTab === "setup" ? (
+          <section className="ha-setup-panel">
+            <div className="ha-section-heading">
+              <div>
+                <strong>Connection</strong>
+                <span>{discovery ? "Entities loaded from Home Assistant" : "Save credentials, then refresh discovery"}</span>
+              </div>
+              <button className="secondary-button ha-refresh-button" onClick={onReload} disabled={discoveryLoading} type="button">
+                <RefreshCcw size={15} /> {discoveryLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
 
-      <div className="presence-mapping-card">
+            <div className="ha-setup-grid">
+              <SettingField
+                field={{ key: "home_assistant_url", label: "URL" }}
+                value={form.home_assistant_url ?? ""}
+                onChange={(value) => onChange("home_assistant_url", value)}
+              />
+              <SettingField
+                field={{ key: "home_assistant_token", label: "Long-lived token", type: "password" }}
+                value={form.home_assistant_token ?? ""}
+                onChange={(value) => onChange("home_assistant_token", value)}
+              />
+              <SettingField
+                field={{ key: "home_assistant_gate_open_service", label: "Cover open service" }}
+                value={form.home_assistant_gate_open_service ?? ""}
+                onChange={(value) => onChange("home_assistant_gate_open_service", value)}
+              />
+              <SettingField
+                field={{ key: "home_assistant_tts_service", label: "TTS service" }}
+                value={form.home_assistant_tts_service ?? ""}
+                onChange={(value) => onChange("home_assistant_tts_service", value)}
+              />
+              <div className="ha-grid-wide">
+                <EntitySelectField
+                  label="Default media player"
+                  value={form.home_assistant_default_media_player ?? ""}
+                  entities={discovery?.media_player_entities ?? []}
+                  domainLabel="media_player"
+                  onChange={(value) => onChange("home_assistant_default_media_player", value)}
+                />
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "gates" ? (
+        <HomeAssistantCoverTable
+          addLabel="Add Gate"
+          autoDetectLabel="Auto Detect"
+          emptyLabel="No gate entities configured"
+          entities={gateEntities}
+          icon={DoorOpen}
+          availableEntities={discovery?.cover_entities ?? []}
+          description="Gates opened when access is granted."
+          onAutoDetect={autoDetectGateEntities}
+          onChange={updateGateEntities}
+          title="Gate entities"
+        />
+        ) : null}
+
+        {activeTab === "garages" ? (
+        <HomeAssistantCoverTable
+          addLabel="Add Door"
+          autoDetectLabel="Auto Detect"
+          emptyLabel="No garage doors configured"
+          entities={garageDoorEntities}
+          icon={Warehouse}
+          availableEntities={discovery?.cover_entities ?? []}
+          description="Garage doors available in each person profile."
+          onAutoDetect={autoDetectGarageDoors}
+          onChange={updateGarageDoorEntities}
+          title="Garage doors"
+        />
+        ) : null}
+
+        {activeTab === "presence" ? (
+      <section className="presence-mapping-card">
         <div className="presence-mapping-title">
           <strong>Presence mapping</strong>
           <span>Auto-detected from local users and Home Assistant person entities.</span>
@@ -3184,8 +4449,114 @@ function HomeAssistantSettingsFields({
         ) : (
           <div className="empty-state">No Home Assistant person entities discovered</div>
         )}
+      </section>
+        ) : null}
       </div>
     </div>
+  );
+}
+
+function HomeAssistantCoverTable({
+  addLabel,
+  autoDetectLabel,
+  availableEntities,
+  emptyLabel,
+  entities,
+  icon: Icon,
+  description,
+  onAutoDetect,
+  onChange,
+  title
+}: {
+  addLabel: string;
+  autoDetectLabel: string;
+  availableEntities: HomeAssistantEntity[];
+  emptyLabel: string;
+  entities: HomeAssistantManagedCover[];
+  icon: React.ElementType;
+  description: string;
+  onAutoDetect: () => void;
+  onChange: (entities: HomeAssistantManagedCover[]) => void;
+  title: string;
+}) {
+  const [selectedEntityId, setSelectedEntityId] = React.useState("");
+  const selectedIds = React.useMemo(() => new Set(entities.map((entity) => entity.entity_id)), [entities]);
+  const addableEntities = availableEntities.filter((entity) => entity.entity_id.startsWith("cover.") && !selectedIds.has(entity.entity_id));
+
+  const addSelectedEntity = () => {
+    if (!selectedEntityId) return;
+    const entity = availableEntities.find((item) => item.entity_id === selectedEntityId);
+    if (!entity) return;
+    onChange([...entities, managedCoverFromEntity(entity)]);
+    setSelectedEntityId("");
+  };
+
+  const updateEntity = (entityId: string, updates: Partial<HomeAssistantManagedCover>) => {
+    onChange(entities.map((entity) => entity.entity_id === entityId ? { ...entity, ...updates } : entity));
+  };
+
+  const removeEntity = (entityId: string) => {
+    onChange(entities.filter((entity) => entity.entity_id !== entityId));
+  };
+
+  return (
+    <section className="ha-device-panel">
+      <div className="ha-device-title">
+        <span className="ha-device-icon"><Icon size={17} /></span>
+        <div>
+          <strong>{title}</strong>
+          <span>{entities.length} configured - {description}</span>
+        </div>
+        <button className="secondary-button ha-auto-button" onClick={onAutoDetect} type="button">
+          <RefreshCcw size={15} /> {autoDetectLabel}
+        </button>
+      </div>
+
+      <div className="ha-entity-composer">
+        <select value={selectedEntityId} onChange={(event) => setSelectedEntityId(event.target.value)}>
+          <option value="">Select discovered cover entity</option>
+          {addableEntities.map((entity) => (
+            <option key={entity.entity_id} value={entity.entity_id}>
+              {entity.name ? `${entity.name} - ${entity.entity_id}` : entity.entity_id}
+            </option>
+          ))}
+        </select>
+        <button className="primary-button ha-add-button" onClick={addSelectedEntity} disabled={!selectedEntityId} type="button">
+          <Plus size={15} /> {addLabel}
+        </button>
+      </div>
+
+      <div className="ha-cover-list">
+        {entities.length ? entities.map((entity) => (
+          <div className="ha-cover-row" key={entity.entity_id}>
+            <div className="ha-cover-identity">
+              <input
+                value={entity.name}
+                onChange={(event) => updateEntity(entity.entity_id, { name: event.target.value })}
+                aria-label={`${entity.entity_id} name`}
+              />
+              <code>{entity.entity_id}</code>
+            </div>
+            <label className={entity.enabled === false ? "entity-toggle" : "entity-toggle active"}>
+              <input
+                checked={entity.enabled !== false}
+                onChange={(event) => updateEntity(entity.entity_id, { enabled: event.target.checked })}
+                type="checkbox"
+              />
+              <span>{entity.enabled === false ? "Disabled" : "Enabled"}</span>
+            </label>
+            <button className="icon-button danger" onClick={() => removeEntity(entity.entity_id)} type="button" aria-label={`Remove ${entity.name || entity.entity_id}`}>
+              <Trash2 size={15} />
+            </button>
+          </div>
+        )) : (
+          <div className="ha-entity-empty">
+            <Icon size={18} />
+            <span>{emptyLabel}</span>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -3756,7 +5127,17 @@ type SettingFieldDefinition = {
   help?: string;
 };
 
-const secretSettingKeys = new Set(["home_assistant_token", "apprise_urls", "dvla_api_key", "openai_api_key", "gemini_api_key", "anthropic_api_key"]);
+const secretSettingKeys = new Set([
+  "home_assistant_token",
+  "apprise_urls",
+  "dvla_api_key",
+  "unifi_protect_username",
+  "unifi_protect_password",
+  "unifi_protect_api_key",
+  "openai_api_key",
+  "gemini_api_key",
+  "anthropic_api_key"
+]);
 
 function SettingField({
   field,
@@ -3877,13 +5258,19 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     ollama_base_url: "http://host.docker.internal:11434",
     dvla_vehicle_enquiry_url: "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
     dvla_test_registration_number: "AA19AAA",
-    dvla_timeout_seconds: "10"
+    dvla_timeout_seconds: "10",
+    unifi_protect_port: "443",
+    unifi_protect_verify_ssl: "false",
+    unifi_protect_snapshot_width: "1280",
+    unifi_protect_snapshot_height: "720",
+    home_assistant_gate_entities: "[]",
+    home_assistant_garage_door_entities: "[]"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
     if (secretSettingKeys.has(field.key)) {
       acc[field.key] = "";
-    } else if (field.key === "home_assistant_presence_entities" && typeof current === "object") {
+    } else if (["home_assistant_presence_entities", "home_assistant_gate_entities", "home_assistant_garage_door_entities"].includes(field.key) && typeof current === "object") {
       acc[field.key] = JSON.stringify(current ?? {}, null, 2);
     } else {
       acc[field.key] = stringifySetting(current || defaults[field.key] || "");
@@ -3914,10 +5301,104 @@ function parsePresenceMapping(value: unknown): Record<string, string> {
   }
 }
 
+function parseManagedCovers(value: unknown): HomeAssistantManagedCover[] {
+  const raw = parseJsonArray(value);
+  const seen = new Set<string>();
+  const covers: HomeAssistantManagedCover[] = [];
+  for (const item of raw) {
+    const cover = normalizeManagedCover(item);
+    if (!cover || seen.has(cover.entity_id)) continue;
+    covers.push(cover);
+    seen.add(cover.entity_id);
+  }
+  return covers;
+}
+
+function parseJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeManagedCover(value: unknown): HomeAssistantManagedCover | null {
+  if (typeof value === "string") {
+    const entityId = value.trim();
+    return entityId.startsWith("cover.")
+      ? { entity_id: entityId, name: titleFromEntityId(entityId), enabled: true, open_service: "cover.open_cover", close_service: "cover.close_cover" }
+      : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<HomeAssistantManagedCover>;
+  const entityId = String(raw.entity_id ?? "").trim();
+  if (!entityId.startsWith("cover.")) return null;
+  return {
+    entity_id: entityId,
+    name: String(raw.name || titleFromEntityId(entityId)),
+    enabled: raw.enabled !== false,
+    open_service: String(raw.open_service || "cover.open_cover"),
+    close_service: String(raw.close_service || "cover.close_cover"),
+    state: raw.state ?? null
+  };
+}
+
+function normalizeManagedCoversForSave(entities: HomeAssistantManagedCover[]) {
+  return entities.map((entity) => ({
+    entity_id: entity.entity_id,
+    name: entity.name || titleFromEntityId(entity.entity_id),
+    enabled: entity.enabled !== false
+  }));
+}
+
+function managedCoverFromEntity(entity: HomeAssistantEntity): HomeAssistantManagedCover {
+  return {
+    entity_id: entity.entity_id,
+    name: entity.name || titleFromEntityId(entity.entity_id),
+    enabled: true,
+    open_service: "cover.open_cover",
+    close_service: "cover.close_cover",
+    state: entity.state
+  };
+}
+
+function mergeManagedCovers(current: HomeAssistantManagedCover[], incoming: HomeAssistantManagedCover[]) {
+  const byEntityId = new Map(current.map((entity) => [entity.entity_id, entity]));
+  for (const entity of incoming) {
+    if (!byEntityId.has(entity.entity_id)) {
+      byEntityId.set(entity.entity_id, entity);
+    }
+  }
+  return Array.from(byEntityId.values());
+}
+
+function isGarageDoorCandidate(entity: HomeAssistantEntity) {
+  const label = `${entity.entity_id} ${entity.name ?? ""}`.toLowerCase();
+  return entity.device_class === "garage" || label.includes("garage");
+}
+
+function isGateCandidate(entity: HomeAssistantEntity) {
+  const label = `${entity.entity_id} ${entity.name ?? ""}`.toLowerCase();
+  return entity.device_class === "gate" || label.includes("gate");
+}
+
+function titleFromEntityId(entityId: string) {
+  return entityId.split(".", 2).pop()?.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) || entityId;
+}
+
 function coerceSettingsPayload(form: Record<string, string>): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(form)) {
-    if (key.endsWith("_api_key") || key === "home_assistant_token" || key === "apprise_urls") {
+    if (
+      key.endsWith("_api_key") ||
+      key === "home_assistant_token" ||
+      key === "apprise_urls" ||
+      key === "unifi_protect_username" ||
+      key === "unifi_protect_password"
+    ) {
       if (!value.trim()) continue;
     }
     if (key === "home_assistant_presence_entities") {
@@ -3926,7 +5407,14 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       } catch {
         payload[key] = {};
       }
-    } else if (["auth_cookie_secure"].includes(key)) {
+    } else if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
+      try {
+        const parsed = value.trim() ? JSON.parse(value) : [];
+        payload[key] = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        payload[key] = [];
+      }
+    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl"].includes(key)) {
       payload[key] = value === "true";
     } else if ([
       "auth_access_token_minutes",
@@ -3935,7 +5423,10 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       "lpr_debounce_max_seconds",
       "lpr_similarity_threshold",
       "llm_timeout_seconds",
-      "dvla_timeout_seconds"
+      "dvla_timeout_seconds",
+      "unifi_protect_port",
+      "unifi_protect_snapshot_width",
+      "unifi_protect_snapshot_height"
     ].includes(key)) {
       payload[key] = Number(value);
     } else {
@@ -4107,8 +5598,8 @@ function matches(value: string, query: string) {
   return !query.trim() || value.toLowerCase().includes(query.trim().toLowerCase());
 }
 
-function titleCase(value: string) {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+function titleCase(value: string | null | undefined) {
+  return String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function groupCategoryTone(category: string): BadgeTone {

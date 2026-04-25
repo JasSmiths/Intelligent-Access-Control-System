@@ -52,6 +52,7 @@ class Person(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
+    garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

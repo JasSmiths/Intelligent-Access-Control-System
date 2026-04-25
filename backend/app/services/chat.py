@@ -25,10 +25,13 @@ logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
 Answer concisely and use tool results as the source of truth for presence,
-events, anomalies, schedules, access rhythm, and DVLA vehicle lookups. If the
+events, anomalies, schedules, access rhythm, DVLA vehicle lookups, and camera
+snapshot analysis. If the
 user asks a follow-up with pronouns like they, he, she, or it, use the session
 memory context. Never invent access events, people, or DVLA vehicle records
-that are not present in tool results."""
+that are not present in tool results. When a DVLA vehicle lookup succeeds,
+format the result as a short human-readable vehicle details summary rather than
+raw JSON. Camera snapshots are ephemeral and are not retained by default."""
 
 
 @dataclass(frozen=True)
@@ -237,14 +240,26 @@ class ChatService:
                 )
             )
 
-        if any(word in lower for word in ["dvla", "vehicle enquiry", "vehicle lookup", "mot", "tax status", "taxed"]):
-            registration_number = self._registration_from_message(message)
-            if registration_number:
+        registration_number = self._registration_from_message(message)
+        if registration_number and self._is_vehicle_lookup_request(lower):
+            calls.append(
+                ToolCall(
+                    "planned-dvla-lookup",
+                    "lookup_dvla_vehicle",
+                    {"registration_number": registration_number},
+                )
+            )
+
+        if any(word in lower for word in ["camera", "snapshot", "image"]) and any(
+            word in lower for word in ["analyze", "analyse", "look", "see", "visible", "describe"]
+        ):
+            camera_name = self._camera_name_from_message(message)
+            if camera_name:
                 calls.append(
                     ToolCall(
-                        "planned-dvla-lookup",
-                        "lookup_dvla_vehicle",
-                        {"registration_number": registration_number},
+                        "planned-camera-analysis",
+                        "analyze_camera_snapshot",
+                        {"camera_name": camera_name, "prompt": message},
                     )
                 )
 
@@ -286,6 +301,35 @@ class ChatService:
             if 2 <= len(candidate) <= 8 and any(char.isalpha() for char in candidate) and any(char.isdigit() for char in candidate):
                 return candidate
         return None
+
+    def _camera_name_from_message(self, message: str) -> str | None:
+        match = re.search(
+            r"(?:camera|snapshot|image)\s+(?:called|named|from|of)?\s*([A-Za-z0-9 _.-]{2,80})",
+            message,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1).strip(" .")
+
+    def _is_vehicle_lookup_request(self, lower: str) -> bool:
+        lookup_phrases = [
+            "lookup details",
+            "look up details",
+            "lookup vehicle",
+            "look up vehicle",
+            "vehicle details",
+            "details on",
+            "details for",
+            "check vehicle",
+            "check registration",
+            "dvla",
+            "vehicle enquiry",
+            "mot",
+            "tax status",
+            "taxed",
+        ]
+        return any(phrase in lower for phrase in lookup_phrases)
 
     async def _execute_tool_call(self, call: ToolCall) -> dict[str, Any]:
         tool = self._tools.get(call.name)

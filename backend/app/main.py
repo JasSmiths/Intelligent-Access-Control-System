@@ -8,6 +8,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.api.router import api_router
 from app.api.v1 import auth as auth_routes
 from app.api.v1 import users as user_routes
+from app.api.v1 import webhooks as webhook_routes
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
@@ -17,6 +18,7 @@ from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config
+from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
 
@@ -39,9 +41,11 @@ async def lifespan(app: FastAPI):
     await event_bus.start()
     await get_access_event_service().start()
     await get_home_assistant_service().start()
+    await get_unifi_protect_service().start()
     try:
         yield
     finally:
+        await get_unifi_protect_service().stop()
         await get_home_assistant_service().stop()
         await get_access_event_service().stop()
         await event_bus.stop()
@@ -74,6 +78,8 @@ PUBLIC_AUTH_PATHS = {
     "/api/v1/auth/setup",
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
+    "/api/v1/webhooks/ubiquiti/lpr",
+    "/api/webhooks/ubiquiti/lpr",
 }
 
 
@@ -91,23 +97,26 @@ async def auth_guard(request: Request, call_next):
         return await call_next(request)
 
     async with AsyncSessionLocal() as session:
-        if await count_users(session) == 0:
-            return JSONResponse(
-                status_code=428,
-                content={
-                    "detail": "setup_required",
-                    "setup_required": True,
-                    "setup_path": "/setup",
-                },
-            )
+        user_count = await count_users(session)
 
+    if user_count == 0:
+        return JSONResponse(
+            status_code=428,
+            content={
+                "detail": "setup_required",
+                "setup_required": True,
+                "setup_path": "/setup",
+            },
+        )
+
+    async with AsyncSessionLocal() as session:
         user = await authenticate_request(session, request)
-        if not user:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required"},
-            )
-        request.state.user = user
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+        )
+    request.state.user = user
 
     return await call_next(request)
 
@@ -139,3 +148,4 @@ async def service_root() -> dict[str, object]:
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
 app.include_router(user_routes.router, prefix="/api/users", tags=["users"])
+app.include_router(webhook_routes.router, prefix="/api/webhooks", tags=["webhooks"])

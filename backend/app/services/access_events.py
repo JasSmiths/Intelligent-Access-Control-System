@@ -12,6 +12,9 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
+from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
+from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
 from app.models import AccessEvent, Anomaly, Person, Presence, ScheduleAssignment, Vehicle
 from app.models.enums import (
@@ -139,13 +142,38 @@ class AccessEventService:
 
         self._pending = waiting
         for window in ready:
-            await self._finalize_window(window)
+            try:
+                await self._finalize_window(window)
+            except Exception:
+                logger.exception(
+                    "access_event_finalize_failed",
+                    extra={
+                        "candidate_count": len(window.reads),
+                        "best_registration_number": window.best_read.registration_number,
+                    },
+                )
+                await event_bus.publish(
+                    "access_event.finalize_failed",
+                    {
+                        "registration_number": window.best_read.registration_number,
+                        "candidate_count": len(window.reads),
+                    },
+                )
 
     async def _flush_all_pending(self) -> None:
         pending = self._pending
         self._pending = []
         for window in pending:
-            await self._finalize_window(window)
+            try:
+                await self._finalize_window(window)
+            except Exception:
+                logger.exception(
+                    "access_event_finalize_failed",
+                    extra={
+                        "candidate_count": len(window.reads),
+                        "best_registration_number": window.best_read.registration_number,
+                    },
+                )
 
     async def _finalize_window(self, window: DebounceWindow) -> None:
         read = window.best_read
@@ -208,14 +236,20 @@ class AccessEventService:
         await event_bus.publish(
             "access_event.finalized",
             {
+                "event_id": str(event.id),
                 "registration_number": read.registration_number,
                 "direction": direction.value,
                 "decision": decision.value,
                 "confidence": read.confidence,
+                "source": event.source,
+                "occurred_at": event.occurred_at.isoformat(),
                 "timing_classification": timing.value,
                 "anomaly_count": len(anomalies),
             },
         )
+        if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
+            await self._open_gate_for_event(event, person)
+
         for anomaly in anomalies:
             await get_notification_service().notify(
                 NotificationContext(
@@ -224,6 +258,155 @@ class AccessEventService:
                     severity=anomaly.severity.value,
                     facts={
                         "message": anomaly.message,
+                        "direction": event.direction.value,
+                        "decision": event.decision.value,
+                        "source": event.source,
+                    },
+                )
+            )
+
+    async def _open_gate_for_event(self, event: AccessEvent, person: Person | None) -> None:
+        reason = (
+            f"Automatic LPR grant for {event.registration_number}"
+            f"{f' ({person.display_name})' if person else ''}"
+        )
+        try:
+            gate = get_gate_controller(settings.gate_controller)
+            result = await gate.open_gate(reason)
+        except UnsupportedModuleError as exc:
+            logger.error(
+                "gate_controller_unavailable",
+                extra={
+                    "registration_number": event.registration_number,
+                    "event_id": str(event.id),
+                    "error": str(exc),
+                },
+            )
+            await event_bus.publish(
+                "gate.open_failed",
+                {
+                    "event_id": str(event.id),
+                    "registration_number": event.registration_number,
+                    "detail": str(exc),
+                },
+            )
+        else:
+            event_type = "gate.open_requested" if result.accepted else "gate.open_failed"
+            await event_bus.publish(
+                event_type,
+                {
+                    "event_id": str(event.id),
+                    "registration_number": event.registration_number,
+                    "accepted": result.accepted,
+                    "state": result.state.value,
+                    "detail": result.detail,
+                },
+            )
+            if result.accepted:
+                logger.info(
+                    "gate_open_requested_for_access_event",
+                    extra={
+                        "registration_number": event.registration_number,
+                        "event_id": str(event.id),
+                        "state": result.state.value,
+                    },
+                )
+            else:
+                logger.error(
+                    "gate_open_failed_for_access_event",
+                    extra={
+                        "registration_number": event.registration_number,
+                        "event_id": str(event.id),
+                        "state": result.state.value,
+                        "detail": result.detail,
+                    },
+                )
+                await get_notification_service().notify(
+                    NotificationContext(
+                        event_type="gate_open_failed",
+                        subject=event.registration_number,
+                        severity=AnomalySeverity.CRITICAL.value,
+                        facts={
+                            "message": result.detail or "Automatic gate open command failed.",
+                            "direction": event.direction.value,
+                            "decision": event.decision.value,
+                            "source": event.source,
+                        },
+                    )
+                )
+
+        await self._open_garage_doors_for_event(event, person, reason)
+
+    async def _open_garage_doors_for_event(
+        self, event: AccessEvent, person: Person | None, reason: str
+    ) -> None:
+        if not person or not person.garage_door_entity_ids:
+            return
+
+        config = await get_runtime_config()
+        selected_ids = set(person.garage_door_entity_ids)
+        entities = [
+            entity
+            for entity in enabled_cover_entities(
+                config.home_assistant_garage_door_entities,
+                default_open_service=config.home_assistant_gate_open_service,
+            )
+            if str(entity["entity_id"]) in selected_ids
+        ]
+        if not entities:
+            return
+
+        client = HomeAssistantClient()
+        for entity in entities:
+            outcome = await command_cover(client, entity, "open", reason)
+            event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
+            await event_bus.publish(
+                event_type,
+                {
+                    "event_id": str(event.id),
+                    "registration_number": event.registration_number,
+                    "person_id": str(person.id),
+                    "person": person.display_name,
+                    "entity_id": outcome.entity_id,
+                    "name": outcome.name,
+                    "accepted": outcome.accepted,
+                    "state": outcome.state,
+                    "detail": outcome.detail,
+                },
+            )
+            if outcome.accepted:
+                logger.info(
+                    "garage_door_open_requested_for_access_event",
+                    extra={
+                        "registration_number": event.registration_number,
+                        "event_id": str(event.id),
+                        "person_id": str(person.id),
+                        "entity_id": outcome.entity_id,
+                        "state": outcome.state,
+                    },
+                )
+                continue
+
+            logger.error(
+                "garage_door_open_failed_for_access_event",
+                extra={
+                    "registration_number": event.registration_number,
+                    "event_id": str(event.id),
+                    "person_id": str(person.id),
+                    "entity_id": outcome.entity_id,
+                    "detail": outcome.detail,
+                },
+            )
+            await get_notification_service().notify(
+                NotificationContext(
+                    event_type="garage_door_open_failed",
+                    subject=event.registration_number,
+                    severity=AnomalySeverity.CRITICAL.value,
+                    facts={
+                        "message": outcome.detail or f"Automatic garage door open command failed for {outcome.name}.",
+                        "person": person.display_name,
+                        "garage_door": outcome.name,
+                        "entity_id": outcome.entity_id,
                         "direction": event.direction.value,
                         "decision": event.decision.value,
                         "source": event.source,
