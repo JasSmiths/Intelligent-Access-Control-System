@@ -43,6 +43,8 @@ class PersonResponse(BaseModel):
     is_active: bool
     notes: str | None
     garage_door_entity_ids: list[str]
+    home_assistant_presence_entity_id: str | None
+    home_assistant_mobile_app_notify_service: str | None
     vehicles: list[PersonVehicleResponse]
 
 
@@ -54,6 +56,8 @@ class CreatePersonRequest(BaseModel):
     schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
     garage_door_entity_ids: list[str] = Field(default_factory=list)
+    home_assistant_presence_entity_id: str | None = Field(default=None, max_length=255)
+    home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool = True
 
@@ -66,6 +70,8 @@ class UpdatePersonRequest(BaseModel):
     schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] | None = None
     garage_door_entity_ids: list[str] | None = None
+    home_assistant_presence_entity_id: str | None = Field(default=None, max_length=255)
+    home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
 
@@ -162,6 +168,26 @@ def normalize_optional_text(value: str | None) -> str | None:
     return text or None
 
 
+def normalize_home_assistant_presence_entity(entity_id: str | None) -> str | None:
+    entity_id = normalize_optional_text(entity_id)
+    if entity_id and not entity_id.startswith("person."):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Home Assistant presence entity must be a person.* entity.",
+        )
+    return entity_id
+
+
+def normalize_home_assistant_mobile_notify_service(service_name: str | None) -> str | None:
+    service_name = normalize_optional_text(service_name)
+    if service_name and not service_name.startswith("notify.mobile_app_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Home Assistant mobile notification target must be a notify.mobile_app_* service.",
+        )
+    return service_name
+
+
 def serialize_vehicle(vehicle: Vehicle) -> dict:
     return {
         "id": str(vehicle.id),
@@ -194,6 +220,8 @@ def serialize_person(person: Person) -> dict:
         "is_active": person.is_active,
         "notes": person.notes,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
+        "home_assistant_presence_entity_id": person.home_assistant_presence_entity_id,
+        "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
         "vehicles": [
                 {
                     "id": str(vehicle.id),
@@ -293,6 +321,12 @@ async def add_person(
         group_id=group.id if group else None,
         schedule_id=schedule.id if schedule else None,
         garage_door_entity_ids=garage_door_entity_ids,
+        home_assistant_presence_entity_id=normalize_home_assistant_presence_entity(
+            request.home_assistant_presence_entity_id
+        ),
+        home_assistant_mobile_app_notify_service=normalize_home_assistant_mobile_notify_service(
+            request.home_assistant_mobile_app_notify_service
+        ),
         notes=normalize_optional_text(request.notes),
         is_active=request.is_active,
     )
@@ -351,6 +385,16 @@ async def update_person(
 
     if request.garage_door_entity_ids is not None:
         person.garage_door_entity_ids = await validate_garage_door_entity_ids(request.garage_door_entity_ids)
+
+    if "home_assistant_presence_entity_id" in request.model_fields_set:
+        person.home_assistant_presence_entity_id = normalize_home_assistant_presence_entity(
+            request.home_assistant_presence_entity_id
+        )
+
+    if "home_assistant_mobile_app_notify_service" in request.model_fields_set:
+        person.home_assistant_mobile_app_notify_service = normalize_home_assistant_mobile_notify_service(
+            request.home_assistant_mobile_app_notify_service
+        )
 
     if request.first_name is not None:
         person.first_name = request.first_name.strip()
@@ -582,4 +626,3 @@ async def update_group(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved group")
 
     return GroupResponse(**serialize_group(refreshed_group))
-

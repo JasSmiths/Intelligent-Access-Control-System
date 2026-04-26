@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import NotificationRule, Presence, Schedule
+from app.models import NotificationRule, Person, Presence, Schedule
 from app.models.enums import PresenceState
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.modules.home_assistant.client import HomeAssistantClient
@@ -20,6 +20,10 @@ from app.modules.notifications.apprise_client import (
     normalize_apprise_url,
     split_apprise_urls,
     summarize_apprise_url,
+)
+from app.modules.notifications.home_assistant_mobile import (
+    HomeAssistantMobileAppNotifier,
+    HomeAssistantMobileAppTarget,
 )
 from app.modules.notifications.base import (
     ComposedNotification,
@@ -237,14 +241,16 @@ class NotificationService:
             }
             for endpoint in apprise_endpoints
         )
+        home_assistant_mobile_endpoints = await self._home_assistant_mobile_endpoint_catalog(config)
+        mobile_endpoints.extend(home_assistant_mobile_endpoints)
 
         voice_endpoints = await self._voice_endpoint_catalog(config)
         return [
             {
                 "id": "mobile",
                 "name": "Mobile Notification",
-                "provider": "Apprise",
-                "configured": bool(apprise_urls),
+                "provider": "Apprise / Home Assistant",
+                "configured": bool(apprise_urls or home_assistant_mobile_endpoints),
                 "endpoints": mobile_endpoints,
             },
             {
@@ -537,23 +543,48 @@ class NotificationService:
 
     async def _send_mobile(self, action: dict[str, Any], context: NotificationContext, config) -> None:
         urls = self._select_apprise_urls(config.apprise_urls, action)
-        if not urls:
-            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+        home_assistant_targets = await self._select_home_assistant_mobile_targets(config, action)
+        if not urls and not home_assistant_targets:
+            raise NotificationDeliveryError("No mobile notification endpoints are configured or selected.")
         attachments = await self._snapshot_attachments(action.get("media") or {})
-        sender = AppriseNotificationSender(urls="\n".join(urls))
+        failures: list[str] = []
+        delivered_any = False
         try:
-            await sender.send(
-                str(action.get("title") or context.subject),
-                str(action.get("message") or ""),
-                context,
-                attachments=attachments,
-            )
+            if urls:
+                sender = AppriseNotificationSender(urls="\n".join(urls))
+                try:
+                    await sender.send(
+                        str(action.get("title") or context.subject),
+                        str(action.get("message") or ""),
+                        context,
+                        attachments=attachments,
+                    )
+                    delivered_any = True
+                except NotificationDeliveryError as exc:
+                    failures.append(f"Apprise: {exc}")
+            if home_assistant_targets:
+                notifier = HomeAssistantMobileAppNotifier()
+                for target in home_assistant_targets:
+                    try:
+                        await notifier.send(
+                            HomeAssistantMobileAppTarget(target),
+                            str(action.get("title") or context.subject),
+                            str(action.get("message") or ""),
+                            context,
+                        )
+                        delivered_any = True
+                    except NotificationDeliveryError as exc:
+                        failures.append(f"{target}: {exc}")
         finally:
             for path in attachments:
                 try:
                     os.unlink(path)
                 except OSError:
                     logger.debug("notification_snapshot_cleanup_failed", extra={"path": path})
+        if failures:
+            raise NotificationDeliveryError("; ".join(failures))
+        if not delivered_any:
+            raise NotificationDeliveryError("No mobile notification endpoints were delivered.")
 
     async def _send_voice(self, action: dict[str, Any], config) -> None:
         targets = await self._select_voice_targets(config, action)
@@ -585,6 +616,21 @@ class NotificationService:
             if 0 <= index < len(urls):
                 chosen.append(urls[index])
         return chosen
+
+    async def _select_home_assistant_mobile_targets(self, config, action: dict[str, Any]) -> list[str]:
+        target_mode = str(action.get("target_mode") or "all")
+        endpoint_ids = normalize_string_list(action.get("target_ids"))
+        if target_mode == "all" or "home_assistant_mobile:*" in endpoint_ids:
+            return await self._all_home_assistant_mobile_targets(config)
+
+        targets: list[str] = []
+        for endpoint_id in endpoint_ids:
+            if not endpoint_id.startswith("home_assistant_mobile:"):
+                continue
+            target = endpoint_id.split(":", 1)[1]
+            if target and target != "*":
+                targets.append(target)
+        return list(dict.fromkeys(targets))
 
     async def _select_voice_targets(self, config, action: dict[str, Any]) -> list[str]:
         target_mode = str(action.get("target_mode") or "all")
@@ -639,6 +685,75 @@ class NotificationService:
                 }
             )
         return endpoints
+
+    async def _home_assistant_mobile_endpoint_catalog(self, config) -> list[dict[str, Any]]:
+        targets = await self._all_home_assistant_mobile_targets(config)
+        if not targets:
+            return []
+
+        endpoints: list[dict[str, Any]] = [
+            {
+                "id": "home_assistant_mobile:*",
+                "provider": "Home Assistant",
+                "label": "All Home Assistant mobile apps",
+                "detail": f"{len(targets)} notify.mobile_app services",
+            }
+        ]
+        person_labels = await self._home_assistant_mobile_person_labels()
+        for target in targets:
+            endpoints.append(
+                {
+                    "id": f"home_assistant_mobile:{target}",
+                    "provider": "Home Assistant",
+                    "label": person_labels.get(target) or target.split(".", 1)[-1].replace("_", " ").title(),
+                    "detail": target,
+                }
+            )
+        return endpoints
+
+    async def _home_assistant_mobile_person_labels(self) -> dict[str, str]:
+        async with AsyncSessionLocal() as session:
+            people = (
+                await session.scalars(
+                    select(Person).where(Person.home_assistant_mobile_app_notify_service.is_not(None))
+                )
+            ).all()
+        return {
+            str(person.home_assistant_mobile_app_notify_service): person.display_name
+            for person in people
+            if person.home_assistant_mobile_app_notify_service
+        }
+
+    async def _all_home_assistant_mobile_targets(self, config) -> list[str]:
+        configured_targets = await self._configured_home_assistant_mobile_targets()
+        if not (config.home_assistant_url and config.home_assistant_token):
+            return configured_targets
+        try:
+            services = await HomeAssistantClient().list_services()
+        except Exception as exc:
+            logger.debug("notification_mobile_app_discovery_failed", extra={"error": str(exc)})
+            return configured_targets
+        discovered_targets = sorted(
+            service.service_id
+            for service in services
+            if service.service_id.startswith("notify.mobile_app_")
+        )
+        return list(dict.fromkeys([*configured_targets, *discovered_targets]))
+
+    async def _configured_home_assistant_mobile_targets(self) -> list[str]:
+        async with AsyncSessionLocal() as session:
+            people = (
+                await session.scalars(
+                    select(Person).where(Person.home_assistant_mobile_app_notify_service.is_not(None))
+                )
+            ).all()
+        return list(
+            dict.fromkeys(
+                str(person.home_assistant_mobile_app_notify_service)
+                for person in people
+                if person.home_assistant_mobile_app_notify_service
+            )
+        )
 
     async def _all_media_player_targets(self, config) -> list[str]:
         if not (config.home_assistant_url and config.home_assistant_token):

@@ -162,7 +162,8 @@ class HomeAssistantIntegrationService:
                 )
             if entity_id in DOOR_ENTITY_IDS:
                 await self._sync_door_state(state_value, entity_id)
-            await self._sync_presence_state(entity_id, state_value, config.home_assistant_presence_entities)
+            if entity_id.startswith("person.") or entity_id in set(config.home_assistant_presence_entities.values()):
+                await self._sync_presence_state(entity_id, state_value, config.home_assistant_presence_entities)
 
     async def _sync_gate_state(self, state_value: str, entity_id: str, name: str | None = None) -> None:
         self._last_gate_state = map_home_assistant_gate_state(state_value)
@@ -210,23 +211,27 @@ class HomeAssistantIntegrationService:
         state_value: str,
         presence_entities: dict[str, str],
     ) -> None:
-        person_name = self._person_name_for_entity(entity_id, presence_entities)
-        if not person_name:
-            return
+        legacy_person_name = self._person_name_for_entity(entity_id, presence_entities)
 
         presence_state = self._map_presence_state(state_value)
         if not presence_state:
             return
 
         async with AsyncSessionLocal() as session:
-            person = await session.scalar(select(Person).where(Person.display_name == person_name))
+            person = await session.scalar(
+                select(Person).where(Person.home_assistant_presence_entity_id == entity_id)
+            )
+            if not person and legacy_person_name:
+                person = await session.scalar(select(Person).where(Person.display_name == legacy_person_name))
             if not person:
-                logger.warning(
-                    "home_assistant_presence_person_missing",
-                    extra={"person_name": person_name, "entity_id": entity_id},
-                )
+                if legacy_person_name:
+                    logger.warning(
+                        "home_assistant_presence_person_missing",
+                        extra={"person_name": legacy_person_name, "entity_id": entity_id},
+                    )
                 return
 
+            person_name = person.display_name
             presence = await session.get(Presence, person.id)
             if not presence:
                 presence = Presence(person_id=person.id)

@@ -13,7 +13,7 @@ from app.db.session import get_db_session
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.modules.gate.home_assistant import HomeAssistantGateController
-from app.models import User
+from app.models import Person, User
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
     command_cover,
@@ -22,13 +22,22 @@ from app.modules.home_assistant.covers import (
     enabled_cover_entities,
     normalize_cover_entities,
 )
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, HomeAssistantState
+from app.modules.home_assistant.client import (
+    HomeAssistantClient,
+    HomeAssistantError,
+    HomeAssistantService,
+    HomeAssistantState,
+)
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.apprise_client import (
     normalize_apprise_url,
     split_apprise_urls,
     summarize_apprise_url,
     validate_apprise_urls,
+)
+from app.modules.notifications.home_assistant_mobile import (
+    HomeAssistantMobileAppNotifier,
+    HomeAssistantMobileAppTarget,
 )
 from app.services.dvla import lookup_vehicle_registration
 from app.services.home_assistant import get_home_assistant_service
@@ -66,6 +75,11 @@ class TestNotificationRequest(BaseModel):
     message: str = Field(default="Notification integration test", max_length=500)
 
 
+class TestHomeAssistantMobileNotificationRequest(BaseModel):
+    service_name: str = Field(pattern=r"^notify\.mobile_app_[A-Za-z0-9_]+$", max_length=255)
+    person_name: str = Field(default="this person", max_length=160)
+
+
 class AddAppriseUrlRequest(BaseModel):
     url: str = Field(min_length=6, max_length=1200)
 
@@ -85,16 +99,27 @@ async def home_assistant_entities(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     try:
-        states = await HomeAssistantClient().list_states()
+        client = HomeAssistantClient()
+        states = await client.list_states()
+        services = await client.list_services()
     except HomeAssistantError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     cover_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")]
     media_players = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("media_player.")]
     person_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("person.")]
+    mobile_app_notification_services = [
+        _serialize_ha_service(service)
+        for service in services
+        if service.service_id.startswith("notify.mobile_app_")
+    ]
     gate_suggestions = [cover_entity_state_payload(entity) for entity in detected_gate_entities(states)]
     garage_door_suggestions = [cover_entity_state_payload(entity) for entity in detected_garage_door_entities(states)]
-    users = (await session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.first_name, User.last_name))).all()
+    people = (
+        await session.scalars(
+            select(Person).where(Person.is_active.is_(True)).order_by(Person.first_name, Person.last_name)
+        )
+    ).all()
 
     return {
         "cover_entities": cover_entities,
@@ -102,9 +127,14 @@ async def home_assistant_entities(
         "garage_door_suggestions": garage_door_suggestions,
         "media_player_entities": media_players,
         "person_entities": person_entities,
+        "mobile_app_notification_services": mobile_app_notification_services,
         "presence_mappings": [
-            _suggest_presence_mapping(user, person_entities)
-            for user in users
+            _suggest_presence_mapping(person, person_entities)
+            for person in people
+        ],
+        "mobile_app_notification_mappings": [
+            _suggest_mobile_app_notification_mapping(person, mobile_app_notification_services)
+            for person in people
         ],
     }
 
@@ -272,6 +302,30 @@ async def say_announcement(request: AnnouncementRequest, _: User = Depends(curre
     return {"status": "sent", "entity_id": target}
 
 
+@router.post("/home-assistant/mobile-notifications/test")
+async def send_home_assistant_mobile_notification_test(
+    request: TestHomeAssistantMobileNotificationRequest,
+    _: User = Depends(current_user),
+) -> dict[str, str]:
+    person_name = request.person_name.strip() or "this person"
+    try:
+        await HomeAssistantMobileAppNotifier().send(
+            HomeAssistantMobileAppTarget(request.service_name),
+            "IACS Home Assistant test",
+            f"Mobile notifications are linked for {person_name}.",
+            NotificationContext(
+                event_type="integration_test",
+                subject="IACS Home Assistant test",
+                severity="info",
+                facts={"message": f"Mobile notifications are linked for {person_name}."},
+            ),
+        )
+    except NotificationDeliveryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"status": "sent", "service_name": request.service_name}
+
+
 @router.post("/notifications/test")
 async def send_test_notification(
     request: TestNotificationRequest,
@@ -307,6 +361,14 @@ def _serialize_ha_entity(state: HomeAssistantState) -> dict[str, str | None]:
     }
 
 
+def _serialize_ha_service(service: HomeAssistantService) -> dict[str, str | None]:
+    return {
+        "service_id": service.service_id,
+        "name": service.name or _title_from_entity_id(service.service_id),
+        "description": service.description,
+    }
+
+
 def _merge_cover_entities(
     existing: list[dict],
     detected: list[dict],
@@ -322,28 +384,62 @@ def _merge_cover_entities(
     return merged
 
 
-def _suggest_presence_mapping(user: User, person_entities: list[dict[str, str | None]]) -> dict:
-    user_label = user.full_name or f"{user.first_name} {user.last_name}".strip() or user.username
-    user_tokens = _name_tokens(user_label, user.username)
+def _suggest_presence_mapping(person: Person, person_entities: list[dict[str, str | None]]) -> dict:
+    return _suggest_person_mapping(
+        person,
+        person_entities,
+        id_key="entity_id",
+        name_key="name",
+        suggested_id_key="suggested_entity_id",
+        suggested_name_key="suggested_name",
+    )
+
+
+def _suggest_mobile_app_notification_mapping(
+    person: Person,
+    mobile_services: list[dict[str, str | None]],
+) -> dict:
+    return _suggest_person_mapping(
+        person,
+        mobile_services,
+        id_key="service_id",
+        name_key="name",
+        suggested_id_key="suggested_service_id",
+        suggested_name_key="suggested_name",
+    )
+
+
+def _suggest_person_mapping(
+    person: Person,
+    candidates: list[dict[str, str | None]],
+    *,
+    id_key: str,
+    name_key: str,
+    suggested_id_key: str,
+    suggested_name_key: str,
+) -> dict:
+    person_label = person.display_name or f"{person.first_name} {person.last_name}".strip()
+    person_tokens = _name_tokens(person_label, person.first_name, person.last_name)
     best_entity: dict[str, str | None] | None = None
     best_score = 0.0
 
-    for entity in person_entities:
-        entity_label = f"{entity.get('entity_id', '')} {entity.get('name') or ''}"
+    for entity in candidates:
+        entity_label = f"{entity.get(id_key, '')} {entity.get(name_key) or ''}"
         entity_tokens = _name_tokens(entity_label)
-        token_score = len(user_tokens & entity_tokens) / max(len(user_tokens), 1)
-        ratio_score = SequenceMatcher(None, " ".join(sorted(user_tokens)), " ".join(sorted(entity_tokens))).ratio()
+        token_score = len(person_tokens & entity_tokens) / max(len(person_tokens), 1)
+        ratio_score = SequenceMatcher(None, " ".join(sorted(person_tokens)), " ".join(sorted(entity_tokens))).ratio()
         score = max(token_score, ratio_score)
         if score > best_score:
             best_score = score
             best_entity = entity
 
     return {
-        "user_id": str(user.id),
-        "username": user.username,
-        "full_name": user_label,
-        "suggested_entity_id": best_entity["entity_id"] if best_entity and best_score >= 0.45 else None,
-        "suggested_name": best_entity["name"] if best_entity and best_score >= 0.45 else None,
+        "person_id": str(person.id),
+        "first_name": person.first_name,
+        "last_name": person.last_name,
+        "display_name": person_label,
+        suggested_id_key: best_entity[id_key] if best_entity and best_score >= 0.45 else None,
+        suggested_name_key: best_entity[name_key] if best_entity and best_score >= 0.45 else None,
         "confidence": round(best_score, 2) if best_entity else 0,
     }
 
@@ -353,7 +449,7 @@ def _name_tokens(*values: str | None) -> set[str]:
     for value in values:
         if not value:
             continue
-        cleaned = value.lower().replace("person.", " ")
+        cleaned = value.lower().replace("person.", " ").replace("notify.mobile_app_", " ")
         tokens.update(part for part in re.split(r"[^a-z0-9]+", cleaned) if part)
     return tokens
 

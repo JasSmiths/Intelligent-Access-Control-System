@@ -2306,7 +2306,7 @@ tr:last-child td {
 
 .ha-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 6px;
   border: 1px solid var(--line);
@@ -2666,6 +2666,134 @@ tr:last-child td {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.users-hero.schedules-hero {
+  width: 100%;
+  display: grid;
+  align-items: stretch;
+  justify-content: stretch;
+  gap: 14px;
+}
+
+.schedules-hero-main {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.schedule-policy-card {
+  width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.schedule-policy-card .schedule-card-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-policy-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.schedule-policy-copy h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.schedule-policy-copy p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.schedule-policy-actions {
+  grid-column: 3;
+  width: max-content;
+  max-width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.schedule-policy-option {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.schedule-policy-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.schedule-policy-option.allow.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 66%, var(--surface));
+  color: var(--green-strong);
+}
+
+.schedule-policy-option.deny.active {
+  border-color: color-mix(in srgb, var(--red) 30%, var(--line));
+  background: color-mix(in srgb, var(--red-soft) 66%, var(--surface));
+  color: var(--red);
+}
+
+.schedule-policy-status {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.schedule-policy-saved-pill {
+  animation: scheduleSavedFade 5.2s ease forwards;
+}
+
+@keyframes scheduleSavedFade {
+  0%,
+  82% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
 }
 
 .schedule-card {
@@ -5257,6 +5385,12 @@ tr:last-child td {
   line-height: 1;
 }
 
+.ha-chip {
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
 .muted-value {
   color: var(--muted);
   font-size: 12px;
@@ -5264,6 +5398,117 @@ tr:last-child td {
 
 .person-modal {
   width: min(680px, 100%);
+}
+
+.person-ha-section {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 58%, transparent);
+}
+
+.person-ha-section-title {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.person-ha-section-title .ha-device-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.person-ha-section-title strong,
+.person-ha-section-title span {
+  display: block;
+  min-width: 0;
+}
+
+.person-ha-section-title strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 680;
+}
+
+.person-ha-section-title span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.person-ha-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.person-ha-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.person-ha-actions .secondary-button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.person-ha-actions > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-ha-test-feedback {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.person-ha-test-feedback.info {
+  border-color: color-mix(in srgb, var(--blue) 24%, var(--line));
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
+.person-ha-test-feedback.success {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+
+.person-ha-test-feedback.error {
+  border-color: color-mix(in srgb, var(--red) 32%, var(--line));
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.person-ha-suggestions span {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line));
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 620;
 }
 
 .group-modal {
@@ -6110,6 +6355,7 @@ tr:last-child td {
   .ha-section-heading,
   .ha-device-title,
   .ha-entity-composer,
+  .schedule-policy-card,
   .weekly-schedule-toolbar,
   .protect-section-header,
   .protect-exposes-header,
@@ -6128,6 +6374,15 @@ tr:last-child td {
   .protect-section-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .schedule-policy-actions,
+  .schedule-policy-status {
+    width: 100%;
+  }
+
+  .schedule-policy-status {
+    justify-content: flex-start;
   }
 
   .ha-tab {
@@ -6254,6 +6509,11 @@ tr:last-child td {
   .users-hero,
   .temporary-password-card,
   .modal-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .schedules-hero-main {
     align-items: stretch;
     flex-direction: column;
   }

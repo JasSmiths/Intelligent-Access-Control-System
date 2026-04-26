@@ -176,6 +176,8 @@ type Person = {
   is_active: boolean;
   notes: string | null;
   garage_door_entity_ids: string[];
+  home_assistant_presence_entity_id: string | null;
+  home_assistant_mobile_app_notify_service: string | null;
   vehicles: Vehicle[];
 };
 
@@ -262,10 +264,27 @@ type HomeAssistantManagedCover = {
 };
 
 type HomeAssistantPresenceSuggestion = {
-  user_id: string;
-  username: string;
-  full_name: string;
+  person_id: string;
+  first_name: string;
+  last_name: string;
+  display_name: string;
   suggested_entity_id: string | null;
+  suggested_name: string | null;
+  confidence: number;
+};
+
+type HomeAssistantMobileAppService = {
+  service_id: string;
+  name: string | null;
+  description: string | null;
+};
+
+type HomeAssistantMobileAppSuggestion = {
+  person_id: string;
+  first_name: string;
+  last_name: string;
+  display_name: string;
+  suggested_service_id: string | null;
   suggested_name: string | null;
   confidence: number;
 };
@@ -276,7 +295,22 @@ type HomeAssistantDiscovery = {
   garage_door_suggestions?: HomeAssistantManagedCover[];
   media_player_entities: HomeAssistantEntity[];
   person_entities: HomeAssistantEntity[];
+  mobile_app_notification_services: HomeAssistantMobileAppService[];
   presence_mappings: HomeAssistantPresenceSuggestion[];
+  mobile_app_notification_mappings: HomeAssistantMobileAppSuggestion[];
+};
+
+type HomeAssistantPersonSuggestion = {
+  presence?: {
+    id: string;
+    label: string;
+    confidence: number;
+  };
+  mobile?: {
+    id: string;
+    label: string;
+    confidence: number;
+  };
 };
 
 type AppriseUrlSummary = {
@@ -2296,11 +2330,21 @@ function SchedulesView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedSchedule, setSelectedSchedule] = React.useState<Schedule | null>(null);
   const [error, setError] = React.useState("");
+  const [policySaved, setPolicySaved] = React.useState("");
+  const [policySaving, setPolicySaving] = React.useState(false);
+  const accessSettings = useSettings("access");
+  const defaultPolicy = String(accessSettings.values.schedule_default_policy ?? "allow").toLowerCase() === "deny" ? "deny" : "allow";
   const filtered = schedules.filter((schedule) =>
     matches(schedule.name, query) ||
     matches(schedule.description ?? "", query) ||
     matches(scheduleSummary(schedule.time_blocks), query)
   );
+
+  React.useEffect(() => {
+    if (!policySaved) return undefined;
+    const timer = window.setTimeout(() => setPolicySaved(""), 5200);
+    return () => window.clearTimeout(timer);
+  }, [policySaved]);
 
   const openCreate = () => {
     setSelectedSchedule(null);
@@ -2328,20 +2372,80 @@ function SchedulesView({
     }
   };
 
+  const updateDefaultPolicy = async (policy: "allow" | "deny") => {
+    if (policy === defaultPolicy || policySaving) return;
+    setError("");
+    setPolicySaved("");
+    setPolicySaving(true);
+    try {
+      await accessSettings.save({ schedule_default_policy: policy });
+      setPolicySaved("Default policy saved.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save default policy");
+    } finally {
+      setPolicySaving(false);
+    }
+  };
+
   return (
     <section className="view-stack schedules-page">
-      <div className="users-hero card">
-        <div>
-          <span className="eyebrow">Access Control</span>
-          <h1>Schedules</h1>
-          <p>Reusable weekly access templates for people, vehicles, gates, and garage doors.</p>
+      <div className="users-hero schedules-hero card">
+        <div className="schedules-hero-main">
+          <div>
+            <span className="eyebrow">Access Control</span>
+            <h1>Schedules</h1>
+            <p>Reusable weekly access templates for people, vehicles, gates, and garage doors.</p>
+          </div>
+          <button className="primary-button" onClick={openCreate} type="button">
+            <Plus size={17} /> New Schedule
+          </button>
         </div>
-        <button className="primary-button" onClick={openCreate} type="button">
-          <Plus size={17} /> New Schedule
-        </button>
+        <section className="schedule-policy-card" aria-labelledby="schedule-default-policy-title">
+          <div className="schedule-policy-copy">
+            <div className="schedule-card-icon">
+              <ShieldCheck size={18} />
+            </div>
+            <div>
+              <h2 id="schedule-default-policy-title">Default Policy</h2>
+              <p>Used when a person, vehicle, gate, or garage door has no schedule assigned.</p>
+            </div>
+          </div>
+          <div className="schedule-policy-actions" role="group" aria-label="No schedule default policy">
+            <button
+              aria-pressed={defaultPolicy === "allow"}
+              className={defaultPolicy === "allow" ? "schedule-policy-option active allow" : "schedule-policy-option allow"}
+              disabled={accessSettings.loading || policySaving}
+              onClick={() => updateDefaultPolicy("allow")}
+              type="button"
+            >
+              <CheckCircle2 size={16} />
+              Always Allow
+            </button>
+            <button
+              aria-pressed={defaultPolicy === "deny"}
+              className={defaultPolicy === "deny" ? "schedule-policy-option active deny" : "schedule-policy-option deny"}
+              disabled={accessSettings.loading || policySaving}
+              onClick={() => updateDefaultPolicy("deny")}
+              type="button"
+            >
+              <Lock size={16} />
+              Never Allow
+            </button>
+          </div>
+          <div className="schedule-policy-status">
+            {policySaving ? (
+              <Badge tone="gray">Saving</Badge>
+            ) : policySaved ? (
+              <span className="schedule-policy-saved-pill">
+                <Badge tone="green">Saved</Badge>
+              </span>
+            ) : null}
+          </div>
+        </section>
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
 
       <div className="schedule-card-grid">
         {filtered.length ? filtered.map((schedule) => (
@@ -3082,6 +3186,15 @@ function scheduleSummary(blocks: ScheduleTimeBlocks) {
   return `${hours % 1 === 0 ? hours : hours.toFixed(1)}h across ${days} day${days === 1 ? "" : "s"}`;
 }
 
+function scheduleDefaultPolicyDisplay(value: unknown) {
+  return String(value ?? "allow").trim().toLowerCase() === "deny" ? "Never Allow" : "Always Allow";
+}
+
+function useScheduleDefaultPolicyOptionLabel() {
+  const accessSettings = useSettings("access");
+  return `Default Policy - ${scheduleDefaultPolicyDisplay(accessSettings.values.schedule_default_policy)}`;
+}
+
 function PeopleView({
   garageDoors,
   groups,
@@ -3102,12 +3215,15 @@ function PeopleView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
+  const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const availableGarageDoors = React.useMemo(() => activeManagedCovers(garageDoors), [garageDoors]);
   const filtered = people.filter((item) =>
     matches(item.display_name, query) ||
     matches(item.group ?? "", query) ||
     item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
-    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoors.find((door) => door.entity_id === entityId)?.name ?? entityId, query))
+    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoors.find((door) => door.entity_id === entityId)?.name ?? entityId, query)) ||
+    matches(item.home_assistant_presence_entity_id ?? "", query) ||
+    matches(item.home_assistant_mobile_app_notify_service ?? "", query)
   );
   const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
   const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
@@ -3174,6 +3290,8 @@ function PeopleView({
                   {(person.garage_door_entity_ids ?? []).map((entityId) => (
                     <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
                   ))}
+                  {person.home_assistant_presence_entity_id ? <span className="vehicle-chip ha-chip">HA presence</span> : null}
+                  {person.home_assistant_mobile_app_notify_service ? <span className="vehicle-chip ha-chip">HA mobile</span> : null}
                 </div>
               </article>
             ))}
@@ -3186,6 +3304,7 @@ function PeopleView({
       {modalOpen ? (
         <PersonModal
           assignedVehicleIds={assignedVehicleIds}
+          defaultPolicyOptionLabel={defaultPolicyOptionLabel}
           garageDoors={availableGarageDoors}
           groups={groups}
           mode={selectedPerson ? "edit" : "create"}
@@ -3206,6 +3325,7 @@ function PeopleView({
 
 function PersonModal({
   assignedVehicleIds,
+  defaultPolicyOptionLabel,
   garageDoors,
   groups,
   mode,
@@ -3217,6 +3337,7 @@ function PersonModal({
   vehicles
 }: {
   assignedVehicleIds: Set<string>;
+  defaultPolicyOptionLabel: string;
   garageDoors: HomeAssistantManagedCover[];
   groups: Group[];
   mode: "create" | "edit";
@@ -3235,10 +3356,19 @@ function PersonModal({
     schedule_id: person?.schedule_id ?? "",
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
+    home_assistant_presence_entity_id: person?.home_assistant_presence_entity_id ?? "",
+    home_assistant_mobile_app_notify_service: person?.home_assistant_mobile_app_notify_service ?? "",
     notes: person?.notes ?? "",
     is_active: person?.is_active ?? true
   });
   const [error, setError] = React.useState("");
+  const [haDiscovery, setHaDiscovery] = React.useState<HomeAssistantDiscovery | null>(null);
+  const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
+  const [haDiscoveryLoading, setHaDiscoveryLoading] = React.useState(false);
+  const [haSelectionTouched, setHaSelectionTouched] = React.useState({ presence: Boolean(person?.home_assistant_presence_entity_id), mobile: Boolean(person?.home_assistant_mobile_app_notify_service) });
+  const [haSuggestion, setHaSuggestion] = React.useState<HomeAssistantPersonSuggestion>({});
+  const [haTestFeedback, setHaTestFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
+  const [sendingHaTest, setSendingHaTest] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
 
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
@@ -3276,6 +3406,90 @@ function PersonModal({
     );
   };
 
+  const updatePresenceEntity = (entityId: string) => {
+    setHaSelectionTouched((current) => ({ ...current, presence: true }));
+    update("home_assistant_presence_entity_id", entityId);
+  };
+
+  const updateMobileNotifyService = (serviceId: string) => {
+    setHaSelectionTouched((current) => ({ ...current, mobile: true }));
+    setHaTestFeedback(null);
+    update("home_assistant_mobile_app_notify_service", serviceId);
+  };
+
+  const sendHomeAssistantMobileTest = async () => {
+    if (!form.home_assistant_mobile_app_notify_service) {
+      setHaTestFeedback({ tone: "error", text: "Select a mobile app notification service first." });
+      return;
+    }
+    const personName = `${form.first_name} ${form.last_name}`.trim() || person?.display_name || "this person";
+    setSendingHaTest(true);
+    setHaTestFeedback({ tone: "info", text: "Sending Home Assistant test notification." });
+    try {
+      await api.post("/api/v1/integrations/home-assistant/mobile-notifications/test", {
+        service_name: form.home_assistant_mobile_app_notify_service,
+        person_name: personName
+      });
+      setHaTestFeedback({ tone: "success", text: "Home Assistant accepted the test notification." });
+    } catch (testError) {
+      setHaTestFeedback({
+        tone: "error",
+        text: testError instanceof Error ? testError.message : "Unable to send Home Assistant test notification."
+      });
+    } finally {
+      setSendingHaTest(false);
+    }
+  };
+
+  React.useEffect(() => {
+    let active = true;
+    setHaDiscoveryLoading(true);
+    setHaDiscoveryError("");
+    api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities")
+      .then((discovery) => {
+        if (!active) return;
+        setHaDiscovery(discovery);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setHaDiscoveryError(loadError instanceof Error ? loadError.message : "Unable to load Home Assistant entities.");
+      })
+      .finally(() => {
+        if (active) setHaDiscoveryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!haDiscovery) return;
+    const firstName = form.first_name.trim();
+    const lastName = form.last_name.trim();
+    if (!firstName || !lastName) {
+      setHaSuggestion({});
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      const suggestion = suggestHomeAssistantPersonIntegrations(firstName, lastName, haDiscovery);
+      setHaSuggestion(suggestion);
+      setForm((current) => ({
+        ...current,
+        home_assistant_presence_entity_id:
+          !haSelectionTouched.presence && !current.home_assistant_presence_entity_id && suggestion.presence?.id
+            ? suggestion.presence.id
+            : current.home_assistant_presence_entity_id,
+        home_assistant_mobile_app_notify_service:
+          !haSelectionTouched.mobile && !current.home_assistant_mobile_app_notify_service && suggestion.mobile?.id
+            ? suggestion.mobile.id
+            : current.home_assistant_mobile_app_notify_service
+      }));
+    }, 700);
+
+    return () => window.clearTimeout(timeout);
+  }, [form.first_name, form.last_name, haDiscovery, haSelectionTouched.mobile, haSelectionTouched.presence]);
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
@@ -3289,6 +3503,8 @@ function PersonModal({
       schedule_id: form.schedule_id || null,
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
+      home_assistant_presence_entity_id: form.home_assistant_presence_entity_id || null,
+      home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
       notes: form.notes || null,
       is_active: form.is_active
     };
@@ -3322,6 +3538,8 @@ function PersonModal({
     is_active: form.is_active,
     notes: form.notes || null,
     garage_door_entity_ids: form.garage_door_entity_ids,
+    home_assistant_presence_entity_id: form.home_assistant_presence_entity_id || null,
+    home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
     vehicles: []
   };
 
@@ -3380,7 +3598,7 @@ function PersonModal({
           <label className="field">
             <span>Access Schedule</span>
             <select value={form.schedule_id} onChange={(event) => update("schedule_id", event.target.value)}>
-              <option value="">No schedule - default policy</option>
+              <option value="">{defaultPolicyOptionLabel}</option>
               {schedules.map((schedule) => (
                 <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
               ))}
@@ -3396,6 +3614,55 @@ function PersonModal({
             </select>
           </label>
         </div>
+        <section className="person-ha-section">
+          <div className="person-ha-section-title">
+            <span className="ha-device-icon"><Home size={17} /></span>
+            <div>
+              <strong>Home Assistant</strong>
+              <span>{haDiscoveryLoading ? "Loading discovered entities" : haDiscovery ? "Presence and mobile notification links" : "Save credentials in API & Integrations to enable discovery"}</span>
+            </div>
+          </div>
+          {haDiscoveryError ? <div className="auth-error inline-error">{haDiscoveryError}</div> : null}
+          <div className="field-grid">
+            <EntitySelectField
+              label="Presence entity"
+              value={form.home_assistant_presence_entity_id}
+              entities={haDiscovery?.person_entities ?? []}
+              domainLabel="person"
+              onChange={updatePresenceEntity}
+            />
+            <MobileAppNotifySelectField
+              label="Mobile app notification"
+              value={form.home_assistant_mobile_app_notify_service}
+              services={haDiscovery?.mobile_app_notification_services ?? []}
+              onChange={updateMobileNotifyService}
+            />
+          </div>
+          <div className="person-ha-actions">
+            <button
+              className="secondary-button"
+              disabled={sendingHaTest || !form.home_assistant_mobile_app_notify_service}
+              onClick={sendHomeAssistantMobileTest}
+              type="button"
+            >
+              <Send size={15} /> {sendingHaTest ? "Sending..." : "Send Test"}
+            </button>
+            <span>{form.home_assistant_mobile_app_notify_service || "No mobile app service selected"}</span>
+          </div>
+          {haTestFeedback ? (
+            <div className={`person-ha-test-feedback ${haTestFeedback.tone}`}>{haTestFeedback.text}</div>
+          ) : null}
+          {(haSuggestion.presence || haSuggestion.mobile) ? (
+            <div className="person-ha-suggestions">
+              {haSuggestion.presence ? (
+                <span>Presence match {Math.round(haSuggestion.presence.confidence * 100)}%</span>
+              ) : null}
+              {haSuggestion.mobile ? (
+                <span>Mobile match {Math.round(haSuggestion.mobile.confidence * 100)}%</span>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
         <label className="field">
           <span>Operational notes</span>
           <textarea value={form.notes} onChange={(event) => update("notes", event.target.value)} rows={3} />
@@ -3465,6 +3732,7 @@ function VehiclesView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
+  const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const filtered = vehicles.filter((item) =>
     matches(item.registration_number, query) ||
     matches(item.owner ?? "", query) ||
@@ -3563,6 +3831,7 @@ function VehiclesView({
 
       {modalOpen ? (
         <VehicleModal
+          defaultPolicyOptionLabel={defaultPolicyOptionLabel}
           mode={selectedVehicle ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
@@ -3580,6 +3849,7 @@ function VehiclesView({
 }
 
 function VehicleModal({
+  defaultPolicyOptionLabel,
   mode,
   onClose,
   onSaved,
@@ -3588,6 +3858,7 @@ function VehicleModal({
   setPageError,
   vehicle
 }: {
+  defaultPolicyOptionLabel: string;
   mode: "create" | "edit";
   onClose: () => void;
   onSaved: () => Promise<void>;
@@ -3818,7 +4089,7 @@ function VehicleModal({
         <label className="field">
           <span>Access Schedule</span>
           <select value={form.schedule_id} onChange={(event) => update("schedule_id", event.target.value)}>
-            <option value="">Inherit from Owner</option>
+            <option value="">{defaultPolicyOptionLabel}</option>
             {schedules.map((schedule) => (
               <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
             ))}
@@ -4097,12 +4368,12 @@ function integrationDefinitions(
     {
       key: "home_assistant",
       title: "Home Assistant",
-      description: "Gate control, TTS announcements, and state sync.",
+      description: "Gate control, mobile app notifications, TTS announcements, and state sync.",
       category: "access",
       icon: Home,
       statusLabel: status?.configured ? "Connected" : "Not Configured",
       statusTone: status?.configured ? "green" : "gray",
-      notificationChannels: ["voice"],
+      notificationChannels: ["mobile", "voice"],
       fields: [
         { key: "home_assistant_url", label: "URL" },
         { key: "home_assistant_token", label: "Long-lived token", type: "password" },
@@ -4110,8 +4381,7 @@ function integrationDefinitions(
         { key: "home_assistant_gate_open_service", label: "Cover open service" },
         { key: "home_assistant_garage_door_entities", label: "Garage doors" },
         { key: "home_assistant_tts_service", label: "TTS service" },
-        { key: "home_assistant_default_media_player", label: "Default media player" },
-        { key: "home_assistant_presence_entities", label: "Presence mapping" }
+        { key: "home_assistant_default_media_player", label: "Default media player" }
       ]
     },
     {
@@ -5039,14 +5309,6 @@ function IntegrationModal({
     try {
       const discovery = await api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities");
       setHaDiscovery(discovery);
-      setForm((current) => {
-        const existing = parsePresenceMapping(current.home_assistant_presence_entities);
-        const suggested = discovery.presence_mappings.reduce<Record<string, string>>((acc, mapping) => {
-          if (mapping.suggested_entity_id && !acc[mapping.full_name]) acc[mapping.full_name] = mapping.suggested_entity_id;
-          return acc;
-        }, { ...existing });
-        return { ...current, home_assistant_presence_entities: JSON.stringify(suggested, null, 2) };
-      });
     } catch (error) {
       setHaDiscoveryError(error instanceof Error ? error.message : "Unable to load Home Assistant entities.");
     } finally {
@@ -5470,16 +5732,14 @@ function HomeAssistantSettingsFields({
   onReload: () => Promise<void>;
   schedules: Schedule[];
 }) {
-  type HomeAssistantTab = "setup" | "gates" | "garages" | "presence";
+  type HomeAssistantTab = "setup" | "gates" | "garages";
   const [activeTab, setActiveTab] = React.useState<HomeAssistantTab>("setup");
-  const presenceMapping = parsePresenceMapping(form.home_assistant_presence_entities);
   const gateEntities = parseManagedCovers(form.home_assistant_gate_entities);
   const garageDoorEntities = parseManagedCovers(form.home_assistant_garage_door_entities);
   const tabs: Array<{ key: HomeAssistantTab; label: string; meta: string; icon: React.ElementType }> = [
     { key: "setup", label: "Setup", meta: discovery ? "Discovery ready" : "Credentials", icon: Home },
     { key: "gates", label: "Gates", meta: `${gateEntities.length} configured`, icon: DoorOpen },
-    { key: "garages", label: "Garage doors", meta: `${garageDoorEntities.length} configured`, icon: Warehouse },
-    { key: "presence", label: "Presence", meta: `${Object.keys(presenceMapping).length} mapped`, icon: Users }
+    { key: "garages", label: "Garage doors", meta: `${garageDoorEntities.length} configured`, icon: Warehouse }
   ];
 
   const updateGateEntities = (entities: HomeAssistantManagedCover[]) => {
@@ -5502,16 +5762,6 @@ function HomeAssistantSettingsFields({
       ? discovery.garage_door_suggestions
       : (discovery?.cover_entities ?? []).filter(isGarageDoorCandidate).map(managedCoverFromEntity);
     updateGarageDoorEntities(mergeManagedCovers(garageDoorEntities, suggestions));
-  };
-
-  const updatePresenceMapping = (localName: string, entityId: string) => {
-    const next = { ...presenceMapping };
-    if (entityId) {
-      next[localName] = entityId;
-    } else {
-      delete next[localName];
-    }
-    onChange("home_assistant_presence_entities", JSON.stringify(next, null, 2));
   };
 
   return (
@@ -5617,44 +5867,6 @@ function HomeAssistantSettingsFields({
           title="Garage doors"
         />
         ) : null}
-
-        {activeTab === "presence" ? (
-      <section className="presence-mapping-card">
-        <div className="presence-mapping-title">
-          <strong>Presence mapping</strong>
-          <span>Auto-detected from local users and Home Assistant person entities.</span>
-        </div>
-        {discovery?.presence_mappings.length ? (
-          <div className="presence-mapping-list">
-            {discovery.presence_mappings.map((mapping) => (
-              <div className="presence-mapping-row" key={mapping.user_id}>
-                <div>
-                  <strong>{mapping.full_name}</strong>
-                  <span>
-                    {mapping.suggested_entity_id
-                      ? `Suggested ${mapping.suggested_entity_id} (${Math.round(mapping.confidence * 100)}%)`
-                      : "No confident match found"}
-                  </span>
-                </div>
-                <select
-                  value={presenceMapping[mapping.full_name] ?? mapping.suggested_entity_id ?? ""}
-                  onChange={(event) => updatePresenceMapping(mapping.full_name, event.target.value)}
-                >
-                  <option value="">Not mapped</option>
-                  {discovery.person_entities.map((entity) => (
-                    <option key={entity.entity_id} value={entity.entity_id}>
-                      {entity.name ? `${entity.name} - ${entity.entity_id}` : entity.entity_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">No Home Assistant person entities discovered</div>
-        )}
-      </section>
-        ) : null}
       </div>
     </div>
   );
@@ -5686,6 +5898,7 @@ function HomeAssistantCoverTable({
   title: string;
 }) {
   const [selectedEntityId, setSelectedEntityId] = React.useState("");
+  const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const selectedIds = React.useMemo(() => new Set(entities.map((entity) => entity.entity_id)), [entities]);
   const addableEntities = availableEntities.filter((entity) => entity.entity_id.startsWith("cover.") && !selectedIds.has(entity.entity_id));
 
@@ -5749,7 +5962,7 @@ function HomeAssistantCoverTable({
               value={entity.schedule_id ?? ""}
               onChange={(event) => updateEntity(entity.entity_id, { schedule_id: event.target.value || null })}
             >
-              <option value="">No schedule</option>
+              <option value="">{defaultPolicyOptionLabel}</option>
               {schedules.map((schedule) => (
                 <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
               ))}
@@ -5807,6 +6020,34 @@ function EntitySelectField({
   );
 }
 
+function MobileAppNotifySelectField({
+  label,
+  value,
+  services,
+  onChange
+}: {
+  label: string;
+  value: string;
+  services: HomeAssistantMobileAppService[];
+  onChange: (value: string) => void;
+}) {
+  const hasCurrentValue = value && !services.some((service) => service.service_id === value);
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Select mobile app service</option>
+        {hasCurrentValue ? <option value={value}>{value}</option> : null}
+        {services.map((service) => (
+          <option key={service.service_id} value={service.service_id}>
+            {service.name ? `${service.name} - ${service.service_id}` : service.service_id}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function LogsView({ logs }: { logs: RealtimeMessage[] }) {
   const [level, setLevel] = React.useState("all");
   const filtered = logs.filter((log) => level === "all" || log.type.includes(level));
@@ -5843,7 +6084,7 @@ const notificationChannelMeta: Record<NotificationChannelId, {
     label: "Mobile Notification",
     icon: Smartphone,
     tone: "blue",
-    description: "Apprise delivery to mobile, email, chat, and push endpoints."
+    description: "Apprise or Home Assistant mobile app delivery."
   },
   in_app: {
     label: "In-App Notification",
@@ -6484,7 +6725,7 @@ function NotificationActionCard({
   const Icon = meta.icon;
   const supportsTitle = action.type !== "voice";
   const supportsMedia = action.type === "mobile" || action.type === "in_app";
-  const targetLabel = action.type === "voice" ? "Voice targets" : action.type === "mobile" ? "Apprise targets" : "Dashboard targets";
+  const targetLabel = action.type === "voice" ? "Voice targets" : action.type === "mobile" ? "Mobile targets" : "Dashboard targets";
   const selectedCamera = cameras.find((camera) => camera.id === action.media.camera_id);
   const cameraSnapshotUrl = selectedCamera
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
@@ -7526,6 +7767,70 @@ function parsePresenceMapping(value: unknown): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function suggestHomeAssistantPersonIntegrations(
+  firstName: string,
+  lastName: string,
+  discovery: HomeAssistantDiscovery
+): HomeAssistantPersonSuggestion {
+  const displayName = `${firstName} ${lastName}`.trim();
+  const presence = bestHomeAssistantMatch(
+    displayName,
+    discovery.person_entities.map((entity) => ({
+      id: entity.entity_id,
+      label: entity.name ? `${entity.name} ${entity.entity_id}` : entity.entity_id
+    })),
+    0.45
+  );
+  const mobile = bestHomeAssistantMatch(
+    displayName,
+    discovery.mobile_app_notification_services.map((service) => ({
+      id: service.service_id,
+      label: service.name ? `${service.name} ${service.service_id}` : service.service_id
+    })),
+    0.45
+  );
+  return {
+    presence: presence ? { id: presence.id, label: titleFromEntityId(presence.id), confidence: presence.confidence } : undefined,
+    mobile: mobile ? { id: mobile.id, label: titleFromEntityId(mobile.id), confidence: mobile.confidence } : undefined
+  };
+}
+
+function bestHomeAssistantMatch(
+  personName: string,
+  candidates: Array<{ id: string; label: string }>,
+  threshold: number
+): { id: string; confidence: number } | null {
+  const personTokens = homeAssistantNameTokens(personName);
+  if (!personTokens.size) return null;
+  let best: { id: string; confidence: number } | null = null;
+  for (const candidate of candidates) {
+    const candidateTokens = homeAssistantNameTokens(`${candidate.id} ${candidate.label}`);
+    if (!candidateTokens.size) continue;
+    const overlap = [...personTokens].filter((token) => candidateTokens.has(token)).length / personTokens.size;
+    const personCompact = [...personTokens].sort().join("");
+    const candidateCompact = [...candidateTokens].sort().join("");
+    const substringScore = candidateCompact.includes(personCompact) || [...personTokens].some((token) => candidateCompact.includes(token))
+      ? 0.7
+      : 0;
+    const confidence = Math.max(overlap, substringScore);
+    if (!best || confidence > best.confidence) {
+      best = { id: candidate.id, confidence };
+    }
+  }
+  return best && best.confidence >= threshold ? best : null;
+}
+
+function homeAssistantNameTokens(value: string) {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/notify\.mobile_app_/g, " ")
+      .replace(/person\./g, " ")
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+  );
 }
 
 function parseManagedCovers(value: unknown): HomeAssistantManagedCover[] {

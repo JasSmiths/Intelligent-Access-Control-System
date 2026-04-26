@@ -25,6 +25,15 @@ class HomeAssistantState:
     attributes: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class HomeAssistantService:
+    service_id: str
+    domain: str
+    service: str
+    name: str | None
+    description: str | None
+
+
 class HomeAssistantClient:
     """Small async Home Assistant REST/WebSocket client.
 
@@ -61,6 +70,35 @@ class HomeAssistantClient:
             for item in data
             if isinstance(item, dict) and item.get("entity_id")
         ]
+
+    async def list_services(self) -> list[HomeAssistantService]:
+        data = await self._request("GET", "/api/services")
+        if not isinstance(data, list):
+            raise HomeAssistantError("Home Assistant returned an unexpected services payload.")
+
+        services: list[HomeAssistantService] = []
+        for domain_payload in data:
+            if not isinstance(domain_payload, dict):
+                continue
+            domain = str(domain_payload.get("domain") or "").strip()
+            service_payloads = domain_payload.get("services")
+            if not domain or not isinstance(service_payloads, dict):
+                continue
+            for service, details in service_payloads.items():
+                service_name = str(service or "").strip()
+                if not service_name:
+                    continue
+                detail_map = details if isinstance(details, dict) else {}
+                services.append(
+                    HomeAssistantService(
+                        service_id=f"{domain}.{service_name}",
+                        domain=domain,
+                        service=service_name,
+                        name=str(detail_map.get("name")) if detail_map.get("name") else None,
+                        description=str(detail_map.get("description")) if detail_map.get("description") else None,
+                    )
+                )
+        return services
 
     async def subscribe_state_changed(self) -> AsyncIterator[dict[str, Any]]:
         config = await self.config()
