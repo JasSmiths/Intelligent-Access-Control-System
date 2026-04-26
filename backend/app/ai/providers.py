@@ -434,6 +434,10 @@ class LocalProvider:
                 summaries.append(self._summarize_events(output))
             elif tool_name == "query_presence":
                 summaries.append(self._summarize_presence(output))
+            elif tool_name == "query_device_states":
+                summaries.append(self._summarize_device_states(output))
+            elif tool_name == "open_device":
+                summaries.append(self._summarize_device_open(output))
             elif tool_name == "query_anomalies":
                 summaries.append(self._summarize_anomalies(output))
             elif tool_name == "calculate_visit_duration":
@@ -446,6 +450,22 @@ class LocalProvider:
                 summaries.append(self._summarize_dvla_vehicle(output))
             elif tool_name == "analyze_camera_snapshot":
                 summaries.append(self._summarize_camera_analysis(output))
+            elif tool_name == "read_chat_attachment":
+                summaries.append(self._summarize_attachment_read(output))
+            elif tool_name in {"export_presence_report_csv", "generate_contractor_invoice_pdf"}:
+                summaries.append(self._summarize_generated_file(output))
+            elif tool_name == "get_camera_snapshot":
+                summaries.append(self._summarize_camera_attachment(output))
+            elif tool_name in {
+                "query_schedules",
+                "get_schedule",
+                "create_schedule",
+                "update_schedule",
+                "delete_schedule",
+                "assign_schedule_to_entity",
+                "verify_schedule_access",
+            }:
+                summaries.append(self._summarize_schedule_tool(tool_name, output))
             else:
                 summaries.append(f"{tool_name}: {json.dumps(output, default=str)}")
         return "\n".join(summaries)
@@ -467,6 +487,30 @@ class LocalProvider:
         if not records:
             return "I found no matching presence records."
         return "; ".join(f"{row['person']} is {row['state']}" for row in records)
+
+    def _summarize_device_states(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"Device state check failed: {output.get('error')}"
+        devices = output.get("devices", [])
+        if not devices:
+            target = output.get("target")
+            if target:
+                return f"I found no configured device matching {target}."
+            return "I found no configured gate, door, or garage-door states."
+        return "; ".join(
+            f"{device.get('name') or device.get('entity_id')} is {device.get('state', 'unknown')}"
+            for device in devices
+        )
+
+    def _summarize_device_open(self, output: dict[str, Any]) -> str:
+        if output.get("requires_confirmation"):
+            target = output.get("target") or "that device"
+            return f"Please use the confirmation button before I open {target}."
+        device = output.get("device") if isinstance(output.get("device"), dict) else {}
+        name = device.get("name") or output.get("target") or "the device"
+        if output.get("opened"):
+            return f"Opened {name}. This was logged as an Alfred agent action."
+        return f"I could not open {name}: {output.get('detail') or output.get('error') or 'command failed'}"
 
     def _summarize_anomalies(self, output: dict[str, Any]) -> str:
         anomalies = output.get("anomalies", [])
@@ -520,6 +564,67 @@ class LocalProvider:
         if output.get("error"):
             return f"Camera analysis failed: {output.get('error')}"
         return str(output.get("analysis") or "Camera analysis returned no text.")
+
+    def _summarize_attachment_read(self, output: dict[str, Any]) -> str:
+        filename = output.get("filename") or "the attachment"
+        if output.get("error"):
+            return f"I could not read {filename}: {output.get('error')}"
+        if output.get("analysis"):
+            return f"Attachment analysis for {filename}: {output.get('analysis')}"
+        text = str(output.get("text") or "").strip()
+        if not text:
+            return f"I read {filename}, but found no text to summarize."
+        preview = text[:800].rstrip()
+        return f"I read {filename}. Content preview:\n{preview}"
+
+    def _summarize_generated_file(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"File generation failed: {output.get('error')}"
+        attachment = output.get("attachment") if isinstance(output.get("attachment"), dict) else {}
+        filename = attachment.get("filename") or "the file"
+        return f"I generated {filename} and attached it here."
+
+    def _summarize_camera_attachment(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"Camera snapshot failed: {output.get('error')}"
+        attachment = output.get("attachment") if isinstance(output.get("attachment"), dict) else {}
+        filename = attachment.get("filename") or "the camera snapshot"
+        return f"I fetched {filename} and attached it here."
+
+    def _summarize_schedule_tool(self, tool_name: str, output: dict[str, Any]) -> str:
+        if output.get("requires_details"):
+            return str(output.get("detail") or "I need more schedule details before I can do that.")
+        if output.get("error"):
+            return f"Schedule action failed: {output.get('error')}"
+
+        schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+        name = schedule.get("name") or output.get("schedule_name") or "schedule"
+        summary = schedule.get("summary")
+
+        if tool_name == "query_schedules":
+            count = output.get("count", 0)
+            return f"I found {count} schedule{'s' if count != 1 else ''}."
+        if tool_name == "get_schedule":
+            return f"{name}: {summary or 'schedule details returned'}."
+        if tool_name == "create_schedule":
+            if output.get("created"):
+                return f"Created {name} with {summary or 'the requested allowed time'}."
+            return str(output.get("detail") or "I did not create the schedule.")
+        if tool_name == "update_schedule":
+            if output.get("updated"):
+                return f"Updated {name}."
+            return "I did not update the schedule."
+        if tool_name == "delete_schedule":
+            if output.get("deleted"):
+                return f"Deleted {name}."
+            return str(output.get("detail") or "I did not delete the schedule.")
+        if tool_name == "assign_schedule_to_entity":
+            if output.get("assigned"):
+                return f"Assigned {name}."
+            return "I did not assign the schedule."
+        if tool_name == "verify_schedule_access":
+            return str(output.get("reason") or "Schedule access verification completed.")
+        return json.dumps(output, default=str)
 
 
 def _format_engine_capacity(value: Any) -> str | None:

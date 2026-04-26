@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   AlertTriangle,
@@ -22,6 +23,8 @@ import {
   DoorClosed,
   DoorOpen,
   Download,
+  File as FileIcon,
+  FileImage,
   FileText,
   Gauge,
   GitBranch,
@@ -32,6 +35,7 @@ import {
   Lock,
   LogIn,
   LogOut,
+  Loader2,
   MessageCircle,
   Menu,
   Moon,
@@ -39,6 +43,7 @@ import {
   Play,
   PlugZap,
   Plus,
+  Paperclip,
   RefreshCcw,
   Search,
   Send,
@@ -48,6 +53,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Save,
+  Sparkles,
   Sun,
   Terminal,
   Trash2,
@@ -586,6 +592,47 @@ type AuthStatus = {
   user: UserAccount | null;
 };
 
+type ChatAttachment = {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  kind: "image" | "text" | "document" | string;
+  url: string;
+  download_url?: string | null;
+  source?: string | null;
+  created_at?: string | null;
+};
+
+type ChatAttachmentDraft = ChatAttachment & {
+  uploadState: "uploading" | "ready" | "error";
+  preview_url?: string;
+  error?: string;
+};
+
+type ChatConfirmationAction = {
+  type: "open_device" | "update_schedule";
+  target: string;
+  displayTarget: string;
+  command: string;
+  title: string;
+  description: string;
+  buttonLabel: string;
+  pendingLabel: string;
+  statusLabel: string;
+  userEcho: string;
+  sent?: boolean;
+};
+
+type ChatMessageItem = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  attachments?: ChatAttachment[];
+  confirmationAction?: ChatConfirmationAction | null;
+  streaming?: boolean;
+};
+
 type ThemeMode = "system" | "light" | "dark";
 type ProfilePreferences = {
   sidebarCollapsed: boolean;
@@ -720,6 +767,86 @@ async function apiError(response: Response) {
 function wsUrl(path: string) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   return `${protocol}://${window.location.host}${path}`;
+}
+
+async function uploadChatAttachment(file: File, sessionId: string | null): Promise<ChatAttachment> {
+  const body = new FormData();
+  body.append("file", file);
+  const suffix = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  const response = await fetch(`/api/chat/upload${suffix}`, {
+    method: "POST",
+    credentials: "include",
+    body
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<ChatAttachment>;
+}
+
+function clientId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${size} B`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function formatDeviceTargetName(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .map((part) => part ? part[0].toUpperCase() + part.slice(1) : part)
+    .join(" ");
+}
+
+function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | null {
+  if (!Array.isArray(toolResults)) return null;
+  for (const result of toolResults) {
+    if (!isRecord(result) || !isRecord(result.output)) continue;
+    if (result.output.requires_confirmation !== true) continue;
+    const args = isRecord(result.arguments) ? result.arguments : {};
+    if (result.name === "open_device") {
+      const target = String(result.output.target || args.target || args.entity_id || "").trim();
+      if (!target) return null;
+      const displayTarget = formatDeviceTargetName(target);
+      return {
+        type: "open_device",
+        target,
+        displayTarget,
+        command: `confirm open ${target}`,
+        title: `Open ${displayTarget}?`,
+        description: "This will be logged as an Alfred action.",
+        buttonLabel: "Confirm",
+        pendingLabel: "Confirmed",
+        statusLabel: `Opening ${displayTarget}...`,
+        userEcho: `Confirmed: open ${displayTarget}`
+      };
+    }
+    if (result.name === "update_schedule") {
+      const target = String(result.output.schedule_name || args.schedule_name || args.name || "").trim();
+      if (!target) return null;
+      const summary = typeof result.output.summary === "string" ? result.output.summary : "the requested times";
+      return {
+        type: "update_schedule",
+        target,
+        displayTarget: target,
+        command: `confirm update ${target} schedule`,
+        title: `Update ${target}?`,
+        description: `Replace the existing allowed times with ${summary}.`,
+        buttonLabel: "Update schedule",
+        pendingLabel: "Update confirmed",
+        statusLabel: `Updating ${target}...`,
+        userEcho: `Confirmed: update ${target}`
+      };
+    }
+  }
+  return null;
 }
 
 function applyIntegrationRealtimeEvent(
@@ -7985,96 +8112,570 @@ function ThemeControl({ theme, setTheme }: { theme: ThemeMode; setTheme: (mode: 
   );
 }
 
+const chatMessageVariants = {
+  hidden: { opacity: 0, y: 14, scale: 0.98 },
+  visible: { opacity: 1, y: 0, scale: 1 },
+  exit: { opacity: 0, y: 8, scale: 0.98 }
+};
+
 function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
   const [open, setOpen] = React.useState(false);
   const teaserStorageKey = `iacs-chat-teaser-dismissed:${currentUser.id}`;
   const [showTeaser, setShowTeaser] = React.useState(() => sessionStorage.getItem(teaserStorageKey) !== "true");
   const [sessionId, setSessionId] = React.useState<string | null>(null);
-  const [messages, setMessages] = React.useState<Array<{ role: "user" | "assistant"; text: string }>>([
-    { role: "assistant", text: "Site agent ready." }
-  ]);
+  const [messages, setMessages] = React.useState<ChatMessageItem[]>([]);
   const [draft, setDraft] = React.useState("");
+  const [pendingAttachments, setPendingAttachments] = React.useState<ChatAttachmentDraft[]>([]);
+  const [connected, setConnected] = React.useState(false);
+  const [thinking, setThinking] = React.useState(false);
+  const [toolStatus, setToolStatus] = React.useState("");
+  const [dragActive, setDragActive] = React.useState(false);
   const socketRef = React.useRef<WebSocket | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const feedRef = React.useRef<HTMLDivElement | null>(null);
+  const activeAssistantMessageRef = React.useRef<string | null>(null);
+  const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
+  const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
+  const uploading = pendingAttachments.some((attachment) => attachment.uploadState === "uploading");
+  const readyAttachments = pendingAttachments.filter((attachment) => attachment.uploadState === "ready");
+  const canSend = Boolean((draft.trim() || readyAttachments.length) && connected && !uploading);
 
   React.useEffect(() => {
     setShowTeaser(sessionStorage.getItem(teaserStorageKey) !== "true");
   }, [teaserStorageKey]);
 
-  const dismissTeaser = () => {
-    sessionStorage.setItem(teaserStorageKey, "true");
-    setShowTeaser(false);
-  };
+  React.useEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachments;
+  }, [pendingAttachments]);
+
+  React.useEffect(() => {
+    return () => {
+      pendingAttachmentsRef.current.forEach((attachment) => {
+        if (attachment.preview_url) URL.revokeObjectURL(attachment.preview_url);
+      });
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    if (greetingInsertedRef.current) return;
+    setMessages((current) => {
+      greetingInsertedRef.current = true;
+      if (current.length) return current;
+      return [{ id: clientId("alfred"), role: "assistant", text: `Hi ${firstName}, how can I help?` }];
+    });
+  }, [firstName, open]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const focusTimer = window.setTimeout(() => {
+      composerRef.current?.focus({ preventScroll: true });
+    }, 120);
+    return () => window.clearTimeout(focusTimer);
+  }, [open]);
 
   React.useEffect(() => {
     if (!open || socketRef.current) return;
     const socket = new WebSocket(wsUrl("/api/v1/ai/chat/ws"));
+    setConnected(false);
+    socket.onopen = () => setConnected(true);
     socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      const data = JSON.parse(event.data) as { type: string; payload?: Record<string, unknown> };
+      const payload = data.payload ?? {};
+      if (data.type === "connection.ready") {
+        setConnected(true);
+        return;
+      }
+      if (data.type === "chat.thinking") {
+        setThinking(true);
+        setToolStatus("Thinking...");
+        return;
+      }
+      if (data.type === "chat.tool_status") {
+        setThinking(true);
+        setToolStatus(typeof payload.label === "string" ? payload.label : "Running system tool...");
+        return;
+      }
+      if (data.type === "chat.response.delta") {
+        const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
+        if (!chunk) return;
+        setThinking(true);
+        setMessages((current) => {
+          const activeId = activeAssistantMessageRef.current ?? clientId("alfred-stream");
+          activeAssistantMessageRef.current = activeId;
+          const existing = current.find((message) => message.id === activeId);
+          if (existing) {
+            return current.map((message) => message.id === activeId ? { ...message, text: message.text + chunk, streaming: true } : message);
+          }
+          return [...current, { id: activeId, role: "assistant", text: chunk, streaming: true }];
+        });
+        return;
+      }
       if (data.type === "chat.response") {
-        setSessionId(data.payload.session_id);
-        setMessages((current) => [...current, { role: "assistant", text: data.payload.text }]);
+        const text = typeof payload.text === "string" ? payload.text : "";
+        const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
+        const confirmationAction = chatConfirmationAction(payload.tool_results);
+        const responseText = confirmationAction
+          ? text
+          : text;
+        if (typeof payload.session_id === "string") setSessionId(payload.session_id);
+        setMessages((current) => {
+          const activeId = activeAssistantMessageRef.current ?? clientId("alfred");
+          activeAssistantMessageRef.current = null;
+          const existing = current.find((message) => message.id === activeId);
+          if (existing) {
+            return current.map((message) =>
+              message.id === activeId
+                ? {
+                  ...message,
+                  text: responseText,
+                  attachments: responseAttachments,
+                  confirmationAction,
+                  streaming: false
+                }
+                : message
+            );
+          }
+          return [
+            ...current,
+            {
+              id: activeId,
+              role: "assistant",
+              text: responseText,
+              attachments: responseAttachments,
+              confirmationAction
+            }
+          ];
+        });
+        setThinking(false);
+        setToolStatus("");
+        return;
+      }
+      if (data.type === "chat.error") {
+        setMessages((current) => [
+          ...current,
+          {
+            id: clientId("alfred-error"),
+            role: "assistant",
+            text: typeof payload.message === "string" ? payload.message : "Alfred could not complete that request."
+          }
+        ]);
+        setThinking(false);
+        setToolStatus("");
       }
     };
     socket.onclose = () => {
       socketRef.current = null;
+      setConnected(false);
+      setThinking(false);
+      setToolStatus("");
     };
     socketRef.current = socket;
-    return () => socket.close();
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
   }, [open]);
 
-  const sendMessage = () => {
-    const message = draft.trim();
+  React.useEffect(() => {
+    if (!feedRef.current) return;
+    window.requestAnimationFrame(() => {
+      if (feedRef.current) {
+        feedRef.current.scrollTop = feedRef.current.scrollHeight;
+      }
+    });
+  }, [messages, thinking, toolStatus]);
+
+  const dismissTeaser = React.useCallback(() => {
+    sessionStorage.setItem(teaserStorageKey, "true");
+    setShowTeaser(false);
+  }, [teaserStorageKey]);
+
+  const removeAttachment = React.useCallback((id: string) => {
+    setPendingAttachments((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed?.preview_url) URL.revokeObjectURL(removed.preview_url);
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  }, []);
+
+  const addFiles = React.useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList).slice(0, 6);
+    if (!files.length) return;
+    const drafts: ChatAttachmentDraft[] = files.map((file) => ({
+      id: clientId("upload"),
+      filename: file.name || "Attachment",
+      content_type: file.type || "application/octet-stream",
+      size_bytes: file.size,
+      kind: file.type.startsWith("image/") ? "image" : "document",
+      url: "",
+      uploadState: "uploading",
+      preview_url: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
+    }));
+    setPendingAttachments((current) => [...current, ...drafts]);
+    drafts.forEach((draftAttachment, index) => {
+      uploadChatAttachment(files[index], sessionId)
+        .then((uploaded) => {
+          if (draftAttachment.preview_url) URL.revokeObjectURL(draftAttachment.preview_url);
+          setPendingAttachments((current) =>
+            current.map((attachment) =>
+              attachment.id === draftAttachment.id
+                ? { ...uploaded, uploadState: "ready" }
+                : attachment
+            )
+          );
+        })
+        .catch((error: unknown) => {
+          setPendingAttachments((current) =>
+            current.map((attachment) =>
+              attachment.id === draftAttachment.id
+                ? {
+                  ...attachment,
+                  uploadState: "error",
+                  error: error instanceof Error ? error.message : "Upload failed"
+                }
+                : attachment
+            )
+          );
+        });
+    });
+  }, [sessionId]);
+
+  const sendConfirmationAction = React.useCallback((messageId: string, action: ChatConfirmationAction) => {
     const socket = socketRef.current;
-    if (!message || !socket || socket.readyState !== WebSocket.OPEN) return;
-    setMessages((current) => [...current, { role: "user", text: message }]);
-    socket.send(JSON.stringify({ message, session_id: sessionId }));
+    if (!connected || thinking || !socket || socket.readyState !== WebSocket.OPEN || action.sent) return;
+    setMessages((current) => [
+      ...current.map((message) =>
+        message.id === messageId && message.confirmationAction
+          ? { ...message, confirmationAction: { ...message.confirmationAction, sent: true } }
+          : message
+      ),
+      {
+        id: clientId("user"),
+        role: "user",
+        text: action.userEcho
+      }
+    ]);
+    socket.send(JSON.stringify({ message: action.command, session_id: sessionId, attachments: [] }));
+    setThinking(true);
+    setToolStatus(action.statusLabel);
+  }, [connected, sessionId, thinking]);
+
+  const sendMessage = React.useCallback(() => {
+    const socket = socketRef.current;
+    if (!canSend || !socket || socket.readyState !== WebSocket.OPEN) return;
+    const text = draft.trim() || "Please inspect the attached file.";
+    const attachments = readyAttachments.map(publicChatAttachment);
+    setMessages((current) => [
+      ...current,
+      { id: clientId("user"), role: "user", text, attachments }
+    ]);
+    socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments }));
     setDraft("");
+    setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
+    setThinking(true);
+    setToolStatus("Thinking...");
+  }, [canSend, draft, readyAttachments, sessionId]);
+
+  const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const handleDrop = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    addFiles(event.dataTransfer.files);
+  }, [addFiles]);
+
+  const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (!nextTarget || !event.currentTarget.contains(nextTarget as Node)) {
+      setDragActive(false);
+    }
   };
 
   return (
     <div className={open ? "chat-widget open" : "chat-widget"}>
-      {open ? (
-        <div className="chat-panel">
-          <div className="chat-header">
-            <div className="card-title">
-              <Bot size={18} aria-label="Chat with me" />
+      <AnimatePresence>
+        {open ? (
+          <motion.div
+            className={dragActive ? "chat-panel drag-active" : "chat-panel"}
+            layoutId="alfred-surface"
+            initial={{ opacity: 0, scale: 0.86, y: 28 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 24 }}
+            transition={{ type: "spring", stiffness: 360, damping: 32 }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="chat-header">
+              <div className="alfred-identity">
+                <span className="alfred-avatar">
+                  <Bot size={18} aria-hidden="true" />
+                </span>
+                <span>
+                  <strong>Alfred</strong>
+                  <small><span className={connected ? "alfred-status online" : "alfred-status"} />{connected ? "Online" : "Connecting"}</small>
+                </span>
+              </div>
+              <button className="icon-button chat-close" onClick={() => setOpen(false)} type="button" aria-label="Close Alfred">
+                <X size={16} />
+              </button>
             </div>
-            <button className="icon-button" onClick={() => setOpen(false)} type="button" aria-label="Close chat">
+
+            <div className="chat-feed" ref={feedRef}>
+              <AnimatePresence initial={false}>
+                {messages.map((message, index) => (
+                  <ChatMessageBubble
+                    index={index}
+                    key={message.id}
+                    message={message}
+                    onConfirm={sendConfirmationAction}
+                    senderName={message.role === "assistant" ? "Alfred" : firstName}
+                  />
+                ))}
+              </AnimatePresence>
+              {thinking ? <TypingIndicator status={toolStatus} /> : null}
+            </div>
+
+            <div className="chat-composer">
+              {pendingAttachments.length ? (
+                <div className="chat-composer-attachments" aria-label="Pending attachments">
+                  {pendingAttachments.map((attachment) => (
+                    <ChatAttachmentPreview attachment={attachment} key={attachment.id} onRemove={removeAttachment} />
+                  ))}
+                </div>
+              ) : null}
+              <div className="chat-input">
+                <input
+                  className="chat-file-input"
+                  multiple
+                  onChange={(event) => {
+                    if (event.currentTarget.files) addFiles(event.currentTarget.files);
+                    event.currentTarget.value = "";
+                  }}
+                  ref={fileInputRef}
+                  type="file"
+                />
+                <button className="icon-button attach" onClick={() => fileInputRef.current?.click()} type="button" aria-label="Attach files">
+                  <Paperclip size={17} />
+                </button>
+                <textarea
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder="Ask Alfred..."
+                  ref={composerRef}
+                  rows={1}
+                />
+                <button className="icon-button send" disabled={!canSend} onClick={sendMessage} type="button" aria-label="Send message">
+                  <Send size={17} />
+                </button>
+              </div>
+              {dragActive ? (
+                <div className="chat-drop-overlay">
+                  <Sparkles size={18} />
+                  <span>Drop files for Alfred</span>
+                </div>
+              ) : null}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {!open && showTeaser ? (
+          <motion.div
+            className="chat-teaser"
+            initial={{ opacity: 0, y: 10, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.96 }}
+          >
+            <button className="teaser-close" onClick={dismissTeaser} type="button" aria-label="Dismiss chat prompt">
               <X size={16} />
             </button>
-          </div>
-          <div className="chat-feed">
-            {messages.map((message, index) => (
-              <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
-                {message.text}
-              </div>
-            ))}
-          </div>
-          <div className="chat-input">
-            <input value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => event.key === "Enter" && sendMessage()} placeholder="Ask about presence" />
-            <button className="icon-button send" onClick={sendMessage} type="button" aria-label="Send">
-              <Send size={17} />
-            </button>
-          </div>
-        </div>
-      ) : null}
-      {!open && showTeaser ? (
-        <div className="chat-teaser">
-          <button className="teaser-close" onClick={dismissTeaser} type="button" aria-label="Dismiss chat prompt">
-            <X size={16} />
-          </button>
-          <strong>Hi {firstName}!</strong>
-          <p>Need help with something? I can help you check events, run reports, and more.</p>
-        </div>
-      ) : null}
+            <strong>Alfred is ready</strong>
+            <p>Hi {firstName}, how can I help?</p>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
       {!open ? (
-        <button className="chat-pill" onClick={() => setOpen(true)} type="button" aria-label="Chat with me">
+        <motion.button
+          className="chat-pill"
+          layoutId="alfred-surface"
+          onClick={() => setOpen(true)}
+          type="button"
+          aria-label="Open Alfred"
+          whileHover={{ y: -2, scale: 1.02 }}
+          whileTap={{ scale: 0.97 }}
+        >
           <MessageCircle size={18} />
-        </button>
+          <span>Alfred</span>
+        </motion.button>
       ) : null}
     </div>
   );
+}
+
+function ChatMessageBubble({
+  message,
+  index,
+  senderName,
+  onConfirm
+}: {
+  message: ChatMessageItem;
+  index: number;
+  senderName: string;
+  onConfirm: (messageId: string, action: ChatConfirmationAction) => void;
+}) {
+  return (
+    <motion.div
+      className={`chat-message ${message.role}`}
+      variants={chatMessageVariants}
+      initial="hidden"
+      animate="visible"
+      exit="exit"
+      transition={{ type: "spring", stiffness: 420, damping: 34, delay: Math.min(index * 0.025, 0.18) }}
+      layout
+    >
+      <div className="chat-message-stack">
+        <span className="chat-sender-label">{senderName}</span>
+        <div className={`chat-bubble ${message.role}`}>
+          {message.text ? <p>{message.text}</p> : null}
+          {message.confirmationAction ? (
+            <ChatConfirmationCard
+              action={message.confirmationAction}
+              onConfirm={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction)}
+            />
+          ) : null}
+          {message.attachments?.length ? (
+            <div className="chat-bubble-attachments">
+              {message.attachments.map((attachment) => (
+                <ChatAttachmentCard attachment={attachment} key={attachment.id} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function ChatConfirmationCard({
+  action,
+  onConfirm
+}: {
+  action: ChatConfirmationAction;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="chat-confirm-card">
+      <span className="chat-confirm-icon">
+        {action.type === "update_schedule" ? <Clock3 size={17} /> : <DoorOpen size={17} />}
+      </span>
+      <span>
+        <strong>{action.title}</strong>
+        <small>{action.description}</small>
+      </span>
+      <button className="chat-confirm-button" disabled={action.sent} onClick={onConfirm} type="button">
+        <ShieldCheck size={14} />
+        <span>{action.sent ? action.pendingLabel : action.buttonLabel}</span>
+      </button>
+    </div>
+  );
+}
+
+function ChatAttachmentCard({ attachment }: { attachment: ChatAttachment }) {
+  const url = attachment.url || attachment.download_url || "#";
+  if (attachment.kind === "image") {
+    return (
+      <a className="chat-image-attachment" href={url} target="_blank" rel="noreferrer">
+        <img alt={attachment.filename} src={url} />
+      </a>
+    );
+  }
+  return (
+    <div className="chat-download-card">
+      <span className="chat-file-icon"><FileText size={18} /></span>
+      <span>
+        <strong>{attachment.filename}</strong>
+        <small>{formatFileSize(attachment.size_bytes)} · {attachment.content_type}</small>
+      </span>
+      <a className="chat-download-button" href={attachment.download_url || url} download>
+        <Download size={14} />
+        <span>Download</span>
+      </a>
+    </div>
+  );
+}
+
+function ChatAttachmentPreview({
+  attachment,
+  onRemove
+}: {
+  attachment: ChatAttachmentDraft;
+  onRemove: (id: string) => void;
+}) {
+  const isImage = attachment.kind === "image";
+  const Icon = isImage ? FileImage : FileIcon;
+  return (
+    <div className={`chat-attachment-pill ${attachment.uploadState}`}>
+      {isImage && (attachment.preview_url || attachment.url) ? (
+        <img alt="" src={attachment.preview_url || attachment.url} />
+      ) : (
+        <Icon size={15} />
+      )}
+      <span>
+        <strong>{attachment.filename}</strong>
+        <small>{attachment.uploadState === "error" ? attachment.error : formatFileSize(attachment.size_bytes)}</small>
+      </span>
+      {attachment.uploadState === "uploading" ? <Loader2 className="spin" size={14} /> : null}
+      <button onClick={() => onRemove(attachment.id)} type="button" aria-label={`Remove ${attachment.filename}`}>
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
+function TypingIndicator({ status }: { status: string }) {
+  return (
+    <motion.div
+      className="typing-row"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+    >
+      {status ? <span className="typing-status">{status}</span> : null}
+      <span className="typing-bubble" aria-label="Alfred is typing">
+        <i />
+        <i />
+        <i />
+      </span>
+    </motion.div>
+  );
+}
+
+function publicChatAttachment(attachment: ChatAttachmentDraft): ChatAttachment {
+  return {
+    id: attachment.id,
+    filename: attachment.filename,
+    content_type: attachment.content_type,
+    size_bytes: attachment.size_bytes,
+    kind: attachment.kind,
+    url: attachment.url,
+    download_url: attachment.download_url,
+    source: attachment.source,
+    created_at: attachment.created_at
+  };
 }
 
 function useTheme(): [ThemeMode, (mode: ThemeMode) => void] {

@@ -50,6 +50,7 @@ services:
     volumes:
       # Bind mounts only. These paths are intentionally visible on the host.
       - ./data/backend:/app/data
+      - ./data/chat_attachments:/app/data/chat_attachments
       - ./logs/backend:/app/logs
       - ./backend/app:/app/app:ro
     depends_on:

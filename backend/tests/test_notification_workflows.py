@@ -309,6 +309,95 @@ async def test_ai_alert_tool_does_not_report_false_success(monkeypatch) -> None:
     assert "No active notification workflow" in result["error"]
 
 
+def test_ai_notification_workflow_tools_are_registered() -> None:
+    tools = ai_tools.build_agent_tools()
+
+    expected = {
+        "query_notification_catalog",
+        "query_notification_workflows",
+        "get_notification_workflow",
+        "create_notification_workflow",
+        "update_notification_workflow",
+        "delete_notification_workflow",
+        "preview_notification_workflow",
+        "test_notification_workflow",
+    }
+    assert expected.issubset(tools.keys())
+
+
+async def test_ai_preview_notification_workflow_resolves_variables() -> None:
+    result = await ai_tools.preview_notification_workflow(
+        {
+            "rule": {
+                "name": "Preview",
+                "trigger_event": "authorized_entry",
+                "actions": [
+                    {
+                        "type": "in_app",
+                        "title_template": "@FirstName arrived",
+                        "message_template": "@FirstName arrived in the @VehicleName.",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert result["previewed"] is True
+    assert result["preview"]["actions"][0]["title"] == "Steph arrived"
+
+
+async def test_ai_notification_mutation_tools_require_confirmation() -> None:
+    create_result = await ai_tools.create_notification_workflow(
+        {
+            "name": "Gate arrivals",
+            "trigger_event": "authorized_entry",
+            "actions": [{"type": "in_app"}],
+        }
+    )
+    delete_result = await ai_tools.delete_notification_workflow({"rule_name": "Gate arrivals"})
+    test_result = await ai_tools.test_notification_workflow(
+        {
+            "rule": {
+                "name": "Preview",
+                "trigger_event": "authorized_entry",
+                "actions": [{"type": "in_app"}],
+            }
+        }
+    )
+
+    assert create_result["created"] is False
+    assert "confirm=true" in create_result["error"]
+    assert delete_result["deleted"] is False
+    assert "confirm=true" in delete_result["error"]
+    assert test_result["sent"] is False
+    assert "confirm_send=true" in test_result["error"]
+
+
+async def test_ai_notification_test_tool_propagates_provider_failure(monkeypatch) -> None:
+    class FailingWorkflowService:
+        async def process_context(self, *_args, **_kwargs):
+            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+
+        async def preview_rule(self, rule, _context=None):
+            return {"id": rule["id"], "actions": []}
+
+    monkeypatch.setattr(ai_tools, "get_notification_service", lambda: FailingWorkflowService())
+
+    result = await ai_tools.test_notification_workflow(
+        {
+            "confirm_send": True,
+            "rule": {
+                "name": "Mobile",
+                "trigger_event": "authorized_entry",
+                "actions": [{"type": "mobile", "title_template": "@Subject", "message_template": "@Message"}],
+            },
+        }
+    )
+
+    assert result["sent"] is False
+    assert "No Apprise endpoints" in result["error"]
+
+
 async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     async def fake_runtime_config():
         return SimpleNamespace()
