@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import WebSocket
 
@@ -17,6 +17,9 @@ class RealtimeEvent:
     created_at: str
 
 
+EventListener = Callable[[RealtimeEvent], Awaitable[None]]
+
+
 class EventBus:
     """Small in-process event bus used by Phase 1.
 
@@ -26,6 +29,7 @@ class EventBus:
 
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
+        self._listeners: set[EventListener] = set()
         self._lock = asyncio.Lock()
         self._started = False
 
@@ -52,6 +56,12 @@ class EventBus:
     def disconnect(self, websocket: WebSocket) -> None:
         self._connections.discard(websocket)
 
+    def subscribe(self, listener: EventListener) -> None:
+        self._listeners.add(listener)
+
+    def unsubscribe(self, listener: EventListener) -> None:
+        self._listeners.discard(listener)
+
     async def publish(self, event_type: str, payload: dict[str, Any]) -> None:
         event = RealtimeEvent(
             type=event_type,
@@ -60,12 +70,24 @@ class EventBus:
         )
         async with self._lock:
             connections = list(self._connections)
+            listeners = list(self._listeners)
 
         for websocket in connections:
             try:
                 await websocket.send_json(event.__dict__)
             except RuntimeError:
                 self.disconnect(websocket)
+
+        for listener in listeners:
+            task = asyncio.create_task(listener(event), name=f"event-listener:{event_type}")
+            task.add_done_callback(_log_listener_error)
+
+
+def _log_listener_error(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception:
+        logger.exception("event_bus_listener_failed")
 
 
 event_bus = EventBus()

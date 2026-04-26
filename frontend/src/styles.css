@@ -495,6 +495,74 @@ h2 {
   font-weight: 650;
 }
 
+.notification-toast-stack {
+  position: fixed;
+  top: 78px;
+  right: 26px;
+  z-index: 80;
+  display: grid;
+  gap: 10px;
+  width: min(430px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.notification-toast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  overflow: hidden;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: var(--shadow-strong);
+  pointer-events: auto;
+}
+
+.notification-toast.warning {
+  border-left-color: var(--amber);
+}
+
+.notification-toast.critical {
+  border-left-color: var(--red);
+}
+
+.notification-toast > img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.notification-toast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.notification-toast-head .icon-button {
+  width: 28px;
+  min-height: 28px;
+}
+
+.notification-toast strong {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.notification-toast p {
+  margin-top: 5px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .refresh-button {
   display: none;
 }
@@ -1500,6 +1568,40 @@ tr:last-child td {
   max-width: 1480px;
 }
 
+.integration-category-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.integration-category {
+  display: grid;
+  gap: 10px;
+}
+
+.integration-category-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  padding-inline: 2px;
+}
+
+.integration-category-header strong,
+.integration-category-header span {
+  display: block;
+}
+
+.integration-category-header strong {
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.integration-category-header span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .integration-tile-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1542,6 +1644,26 @@ tr:last-child td {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.35;
+}
+
+.integration-tile-main > div > .integration-notification-link {
+  width: max-content;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--blue) 20%, var(--line));
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.integration-notification-link svg {
+  flex: 0 0 auto;
 }
 
 .integration-tile .badge {
@@ -2418,7 +2540,7 @@ tr:last-child td {
   min-width: 0;
   min-height: 62px;
   display: grid;
-  grid-template-columns: minmax(180px, 0.38fr) minmax(0, 1fr) 104px 40px;
+  grid-template-columns: minmax(170px, 0.32fr) minmax(180px, 0.42fr) minmax(170px, 0.34fr) 104px 40px;
   align-items: center;
   gap: 12px;
   padding: 12px;
@@ -2462,6 +2584,17 @@ tr:last-child td {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ha-cover-schedule-select {
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 13px;
 }
 
 .entity-toggle {
@@ -2513,6 +2646,445 @@ tr:last-child td {
   border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
   color: var(--blue);
   background: var(--blue-soft);
+}
+
+.schedule-chip {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.inherit-chip {
+  color: var(--muted-strong);
+}
+
+.schedules-page {
+  max-width: 1540px;
+}
+
+.schedule-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.schedule-card {
+  min-height: 206px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.schedule-card-main {
+  width: 100%;
+  min-height: 82px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.schedule-card-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.schedule-card-main strong,
+.schedule-card-main div > span {
+  display: block;
+  min-width: 0;
+}
+
+.schedule-card-main strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-card-main div > span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.schedule-card-main .badge {
+  width: max-content;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  align-self: start;
+  line-height: 1;
+}
+
+.schedule-card-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.schedule-card-days span {
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.schedule-card-days span.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 70%, var(--surface));
+  color: var(--green-strong);
+}
+
+.schedule-card-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.schedule-empty-card {
+  grid-column: 1 / -1;
+}
+
+.schedule-modal {
+  width: min(1220px, calc(100vw - 32px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+}
+
+.schedule-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.32fr) minmax(640px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.schedule-details-panel,
+.weekly-schedule-panel,
+.schedule-dependencies {
+  display: grid;
+  gap: 14px;
+}
+
+.schedule-dependencies {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.schedule-dependency-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-dependency-pill {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.schedule-dependency-pill.blue {
+  border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-dependency-pill.green {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.schedule-dependency-pill.amber {
+  border-color: color-mix(in srgb, var(--amber) 28%, var(--line));
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.schedule-dependency-empty {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.weekly-schedule-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.weekly-schedule-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.weekly-schedule-toolbar strong,
+.weekly-schedule-toolbar span {
+  display: block;
+}
+
+.weekly-schedule-toolbar strong {
+  font-size: 15px;
+  font-weight: 680;
+}
+
+.weekly-schedule-toolbar span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.weekly-schedule-toolbar > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.weekly-schedule-toolbar .secondary-button {
+  min-height: 32px;
+  padding-inline: 11px;
+}
+
+.schedule-calendar {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overscroll-behavior: contain;
+}
+
+.schedule-calendar-head {
+  min-width: 760px;
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(72px, 1fr));
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.schedule-calendar-head strong {
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-left: 1px solid var(--line);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.schedule-calendar-body {
+  min-width: 760px;
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(72px, 1fr));
+}
+
+.schedule-time-axis,
+.schedule-day-column {
+  display: grid;
+  grid-template-rows: repeat(48, 15px);
+}
+
+.schedule-time-axis {
+  border-right: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.schedule-time-axis span {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 1px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.schedule-day-column {
+  border-right: 1px solid var(--line);
+}
+
+.schedule-day-column:last-child {
+  border-right: 0;
+}
+
+.schedule-cell {
+  min-height: 15px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+  background: transparent;
+  padding: 0;
+  touch-action: none;
+}
+
+.schedule-cell:nth-child(2n) {
+  border-bottom-color: var(--line);
+}
+
+.schedule-cell:hover {
+  background: color-mix(in srgb, var(--green-soft) 38%, transparent);
+}
+
+.schedule-cell.selected {
+  border-bottom-color: color-mix(in srgb, var(--green) 18%, transparent);
+  background: color-mix(in srgb, var(--green) 28%, transparent);
+}
+
+.schedule-cell.selected:not(.selected-start) {
+  border-top-color: transparent;
+}
+
+.schedule-cell.selected:not(.selected-end) {
+  border-bottom-color: transparent;
+}
+
+.schedule-cell.selected-start {
+  border-radius: 6px 6px 1px 1px;
+}
+
+.schedule-cell.selected-end {
+  border-bottom-color: color-mix(in srgb, var(--green) 24%, var(--line));
+  border-radius: 1px 1px 6px 6px;
+}
+
+.schedule-cell.selected-start.selected-end {
+  border-radius: 6px;
+}
+
+.schedule-context-menu {
+  position: fixed;
+  z-index: 130;
+  width: min(232px, calc(100vw - 24px));
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: var(--shadow-strong);
+  backdrop-filter: blur(16px);
+}
+
+.schedule-context-menu-label {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-context-menu-label span,
+.schedule-context-menu-label strong {
+  display: block;
+}
+
+.schedule-context-menu-label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.schedule-context-menu-label strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 640;
+}
+
+.schedule-context-menu button {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 560;
+  text-align: left;
+}
+
+.schedule-context-menu button svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.schedule-context-menu button:hover:not(:disabled) {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-context-menu button:hover:not(:disabled) svg {
+  color: var(--blue);
+}
+
+.schedule-context-menu-separator {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--line);
+}
+
+.schedule-context-menu button.danger {
+  color: var(--red);
+}
+
+.schedule-context-menu button.danger svg {
+  color: var(--red);
+}
+
+.schedule-context-menu button.danger:hover:not(:disabled) {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.schedule-context-menu button.danger:hover:not(:disabled) svg {
+  color: var(--red);
+}
+
+.schedule-context-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
 }
 
 .apprise-manager {
@@ -2744,6 +3316,1460 @@ tr:last-child td {
   border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
   background: var(--blue-soft);
   color: var(--blue-strong);
+}
+
+.notifications-page {
+  max-width: 1560px;
+}
+
+.notifications-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.notification-rule-list,
+.notification-editor-panel,
+.notification-side-panel,
+.notification-variable-card,
+.notification-preview-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.notification-rule-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  position: sticky;
+  top: 88px;
+}
+
+.notification-list-header {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 4px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.notification-empty-list {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.notification-empty-list strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.notification-rule-card {
+  width: 100%;
+  min-height: 94px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-rule-card:hover,
+.notification-rule-card.active {
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.notification-rule-card strong,
+.notification-rule-card > div > span:not(.badge) {
+  display: block;
+}
+
+.notification-rule-card strong {
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.notification-rule-card > div > span:not(.badge) {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.notification-rule-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+
+.notification-rule-meta .badge {
+  margin-right: auto;
+}
+
+.notification-editor-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.notification-editor-header,
+.notification-editor-actions,
+.notification-channel-title,
+.notification-subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notification-editor-header > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.notification-editor-header > div:first-child > input {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.notification-editor-actions {
+  flex: 0 0 auto;
+}
+
+.notification-mode-tabs {
+  width: max-content;
+  max-width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.notification-mode-tab {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.notification-mode-tab.active {
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 52%, var(--surface));
+  color: var(--blue-strong);
+}
+
+.notification-switch {
+  width: max-content;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted-strong);
+  background: var(--surface-soft);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.notification-switch.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.notification-switch input {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.notification-description-field textarea {
+  min-height: 66px;
+}
+
+.notification-event-lock {
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--blue) 26%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.notification-event-lock > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notification-event-lock svg {
+  flex: 0 0 auto;
+  color: var(--blue);
+}
+
+.notification-event-lock strong,
+.notification-event-lock small {
+  display: block;
+}
+
+.notification-event-lock strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.notification-event-lock small {
+  margin-top: 2px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.notification-add-modal {
+  width: min(840px, calc(100vw - 32px));
+}
+
+.notification-add-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.notification-add-group {
+  display: grid;
+  gap: 9px;
+}
+
+.notification-add-group > div:last-child {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.notification-add-option {
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-add-option:hover,
+.notification-add-option:focus-visible {
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.notification-add-option.configured {
+  background: color-mix(in srgb, var(--green-soft) 34%, var(--surface));
+}
+
+.notification-add-option strong,
+.notification-add-option small {
+  display: block;
+}
+
+.notification-add-option strong {
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.notification-add-option small {
+  margin-top: 5px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.notification-event-catalog {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-event-groups {
+  display: grid;
+  gap: 8px;
+}
+
+.notification-event-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-event-group summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 620;
+  list-style: none;
+}
+
+.notification-event-group summary::-webkit-details-marker {
+  display: none;
+}
+
+.notification-event-group > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.notification-event-pill {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.notification-event-pill.active {
+  border-color: color-mix(in srgb, var(--blue) 36%, var(--line));
+  color: var(--blue-strong);
+  background: var(--blue-soft);
+}
+
+.notification-event-pill .badge {
+  min-height: 22px;
+  padding-inline: 8px;
+}
+
+.notification-severity-row {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-severity-row strong,
+.notification-severity-row span {
+  display: block;
+}
+
+.notification-severity-row strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.notification-severity-row span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notification-picker-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 0.8fr;
+  gap: 12px;
+}
+
+.notification-checklist {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-checklist > strong,
+.notification-subtitle strong,
+.notification-channel-title strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.notification-checklist > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.notification-check {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.notification-workflow-panel {
+  align-content: start;
+}
+
+.notification-flow-canvas {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.notification-flow-node {
+  min-height: 168px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-flow-node-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.notification-flow-node-title strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.notification-flow-event {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-flow-event svg {
+  color: var(--blue);
+}
+
+.notification-flow-event strong,
+.notification-flow-event small {
+  display: block;
+}
+
+.notification-flow-event strong {
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.notification-flow-event small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.notification-flow-actions {
+  display: grid;
+  gap: 7px;
+}
+
+.notification-flow-action {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-flow-action.active {
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.workflow-action-detail {
+  background: var(--surface);
+}
+
+.notification-channel-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.notification-channel-tab {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-channel-tab.active {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 46%, var(--surface));
+}
+
+.notification-channel-tab .badge {
+  min-height: 22px;
+  padding-inline: 8px;
+}
+
+.notification-channel-panel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-channel-title > div {
+  min-width: 0;
+}
+
+.notification-channel-title span,
+.notification-subtitle span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.notification-endpoints,
+.notification-template-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.notification-endpoint-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.notification-endpoint {
+  min-height: 60px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-endpoint strong,
+.notification-endpoint small {
+  display: block;
+}
+
+.notification-endpoint strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.notification-endpoint small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.notification-endpoint-empty {
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.notification-template-editor textarea {
+  font-family: inherit;
+  line-height: 1.45;
+}
+
+.notification-snapshot-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-snapshot-panel.muted {
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.notification-snapshot-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  align-items: end;
+}
+
+.notification-snapshot-controls img,
+.notification-preview > img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-test-button {
+  justify-self: end;
+}
+
+.notification-side-panel {
+  grid-column: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.notification-variable-card,
+.notification-preview-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  box-shadow: none;
+}
+
+.compact-search {
+  width: 100%;
+  height: 38px;
+}
+
+.notification-variable-table {
+  display: grid;
+  gap: 6px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.notification-variable-table button {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-variable-table code {
+  min-width: 0;
+  color: var(--blue);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.notification-variable-table button > span:not(.badge) {
+  min-width: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.notification-variable-table .badge {
+  justify-self: end;
+}
+
+.notification-preview-stack {
+  display: grid;
+  gap: 9px;
+}
+
+.notification-preview {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-preview > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.notification-preview h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.notification-preview p {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.notification-feedback {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted-strong);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.notification-feedback.success {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  color: var(--green-strong);
+  background: color-mix(in srgb, var(--green-soft) 64%, var(--surface));
+}
+
+.notification-feedback.error {
+  border-color: color-mix(in srgb, var(--red) 35%, var(--line));
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-soft) 64%, var(--surface));
+}
+
+.notification-feedback.info {
+  border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 64%, var(--surface));
+}
+
+.workflow-notifications-page {
+  max-width: 1640px;
+}
+
+.workflow-notification-shell {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.workflow-notification-shell.list-only {
+  grid-template-columns: 1fr;
+}
+
+.workflow-notification-shell.list-only .workflow-rule-table {
+  position: static;
+}
+
+.workflow-rule-table {
+  position: sticky;
+  top: 88px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.workflow-rule-table-header,
+.workflow-card-title,
+.workflow-block-head,
+.notification-preview-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-rule-table-header > div,
+.workflow-card-title > span,
+.notification-preview-rail-head {
+  min-width: 0;
+}
+
+.workflow-rule-table-header strong,
+.workflow-rule-table-header span,
+.workflow-card-title strong,
+.workflow-card-title small,
+.notification-preview-rail-head strong,
+.notification-preview-rail-head span {
+  display: block;
+}
+
+.workflow-rule-table-header strong,
+.workflow-card-title strong,
+.notification-preview-rail-head strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.workflow-rule-table-header span,
+.workflow-card-title small,
+.notification-preview-rail-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.workflow-rule-rows,
+.workflow-stack,
+.workflow-vertical,
+.workflow-editor-column {
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.workflow-rule-row > button:first-child {
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 9px;
+  align-items: start;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.workflow-rule-row.active > button:first-child,
+.workflow-rule-row > button:first-child:hover {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.workflow-rule-row strong,
+.workflow-rule-row small {
+  display: block;
+}
+
+.workflow-rule-row strong {
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.workflow-rule-row small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.workflow-rule-icons {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.workflow-empty-list {
+  min-height: 260px;
+}
+
+.workflow-empty-list > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.workflow-empty-editor {
+  min-height: 460px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 24px;
+}
+
+.workflow-editor-backdrop {
+  align-items: center;
+  overflow: hidden;
+  justify-items: center;
+  padding: 48px;
+}
+
+.modal-card.workflow-editor-modal {
+  width: min(1408px, calc(100vw - 96px));
+  height: min(820px, calc(100vh - 96px));
+  max-width: calc(100vw - 96px);
+  max-height: calc(100vh - 96px);
+  grid-template-rows: auto minmax(0, 1fr);
+  margin: auto;
+  overflow: hidden;
+}
+
+.workflow-editor-modal .workflow-editor-column {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workflow-editor-modal-grid {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
+  gap: 14px;
+  align-items: stretch;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.workflow-editor-modal-grid .workflow-builder-panel,
+.workflow-editor-modal-grid .notification-preview-panel {
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.workflow-builder-panel {
+  align-content: start;
+}
+
+.workflow-editor-header {
+  padding-bottom: 2px;
+}
+
+.workflow-vertical {
+  position: relative;
+  padding-left: 16px;
+}
+
+.workflow-vertical::before {
+  content: "";
+  position: absolute;
+  inset: 16px auto 16px 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--blue) 24%, var(--line));
+}
+
+.workflow-block {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.workflow-block::before {
+  content: "";
+  position: absolute;
+  left: -17px;
+  top: 22px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--blue);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.workflow-block-head {
+  justify-content: flex-start;
+}
+
+.workflow-block-head strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.workflow-block-head > span:last-child {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflow-selected-card,
+.workflow-add-block,
+.workflow-condition-card,
+.workflow-action-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.workflow-selected-card {
+  min-height: 74px;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) max-content;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  color: var(--text);
+  text-align: left;
+}
+
+.workflow-selected-card:hover,
+.workflow-add-block:hover {
+  border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 34%, var(--surface));
+}
+
+.workflow-selected-card svg {
+  color: var(--blue);
+}
+
+.workflow-selected-card strong,
+.workflow-selected-card small {
+  display: block;
+}
+
+.workflow-selected-card strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.workflow-selected-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.workflow-add-block {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.workflow-condition-card,
+.workflow-action-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.workflow-card-title {
+  align-items: start;
+}
+
+.workflow-card-title > svg {
+  flex: 0 0 auto;
+  color: var(--blue);
+}
+
+.workflow-card-title > .icon-button {
+  margin-left: auto;
+}
+
+.compact-field-grid,
+.workflow-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compact-field select,
+.workflow-media-row select {
+  min-height: 38px;
+}
+
+.workflow-target-summary {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.workflow-endpoint-picks {
+  max-height: 148px;
+  overflow: auto;
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.workflow-endpoint-pick {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.workflow-endpoint-pick strong,
+.workflow-endpoint-pick small {
+  display: block;
+}
+
+.workflow-endpoint-pick strong {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.workflow-endpoint-pick small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.workflow-media-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.workflow-media-row select {
+  min-width: min(280px, 100%);
+}
+
+.workflow-camera-preview {
+  width: min(220px, 100%);
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.workflow-camera-preview img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.workflow-camera-preview span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.variable-editor-field {
+  gap: 7px;
+}
+
+.variable-editor-wrap {
+  position: relative;
+}
+
+.variable-editor-content {
+  min-height: 42px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.variable-editor-content.multiline {
+  min-height: 112px;
+}
+
+.variable-editor-content .ProseMirror {
+  min-height: 20px;
+  outline: none;
+}
+
+.variable-editor-content.multiline .ProseMirror {
+  min-height: 88px;
+}
+
+.variable-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  vertical-align: baseline;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.variable-suggestion-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(360px, 100%);
+  max-height: 300px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-strong);
+}
+
+.variable-suggestion-group {
+  display: grid;
+  gap: 5px;
+}
+
+.variable-suggestion-group > strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.variable-suggestion-group button {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.variable-suggestion-group button:hover {
+  border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
+  background: var(--blue-soft);
+}
+
+.variable-suggestion-group code {
+  color: var(--blue);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.variable-suggestion-group span {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.notification-preview-rail {
+  position: sticky;
+  bottom: 12px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--blue-soft));
+  box-shadow: var(--shadow-strong);
+  z-index: 10;
+}
+
+.notification-preview-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.notification-preview-panel .notification-preview-rail-head {
+  align-items: start;
+}
+
+.notification-preview-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.notification-preview-stack .notification-preview-card-inline {
+  flex: none;
+}
+
+.notification-preview-horizontal {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.notification-preview-card-inline {
+  flex: 0 0 min(360px, 88vw);
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.notification-preview-card-inline > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.notification-preview-card-inline h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.notification-preview-card-inline p {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.preview-media-chip {
+  width: max-content;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.workflow-editor-footer {
+  justify-content: flex-end;
 }
 
 .success-note {
@@ -3052,7 +5078,7 @@ tr:last-child td {
 }
 
 .vehicle-row {
-  grid-template-columns: 56px minmax(180px, 1fr) minmax(130px, 0.7fr) auto auto;
+  grid-template-columns: 56px minmax(170px, 1fr) minmax(120px, 0.55fr) minmax(92px, auto) auto auto;
 }
 
 .person-row-button {
@@ -3515,6 +5541,67 @@ tr:last-child td {
   min-height: 38px;
 }
 
+.modal-card.schedule-modal {
+  width: min(1600px, calc(100vw - 32px));
+  height: min(980px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  overflow: hidden;
+  padding: 18px;
+}
+
+.modal-card.schedule-modal .modal-header,
+.modal-card.schedule-modal .modal-actions {
+  flex: 0 0 auto;
+}
+
+.modal-card.schedule-modal .schedule-modal-grid {
+  min-height: 0;
+  overflow: hidden;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 14px;
+}
+
+.modal-card.schedule-modal .schedule-details-panel,
+.modal-card.schedule-modal .weekly-schedule-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.modal-card.schedule-modal .schedule-details-panel {
+  align-content: start;
+}
+
+.modal-card.schedule-modal .schedule-details-panel textarea {
+  min-height: 104px;
+}
+
+.modal-card.schedule-modal .schedule-dependencies {
+  min-height: 0;
+}
+
+.modal-card.schedule-modal .schedule-dependency-list {
+  max-height: 190px;
+  overflow: auto;
+}
+
+.modal-card.schedule-modal .weekly-schedule-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  max-height: 100%;
+}
+
+.modal-card.schedule-modal .schedule-calendar {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  overflow: auto;
+}
+
 .modal-header,
 .modal-actions {
   display: flex;
@@ -3683,6 +5770,19 @@ tr:last-child td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .notifications-layout {
+    grid-template-columns: 250px minmax(0, 1fr);
+  }
+
+  .notification-side-panel {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .notification-flow-canvas {
+    grid-template-columns: 1fr;
+  }
+
   .presence-summary-card,
   .chart-card {
     grid-column: span 2;
@@ -3690,6 +5790,26 @@ tr:last-child td {
 
   .simulator-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .modal-card.schedule-modal {
+    overflow: auto;
+  }
+
+  .modal-card.schedule-modal .schedule-modal-grid {
+    overflow: visible;
+    grid-template-columns: 1fr;
+  }
+
+  .modal-card.schedule-modal .schedule-details-panel,
+  .modal-card.schedule-modal .weekly-schedule-panel {
+    overflow: visible;
+  }
+
+  .modal-card.schedule-modal .schedule-calendar {
+    height: min(680px, calc(100vh - 270px));
   }
 }
 
@@ -3759,6 +5879,8 @@ tr:last-child td {
   .provider-grid,
   .integration-tile-grid,
   .protect-camera-grid,
+  .schedule-card-grid,
+  .schedule-modal-grid,
   .settings-form-grid,
   .ha-setup-grid,
   .slot-grid,
@@ -3766,6 +5888,26 @@ tr:last-child td {
   .integrations-grid,
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .notifications-layout,
+  .notification-picker-grid,
+  .workflow-notification-shell,
+  .workflow-editor-modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-rule-table,
+  .notification-preview-rail,
+  .workflow-editor-modal-grid .workflow-builder-panel,
+  .workflow-editor-modal-grid .notification-preview-panel {
+    position: static;
+    max-height: none;
+  }
+
+  .notification-side-panel {
+    grid-column: auto;
+    grid-template-columns: 1fr;
   }
 
   .ha-tabs {
@@ -3890,6 +6032,24 @@ tr:last-child td {
     padding: 12px 14px;
   }
 
+  .compact-field-grid,
+  .workflow-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-selected-card,
+  .workflow-rule-row > button:first-child {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-selected-card svg {
+    display: none;
+  }
+
+  .notification-preview-card-inline {
+    flex-basis: 86vw;
+  }
+
   .topbar-left,
   .topbar-actions {
     width: 100%;
@@ -3948,6 +6108,7 @@ tr:last-child td {
   .ha-section-heading,
   .ha-device-title,
   .ha-entity-composer,
+  .weekly-schedule-toolbar,
   .protect-section-header,
   .protect-exposes-header,
   .protect-exposes-grid,
@@ -3970,6 +6131,38 @@ tr:last-child td {
   .ha-tab {
     grid-template-columns: 28px minmax(0, 1fr);
     min-height: 54px;
+  }
+
+  .notification-editor-header,
+  .notification-editor-actions,
+  .notification-event-lock,
+  .notification-channel-title,
+  .notification-subtitle,
+  .integration-category-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .notification-channel-tabs,
+  .notification-endpoint-list,
+  .notification-add-group > div,
+  .notification-mode-tabs,
+  .notification-severity-row,
+  .notification-snapshot-controls,
+  .notification-variable-table button {
+    grid-template-columns: 1fr;
+  }
+
+  .notification-channel-tab {
+    grid-template-columns: 20px minmax(0, 1fr) max-content;
+  }
+
+  .notification-mode-tabs {
+    width: 100%;
+  }
+
+  .notification-test-button {
+    justify-self: stretch;
   }
 
   .ha-tab svg {
@@ -4046,6 +6239,7 @@ tr:last-child td {
   }
 
   .field-grid,
+  .schedule-card-main,
   .user-row,
   .group-row,
   .group-member-row,

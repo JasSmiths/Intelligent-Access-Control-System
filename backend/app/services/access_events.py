@@ -1,11 +1,11 @@
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,19 +16,19 @@ from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
-from app.models import AccessEvent, Anomaly, Person, Presence, ScheduleAssignment, Vehicle
+from app.models import AccessEvent, Anomaly, Person, Presence, Vehicle
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
     PresenceState,
-    ScheduleKind,
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
+from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
 
 logger = get_logger(__name__)
@@ -180,7 +180,11 @@ class AccessEventService:
         async with AsyncSessionLocal() as session:
             vehicle = await session.scalar(
                 select(Vehicle)
-                .options(selectinload(Vehicle.owner))
+                .options(
+                    selectinload(Vehicle.schedule),
+                    selectinload(Vehicle.owner).selectinload(Person.group),
+                    selectinload(Vehicle.owner).selectinload(Person.schedule),
+                )
                 .where(
                     Vehicle.registration_number == read.registration_number,
                     Vehicle.is_active.is_(True),
@@ -188,7 +192,20 @@ class AccessEventService:
             )
 
             person = vehicle.owner if vehicle else None
-            allowed = bool(person and person.is_active and await self._is_allowed_now(session, person))
+            runtime = self._runtime or await get_runtime_config()
+            identity_active = bool(vehicle and (not person or person.is_active))
+            schedule_evaluation = (
+                await evaluate_vehicle_schedule(
+                    session,
+                    vehicle,
+                    read.captured_at,
+                    timezone_name=runtime.site_timezone,
+                    default_policy=runtime.schedule_default_policy,
+                )
+                if vehicle and identity_active
+                else None
+            )
+            allowed = bool(identity_active and schedule_evaluation and schedule_evaluation.allowed)
             direction = await self._resolve_direction(session, read, person, allowed)
             decision = AccessDecision.GRANTED if allowed else AccessDecision.DENIED
             timing = (
@@ -209,6 +226,13 @@ class AccessEventService:
                 timing_classification=timing,
                 raw_payload={
                     "best": read.raw_payload,
+                    "schedule": {
+                        "allowed": schedule_evaluation.allowed if schedule_evaluation else False,
+                        "source": schedule_evaluation.source if schedule_evaluation else "none",
+                        "schedule_id": str(schedule_evaluation.schedule_id) if schedule_evaluation and schedule_evaluation.schedule_id else None,
+                        "schedule_name": schedule_evaluation.schedule_name if schedule_evaluation else None,
+                        "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
+                    },
                     "debounce": {
                         "candidate_count": len(window.reads),
                         "candidates": [
@@ -225,7 +249,7 @@ class AccessEventService:
             session.add(event)
             await session.flush()
 
-            anomalies = await self._build_anomalies(session, event, person, allowed)
+            anomalies = await self._build_anomalies(session, event, person, vehicle, allowed)
             session.add_all(anomalies)
 
             if allowed and person:
@@ -248,7 +272,21 @@ class AccessEventService:
             },
         )
         if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
-            await self._open_gate_for_event(event, person)
+            gate_opened = await self._open_gate_for_event(event, person)
+            if gate_opened and person:
+                await get_notification_service().notify(
+                    NotificationContext(
+                        event_type="authorized_entry",
+                        subject=f"{person.display_name} arrived at the gate",
+                        severity=AnomalySeverity.INFO.value,
+                        facts=self._notification_facts(
+                            event,
+                            person,
+                            vehicle,
+                            self._authorized_entry_message(person, vehicle),
+                        ),
+                    )
+                )
 
         for anomaly in anomalies:
             await get_notification_service().notify(
@@ -256,20 +294,16 @@ class AccessEventService:
                     event_type=anomaly.anomaly_type.value,
                     subject=event.registration_number,
                     severity=anomaly.severity.value,
-                    facts={
-                        "message": anomaly.message,
-                        "direction": event.direction.value,
-                        "decision": event.decision.value,
-                        "source": event.source,
-                    },
+                    facts=self._notification_facts(event, person, vehicle, anomaly.message),
                 )
-            )
+                )
 
-    async def _open_gate_for_event(self, event: AccessEvent, person: Person | None) -> None:
+    async def _open_gate_for_event(self, event: AccessEvent, person: Person | None) -> bool:
         reason = (
             f"Automatic LPR grant for {event.registration_number}"
             f"{f' ({person.display_name})' if person else ''}"
         )
+        gate_opened = False
         try:
             gate = get_gate_controller(settings.gate_controller)
             result = await gate.open_gate(reason)
@@ -289,6 +323,19 @@ class AccessEventService:
                     "registration_number": event.registration_number,
                     "detail": str(exc),
                 },
+            )
+            await get_notification_service().notify(
+                NotificationContext(
+                    event_type="gate_open_failed",
+                    subject=event.registration_number,
+                    severity=AnomalySeverity.CRITICAL.value,
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        event.vehicle,
+                        str(exc),
+                    ),
+                )
             )
         else:
             event_type = "gate.open_requested" if result.accepted else "gate.open_failed"
@@ -311,6 +358,7 @@ class AccessEventService:
                         "state": result.state.value,
                     },
                 )
+                gate_opened = True
             else:
                 logger.error(
                     "gate_open_failed_for_access_event",
@@ -326,16 +374,17 @@ class AccessEventService:
                         event_type="gate_open_failed",
                         subject=event.registration_number,
                         severity=AnomalySeverity.CRITICAL.value,
-                        facts={
-                            "message": result.detail or "Automatic gate open command failed.",
-                            "direction": event.direction.value,
-                            "decision": event.decision.value,
-                            "source": event.source,
-                        },
+                        facts=self._notification_facts(
+                            event,
+                            person,
+                            event.vehicle,
+                            result.detail or "Automatic gate open command failed.",
+                        ),
                     )
                 )
 
         await self._open_garage_doors_for_event(event, person, reason)
+        return gate_opened
 
     async def _open_garage_doors_for_event(
         self, event: AccessEvent, person: Person | None, reason: str
@@ -357,7 +406,54 @@ class AccessEventService:
             return
 
         client = HomeAssistantClient()
+        async with AsyncSessionLocal() as schedule_session:
+            schedule_evaluations = {
+                str(entity["entity_id"]): await evaluate_schedule_id(
+                    schedule_session,
+                    entity.get("schedule_id"),
+                    event.occurred_at,
+                    timezone_name=config.site_timezone,
+                    default_policy=config.schedule_default_policy,
+                    source="garage_door",
+                )
+                for entity in entities
+            }
+
         for entity in entities:
+            schedule_evaluation = schedule_evaluations[str(entity["entity_id"])]
+            if not schedule_evaluation.allowed:
+                detail = schedule_evaluation.reason or f"{entity.get('name') or entity['entity_id']} is outside its assigned schedule."
+                await event_bus.publish(
+                    "garage_door.open_failed",
+                    {
+                        "event_id": str(event.id),
+                        "registration_number": event.registration_number,
+                        "person_id": str(person.id),
+                        "person": person.display_name,
+                        "entity_id": str(entity["entity_id"]),
+                        "name": str(entity.get("name") or entity["entity_id"]),
+                        "accepted": False,
+                        "state": "schedule_denied",
+                        "detail": detail,
+                    },
+                )
+                await get_notification_service().notify(
+                    NotificationContext(
+                        event_type="garage_door_open_failed",
+                        subject=event.registration_number,
+                        severity=AnomalySeverity.WARNING.value,
+                        facts=self._notification_facts(
+                            event,
+                            person,
+                            event.vehicle,
+                            detail,
+                            garage_door=str(entity.get("name") or entity["entity_id"]),
+                            entity_id=str(entity["entity_id"]),
+                        ),
+                    )
+                )
+                continue
+
             outcome = await command_cover(client, entity, "open", reason)
             event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
             await event_bus.publish(
@@ -402,59 +498,64 @@ class AccessEventService:
                     event_type="garage_door_open_failed",
                     subject=event.registration_number,
                     severity=AnomalySeverity.CRITICAL.value,
-                    facts={
-                        "message": outcome.detail or f"Automatic garage door open command failed for {outcome.name}.",
-                        "person": person.display_name,
-                        "garage_door": outcome.name,
-                        "entity_id": outcome.entity_id,
-                        "direction": event.direction.value,
-                        "decision": event.decision.value,
-                        "source": event.source,
-                    },
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        event.vehicle,
+                        outcome.detail or f"Automatic garage door open command failed for {outcome.name}.",
+                        garage_door=outcome.name,
+                        entity_id=outcome.entity_id,
+                    ),
                 )
             )
 
-    async def _is_allowed_now(self, session: AsyncSession, person: Person) -> bool:
-        local_now = datetime.now(tz=UTC).astimezone(self._timezone)
-        assignments = (
-            await session.scalars(
-                select(ScheduleAssignment)
-                .options(selectinload(ScheduleAssignment.time_slot))
-                .where(
-                    or_(
-                        ScheduleAssignment.person_id == person.id,
-                        and_(
-                            person.group_id is not None,
-                            ScheduleAssignment.group_id == person.group_id,
-                        ),
-                    )
-                )
-            )
-        ).all()
+    def _notification_facts(
+        self,
+        event: AccessEvent,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        message: str,
+        **extra: str,
+    ) -> dict[str, str]:
+        group = person.group if person else None
+        vehicle_display_name = self._vehicle_display_name(vehicle, event.registration_number)
+        facts = {
+            "message": message,
+            "first_name": person.first_name if person else "",
+            "last_name": person.last_name if person else "",
+            "display_name": person.display_name if person else "",
+            "group_name": group.name if group else "",
+            "vehicle_registration_number": event.registration_number,
+            "registration_number": event.registration_number,
+            "vehicle_display_name": vehicle_display_name,
+            "vehicle_make": vehicle.make or "" if vehicle else "",
+            "vehicle_model": vehicle.model or "" if vehicle else "",
+            "vehicle_color": vehicle.color or "" if vehicle else "",
+            "object_pronoun": "them",
+            "possessive_determiner": "their",
+            "direction": event.direction.value,
+            "decision": event.decision.value,
+            "source": event.source,
+            "timing_classification": event.timing_classification.value,
+            "occurred_at": event.occurred_at.isoformat(),
+        }
+        facts.update(extra)
+        return facts
 
-        for assignment in assignments:
-            slot = assignment.time_slot
-            if slot.is_active and self._time_slot_matches(slot, local_now):
-                return True
-        return False
+    def _authorized_entry_message(self, person: Person, vehicle: Vehicle | None) -> str:
+        first_name = person.first_name or person.display_name.split(" ", 1)[0]
+        possessive = f"{first_name}'" if first_name.lower().endswith("s") else f"{first_name}'s"
+        vehicle_label = self._vehicle_display_name(vehicle, "")
+        if vehicle_label:
+            return f"{possessive} {vehicle_label} has been detected at the gate. I've let them in."
+        return f"{person.display_name} has been detected at the gate. I've let them in."
 
-    def _time_slot_matches(self, slot, local_now: datetime) -> bool:
-        if slot.kind == ScheduleKind.ALWAYS:
-            return True
-        if slot.kind == ScheduleKind.ONE_TIME:
-            return bool(slot.starts_at and slot.ends_at and slot.starts_at <= local_now <= slot.ends_at)
-        if slot.kind == ScheduleKind.WEEKLY:
-            if slot.days_of_week and local_now.weekday() not in slot.days_of_week:
-                return False
-            if slot.start_time and slot.end_time:
-                return self._time_in_range(slot.start_time, slot.end_time, local_now.time())
-            return True
-        return False
-
-    def _time_in_range(self, start: time, end: time, current: time) -> bool:
-        if start <= end:
-            return start <= current <= end
-        return current >= start or current <= end
+    def _vehicle_display_name(self, vehicle: Vehicle | None, fallback: str) -> str:
+        if not vehicle:
+            return fallback
+        parts = [vehicle.make, vehicle.model]
+        label = " ".join(part for part in parts if part)
+        return label or vehicle.description or vehicle.registration_number or fallback
 
     async def _resolve_direction(
         self, session: AsyncSession, read: PlateRead, person: Person | None, allowed: bool
@@ -464,8 +565,10 @@ class AccessEventService:
             return AccessDirection.ENTRY if allowed else AccessDirection.DENIED
         if explicit in {"exit", "leave", "departure", "out"}:
             return AccessDirection.EXIT if allowed else AccessDirection.DENIED
-        if not allowed or not person:
+        if not allowed:
             return AccessDirection.DENIED
+        if not person:
+            return AccessDirection.ENTRY
 
         presence = await session.get(Presence, person.id)
         if presence and presence.state == PresenceState.PRESENT:
@@ -510,11 +613,16 @@ class AccessEventService:
         return TimingClassification.NORMAL
 
     async def _build_anomalies(
-        self, session: AsyncSession, event: AccessEvent, person: Person | None, allowed: bool
+        self,
+        session: AsyncSession,
+        event: AccessEvent,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        allowed: bool,
     ) -> list[Anomaly]:
         anomalies: list[Anomaly] = []
 
-        if not person:
+        if not vehicle:
             anomalies.append(
                 Anomaly(
                     event=event,
@@ -527,15 +635,22 @@ class AccessEventService:
             return anomalies
 
         if not allowed:
+            subject = person.display_name if person else event.registration_number
             anomalies.append(
                 Anomaly(
                     event=event,
                     anomaly_type=AnomalyType.OUTSIDE_SCHEDULE,
                     severity=AnomalySeverity.WARNING,
-                    message=f"{person.display_name} arrived outside an allowed schedule.",
-                    context={"person_id": str(person.id)},
+                    message=f"{subject} was denied by schedule or access policy.",
+                    context={
+                        "person_id": str(person.id) if person else None,
+                        "vehicle_id": str(vehicle.id),
+                    },
                 )
             )
+            return anomalies
+
+        if not person:
             return anomalies
 
         presence = await session.get(Presence, person.id)

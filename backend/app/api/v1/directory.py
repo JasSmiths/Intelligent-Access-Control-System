@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import current_user
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import Group, Person, TimeSlot, User, Vehicle
+from app.models import Group, Person, Schedule, TimeSlot, User, Vehicle
 from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
 from app.services.settings import get_runtime_config
@@ -25,6 +25,8 @@ class PersonVehicleResponse(BaseModel):
     make: str | None
     model: str | None
     color: str | None
+    schedule_id: str | None = None
+    schedule: str | None = None
 
 
 class PersonResponse(BaseModel):
@@ -36,6 +38,8 @@ class PersonResponse(BaseModel):
     group_id: str | None
     group: str | None
     category: str | None
+    schedule_id: str | None
+    schedule: str | None
     is_active: bool
     garage_door_entity_ids: list[str]
     vehicles: list[PersonVehicleResponse]
@@ -46,6 +50,7 @@ class CreatePersonRequest(BaseModel):
     last_name: str = Field(min_length=1, max_length=80)
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     group_id: uuid.UUID | None = None
+    schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
     garage_door_entity_ids: list[str] = Field(default_factory=list)
     is_active: bool = True
@@ -56,6 +61,7 @@ class UpdatePersonRequest(BaseModel):
     last_name: str | None = Field(default=None, min_length=1, max_length=80)
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     group_id: uuid.UUID | None = None
+    schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] | None = None
     garage_door_entity_ids: list[str] | None = None
     is_active: bool | None = None
@@ -71,6 +77,8 @@ class VehicleResponse(BaseModel):
     color: str | None
     person_id: str | None
     owner: str | None
+    schedule_id: str | None
+    schedule: str | None
     is_active: bool
 
 
@@ -81,6 +89,7 @@ class CreateVehicleRequest(BaseModel):
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
     person_id: uuid.UUID | None = None
+    schedule_id: uuid.UUID | None = None
     is_active: bool = True
 
 
@@ -91,6 +100,7 @@ class UpdateVehicleRequest(BaseModel):
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
     person_id: uuid.UUID | None = None
+    schedule_id: uuid.UUID | None = None
     is_active: bool | None = None
 
 
@@ -151,6 +161,8 @@ def serialize_vehicle(vehicle: Vehicle) -> dict:
         "color": vehicle.color,
         "person_id": str(vehicle.person_id) if vehicle.person_id else None,
         "owner": vehicle.owner.display_name if vehicle.owner else None,
+        "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
+        "schedule": vehicle.schedule.name if vehicle.schedule else None,
         "is_active": vehicle.is_active,
     }
 
@@ -165,6 +177,8 @@ def serialize_person(person: Person) -> dict:
         "group_id": str(person.group_id) if person.group_id else None,
         "group": person.group.name if person.group else None,
         "category": person.group.category.value if person.group else None,
+        "schedule_id": str(person.schedule_id) if person.schedule_id else None,
+        "schedule": person.schedule.name if person.schedule else None,
         "is_active": person.is_active,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "vehicles": [
@@ -176,6 +190,8 @@ def serialize_person(person: Person) -> dict:
                     "make": vehicle.make,
                     "model": vehicle.model,
                     "color": vehicle.color,
+                    "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
+                    "schedule": vehicle.schedule.name if vehicle.schedule else None,
                 }
                 for vehicle in person.vehicles
             ],
@@ -188,7 +204,11 @@ async def list_people() -> list[PersonResponse]:
         people = (
             await session.scalars(
                 select(Person)
-                .options(selectinload(Person.group), selectinload(Person.vehicles))
+                .options(
+                    selectinload(Person.group),
+                    selectinload(Person.schedule),
+                    selectinload(Person.vehicles).selectinload(Vehicle.schedule),
+                )
                 .order_by(Person.display_name)
             )
         ).all()
@@ -201,6 +221,13 @@ async def get_group_or_404(session: AsyncSession, group_id: uuid.UUID | None) ->
     if group_id and not group:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
     return group
+
+
+async def get_schedule_or_404(session: AsyncSession, schedule_id: uuid.UUID | None) -> Schedule | None:
+    schedule = await session.get(Schedule, schedule_id) if schedule_id else None
+    if schedule_id and not schedule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    return schedule
 
 
 async def get_vehicles_or_404(session: AsyncSession, vehicle_ids: list[uuid.UUID]) -> list[Vehicle]:
@@ -241,6 +268,7 @@ async def add_person(
     session: AsyncSession = Depends(get_db_session),
 ) -> PersonResponse:
     group = await get_group_or_404(session, request.group_id)
+    schedule = await get_schedule_or_404(session, request.schedule_id)
     vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
     garage_door_entity_ids = await validate_garage_door_entity_ids(request.garage_door_entity_ids)
 
@@ -250,6 +278,7 @@ async def add_person(
         display_name=compose_person_name(request.first_name, request.last_name),
         profile_photo_data_url=request.profile_photo_data_url,
         group_id=group.id if group else None,
+        schedule_id=schedule.id if schedule else None,
         garage_door_entity_ids=garage_door_entity_ids,
         is_active=request.is_active,
     )
@@ -262,7 +291,11 @@ async def add_person(
     await session.commit()
     refreshed_person = await session.scalar(
         select(Person)
-        .options(selectinload(Person.group), selectinload(Person.vehicles))
+        .options(
+            selectinload(Person.group),
+            selectinload(Person.schedule),
+            selectinload(Person.vehicles).selectinload(Vehicle.schedule),
+        )
         .where(Person.id == person.id)
     )
     if not refreshed_person:
@@ -285,6 +318,10 @@ async def update_person(
     if "group_id" in request.model_fields_set:
         group = await get_group_or_404(session, request.group_id)
         person.group_id = group.id if group else None
+
+    if "schedule_id" in request.model_fields_set:
+        schedule = await get_schedule_or_404(session, request.schedule_id)
+        person.schedule_id = schedule.id if schedule else None
 
     if request.vehicle_ids is not None:
         vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
@@ -315,7 +352,11 @@ async def update_person(
     await session.commit()
     refreshed_person = await session.scalar(
         select(Person)
-        .options(selectinload(Person.group), selectinload(Person.vehicles))
+        .options(
+            selectinload(Person.group),
+            selectinload(Person.schedule),
+            selectinload(Person.vehicles).selectinload(Vehicle.schedule),
+        )
         .where(Person.id == person.id)
     )
     if not refreshed_person:
@@ -330,6 +371,7 @@ async def list_vehicles() -> list[VehicleResponse]:
         vehicles = (
             await session.scalars(
                 select(Vehicle).options(selectinload(Vehicle.owner)).order_by(Vehicle.registration_number)
+                .options(selectinload(Vehicle.schedule))
             )
         ).all()
 
@@ -345,9 +387,11 @@ async def add_vehicle(
     owner = await session.get(Person, request.person_id) if request.person_id else None
     if request.person_id and not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+    schedule = await get_schedule_or_404(session, request.schedule_id)
 
     vehicle = Vehicle(
         person_id=owner.id if owner else None,
+        schedule_id=schedule.id if schedule else None,
         registration_number=normalize_registration_number(request.registration_number),
         vehicle_photo_data_url=request.vehicle_photo_data_url,
         make=normalize_vehicle_text(request.make),
@@ -364,7 +408,7 @@ async def add_vehicle(
 
     refreshed_vehicle = await session.scalar(
         select(Vehicle)
-        .options(selectinload(Vehicle.owner))
+        .options(selectinload(Vehicle.owner), selectinload(Vehicle.schedule))
         .where(Vehicle.id == vehicle.id)
     )
     if not refreshed_vehicle:
@@ -392,6 +436,10 @@ async def update_vehicle(
     elif "person_id" in request.model_fields_set:
         vehicle.person_id = None
 
+    if "schedule_id" in request.model_fields_set:
+        schedule = await get_schedule_or_404(session, request.schedule_id)
+        vehicle.schedule_id = schedule.id if schedule else None
+
     if request.registration_number is not None:
         vehicle.registration_number = normalize_registration_number(request.registration_number)
     if "vehicle_photo_data_url" in request.model_fields_set:
@@ -413,7 +461,7 @@ async def update_vehicle(
 
     refreshed_vehicle = await session.scalar(
         select(Vehicle)
-        .options(selectinload(Vehicle.owner))
+        .options(selectinload(Vehicle.owner), selectinload(Vehicle.schedule))
         .where(Vehicle.id == vehicle.id)
     )
     if not refreshed_vehicle:

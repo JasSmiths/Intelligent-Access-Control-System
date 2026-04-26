@@ -22,6 +22,22 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS schedule_id UUID"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_people_schedule_id ON people (schedule_id)"))
+            await conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE people
+                        ADD CONSTRAINT fk_people_schedule_id
+                        FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL;
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END $$;
+                    """
+                )
+            )
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS garage_door_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb"))
             await conn.execute(
                 text(
@@ -41,6 +57,22 @@ async def init_database() -> None:
                 )
             )
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS vehicle_photo_data_url TEXT"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS schedule_id UUID"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicles_schedule_id ON vehicles (schedule_id)"))
+            await conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE vehicles
+                        ADD CONSTRAINT fk_vehicles_schedule_id
+                        FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL;
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END $$;
+                    """
+                )
+            )
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))

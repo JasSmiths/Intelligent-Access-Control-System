@@ -581,6 +581,10 @@ Follow the established Modern SaaS Clean operational style:
   styling tables, rows, cards, or generic `span` elements, explicitly avoid
   overriding `.badge` display behavior; scoped row rules like `row span {
   display: block; }` have caused regressions before.
+- In schedule cards specifically, never style `.schedule-card-main span`
+  broadly. The hours pill is a `.badge` rendered as a `span`; use
+  `.schedule-card-main div > span` for description text and keep
+  `.schedule-card-main .badge` as `display: inline-flex` with centered content.
 - Use neutral foundation colors.
 - Reserve color for function:
   - Blue: primary actions and live markers.

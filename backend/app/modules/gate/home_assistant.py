@@ -1,6 +1,10 @@
+from datetime import UTC, datetime
+
+from app.db.session import AsyncSessionLocal
 from app.modules.gate.base import GateCommandResult, GateController, GateState
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities, legacy_gate_entities, normalize_cover_entities
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
+from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config
 
 
@@ -23,6 +27,27 @@ class HomeAssistantGateController(GateController):
         )
         if not gate_entities:
             return GateCommandResult(False, GateState.UNKNOWN, "Gate entity is not configured.")
+
+        now = datetime.now(tz=UTC)
+        async with AsyncSessionLocal() as session:
+            schedule_evaluations = [
+                await evaluate_schedule_id(
+                    session,
+                    entity.get("schedule_id"),
+                    now,
+                    timezone_name=config.site_timezone,
+                    default_policy=config.schedule_default_policy,
+                    source="gate",
+                )
+                for entity in gate_entities
+            ]
+        denied = [
+            f"{entity.get('name') or entity['entity_id']}: {evaluation.reason or 'outside schedule'}"
+            for entity, evaluation in zip(gate_entities, schedule_evaluations, strict=False)
+            if not evaluation.allowed
+        ]
+        if denied:
+            return GateCommandResult(False, GateState.FAULT, "; ".join(denied))
 
         outcomes = [await command_cover(self._client, entity, "open", reason) for entity in gate_entities]
         failed = [outcome for outcome in outcomes if not outcome.accepted]

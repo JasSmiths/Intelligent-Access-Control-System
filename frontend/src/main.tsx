@@ -1,5 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { EditorContent, useEditor } from "@tiptap/react";
+import { Mention } from "@tiptap/extension-mention";
+import StarterKit from "@tiptap/starter-kit";
 import {
   Activity,
   AlertTriangle,
@@ -16,12 +19,15 @@ import {
   CircleDot,
   Clock3,
   Command,
+  ClipboardPaste,
+  Copy,
   Database,
   DoorClosed,
   DoorOpen,
   Download,
   FileText,
   Gauge,
+  GitBranch,
   Home,
   Key,
   KeyRound,
@@ -39,16 +45,20 @@ import {
   RefreshCcw,
   Search,
   Send,
+  Smartphone,
   Settings,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
+  Save,
   Sun,
   Terminal,
   Trash2,
+  Type,
   UserPlus,
   UserRound,
   Users,
+  Volume2,
   Warehouse,
   X
 } from "lucide-react";
@@ -61,6 +71,70 @@ type DashboardCommand = {
   label: string;
   action: DoorCommandAction;
 };
+
+type ScheduleTimeBlock = {
+  start: string;
+  end: string;
+};
+
+type ScheduleTimeBlocks = Record<string, ScheduleTimeBlock[]>;
+
+type Schedule = {
+  id: string;
+  name: string;
+  description: string | null;
+  time_blocks: ScheduleTimeBlocks;
+  created_at: string;
+  updated_at: string;
+};
+
+type ScheduleDependencyItem = {
+  id: string;
+  name: string;
+  kind: string;
+  entity_id?: string | null;
+  registration_number?: string | null;
+  owner?: string | null;
+};
+
+type ScheduleDependencies = {
+  people: ScheduleDependencyItem[];
+  vehicles: ScheduleDependencyItem[];
+  doors: ScheduleDependencyItem[];
+};
+
+type ScheduleCellPoint = {
+  day: number;
+  slot: number;
+};
+
+type ScheduleDragState = {
+  active: boolean;
+  targetSelected: boolean;
+  anchorDay: number;
+  anchorSlot: number;
+  baseSlots: Set<string>;
+};
+
+type ScheduleCopiedBlock = {
+  startSlot: number;
+  endSlot: number;
+};
+
+type ScheduleContextMenu =
+  | {
+    kind: "selected";
+    x: number;
+    y: number;
+    day: number;
+    range: ScheduleCopiedBlock;
+  }
+  | {
+    kind: "empty";
+    x: number;
+    y: number;
+    day: number;
+  };
 
 type Presence = {
   person_id: string;
@@ -98,6 +172,8 @@ type Person = {
   group_id: string | null;
   group: string | null;
   category: string | null;
+  schedule_id: string | null;
+  schedule: string | null;
   is_active: boolean;
   garage_door_entity_ids: string[];
   vehicles: Vehicle[];
@@ -113,6 +189,8 @@ type Vehicle = {
   color?: string | null;
   person_id?: string | null;
   owner?: string | null;
+  schedule_id?: string | null;
+  schedule?: string | null;
   is_active?: boolean;
 };
 
@@ -155,6 +233,15 @@ type RealtimeMessage = {
   created_at?: string;
 };
 
+type NotificationToast = {
+  id: string;
+  title: string;
+  body: string;
+  event_type: string;
+  severity: "info" | "warning" | "critical";
+  snapshot_url?: string;
+};
+
 type UserRole = "admin" | "standard";
 
 type SystemSetting = {
@@ -179,6 +266,7 @@ type HomeAssistantManagedCover = {
   name: string;
   state?: string | null;
   enabled?: boolean;
+  schedule_id?: string | null;
   open_service?: string;
   close_service?: string;
 };
@@ -202,10 +290,108 @@ type HomeAssistantDiscovery = {
 };
 
 type AppriseUrlSummary = {
+  id?: string;
   index: number;
   type: string;
   scheme: string;
   preview: string;
+};
+
+type NotificationChannelId = "mobile" | "in_app" | "voice";
+type NotificationActionType = NotificationChannelId;
+type NotificationConditionType = "schedule" | "presence";
+type PresenceConditionMode = "no_one_home" | "someone_home" | "person_home";
+type NotificationTargetMode = "all" | "many" | "selected";
+
+type NotificationEndpoint = {
+  id: string;
+  provider: string;
+  label: string;
+  detail: string;
+};
+
+type NotificationIntegration = {
+  id: NotificationChannelId;
+  name: string;
+  provider: string;
+  configured: boolean;
+  endpoints: NotificationEndpoint[];
+};
+
+type NotificationCondition = {
+  id: string;
+  type: NotificationConditionType;
+  schedule_id?: string;
+  mode?: PresenceConditionMode;
+  person_id?: string;
+};
+
+type NotificationAction = {
+  id: string;
+  type: NotificationActionType;
+  target_mode: NotificationTargetMode;
+  target_ids: string[];
+  title_template: string;
+  message_template: string;
+  media: {
+    attach_camera_snapshot: boolean;
+    camera_id: string;
+  };
+};
+
+type NotificationRule = {
+  id: string;
+  name: string;
+  trigger_event: string;
+  conditions: NotificationCondition[];
+  actions: NotificationAction[];
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type NotificationVariable = {
+  name: string;
+  token: string;
+  label: string;
+};
+
+type NotificationVariableGroup = {
+  group: string;
+  items: NotificationVariable[];
+};
+
+type NotificationTriggerOption = {
+  value: string;
+  label: string;
+  severity: "info" | "warning" | "critical";
+  description: string;
+};
+
+type NotificationTriggerGroup = {
+  id: string;
+  label: string;
+  events: NotificationTriggerOption[];
+};
+
+type NotificationCatalogResponse = {
+  triggers: NotificationTriggerGroup[];
+  variables: NotificationVariableGroup[];
+  integrations: NotificationIntegration[];
+  mock_context: Record<string, string>;
+};
+
+type NotificationPreview = {
+  id: string;
+  name: string;
+  trigger_event: string;
+  is_active: boolean;
+  conditions: NotificationCondition[];
+  actions: Array<NotificationAction & {
+    title: string;
+    message: string;
+    snapshot: { image_url?: string } | null;
+  }>;
 };
 
 type DvlaLookupResponse = {
@@ -384,6 +570,7 @@ type ViewKey =
   | "dashboard"
   | "people"
   | "groups"
+  | "schedules"
   | "vehicles"
   | "events"
   | "reports"
@@ -392,6 +579,7 @@ type ViewKey =
   | "settings"
   | "settings_general"
   | "settings_auth"
+  | "settings_notifications"
   | "settings_lpr"
   | "users";
 
@@ -399,6 +587,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
   { key: "dashboard", label: "Dashboard", icon: Home },
   { key: "people", label: "People", icon: UserRound },
   { key: "groups", label: "Groups", icon: Users },
+  { key: "schedules", label: "Schedules", icon: Clock3 },
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "events", label: "Events", icon: CalendarDays },
   { key: "reports", label: "Reports", icon: BarChart3 },
@@ -410,6 +599,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
 const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
+  { key: "settings_notifications", label: "Notifications", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "users", label: "Users", icon: Users }
 ];
@@ -418,6 +608,7 @@ const viewPaths: Record<ViewKey, string> = {
   dashboard: "/",
   people: "/people",
   groups: "/groups",
+  schedules: "/schedules",
   vehicles: "/vehicles",
   events: "/events",
   reports: "/reports",
@@ -426,6 +617,7 @@ const viewPaths: Record<ViewKey, string> = {
   settings: "/settings",
   settings_general: "/settings/general",
   settings_auth: "/settings/auth-security",
+  settings_notifications: "/settings/notifications",
   settings_lpr: "/settings/lpr-tuning",
   users: "/settings/users"
 };
@@ -566,6 +758,32 @@ function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
   };
 }
 
+function notificationToastFromRealtime(event: RealtimeMessage): NotificationToast | null {
+  if (event.type !== "notification.in_app") return null;
+  const title = stringPayload(event.payload.title);
+  const body = stringPayload(event.payload.body);
+  const eventType = stringPayload(event.payload.event_type);
+  const severity = stringPayload(event.payload.severity);
+  const snapshot = event.payload.snapshot;
+  let snapshotUrl = "";
+  if (snapshot && typeof snapshot === "object" && "image_url" in snapshot) {
+    snapshotUrl = stringPayload((snapshot as Record<string, unknown>).image_url);
+  }
+  if (!title && !body) return null;
+  return {
+    id: `${event.created_at ?? Date.now()}-${eventType}-${Math.random().toString(16).slice(2)}`,
+    title: title || titleCase(eventType),
+    body,
+    event_type: eventType,
+    severity: isNotificationSeverity(severity) ? severity : "info",
+    snapshot_url: snapshotUrl || undefined,
+  };
+}
+
+function isNotificationSeverity(value: string): value is NotificationToast["severity"] {
+  return ["info", "warning", "critical"].includes(value);
+}
+
 function isAccessDirection(value: string): value is AccessEvent["direction"] {
   return ["entry", "exit", "denied"].includes(value);
 }
@@ -609,9 +827,11 @@ function App() {
   const [people, setPeople] = React.useState<Person[]>([]);
   const [vehicles, setVehicles] = React.useState<Vehicle[]>([]);
   const [groups, setGroups] = React.useState<Group[]>([]);
+  const [schedules, setSchedules] = React.useState<Schedule[]>([]);
   const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
+  const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
@@ -651,7 +871,7 @@ function App() {
   }, [refreshAuth]);
 
   const refresh = React.useCallback(async () => {
-    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSlots, nextStatus] =
+    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextSlots, nextStatus] =
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
@@ -659,6 +879,7 @@ function App() {
         api.get<Person[]>("/api/v1/people"),
         api.get<Vehicle[]>("/api/v1/vehicles"),
         api.get<Group[]>("/api/v1/groups"),
+        api.get<Schedule[]>("/api/v1/schedules"),
         api.get<TimeSlot[]>("/api/v1/time-slots"),
         api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status")
       ]);
@@ -668,6 +889,7 @@ function App() {
     setPeople(nextPeople);
     setVehicles(nextVehicles);
     setGroups(nextGroups);
+    setSchedules(nextSchedules);
     setTimeSlots(nextSlots);
     setIntegrationStatus(nextStatus);
     setLoading(false);
@@ -696,6 +918,11 @@ function App() {
     socket.onmessage = (event) => {
       const parsed = JSON.parse(event.data) as RealtimeMessage;
       setRealtime((current) => [parsed, ...current].slice(0, 80));
+      const notificationToast = notificationToastFromRealtime(parsed);
+      if (notificationToast) {
+        setNotificationToasts((current) => [notificationToast, ...current].slice(0, 4));
+        return;
+      }
       if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
         return;
       }
@@ -877,6 +1104,7 @@ function App() {
             people={people}
             vehicles={vehicles}
             groups={groups}
+            schedules={schedules}
             timeSlots={timeSlots}
             integrationStatus={integrationStatus}
             realtime={realtime}
@@ -888,7 +1116,50 @@ function App() {
           />
         )}
       </main>
+      <NotificationToastStack
+        notifications={notificationToasts}
+        onDismiss={(id) => setNotificationToasts((current) => current.filter((item) => item.id !== id))}
+      />
       <ChatWidget currentUser={currentUser} />
+    </div>
+  );
+}
+
+function NotificationToastStack({
+  notifications,
+  onDismiss
+}: {
+  notifications: NotificationToast[];
+  onDismiss: (id: string) => void;
+}) {
+  React.useEffect(() => {
+    if (!notifications.length) return undefined;
+    const timers = notifications.map((notification) =>
+      window.setTimeout(() => onDismiss(notification.id), 9000)
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [notifications, onDismiss]);
+
+  if (!notifications.length) return null;
+  return (
+    <div className="notification-toast-stack" aria-live="polite">
+      {notifications.map((notification) => (
+        <article className={`notification-toast ${notification.severity}`} key={notification.id}>
+          {notification.snapshot_url ? <img alt="" src={notification.snapshot_url} /> : null}
+          <div>
+            <div className="notification-toast-head">
+              <Badge tone={notification.severity === "critical" ? "red" : notification.severity === "warning" ? "amber" : "blue"}>
+                {notificationEventLabel(notification.event_type)}
+              </Badge>
+              <button className="icon-button" onClick={() => onDismiss(notification.id)} type="button" aria-label="Dismiss notification">
+                <X size={14} />
+              </button>
+            </div>
+            <strong>{notification.title}</strong>
+            <p>{notification.body}</p>
+          </div>
+        </article>
+      ))}
     </div>
   );
 }
@@ -1073,6 +1344,7 @@ function View(props: {
   people: Person[];
   vehicles: Vehicle[];
   groups: Group[];
+  schedules: Schedule[];
   timeSlots: TimeSlot[];
   integrationStatus: IntegrationStatus | null;
   realtime: RealtimeMessage[];
@@ -1082,23 +1354,27 @@ function View(props: {
 }) {
   switch (props.view) {
     case "people":
-      return <PeopleView garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
+      return <PeopleView garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
     case "groups":
       return <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
+    case "schedules":
+      return <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
     case "vehicles":
-      return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} vehicles={props.vehicles} />;
+      return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
     case "events":
       return <EventsView events={props.events} query={props.search} />;
     case "reports":
       return <ReportsView events={props.events} presence={props.presence} />;
     case "integrations":
-      return <IntegrationsView status={props.integrationStatus} refresh={props.refresh} />;
+      return <IntegrationsView schedules={props.schedules} status={props.integrationStatus} refresh={props.refresh} />;
     case "logs":
       return <LogsView logs={props.realtime} />;
     case "settings_general":
       return <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} />;
     case "settings_auth":
       return <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} />;
+    case "settings_notifications":
+      return <NotificationsView people={props.people} schedules={props.schedules} />;
     case "settings_lpr":
       return <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} />;
     case "settings":
@@ -1139,7 +1415,7 @@ function Dashboard({
   const unknown = Math.max(presence.length - present - exited, 0);
   const latestEvent = events[0];
   const critical = anomalies.filter((item) => item.severity === "critical").length;
-  const displayEvents = getDashboardEvents(events);
+  const displayEvents = getDashboardEvents(events, vehicles, people);
   const displayAnomalies = getDashboardAnomalies(anomalies);
   const expected = Math.max(people.length, presence.length);
   const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
@@ -1285,7 +1561,7 @@ function Dashboard({
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
               return (
-                <div className="event-feed-row" key={`${event.time}-${event.label}`}>
+                <div className="event-feed-row" key={event.id}>
                   <time>{event.time}</time>
                   <span className={`feed-line ${event.tone}`} />
                   <span className={`event-chip ${event.tone}`}>
@@ -1578,6 +1854,7 @@ function LegendDot({ className, label, value }: { className: string; label: stri
 }
 
 type DashboardEvent = {
+  id: string;
   time: string;
   label: string;
   subtitle: string;
@@ -1586,15 +1863,25 @@ type DashboardEvent = {
   icon: React.ElementType;
 };
 
-function getDashboardEvents(events: AccessEvent[]): DashboardEvent[] {
-  return events.slice(0, 5).map((event) => ({
-    time: formatTime(event.occurred_at),
-    label: event.registration_number,
-    subtitle: `${titleCase(event.source)}  •  LPR`,
-    status: event.direction === "exit" ? "OUT" : "IN",
-    tone: event.decision === "denied" ? "gray" : event.direction === "entry" ? "green" : "blue",
-    icon: event.direction === "exit" ? LogOut : event.decision === "denied" ? AlertTriangle : Car
-  }));
+function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: Person[]): DashboardEvent[] {
+  const peopleById = new Map(people.map((person) => [person.id, person]));
+  const vehiclesByRegistration = new Map(vehicles.map((vehicle) => [vehicle.registration_number.toUpperCase(), vehicle]));
+
+  return events.slice(0, 5).map((event) => {
+    const vehicle = vehiclesByRegistration.get(event.registration_number.toUpperCase());
+    const owner = vehicle?.person_id ? peopleById.get(vehicle.person_id) : undefined;
+    const ownerFirstName = owner?.first_name || vehicle?.owner?.split(" ")[0] || "";
+
+    return {
+      id: event.id,
+      time: formatTime(event.occurred_at),
+      label: ownerFirstName || "Unknown",
+      subtitle: `${event.registration_number}  •  LPR`,
+      status: event.direction === "exit" ? "OUT" : "IN",
+      tone: event.decision === "denied" ? "gray" : event.direction === "entry" ? "green" : "blue",
+      icon: event.direction === "exit" ? LogOut : event.decision === "denied" ? AlertTriangle : Car
+    };
+  });
 }
 
 type DashboardAnomaly = {
@@ -2007,12 +2294,816 @@ function GroupModal({
   );
 }
 
+const scheduleDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const scheduleDayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const scheduleSlotCount = 48;
+const scheduleMinutesPerSlot = 30;
+
+function SchedulesView({
+  schedules,
+  query,
+  refresh
+}: {
+  schedules: Schedule[];
+  query: string;
+  refresh: () => Promise<void>;
+}) {
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [selectedSchedule, setSelectedSchedule] = React.useState<Schedule | null>(null);
+  const [error, setError] = React.useState("");
+  const filtered = schedules.filter((schedule) =>
+    matches(schedule.name, query) ||
+    matches(schedule.description ?? "", query) ||
+    matches(scheduleSummary(schedule.time_blocks), query)
+  );
+
+  const openCreate = () => {
+    setSelectedSchedule(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (schedule: Schedule) => {
+    setSelectedSchedule(schedule);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setSelectedSchedule(null);
+  };
+
+  const deleteSchedule = async (schedule: Schedule) => {
+    if (!window.confirm(`Delete ${schedule.name}?`)) return;
+    setError("");
+    try {
+      await api.delete(`/api/v1/schedules/${schedule.id}`);
+      await refresh();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete schedule");
+    }
+  };
+
+  return (
+    <section className="view-stack schedules-page">
+      <div className="users-hero card">
+        <div>
+          <span className="eyebrow">Access Control</span>
+          <h1>Schedules</h1>
+          <p>Reusable weekly access templates for people, vehicles, gates, and garage doors.</p>
+        </div>
+        <button className="primary-button" onClick={openCreate} type="button">
+          <Plus size={17} /> New Schedule
+        </button>
+      </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="schedule-card-grid">
+        {filtered.length ? filtered.map((schedule) => (
+          <article className="card schedule-card" key={schedule.id}>
+            <button className="schedule-card-main" onClick={() => openEdit(schedule)} type="button">
+              <div className="schedule-card-icon">
+                <Clock3 size={18} />
+              </div>
+              <div>
+                <strong>{schedule.name}</strong>
+                <span>{schedule.description || scheduleSummary(schedule.time_blocks)}</span>
+              </div>
+              <Badge tone={scheduleHasBlocks(schedule.time_blocks) ? "green" : "amber"}>
+                {scheduleSummary(schedule.time_blocks)}
+              </Badge>
+            </button>
+            <div className="schedule-card-days" aria-hidden="true">
+              {scheduleDays.map((day, index) => (
+                <span
+                  className={scheduleDayHasBlocks(schedule.time_blocks, index) ? "active" : ""}
+                  key={day}
+                >
+                  {day.slice(0, 1)}
+                </span>
+              ))}
+            </div>
+            <div className="schedule-card-actions">
+              <button className="secondary-button" onClick={() => openEdit(schedule)} type="button">
+                <CalendarDays size={15} /> Edit
+              </button>
+              <button className="icon-button danger" onClick={() => deleteSchedule(schedule)} type="button" aria-label={`Delete ${schedule.name}`}>
+                <Trash2 size={15} />
+              </button>
+            </div>
+          </article>
+        )) : (
+          <div className="card schedule-empty-card">
+            <EmptyState icon={Clock3} label="No schedules match this view" />
+          </div>
+        )}
+      </div>
+
+      {modalOpen ? (
+        <ScheduleModal
+          mode={selectedSchedule ? "edit" : "create"}
+          onClose={closeModal}
+          onSaved={async () => {
+            await refresh();
+            closeModal();
+          }}
+          schedule={selectedSchedule}
+          setPageError={setError}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ScheduleModal({
+  mode,
+  onClose,
+  onSaved,
+  schedule,
+  setPageError
+}: {
+  mode: "create" | "edit";
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  schedule: Schedule | null;
+  setPageError: (message: string) => void;
+}) {
+  const [form, setForm] = React.useState({
+    name: schedule?.name ?? "",
+    description: schedule?.description ?? "",
+    time_blocks: normalizeScheduleBlocks(schedule?.time_blocks ?? emptyScheduleBlocks())
+  });
+  const [dependencies, setDependencies] = React.useState<ScheduleDependencies | null>(null);
+  const [dependenciesLoading, setDependenciesLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!schedule) {
+      setDependencies(null);
+      return;
+    }
+    setDependenciesLoading(true);
+    api.get<ScheduleDependencies>(`/api/v1/schedules/${schedule.id}/dependencies`)
+      .then(setDependencies)
+      .catch(() => setDependencies(null))
+      .finally(() => setDependenciesLoading(false));
+  }, [schedule]);
+
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => {
+    setForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setPageError("");
+    setSubmitting(true);
+    const payload = {
+      name: form.name,
+      description: form.description || null,
+      time_blocks: normalizeScheduleBlocks(form.time_blocks)
+    };
+    try {
+      if (mode === "edit" && schedule) {
+        await api.patch<Schedule>(`/api/v1/schedules/${schedule.id}`, payload);
+      } else {
+        await api.post<Schedule>("/api/v1/schedules", payload);
+      }
+      await onSaved();
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Unable to save schedule";
+      setError(message);
+      setPageError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card schedule-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <div>
+            <h2>{mode === "edit" ? "Edit Schedule" : "New Schedule"}</h2>
+            <p>{scheduleSummary(form.time_blocks)}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        {error ? <div className="auth-error">{error}</div> : null}
+
+        <div className="schedule-modal-grid">
+          <div className="schedule-details-panel">
+            <label className="field">
+              <span>Schedule name</span>
+              <div className="field-control">
+                <Clock3 size={17} />
+                <input value={form.name} onChange={(event) => update("name", event.target.value)} required />
+              </div>
+            </label>
+            <label className="field">
+              <span>Description</span>
+              <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
+            </label>
+            <ScheduleDependencyPanel dependencies={dependencies} loading={dependenciesLoading} />
+          </div>
+
+          <WeeklyScheduleGrid
+            value={form.time_blocks}
+            onChange={(timeBlocks) => update("time_blocks", timeBlocks)}
+          />
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" disabled={submitting} type="submit">
+            <Save size={16} />
+            {submitting ? "Saving..." : mode === "edit" ? "Save Schedule" : "Create Schedule"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ScheduleDependencyPanel({
+  dependencies,
+  loading
+}: {
+  dependencies: ScheduleDependencies | null;
+  loading: boolean;
+}) {
+  const items = dependencies ? [
+    ...dependencies.people.map((item) => ({ ...item, tone: "blue" as BadgeTone })),
+    ...dependencies.vehicles.map((item) => ({ ...item, tone: "green" as BadgeTone })),
+    ...dependencies.doors.map((item) => ({ ...item, tone: "amber" as BadgeTone }))
+  ] : [];
+
+  return (
+    <section className="schedule-dependencies">
+      <div className="panel-header">
+        <h2>In Use By</h2>
+        <Badge tone={items.length ? "blue" : "gray"}>{loading ? "loading" : String(items.length)}</Badge>
+      </div>
+      {loading ? (
+        <div className="schedule-dependency-empty">Loading dependencies</div>
+      ) : items.length ? (
+        <div className="schedule-dependency-list">
+          {items.map((item) => (
+            <span className={`schedule-dependency-pill ${item.tone}`} key={`${item.kind}-${item.id}`}>
+              {dependencyIcon(item.kind)}
+              <span>{item.name}</span>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="schedule-dependency-empty">No assignments</div>
+      )}
+    </section>
+  );
+}
+
+function dependencyIcon(kind: string) {
+  if (kind === "vehicle") return <Car size={13} />;
+  if (kind === "gate" || kind === "garage_door") return <Warehouse size={13} />;
+  return <UserRound size={13} />;
+}
+
+function WeeklyScheduleGrid({
+  value,
+  onChange
+}: {
+  value: ScheduleTimeBlocks;
+  onChange: (timeBlocks: ScheduleTimeBlocks) => void;
+}) {
+  const [selectedSlots, setSelectedSlots] = React.useState<Set<string>>(() => scheduleBlocksToSlots(value));
+  const calendarRef = React.useRef<HTMLDivElement | null>(null);
+  const dragRef = React.useRef<ScheduleDragState>({
+    active: false,
+    targetSelected: false,
+    anchorDay: 0,
+    anchorSlot: 0,
+    baseSlots: new Set()
+  });
+  const autoScrollRef = React.useRef<{ frame: number | null; clientX: number; clientY: number }>({
+    frame: null,
+    clientX: 0,
+    clientY: 0
+  });
+  const [copiedBlock, setCopiedBlock] = React.useState<ScheduleCopiedBlock | null>(null);
+  const [contextMenu, setContextMenu] = React.useState<ScheduleContextMenu | null>(null);
+
+  React.useEffect(() => {
+    setSelectedSlots(scheduleBlocksToSlots(value));
+  }, [value]);
+
+  const commitSlots = React.useCallback((nextSlots: Set<string>) => {
+    setSelectedSlots(nextSlots);
+    onChange(slotsToScheduleBlocks(nextSlots));
+  }, [onChange]);
+
+  const applyDragRange = React.useCallback((day: number, slot: number) => {
+    const drag = dragRef.current;
+    if (!drag.active) return;
+
+    const next = new Set(drag.baseSlots);
+    const startDay = Math.min(drag.anchorDay, day);
+    const endDay = Math.max(drag.anchorDay, day);
+    const startSlot = Math.min(drag.anchorSlot, slot);
+    const endSlot = Math.max(drag.anchorSlot, slot);
+
+    for (let rangeDay = startDay; rangeDay <= endDay; rangeDay += 1) {
+      for (let rangeSlot = startSlot; rangeSlot <= endSlot; rangeSlot += 1) {
+        const key = scheduleSlotKey(rangeDay, rangeSlot);
+        if (drag.targetSelected) {
+          next.add(key);
+        } else {
+          next.delete(key);
+        }
+      }
+    }
+
+    setSelectedSlots(next);
+    onChange(slotsToScheduleBlocks(next));
+  }, [onChange]);
+
+  const applyBlockToDays = React.useCallback((days: number[], block: ScheduleCopiedBlock) => {
+    setSelectedSlots((current) => {
+      const next = new Set(current);
+      for (const day of days) {
+        for (let slot = block.startSlot; slot <= block.endSlot; slot += 1) {
+          next.add(scheduleSlotKey(day, slot));
+        }
+      }
+      onChange(slotsToScheduleBlocks(next));
+      return next;
+    });
+    setContextMenu(null);
+  }, [onChange]);
+
+  const stopAutoScroll = React.useCallback(() => {
+    if (autoScrollRef.current.frame !== null) {
+      window.cancelAnimationFrame(autoScrollRef.current.frame);
+      autoScrollRef.current.frame = null;
+    }
+  }, []);
+
+  const runAutoScroll = React.useCallback(() => {
+    const calendar = calendarRef.current;
+    if (!dragRef.current.active || !calendar) {
+      autoScrollRef.current.frame = null;
+      return;
+    }
+
+    const { clientX, clientY } = autoScrollRef.current;
+    const rect = calendar.getBoundingClientRect();
+    const edgeSize = 56;
+    const maxStep = 18;
+    let top = 0;
+    let left = 0;
+
+    if (clientY < rect.top + edgeSize) {
+      top = -Math.ceil(((rect.top + edgeSize - clientY) / edgeSize) * maxStep);
+    } else if (clientY > rect.bottom - edgeSize) {
+      top = Math.ceil(((clientY - (rect.bottom - edgeSize)) / edgeSize) * maxStep);
+    }
+
+    if (clientX < rect.left + edgeSize) {
+      left = -Math.ceil(((rect.left + edgeSize - clientX) / edgeSize) * maxStep);
+    } else if (clientX > rect.right - edgeSize) {
+      left = Math.ceil(((clientX - (rect.right - edgeSize)) / edgeSize) * maxStep);
+    }
+
+    if (top !== 0 || left !== 0) {
+      calendar.scrollBy({ top, left });
+      const cell = scheduleCellFromPoint(clientX, clientY, calendar);
+      if (cell) applyDragRange(cell.day, cell.slot);
+    }
+
+    autoScrollRef.current.frame = window.requestAnimationFrame(runAutoScroll);
+  }, [applyDragRange]);
+
+  const updateAutoScrollPointer = React.useCallback((clientX: number, clientY: number) => {
+    autoScrollRef.current.clientX = clientX;
+    autoScrollRef.current.clientY = clientY;
+    if (autoScrollRef.current.frame === null) {
+      autoScrollRef.current.frame = window.requestAnimationFrame(runAutoScroll);
+    }
+  }, [runAutoScroll]);
+
+  React.useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragRef.current.active) return;
+      updateAutoScrollPointer(event.clientX, event.clientY);
+      const cell = scheduleCellFromPoint(event.clientX, event.clientY, calendarRef.current);
+      if (!cell) return;
+      applyDragRange(cell.day, cell.slot);
+    };
+    const onPointerUp = () => {
+      dragRef.current.active = false;
+      stopAutoScroll();
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      stopAutoScroll();
+    };
+  }, [applyDragRange, stopAutoScroll, updateAutoScrollPointer]);
+
+  React.useEffect(() => {
+    if (!contextMenu) return undefined;
+    const closeMenu = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
+
+  const startPaint = (day: number, slot: number, event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setContextMenu(null);
+    const targetSelected = !selectedSlots.has(scheduleSlotKey(day, slot));
+    dragRef.current = {
+      active: true,
+      targetSelected,
+      anchorDay: day,
+      anchorSlot: slot,
+      baseSlots: new Set(selectedSlots)
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateAutoScrollPointer(event.clientX, event.clientY);
+    applyDragRange(day, slot);
+  };
+
+  const openCellMenu = (day: number, slot: number, event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current.active = false;
+    stopAutoScroll();
+
+    const point = scheduleContextMenuPoint(event.clientX, event.clientY);
+    const key = scheduleSlotKey(day, slot);
+    if (selectedSlots.has(key)) {
+      const range = selectedSlotRange(selectedSlots, day, slot);
+      if (range) {
+        setContextMenu({ kind: "selected", day, range, ...point });
+      }
+      return;
+    }
+
+    setContextMenu({ kind: "empty", day, ...point });
+  };
+
+  const copyContextRange = () => {
+    if (contextMenu?.kind !== "selected") return;
+    setCopiedBlock(contextMenu.range);
+    setContextMenu(null);
+  };
+
+  const replicateContextRange = (days: number[]) => {
+    if (contextMenu?.kind !== "selected") return;
+    applyBlockToDays(days, contextMenu.range);
+  };
+
+  const clearContextRange = () => {
+    if (contextMenu?.kind !== "selected") return;
+    const { day, range } = contextMenu;
+    setSelectedSlots((current) => {
+      const next = new Set(current);
+      for (let slot = range.startSlot; slot <= range.endSlot; slot += 1) {
+        next.delete(scheduleSlotKey(day, slot));
+      }
+      onChange(slotsToScheduleBlocks(next));
+      return next;
+    });
+    setContextMenu(null);
+  };
+
+  const clearAllContextRanges = () => {
+    commitSlots(new Set());
+    setContextMenu(null);
+  };
+
+  const pasteCopiedBlock = () => {
+    if (contextMenu?.kind !== "empty" || !copiedBlock) return;
+    applyBlockToDays([contextMenu.day], copiedBlock);
+  };
+
+  const applyPreset = (preset: "clear" | "all" | "weekdays" | "mornings") => {
+    const next = new Set<string>();
+    if (preset === "all") {
+      for (let day = 0; day < 7; day += 1) {
+        for (let slot = 0; slot < scheduleSlotCount; slot += 1) next.add(scheduleSlotKey(day, slot));
+      }
+    }
+    if (preset === "weekdays") {
+      addSlotRange(next, [0, 1, 2, 3, 4], 9 * 60, 17 * 60);
+    }
+    if (preset === "mornings") {
+      addSlotRange(next, [0, 1, 2, 3, 4], 7 * 60, 12 * 60);
+    }
+    commitSlots(next);
+  };
+
+  return (
+    <section className="weekly-schedule-panel">
+      <div className="weekly-schedule-toolbar">
+        <div>
+          <strong>Weekly Access</strong>
+          <span>{scheduleSummary(slotsToScheduleBlocks(selectedSlots))}</span>
+        </div>
+        <div>
+          <button className="secondary-button" onClick={() => applyPreset("weekdays")} type="button">Weekdays</button>
+          <button className="secondary-button" onClick={() => applyPreset("mornings")} type="button">Mornings</button>
+          <button className="secondary-button" onClick={() => applyPreset("all")} type="button">24/7</button>
+          <button className="secondary-button" onClick={() => applyPreset("clear")} type="button">Clear</button>
+        </div>
+      </div>
+
+      <div className="schedule-calendar" onDragStart={(event) => event.preventDefault()} ref={calendarRef}>
+        <div className="schedule-calendar-head">
+          <span />
+          {scheduleDays.map((day) => <strong key={day}>{day}</strong>)}
+        </div>
+        <div className="schedule-calendar-body">
+          <div className="schedule-time-axis" aria-hidden="true">
+            {Array.from({ length: 24 }, (_, hour) => (
+              <span key={hour} style={{ gridRow: `${hour * 2 + 1} / span 2` }}>{`${hour.toString().padStart(2, "0")}:00`}</span>
+            ))}
+          </div>
+          {scheduleDays.map((day, dayIndex) => (
+            <div className="schedule-day-column" key={day}>
+              {Array.from({ length: scheduleSlotCount }, (_, slot) => {
+                const key = scheduleSlotKey(dayIndex, slot);
+                const selected = selectedSlots.has(key);
+                const previousSelected = selectedSlots.has(scheduleSlotKey(dayIndex, slot - 1));
+                const nextSelected = selectedSlots.has(scheduleSlotKey(dayIndex, slot + 1));
+                const className = [
+                  "schedule-cell",
+                  selected ? "selected" : "",
+                  selected && !previousSelected ? "selected-start" : "",
+                  selected && !nextSelected ? "selected-end" : ""
+                ].filter(Boolean).join(" ");
+                return (
+                  <button
+                    aria-label={`${scheduleDayNames[dayIndex]} ${formatSlotLabel(slot)} ${selected ? "allowed" : "blocked"}`}
+                    className={className}
+                    data-day={dayIndex}
+                    data-schedule-cell="true"
+                    data-slot={slot}
+                    key={key}
+                    onContextMenu={(event) => openCellMenu(dayIndex, slot, event)}
+                    onPointerDown={(event) => startPaint(dayIndex, slot, event)}
+                    type="button"
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+      {contextMenu ? (
+        <div
+          className="schedule-context-menu"
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {contextMenu.kind === "selected" ? (
+            <>
+              <div className="schedule-context-menu-label">
+                <span>{scheduleDayNames[contextMenu.day]}</span>
+                <strong>{formatScheduleBlockLabel(contextMenu.range)}</strong>
+              </div>
+              <button onClick={copyContextRange} role="menuitem" type="button">
+                <Copy size={15} />
+                Copy
+              </button>
+              <button onClick={() => replicateContextRange([0, 1, 2, 3, 4, 5, 6])} role="menuitem" type="button">
+                <CalendarDays size={15} />
+                Replicate All Week
+              </button>
+              <button onClick={() => replicateContextRange([0, 1, 2, 3, 4])} role="menuitem" type="button">
+                <CalendarDays size={15} />
+                Replicate Week Days Only
+              </button>
+              <div aria-hidden="true" className="schedule-context-menu-separator" />
+              <button className="danger" onClick={clearContextRange} role="menuitem" type="button">
+                <Trash2 size={15} />
+                Clear Selected
+              </button>
+              <button className="danger" onClick={clearAllContextRanges} role="menuitem" type="button">
+                <X size={15} />
+                Clear All
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="schedule-context-menu-label">
+                <span>{scheduleDayNames[contextMenu.day]}</span>
+                <strong>{copiedBlock ? formatScheduleBlockLabel(copiedBlock) : "Nothing copied"}</strong>
+              </div>
+              <button disabled={!copiedBlock} onClick={pasteCopiedBlock} role="menuitem" type="button">
+                <ClipboardPaste size={15} />
+                Paste
+              </button>
+              <div aria-hidden="true" className="schedule-context-menu-separator" />
+              <button className="danger" disabled={selectedSlots.size === 0} onClick={clearAllContextRanges} role="menuitem" type="button">
+                <X size={15} />
+                Clear All
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function scheduleCellFromPoint(
+  clientX: number,
+  clientY: number,
+  calendar: HTMLDivElement | null
+): ScheduleCellPoint | null {
+  const element = document.elementFromPoint(clientX, clientY);
+  const cell = element?.closest("[data-schedule-cell='true']") as HTMLElement | null;
+  if (cell) {
+    const day = Number(cell.dataset.day);
+    const slot = Number(cell.dataset.slot);
+    if (Number.isInteger(day) && Number.isInteger(slot)) return { day, slot };
+  }
+
+  if (!calendar) return null;
+
+  const calendarRect = calendar.getBoundingClientRect();
+  const edgeSlack = 72;
+  if (
+    clientX < calendarRect.left ||
+    clientX > calendarRect.right ||
+    clientY < calendarRect.top - edgeSlack ||
+    clientY > calendarRect.bottom + edgeSlack
+  ) {
+    return null;
+  }
+
+  const body = calendar.querySelector<HTMLElement>(".schedule-calendar-body");
+  if (!body) return null;
+
+  const bodyRect = body.getBoundingClientRect();
+  const axis = body.querySelector<HTMLElement>(".schedule-time-axis");
+  const axisWidth = axis?.getBoundingClientRect().width ?? 56;
+  const dayWidth = (bodyRect.width - axisWidth) / scheduleDays.length;
+  const slotHeight = bodyRect.height / scheduleSlotCount;
+  if (dayWidth <= 0 || slotHeight <= 0) return null;
+
+  const rawDay = Math.floor((clientX - bodyRect.left - axisWidth) / dayWidth);
+  const rawSlot = Math.floor((clientY - bodyRect.top) / slotHeight);
+  const day = Math.max(0, Math.min(scheduleDays.length - 1, rawDay));
+  const slot = Math.max(0, Math.min(scheduleSlotCount - 1, rawSlot));
+  return { day, slot };
+}
+
+function selectedSlotRange(slots: Set<string>, day: number, slot: number): ScheduleCopiedBlock | null {
+  if (!slots.has(scheduleSlotKey(day, slot))) return null;
+  let startSlot = slot;
+  let endSlot = slot;
+  while (startSlot > 0 && slots.has(scheduleSlotKey(day, startSlot - 1))) startSlot -= 1;
+  while (endSlot < scheduleSlotCount - 1 && slots.has(scheduleSlotKey(day, endSlot + 1))) endSlot += 1;
+  return { startSlot, endSlot };
+}
+
+function scheduleContextMenuPoint(clientX: number, clientY: number) {
+  const menuWidth = 244;
+  const menuHeight = 292;
+  return {
+    x: Math.max(12, Math.min(clientX, window.innerWidth - menuWidth - 12)),
+    y: Math.max(12, Math.min(clientY, window.innerHeight - menuHeight - 12))
+  };
+}
+
+function formatScheduleBlockLabel(block: ScheduleCopiedBlock) {
+  return `${formatScheduleMinute(block.startSlot * scheduleMinutesPerSlot)} - ${formatScheduleMinute((block.endSlot + 1) * scheduleMinutesPerSlot)}`;
+}
+
+function emptyScheduleBlocks(): ScheduleTimeBlocks {
+  return Object.fromEntries(scheduleDays.map((_, index) => [String(index), []])) as ScheduleTimeBlocks;
+}
+
+function normalizeScheduleBlocks(blocks: ScheduleTimeBlocks): ScheduleTimeBlocks {
+  return slotsToScheduleBlocks(scheduleBlocksToSlots(blocks));
+}
+
+function scheduleBlocksToSlots(blocks: ScheduleTimeBlocks): Set<string> {
+  const slots = new Set<string>();
+  for (let day = 0; day < 7; day += 1) {
+    for (const block of blocks[String(day)] ?? []) {
+      const start = parseScheduleTime(block.start);
+      const end = parseScheduleTime(block.end);
+      if (start == null || end == null || start >= end) continue;
+      for (let minute = start; minute < end; minute += scheduleMinutesPerSlot) {
+        const slot = Math.floor(minute / scheduleMinutesPerSlot);
+        if (slot >= 0 && slot < scheduleSlotCount) slots.add(scheduleSlotKey(day, slot));
+      }
+    }
+  }
+  return slots;
+}
+
+function slotsToScheduleBlocks(slots: Set<string>): ScheduleTimeBlocks {
+  const blocks = emptyScheduleBlocks();
+  for (let day = 0; day < 7; day += 1) {
+    const selected = Array.from({ length: scheduleSlotCount }, (_, slot) => slots.has(scheduleSlotKey(day, slot)));
+    const intervals: ScheduleTimeBlock[] = [];
+    let startSlot: number | null = null;
+    for (let slot = 0; slot <= scheduleSlotCount; slot += 1) {
+      const active = selected[slot] ?? false;
+      if (active && startSlot === null) {
+        startSlot = slot;
+      }
+      if ((!active || slot === scheduleSlotCount) && startSlot !== null) {
+        intervals.push({
+          start: formatScheduleMinute(startSlot * scheduleMinutesPerSlot),
+          end: formatScheduleMinute(slot * scheduleMinutesPerSlot)
+        });
+        startSlot = null;
+      }
+    }
+    blocks[String(day)] = intervals;
+  }
+  return blocks;
+}
+
+function addSlotRange(target: Set<string>, days: number[], startMinute: number, endMinute: number) {
+  for (const day of days) {
+    for (let minute = startMinute; minute < endMinute; minute += scheduleMinutesPerSlot) {
+      target.add(scheduleSlotKey(day, minute / scheduleMinutesPerSlot));
+    }
+  }
+}
+
+function scheduleSlotKey(day: number, slot: number) {
+  return `${day}:${slot}`;
+}
+
+function parseScheduleTime(value: string) {
+  if (value === "24:00" || value === "23:59") return 24 * 60;
+  const [hours, minutes] = value.split(":").map((part) => Number(part));
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return hours * 60 + minutes;
+}
+
+function formatScheduleMinute(value: number) {
+  if (value >= 24 * 60) return "24:00";
+  return `${Math.floor(value / 60).toString().padStart(2, "0")}:${(value % 60).toString().padStart(2, "0")}`;
+}
+
+function formatSlotLabel(slot: number) {
+  return `${formatScheduleMinute(slot * scheduleMinutesPerSlot)}-${formatScheduleMinute((slot + 1) * scheduleMinutesPerSlot)}`;
+}
+
+function scheduleHasBlocks(blocks: ScheduleTimeBlocks) {
+  return Object.values(blocks ?? {}).some((items) => items.length);
+}
+
+function scheduleDayHasBlocks(blocks: ScheduleTimeBlocks, day: number) {
+  return Boolean(blocks?.[String(day)]?.length);
+}
+
+function scheduleSummary(blocks: ScheduleTimeBlocks) {
+  const selected = scheduleBlocksToSlots(blocks);
+  if (selected.size === 0) return "No allowed time";
+  if (selected.size === scheduleSlotCount * 7) return "24/7";
+  const hours = selected.size / 2;
+  const days = Array.from({ length: 7 }, (_, day) =>
+    Array.from({ length: scheduleSlotCount }, (_, slot) => selected.has(scheduleSlotKey(day, slot))).some(Boolean)
+  ).filter(Boolean).length;
+  return `${hours % 1 === 0 ? hours : hours.toFixed(1)}h across ${days} day${days === 1 ? "" : "s"}`;
+}
+
 function PeopleView({
   garageDoors,
   groups,
   people,
   query,
   refresh,
+  schedules,
   vehicles
 }: {
   garageDoors: HomeAssistantManagedCover[];
@@ -2020,6 +3111,7 @@ function PeopleView({
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
+  schedules: Schedule[];
   vehicles: Vehicle[];
 }) {
   const [modalOpen, setModalOpen] = React.useState(false);
@@ -2090,6 +3182,7 @@ function PeopleView({
                 </div>
                 <Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "Active" : "Inactive"}</Badge>
                 <div className="vehicle-chip-list">
+                  {person.schedule ? <span className="vehicle-chip schedule-chip">{person.schedule}</span> : null}
                   {person.vehicles.length ? person.vehicles.map((vehicle) => (
                     <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
                   )) : <span className="muted-value">No vehicles</span>}
@@ -2117,6 +3210,7 @@ function PeopleView({
             closeModal();
           }}
           person={selectedPerson}
+          schedules={schedules}
           setPageError={setError}
           vehicles={vehicles}
         />
@@ -2133,6 +3227,7 @@ function PersonModal({
   onClose,
   onSaved,
   person,
+  schedules,
   setPageError,
   vehicles
 }: {
@@ -2143,6 +3238,7 @@ function PersonModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
   person: Person | null;
+  schedules: Schedule[];
   setPageError: (message: string) => void;
   vehicles: Vehicle[];
 }) {
@@ -2151,6 +3247,7 @@ function PersonModal({
     last_name: person?.last_name ?? "",
     profile_photo_data_url: person?.profile_photo_data_url ?? "",
     group_id: person?.group_id ?? groups[0]?.id ?? "",
+    schedule_id: person?.schedule_id ?? "",
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
     is_active: person?.is_active ?? true
@@ -2203,6 +3300,7 @@ function PersonModal({
       last_name: form.last_name,
       profile_photo_data_url: form.profile_photo_data_url || null,
       group_id: form.group_id || null,
+      schedule_id: form.schedule_id || null,
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
       is_active: form.is_active
@@ -2232,6 +3330,8 @@ function PersonModal({
     group_id: form.group_id || null,
     group: groups.find((group) => group.id === form.group_id)?.name ?? null,
     category: groups.find((group) => group.id === form.group_id)?.category ?? null,
+    schedule_id: form.schedule_id || null,
+    schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
     is_active: form.is_active,
     garage_door_entity_ids: form.garage_door_entity_ids,
     vehicles: []
@@ -2289,6 +3389,17 @@ function PersonModal({
               ))}
             </select>
           </label>
+          <label className="field">
+            <span>Access Schedule</span>
+            <select value={form.schedule_id} onChange={(event) => update("schedule_id", event.target.value)}>
+              <option value="">No schedule - default policy</option>
+              {schedules.map((schedule) => (
+                <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="field-grid">
           <label className="field">
             <span>Status</span>
             <select value={form.is_active ? "active" : "inactive"} onChange={(event) => update("is_active", event.target.value === "active")}>
@@ -2350,11 +3461,13 @@ function VehiclesView({
   people,
   query,
   refresh,
+  schedules,
   vehicles
 }: {
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
+  schedules: Schedule[];
   vehicles: Vehicle[];
 }) {
   const [modalOpen, setModalOpen] = React.useState(false);
@@ -2433,6 +3546,9 @@ function VehiclesView({
                   <span>{vehicleTitle(vehicle)}</span>
                 </div>
                 <span className="vehicle-owner">{vehicle.owner ?? "Unassigned"}</span>
+                <span className={vehicle.schedule ? "vehicle-chip schedule-chip" : "vehicle-chip inherit-chip"}>
+                  {vehicle.schedule ?? "Inherit"}
+                </span>
                 <Badge tone={vehicle.is_active !== false ? "green" : "gray"}>{vehicle.is_active !== false ? "Active" : "Inactive"}</Badge>
                 <button
                   className="icon-button danger"
@@ -2462,6 +3578,7 @@ function VehiclesView({
             closeModal();
           }}
           people={people}
+          schedules={schedules}
           setPageError={setError}
           vehicle={selectedVehicle}
         />
@@ -2475,6 +3592,7 @@ function VehicleModal({
   onClose,
   onSaved,
   people,
+  schedules,
   setPageError,
   vehicle
 }: {
@@ -2482,6 +3600,7 @@ function VehicleModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
   people: Person[];
+  schedules: Schedule[];
   setPageError: (message: string) => void;
   vehicle: Vehicle | null;
 }) {
@@ -2492,6 +3611,7 @@ function VehicleModal({
     model: vehicle?.model ?? "",
     color: vehicle?.color ?? "",
     person_id: vehicle?.person_id ?? "",
+    schedule_id: vehicle?.schedule_id ?? "",
     is_active: vehicle?.is_active ?? true
   });
   const [error, setError] = React.useState("");
@@ -2580,6 +3700,7 @@ function VehicleModal({
       model: form.model || null,
       color: form.color || null,
       person_id: form.person_id || null,
+      schedule_id: form.schedule_id || null,
       is_active: form.is_active
     };
     try {
@@ -2608,6 +3729,8 @@ function VehicleModal({
     color: form.color || null,
     person_id: form.person_id || null,
     owner: people.find((person) => person.id === form.person_id)?.display_name ?? null,
+    schedule_id: form.schedule_id || null,
+    schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
     is_active: form.is_active
   };
 
@@ -2691,6 +3814,15 @@ function VehicleModal({
             ))}
           </select>
         </label>
+        <label className="field">
+          <span>Access Schedule</span>
+          <select value={form.schedule_id} onChange={(event) => update("schedule_id", event.target.value)}>
+            <option value="">Inherit from Owner</option>
+            {schedules.map((schedule) => (
+              <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
+            ))}
+          </select>
+        </label>
         <div className="modal-actions">
           <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
@@ -2752,7 +3884,7 @@ function ReportsView({ events, presence }: { events: AccessEvent[]; presence: Pr
   );
 }
 
-function IntegrationsView({ status, refresh }: { status: IntegrationStatus | null; refresh: () => Promise<void> }) {
+function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[]; status: IntegrationStatus | null; refresh: () => Promise<void> }) {
   const { values, loading, save, reload } = useSettings();
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
@@ -2801,32 +3933,56 @@ function IntegrationsView({ status, refresh }: { status: IntegrationStatus | nul
   }, [loadProtect, loadProtectUpdateStatus]);
 
   const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus);
+  const groupedTiles = integrationCategories
+    .map((category) => ({
+      ...category,
+      tiles: tiles.filter((tile) => tile.category === category.key)
+    }))
+    .filter((category) => category.tiles.length);
   return (
     <section className="view-stack integrations-page">
       <Toolbar title="API & Integrations" count={tiles.length} icon={PlugZap} />
-      <div className="integration-tile-grid">
-        {tiles.map((tile) => {
-          const Icon = tile.icon;
-          return (
-            <article className="card integration-tile" key={tile.key}>
-              <button
-                className="integration-tile-main"
-                onClick={() => {
-                  setActive(tile);
-                  setActiveTab(tile.key === "unifi_protect" && tile.updateAvailable ? "updates" : "general");
-                }}
-                type="button"
-              >
-                <span className="integration-icon"><Icon size={22} /></span>
-                <div>
-                  <strong>{tile.title}</strong>
-                  <span>{tile.description}</span>
-                </div>
-                <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
-              </button>
-            </article>
-          );
-        })}
+      <div className="integration-category-stack">
+        {groupedTiles.map((category) => (
+          <section className="integration-category" key={category.key}>
+            <div className="integration-category-header">
+              <div>
+                <strong>{category.label}</strong>
+                <span>{category.description}</span>
+              </div>
+              <Badge tone="gray">{category.tiles.length}</Badge>
+            </div>
+            <div className="integration-tile-grid">
+              {category.tiles.map((tile) => {
+                const Icon = tile.icon;
+                return (
+                  <article className="card integration-tile" key={tile.key}>
+                    <button
+                      className="integration-tile-main"
+                      onClick={() => {
+                        setActive(tile);
+                        setActiveTab(tile.key === "unifi_protect" && tile.updateAvailable ? "updates" : "general");
+                      }}
+                      type="button"
+                    >
+                      <span className="integration-icon"><Icon size={22} /></span>
+                      <div>
+                        <strong>{tile.title}</strong>
+                        <span>{tile.description}</span>
+                        {tile.notificationChannels?.length ? (
+                          <span className="integration-notification-link">
+                            <Bell size={13} /> Available to Notifications: {tile.notificationChannels.map((channel) => notificationChannelMeta[channel].label).join(", ")}
+                          </span>
+                        ) : null}
+                      </div>
+                      <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        ))}
       </div>
       <div className="card compact-command-card">
         <CardHeader icon={DoorOpen} title="Gate Command" />
@@ -2844,6 +4000,7 @@ function IntegrationsView({ status, refresh }: { status: IntegrationStatus | nul
           protectLoading={protectLoading}
           protectStatus={protectStatus}
           protectUpdateStatus={protectUpdateStatus}
+          schedules={schedules}
           values={values}
           onClose={() => setActive(null)}
           onProtectUpdateChanged={async () => {
@@ -2875,10 +4032,12 @@ type IntegrationDefinition = {
   key: string;
   title: string;
   description: string;
+  category: "access" | "notifications" | "data" | "ai";
   icon: React.ElementType;
   fields: SettingFieldDefinition[];
   statusLabel: string;
   statusTone: BadgeTone;
+  notificationChannels?: NotificationChannelId[];
   oauth?: boolean;
   updateAvailable?: boolean;
 };
@@ -2889,6 +4048,33 @@ type IntegrationFeedback = {
   detail: string;
   activeStep?: number;
 };
+
+const integrationCategories: Array<{
+  key: IntegrationDefinition["category"];
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "access",
+    label: "Access Control",
+    description: "Physical site controls and sensor integrations."
+  },
+  {
+    key: "notifications",
+    label: "Notification Providers",
+    description: "Destinations made available to the notification rules engine."
+  },
+  {
+    key: "data",
+    label: "Data & Intelligence",
+    description: "Vehicle data, cameras, and operational enrichment."
+  },
+  {
+    key: "ai",
+    label: "AI Providers",
+    description: "LLM providers used by chat, summaries, and analysis."
+  }
+];
 
 function integrationDefinitions(
   status: IntegrationStatus | null,
@@ -2911,9 +4097,11 @@ function integrationDefinitions(
       key: "home_assistant",
       title: "Home Assistant",
       description: "Gate control, TTS announcements, and state sync.",
+      category: "access",
       icon: Home,
       statusLabel: status?.configured ? "Connected" : "Not Configured",
       statusTone: status?.configured ? "green" : "gray",
+      notificationChannels: ["voice"],
       fields: [
         { key: "home_assistant_url", label: "URL" },
         { key: "home_assistant_token", label: "Long-lived token", type: "password" },
@@ -2929,9 +4117,11 @@ function integrationDefinitions(
       key: "apprise",
       title: "Apprise",
       description: "Mobile and push notification fan-out.",
+      category: "notifications",
       icon: Bell,
       statusLabel: values.apprise_urls ? "Configured" : "Not Configured",
       statusTone: values.apprise_urls ? "green" : "gray",
+      notificationChannels: ["mobile"],
       fields: [{
         key: "apprise_urls",
         label: "Apprise URLs",
@@ -2944,6 +4134,7 @@ function integrationDefinitions(
       key: "dvla",
       title: "DVLA Lookup",
       description: "Vehicle Enquiry Service API plate lookups.",
+      category: "data",
       icon: Search,
       statusLabel: values.dvla_api_key ? "Configured" : "Not Configured",
       statusTone: values.dvla_api_key ? "green" : "gray",
@@ -2971,6 +4162,7 @@ function integrationDefinitions(
       key: "unifi_protect",
       title: "UniFi Protect",
       description: "Camera snapshots, detection events, and AI image analysis.",
+      category: "data",
       icon: Camera,
       statusLabel: protectUpdateAvailable ? `Update ${protectUpdateStatus?.latest_version}` : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured",
       statusTone: protectUpdateAvailable ? "amber" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray",
@@ -2995,6 +4187,7 @@ function integrationDefinitions(
       key: "openai",
       title: "OpenAI",
       description: "Responses API provider for tool-capable chat.",
+      category: "ai",
       icon: Bot,
       ...providerStatus("openai", "openai_api_key"),
       oauth: true,
@@ -3009,6 +4202,7 @@ function integrationDefinitions(
       key: "gemini",
       title: "Gemini",
       description: "Google Gemini provider.",
+      category: "ai",
       icon: CircleDot,
       ...providerStatus("gemini", "gemini_api_key"),
       oauth: true,
@@ -3023,6 +4217,7 @@ function integrationDefinitions(
       key: "anthropic",
       title: "Anthropic",
       description: "Claude provider.",
+      category: "ai",
       icon: MessageCircle,
       ...providerStatus("anthropic", "anthropic_api_key"),
       fields: [
@@ -3036,6 +4231,7 @@ function integrationDefinitions(
       key: "ollama",
       title: "Ollama",
       description: "Local model endpoint.",
+      category: "ai",
       icon: Database,
       ...providerStatus("ollama"),
       fields: [
@@ -3786,6 +4982,7 @@ function IntegrationModal({
   protectLoading,
   protectStatus,
   protectUpdateStatus,
+  schedules,
   onClose,
   onProtectUpdateChanged,
   onProtectRefresh,
@@ -3801,6 +4998,7 @@ function IntegrationModal({
   protectLoading?: boolean;
   protectStatus?: UnifiProtectStatus | null;
   protectUpdateStatus?: UnifiProtectUpdateStatus | null;
+  schedules: Schedule[];
   onClose: () => void;
   onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
@@ -4056,6 +5254,7 @@ function IntegrationModal({
             form={form}
             onChange={update}
             onReload={loadHomeAssistantDiscovery}
+            schedules={schedules}
           />
         ) : isApprise ? (
           <AppriseSettingsFields
@@ -4259,7 +5458,8 @@ function HomeAssistantSettingsFields({
   discoveryLoading,
   form,
   onChange,
-  onReload
+  onReload,
+  schedules
 }: {
   discovery: HomeAssistantDiscovery | null;
   discoveryError: string;
@@ -4267,6 +5467,7 @@ function HomeAssistantSettingsFields({
   form: Record<string, string>;
   onChange: (key: string, value: string) => void;
   onReload: () => Promise<void>;
+  schedules: Schedule[];
 }) {
   type HomeAssistantTab = "setup" | "gates" | "garages" | "presence";
   const [activeTab, setActiveTab] = React.useState<HomeAssistantTab>("setup");
@@ -4395,6 +5596,7 @@ function HomeAssistantSettingsFields({
           description="Gates opened when access is granted."
           onAutoDetect={autoDetectGateEntities}
           onChange={updateGateEntities}
+          schedules={schedules}
           title="Gate entities"
         />
         ) : null}
@@ -4410,6 +5612,7 @@ function HomeAssistantSettingsFields({
           description="Garage doors available in each person profile."
           onAutoDetect={autoDetectGarageDoors}
           onChange={updateGarageDoorEntities}
+          schedules={schedules}
           title="Garage doors"
         />
         ) : null}
@@ -4466,6 +5669,7 @@ function HomeAssistantCoverTable({
   description,
   onAutoDetect,
   onChange,
+  schedules,
   title
 }: {
   addLabel: string;
@@ -4477,6 +5681,7 @@ function HomeAssistantCoverTable({
   description: string;
   onAutoDetect: () => void;
   onChange: (entities: HomeAssistantManagedCover[]) => void;
+  schedules: Schedule[];
   title: string;
 }) {
   const [selectedEntityId, setSelectedEntityId] = React.useState("");
@@ -4537,6 +5742,17 @@ function HomeAssistantCoverTable({
               />
               <code>{entity.entity_id}</code>
             </div>
+            <select
+              aria-label={`${entity.name || entity.entity_id} schedule`}
+              className="ha-cover-schedule-select"
+              value={entity.schedule_id ?? ""}
+              onChange={(event) => updateEntity(entity.entity_id, { schedule_id: event.target.value || null })}
+            >
+              <option value="">No schedule</option>
+              {schedules.map((schedule) => (
+                <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
+              ))}
+            </select>
             <label className={entity.enabled === false ? "entity-toggle" : "entity-toggle active"}>
               <input
                 checked={entity.enabled !== false}
@@ -4614,6 +5830,1179 @@ function LogsView({ logs }: { logs: RealtimeMessage[] }) {
       </div>
     </section>
   );
+}
+
+const notificationChannelMeta: Record<NotificationChannelId, {
+  label: string;
+  icon: React.ElementType;
+  tone: BadgeTone;
+  description: string;
+}> = {
+  mobile: {
+    label: "Mobile Notification",
+    icon: Smartphone,
+    tone: "blue",
+    description: "Apprise delivery to mobile, email, chat, and push endpoints."
+  },
+  in_app: {
+    label: "In-App Notification",
+    icon: Monitor,
+    tone: "green",
+    description: "Realtime dashboard alert for signed-in users."
+  },
+  voice: {
+    label: "Voice Notification",
+    icon: Volume2,
+    tone: "amber",
+    description: "Home Assistant TTS announcement to media players."
+  }
+};
+
+const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
+  {
+    id: "events",
+    label: "Events",
+    events: [
+      { value: "authorized_entry", label: "Authorised Vehicle Detected", severity: "info", description: "A known vehicle is granted entry inside its access policy." },
+      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "critical", description: "A plate is denied because it is unknown or inactive." }
+    ]
+  }
+];
+
+const fallbackNotificationVariables: NotificationVariableGroup[] = [
+  {
+    group: "Person",
+    items: [
+      { name: "FirstName", token: "@FirstName", label: "First name" },
+      { name: "LastName", token: "@LastName", label: "Last name" },
+      { name: "GroupName", token: "@GroupName", label: "Group name" }
+    ]
+  },
+  {
+    group: "Vehicle",
+    items: [
+      { name: "Registration", token: "@Registration", label: "Registration" },
+      { name: "VehicleName", token: "@VehicleName", label: "Friendly vehicle name" },
+      { name: "VehicleMake", token: "@VehicleMake", label: "Vehicle make" }
+    ]
+  },
+  {
+    group: "Event",
+    items: [
+      { name: "Time", token: "@Time", label: "Event time" },
+      { name: "GateStatus", token: "@GateStatus", label: "Gate status" },
+      { name: "Message", token: "@Message", label: "Message" }
+    ]
+  }
+];
+
+const mockNotificationContext: Record<string, string> = {
+  FirstName: "Steph",
+  LastName: "Smith",
+  DisplayName: "Steph Smith",
+  GroupName: "Family",
+  Registration: "STEPH26",
+  VehicleRegistrationNumber: "STEPH26",
+  VehicleName: "2026 Tesla Model Y Dual Motor Long Range",
+  VehicleDisplayName: "2026 Tesla Model Y Dual Motor Long Range",
+  VehicleMake: "Tesla",
+  VehicleModel: "Model Y Dual Motor Long Range",
+  VehicleColor: "Pearl white",
+  Time: "18:42",
+  GateStatus: "opening",
+  Direction: "entry",
+  Decision: "granted",
+  Source: "Driveway LPR",
+  Severity: "Info",
+  EventType: "Authorised Entry",
+  Subject: "Steph arrived at the gate",
+  Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range."
+};
+
+const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<NotificationAction, "title_template" | "message_template">> = {
+  mobile: {
+    title_template: "@FirstName arrived at the gate",
+    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
+  },
+  in_app: {
+    title_template: "@FirstName arrived at the gate",
+    message_template: "@FirstName arrived in the @VehicleName."
+  },
+  voice: {
+    title_template: "",
+    message_template: "@FirstName has arrived at the gate."
+  }
+};
+
+function NotificationsView({ people, schedules }: { people: Person[]; schedules: Schedule[] }) {
+  const [catalog, setCatalog] = React.useState<NotificationCatalogResponse | null>(null);
+  const [rules, setRules] = React.useState<NotificationRule[]>([]);
+  const [cameras, setCameras] = React.useState<UnifiProtectCamera[]>([]);
+  const [, setSelectedRuleId] = React.useState("");
+  const [draft, setDraft] = React.useState<NotificationRule | null>(null);
+  const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
+  const [error, setError] = React.useState("");
+
+  const triggerGroups = catalog?.triggers.length ? catalog.triggers : fallbackNotificationTriggers;
+  const variableGroups = catalog?.variables.length ? catalog.variables : fallbackNotificationVariables;
+  const variables = React.useMemo(() => variableGroups.flatMap((group) => group.items.map((item) => ({ ...item, group: group.group }))), [variableGroups]);
+  const triggerOptions = React.useMemo(() => triggerGroups.flatMap((group) => group.events), [triggerGroups]);
+  const triggerByValue = React.useMemo(() => new Map(triggerOptions.map((trigger) => [trigger.value, trigger])), [triggerOptions]);
+  const activeDraft = draft;
+  const previewContext = catalog?.mock_context && Object.keys(catalog.mock_context).length ? catalog.mock_context : mockNotificationContext;
+  const previewActions = activeDraft ? renderWorkflowPreview(activeDraft.actions, previewContext) : [];
+
+  const load = React.useCallback(async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const [nextCatalog, nextRules, cameraResult] = await Promise.all([
+        api.get<NotificationCatalogResponse>("/api/v1/notifications/catalog"),
+        api.get<NotificationRule[]>("/api/v1/notifications/rules"),
+        api.get<{ cameras: UnifiProtectCamera[] }>("/api/v1/integrations/unifi-protect/cameras").catch(() => ({ cameras: [] }))
+      ]);
+      setCatalog(nextCatalog);
+      setRules(nextRules);
+      setCameras(cameraResult.cameras);
+      setSelectedRuleId((current) => current && nextRules.some((rule) => rule.id === current) ? current : "");
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load notification workflows.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load().catch(() => undefined);
+  }, [load]);
+
+  const selectRule = (rule: NotificationRule) => {
+    setDraft(cloneNotificationRule(rule));
+    setSelectedRuleId(rule.id);
+    setModal(null);
+    setFeedback(null);
+  };
+
+  const updateDraft = (updater: (rule: NotificationRule) => NotificationRule) => {
+    setDraft((current) => updater(current ?? createWorkflowDraft()));
+  };
+
+  const addWorkflow = () => {
+    const next = createWorkflowDraft();
+    setDraft(next);
+    setSelectedRuleId(next.id);
+    setModal(null);
+    setFeedback(null);
+  };
+
+  const deleteRule = async (rule: NotificationRule) => {
+    if (rule.id.startsWith("draft-")) {
+      setDraft(null);
+      setSelectedRuleId("");
+      setModal(null);
+      return;
+    }
+    if (!window.confirm(`Delete ${rule.name}?`)) return;
+    setFeedback(null);
+    try {
+      await api.delete(`/api/v1/notifications/rules/${rule.id}`);
+      await load();
+      setDraft(null);
+      setSelectedRuleId("");
+      setModal(null);
+      setFeedback({ tone: "success", text: "Notification workflow deleted." });
+    } catch (deleteError) {
+      setFeedback({ tone: "error", text: deleteError instanceof Error ? deleteError.message : "Unable to delete notification workflow." });
+    }
+  };
+
+  const save = async () => {
+    if (!activeDraft) return;
+    if (!activeDraft.trigger_event) {
+      setFeedback({ tone: "error", text: "Add a trigger before saving this workflow." });
+      return;
+    }
+    if (!activeDraft.actions.length) {
+      setFeedback({ tone: "error", text: "Add at least one action before saving this workflow." });
+      return;
+    }
+    setSaving(true);
+    setFeedback(null);
+    const payload = workflowRulePayload(activeDraft);
+    try {
+      const saved = activeDraft.id.startsWith("draft-")
+        ? await api.post<NotificationRule>("/api/v1/notifications/rules", payload)
+        : await api.patch<NotificationRule>(`/api/v1/notifications/rules/${activeDraft.id}`, payload);
+      setDraft(null);
+      setSelectedRuleId("");
+      setModal(null);
+      await load();
+      setFeedback({ tone: "success", text: "Notification workflow saved." });
+    } catch (saveError) {
+      setFeedback({ tone: "error", text: saveError instanceof Error ? saveError.message : "Unable to save notification workflow." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sendTest = async () => {
+    if (!activeDraft) return;
+    if (!activeDraft.trigger_event) {
+      setFeedback({ tone: "error", text: "Add a trigger before sending a test." });
+      return;
+    }
+    if (!activeDraft.actions.length) {
+      setFeedback({ tone: "error", text: "Add at least one action before sending a test." });
+      return;
+    }
+    setTesting(true);
+    setFeedback({ tone: "info", text: "Sending workflow test through the configured providers." });
+    try {
+      await api.post("/api/v1/notifications/rules/test", {
+        rule: workflowRulePayload(activeDraft)
+      });
+      setFeedback({ tone: "success", text: "Workflow test accepted by the configured providers." });
+    } catch (testError) {
+      setFeedback({ tone: "error", text: testError instanceof Error ? testError.message : "Notification workflow test failed." });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <section className="view-stack notifications-page workflow-notifications-page">
+        <Toolbar title="Notifications" count={0} icon={Bell} />
+        <div className="loading-panel">Loading notification workflows</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="view-stack notifications-page workflow-notifications-page">
+      <Toolbar title="Notifications" count={rules.length} icon={Bell}>
+        <button className="secondary-button" onClick={addWorkflow} type="button">
+          <Plus size={15} /> Add Notification
+        </button>
+      </Toolbar>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {feedback ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
+
+      <div className="workflow-notification-shell list-only">
+        <NotificationWorkflowList
+          activeId={activeDraft?.id ?? ""}
+          rules={rules}
+          triggerByValue={triggerByValue}
+          onAdd={addWorkflow}
+          onDelete={deleteRule}
+          onSelect={selectRule}
+        />
+      </div>
+
+      {activeDraft ? (
+        <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
+          <div className="modal-card workflow-editor-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-editor-title">
+            <div className="modal-header">
+              <div>
+                <h2 id="workflow-editor-title">{activeDraft.id.startsWith("draft-") ? "Add Notification" : "Edit Notification"}</h2>
+                <p>Build the trigger, conditions, and delivery actions for this workflow.</p>
+              </div>
+              <button className="icon-button" onClick={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }} type="button" aria-label="Close notification editor">
+                <X size={16} />
+              </button>
+            </div>
+          <NotificationWorkflowEditor
+            cameras={cameras}
+            integrations={catalog?.integrations ?? []}
+            people={people}
+            previewActions={previewActions}
+            rule={activeDraft}
+            saving={saving}
+            schedules={schedules}
+            testing={testing}
+            trigger={triggerByValue.get(activeDraft.trigger_event)}
+            variables={variables}
+            onAddAction={() => setModal("action")}
+            onAddCondition={() => setModal("condition")}
+            onCancel={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }}
+            onDelete={() => deleteRule(activeDraft)}
+            onSave={save}
+            onSendTest={sendTest}
+            onShowTrigger={() => setModal("trigger")}
+            onUpdate={updateDraft}
+          />
+          </div>
+        </div>
+      ) : null}
+
+      {activeDraft && modal === "trigger" ? (
+        <NotificationTriggerModal
+          groups={triggerGroups}
+          selected={activeDraft.trigger_event}
+          onClose={() => setModal(null)}
+          onSelect={(triggerEvent) => {
+            updateDraft((rule) => ({ ...rule, trigger_event: triggerEvent, name: rule.name === "New Notification" ? notificationEventLabel(triggerEvent, triggerByValue) : rule.name }));
+            setModal(null);
+          }}
+        />
+      ) : null}
+
+      {activeDraft && modal === "condition" ? (
+        <NotificationConditionModal
+          people={people}
+          schedules={schedules}
+          onClose={() => setModal(null)}
+          onSelect={(condition) => {
+            updateDraft((rule) => ({ ...rule, conditions: [...rule.conditions, condition] }));
+            setModal(null);
+          }}
+        />
+      ) : null}
+
+      {activeDraft && modal === "action" ? (
+        <NotificationActionModal
+          onClose={() => setModal(null)}
+          onSelect={(actionType) => {
+            updateDraft((rule) => ({ ...rule, actions: [...rule.actions, createWorkflowAction(actionType)] }));
+            setModal(null);
+          }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function NotificationWorkflowList({
+  activeId,
+  rules,
+  triggerByValue,
+  onAdd,
+  onDelete,
+  onSelect
+}: {
+  activeId: string;
+  rules: NotificationRule[];
+  triggerByValue: Map<string, NotificationTriggerOption>;
+  onAdd: () => void;
+  onDelete: (rule: NotificationRule) => void | Promise<void>;
+  onSelect: (rule: NotificationRule) => void;
+}) {
+  return (
+    <aside className="workflow-rule-table card" aria-label="Notification workflows">
+      <div className="workflow-rule-table-header">
+        <div>
+          <strong>Workflows</strong>
+          <span>DB-backed rules only</span>
+        </div>
+        <button className="icon-button" onClick={onAdd} type="button" aria-label="Add notification workflow">
+          <Plus size={16} />
+        </button>
+      </div>
+      {rules.length ? (
+        <div className="workflow-rule-rows">
+          {rules.map((rule) => {
+            const active = activeId === rule.id;
+            return (
+              <article className={active ? "workflow-rule-row active" : "workflow-rule-row"} key={rule.id}>
+                <button onClick={() => onSelect(rule)} type="button">
+                  <span>
+                    <strong>{rule.name}</strong>
+                    <small>{notificationEventLabel(rule.trigger_event, triggerByValue)}</small>
+                  </span>
+                  <Badge tone={rule.is_active ? "green" : "gray"}>{rule.is_active ? "Active" : "Paused"}</Badge>
+                  <span className="workflow-rule-icons" aria-label="Workflow summary">
+                    <Badge tone={rule.conditions.length ? "amber" : "gray"}>{rule.conditions.length} if</Badge>
+                    <Badge tone={rule.actions.length ? "blue" : "red"}>{rule.actions.length} then</Badge>
+                  </span>
+                </button>
+                <button className="icon-button danger" onClick={() => onDelete(rule)} type="button" aria-label={`Delete ${rule.name}`}>
+                  <Trash2 size={15} />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="notification-empty-list workflow-empty-list">
+          <Bell size={20} />
+          <strong>No notification workflows</strong>
+          <span>Start from a clean workflow table.</span>
+          <button className="primary-button" onClick={onAdd} type="button">
+            <Plus size={15} /> Add Notification
+          </button>
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function NotificationWorkflowEditor({
+  cameras,
+  integrations,
+  people,
+  previewActions,
+  rule,
+  saving,
+  schedules,
+  testing,
+  trigger,
+  variables,
+  onAddAction,
+  onAddCondition,
+  onCancel,
+  onDelete,
+  onSave,
+  onSendTest,
+  onShowTrigger,
+  onUpdate
+}: {
+  cameras: UnifiProtectCamera[];
+  integrations: NotificationIntegration[];
+  people: Person[];
+  previewActions: Array<NotificationAction & { title: string; message: string }>;
+  rule: NotificationRule;
+  saving: boolean;
+  schedules: Schedule[];
+  testing: boolean;
+  trigger?: NotificationTriggerOption;
+  variables: Array<NotificationVariable & { group: string }>;
+  onAddAction: () => void;
+  onAddCondition: () => void;
+  onCancel: () => void;
+  onDelete: () => void;
+  onSave: () => void;
+  onSendTest: () => void;
+  onShowTrigger: () => void;
+  onUpdate: (updater: (rule: NotificationRule) => NotificationRule) => void;
+}) {
+  const integrationById = React.useMemo(() => new Map(integrations.map((integration) => [integration.id, integration])), [integrations]);
+  const isDraft = rule.id.startsWith("draft-");
+  return (
+    <div className="workflow-editor-modal-grid">
+      <div className="workflow-editor-column">
+        <section className="notification-editor-panel workflow-builder-panel">
+          <div className="notification-editor-header workflow-editor-header">
+            <div>
+              <span className="eyebrow">Name</span>
+              <input
+                aria-label="Workflow name"
+                value={rule.name}
+                onChange={(event) => onUpdate((current) => ({ ...current, name: event.target.value }))}
+              />
+            </div>
+            {!isDraft ? (
+              <div className="notification-editor-actions">
+                <label className={rule.is_active ? "notification-switch active" : "notification-switch"}>
+                  <input checked={rule.is_active} onChange={(event) => onUpdate((current) => ({ ...current, is_active: event.target.checked }))} type="checkbox" />
+                  <span>{rule.is_active ? "Active" : "Paused"}</span>
+                </label>
+                <button className="icon-button danger" onClick={onDelete} type="button" aria-label="Delete workflow">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="workflow-vertical">
+            <WorkflowBlock badge="When" tone="blue" title="Trigger" required>
+              {rule.trigger_event ? (
+                <button className="workflow-selected-card" onClick={onShowTrigger} type="button">
+                  <CircleDot size={18} />
+                  <span>
+                    <strong>{trigger?.label ?? notificationEventLabel(rule.trigger_event)}</strong>
+                    <small>{trigger?.description ?? "Selected event trigger."}</small>
+                  </span>
+                  <Badge tone={notificationSeverityTone(trigger?.severity ?? "info")}>{titleCase(trigger?.severity ?? "info")}</Badge>
+                </button>
+              ) : (
+                <button className="workflow-add-block" onClick={onShowTrigger} type="button">
+                  <Plus size={15} /> Add Trigger
+                </button>
+              )}
+            </WorkflowBlock>
+
+            <WorkflowBlock badge="And If" tone="amber" title="Conditions" optional>
+              <div className="workflow-stack">
+                {rule.conditions.map((condition) => (
+                  <NotificationConditionCard
+                    condition={condition}
+                    key={condition.id}
+                    people={people}
+                    schedules={schedules}
+                    onChange={(nextCondition) => onUpdate((current) => ({ ...current, conditions: current.conditions.map((item) => item.id === condition.id ? nextCondition : item) }))}
+                    onRemove={() => onUpdate((current) => ({ ...current, conditions: current.conditions.filter((item) => item.id !== condition.id) }))}
+                  />
+                ))}
+                <button className="workflow-add-block" onClick={onAddCondition} type="button">
+                  <Plus size={15} /> Add Condition
+                </button>
+              </div>
+            </WorkflowBlock>
+
+            <WorkflowBlock badge="Then" tone="green" title="Actions" required>
+              <div className="workflow-stack">
+                {rule.actions.map((action) => (
+                  <NotificationActionCard
+                    action={action}
+                    cameras={cameras}
+                    integration={integrationById.get(action.type)}
+                    key={action.id}
+                    variables={variables}
+                    onChange={(nextAction) => onUpdate((current) => ({ ...current, actions: current.actions.map((item) => item.id === action.id ? nextAction : item) }))}
+                    onRemove={() => onUpdate((current) => ({ ...current, actions: current.actions.filter((item) => item.id !== action.id) }))}
+                  />
+                ))}
+                <button className="workflow-add-block" onClick={onAddAction} type="button">
+                  <Plus size={15} /> Add Action
+                </button>
+              </div>
+            </WorkflowBlock>
+          </div>
+
+          <div className="modal-actions workflow-editor-footer">
+            <button className="secondary-button" onClick={onCancel} type="button">
+              Cancel
+            </button>
+            <button className="secondary-button" onClick={onSendTest} disabled={testing} type="button">
+              <Send size={15} /> {testing ? "Sending..." : "Send Test"}
+            </button>
+            <button className="primary-button" onClick={onSave} disabled={saving} type="button">
+              <Save size={15} /> {saving ? "Saving..." : "Save"}
+            </button>
+          </div>
+        </section>
+      </div>
+      <NotificationLivePreviewPanel actions={previewActions} />
+    </div>
+  );
+}
+
+function WorkflowBlock({
+  badge,
+  children,
+  optional,
+  required,
+  title,
+  tone
+}: {
+  badge: string;
+  children: React.ReactNode;
+  optional?: boolean;
+  required?: boolean;
+  title: string;
+  tone: BadgeTone;
+}) {
+  return (
+    <section className="workflow-block">
+      <div className="workflow-block-head">
+        <Badge tone={tone}>{badge}</Badge>
+        <strong>{title}</strong>
+        <span>{required ? "Required" : optional ? "Optional" : ""}</span>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function NotificationConditionCard({
+  condition,
+  people,
+  schedules,
+  onChange,
+  onRemove
+}: {
+  condition: NotificationCondition;
+  people: Person[];
+  schedules: Schedule[];
+  onChange: (condition: NotificationCondition) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <article className="workflow-condition-card">
+      <div className="workflow-card-title">
+        <Clock3 size={16} />
+        <strong>{condition.type === "schedule" ? "Schedule" : "Presence"}</strong>
+        <button className="icon-button danger" onClick={onRemove} type="button" aria-label="Remove condition">
+          <Trash2 size={14} />
+        </button>
+      </div>
+      {condition.type === "schedule" ? (
+        <label className="field compact-field">
+          <span>Schedule</span>
+          <select value={condition.schedule_id ?? ""} onChange={(event) => onChange({ ...condition, schedule_id: event.target.value })}>
+            <option value="">Select schedule</option>
+            {schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name}</option>)}
+          </select>
+        </label>
+      ) : (
+        <div className="field-grid compact-field-grid">
+          <label className="field compact-field">
+            <span>Presence</span>
+            <select value={condition.mode ?? "someone_home"} onChange={(event) => onChange({ ...condition, mode: event.target.value as PresenceConditionMode })}>
+              <option value="no_one_home">No one is home</option>
+              <option value="someone_home">Someone is home</option>
+              <option value="person_home">Specific person is home</option>
+            </select>
+          </label>
+          {condition.mode === "person_home" ? (
+            <label className="field compact-field">
+              <span>Person</span>
+              <select value={condition.person_id ?? ""} onChange={(event) => onChange({ ...condition, person_id: event.target.value })}>
+                <option value="">Select person</option>
+                {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+              </select>
+            </label>
+          ) : null}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function NotificationActionCard({
+  action,
+  cameras,
+  integration,
+  variables,
+  onChange,
+  onRemove
+}: {
+  action: NotificationAction;
+  cameras: UnifiProtectCamera[];
+  integration?: NotificationIntegration;
+  variables: Array<NotificationVariable & { group: string }>;
+  onChange: (action: NotificationAction) => void;
+  onRemove: () => void;
+}) {
+  const meta = notificationChannelMeta[action.type];
+  const Icon = meta.icon;
+  const supportsTitle = action.type !== "voice";
+  const supportsMedia = action.type === "mobile" || action.type === "in_app";
+  const targetLabel = action.type === "voice" ? "Voice targets" : action.type === "mobile" ? "Apprise targets" : "Dashboard targets";
+  const selectedCamera = cameras.find((camera) => camera.id === action.media.camera_id);
+  const cameraSnapshotUrl = selectedCamera
+    ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
+    : "";
+  return (
+    <article className="workflow-action-card">
+      <div className="workflow-card-title">
+        <Icon size={16} />
+        <span>
+          <strong>{meta.label}</strong>
+          <small>{meta.description}</small>
+        </span>
+        <button className="icon-button danger" onClick={onRemove} type="button" aria-label="Remove action">
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      <div className="workflow-action-grid">
+        <label className="field compact-field">
+          <span>{targetLabel}</span>
+          <select value={action.target_mode} onChange={(event) => onChange({ ...action, target_mode: event.target.value as NotificationTargetMode })}>
+            <option value="all">All</option>
+            {action.type === "voice" ? <option value="many">Many</option> : null}
+            <option value="selected">Specific target</option>
+          </select>
+        </label>
+        {action.target_mode !== "all" ? (
+          <EndpointMultiSelect
+            action={action}
+            endpoints={integration?.endpoints ?? []}
+            onChange={(target_ids) => onChange({ ...action, target_ids })}
+          />
+        ) : (
+          <div className="workflow-target-summary">
+            <Badge tone={integration?.configured ? meta.tone : "gray"}>{integration?.configured ? "Configured" : "Unavailable"}</Badge>
+            <span>{integration?.endpoints.length ? `${integration.endpoints.length} endpoint${integration.endpoints.length === 1 ? "" : "s"}` : "No endpoints discovered"}</span>
+          </div>
+        )}
+      </div>
+
+      {supportsTitle ? (
+        <VariableRichTextEditor
+          label="Title"
+          value={action.title_template}
+          variables={variables}
+          onChange={(title_template) => onChange({ ...action, title_template })}
+        />
+      ) : null}
+      <VariableRichTextEditor
+        label={action.type === "voice" ? "Spoken message" : "Message"}
+        multiline
+        value={action.message_template}
+        variables={variables}
+        onChange={(message_template) => onChange({ ...action, message_template })}
+      />
+
+      {supportsMedia ? (
+        <section className="workflow-media-row">
+          <label className={action.media.attach_camera_snapshot ? "notification-switch active" : "notification-switch"}>
+            <input
+              checked={action.media.attach_camera_snapshot}
+              onChange={(event) => onChange({ ...action, media: { ...action.media, attach_camera_snapshot: event.target.checked } })}
+              type="checkbox"
+            />
+            <span>Camera Screenshot</span>
+          </label>
+          {action.media.attach_camera_snapshot ? (
+            <select value={action.media.camera_id} onChange={(event) => onChange({ ...action, media: { ...action.media, camera_id: event.target.value } })}>
+              <option value="">Select camera</option>
+              {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
+            </select>
+          ) : null}
+          {cameraSnapshotUrl ? (
+            <div className="workflow-camera-preview">
+              <img src={cameraSnapshotUrl} alt={`${selectedCamera?.name ?? "Camera"} snapshot preview`} />
+              <span>{selectedCamera?.name ?? "Camera snapshot"}</span>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+    </article>
+  );
+}
+
+function EndpointMultiSelect({
+  action,
+  endpoints,
+  onChange
+}: {
+  action: NotificationAction;
+  endpoints: NotificationEndpoint[];
+  onChange: (targetIds: string[]) => void;
+}) {
+  const selected = new Set(action.target_ids);
+  const toggle = (endpointId: string) => {
+    const next = new Set(selected);
+    if (next.has(endpointId)) next.delete(endpointId);
+    else next.add(endpointId);
+    onChange(Array.from(next));
+  };
+  if (!endpoints.length) {
+    return <div className="workflow-target-summary"><span>No endpoints available</span></div>;
+  }
+  return (
+    <div className="workflow-endpoint-picks">
+      {endpoints.filter((endpoint) => !endpoint.id.endsWith(":*")).map((endpoint) => (
+        <label className="workflow-endpoint-pick" key={endpoint.id}>
+          <input checked={selected.has(endpoint.id)} onChange={() => toggle(endpoint.id)} type="checkbox" />
+          <span>
+            <strong>{endpoint.label}</strong>
+            <small>{endpoint.detail}</small>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function VariableRichTextEditor({
+  label,
+  multiline = false,
+  value,
+  variables,
+  onChange
+}: {
+  label: string;
+  multiline?: boolean;
+  value: string;
+  variables: Array<NotificationVariable & { group: string }>;
+  onChange: (value: string) => void;
+}) {
+  const [suggestion, setSuggestion] = React.useState<{ query: string; from: number; to: number } | null>(null);
+  const valueRef = React.useRef(value);
+  const variablesRef = React.useRef(variables);
+  variablesRef.current = variables;
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({
+        blockquote: false,
+        bulletList: false,
+        codeBlock: false,
+        heading: false,
+        horizontalRule: false,
+        orderedList: false
+      }),
+      Mention.configure({
+        HTMLAttributes: { class: "variable-pill" },
+        renderText({ node }) {
+          return `@${node.attrs.label ?? node.attrs.id}`;
+        },
+        renderHTML({ node }) {
+          return ["span", { class: "variable-pill", "data-variable": node.attrs.label ?? node.attrs.id }, `@${node.attrs.label ?? node.attrs.id}`];
+        }
+      })
+    ],
+    content: templateToTiptapDoc(value, variables),
+    editorProps: {
+      attributes: {
+        class: multiline ? "variable-editor-content multiline" : "variable-editor-content"
+      }
+    },
+    onUpdate({ editor: activeEditor }) {
+      const next = tiptapDocToTemplate(activeEditor.getJSON());
+      valueRef.current = next;
+      onChange(next);
+      setSuggestion(findMentionSuggestion(activeEditor));
+    },
+    onSelectionUpdate({ editor: activeEditor }) {
+      setSuggestion(findMentionSuggestion(activeEditor));
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!editor || value === valueRef.current) return;
+    valueRef.current = value;
+    editor.commands.setContent(templateToTiptapDoc(value, variablesRef.current), { emitUpdate: false });
+  }, [editor, value]);
+
+  React.useEffect(() => {
+    if (!editor) return undefined;
+    const element = editor.view.dom;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target.closest(".variable-pill") : null;
+      if (!target) return;
+      const pos = editor.view.posAtDOM(target, 0);
+      editor.commands.setTextSelection({ from: pos, to: pos + 1 });
+      setSuggestion({ query: "", from: pos, to: pos + 1 });
+    };
+    element.addEventListener("click", onClick);
+    return () => element.removeEventListener("click", onClick);
+  }, [editor]);
+
+  const filtered = React.useMemo(() => {
+    const query = suggestion?.query.toLowerCase() ?? "";
+    return variables.filter((variable) => `${variable.name} ${variable.label} ${variable.group}`.toLowerCase().includes(query)).slice(0, 10);
+  }, [suggestion?.query, variables]);
+
+  const insertVariable = (variable: NotificationVariable) => {
+    if (!editor || !suggestion) return;
+    editor.chain().focus().deleteRange({ from: suggestion.from, to: suggestion.to }).insertContent({ type: "mention", attrs: { id: variable.name, label: variable.name } }).insertContent(" ").run();
+    setSuggestion(null);
+  };
+
+  return (
+    <label className="field variable-editor-field">
+      <span>{label}</span>
+      <div className="variable-editor-wrap">
+        <EditorContent editor={editor} />
+        {suggestion && filtered.length ? (
+          <div className="variable-suggestion-menu">
+            {groupVariables(filtered).map((group) => (
+              <div className="variable-suggestion-group" key={group.group}>
+                <strong>{group.group}</strong>
+                {group.items.map((variable) => (
+                  <button key={variable.name} onMouseDown={(event) => event.preventDefault()} onClick={() => insertVariable(variable)} type="button">
+                    <code>{variable.token}</code>
+                    <span>{variable.label}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </label>
+  );
+}
+
+function NotificationLivePreviewPanel({
+  actions
+}: {
+  actions: Array<NotificationAction & { title: string; message: string }>;
+}) {
+  return (
+    <aside className="notification-preview-panel" aria-label="Live notification preview">
+      <div className="notification-preview-rail-head">
+        <div>
+          <strong id="notification-preview-title">Live Preview</strong>
+          <span>Mock context resolves @ variables as you type.</span>
+        </div>
+      </div>
+      {actions.length ? (
+        <div className="notification-preview-stack">
+          {actions.map((action) => {
+            const meta = notificationChannelMeta[action.type];
+            const Icon = meta.icon;
+            return (
+              <article className="notification-preview-card-inline" key={action.id}>
+                <div>
+                  <Icon size={16} />
+                  <strong>{meta.label}</strong>
+                  <Badge tone={meta.tone}>{action.target_mode}</Badge>
+                </div>
+                {action.title ? <h3>{action.title}</h3> : null}
+                <p>{action.message}</p>
+                {action.media.attach_camera_snapshot ? <span className="preview-media-chip"><Camera size={13} /> Camera Screenshot</span> : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="notification-endpoint-empty">Add an action to preview the outgoing notification.</div>
+      )}
+    </aside>
+  );
+}
+
+function NotificationTriggerModal({
+  groups,
+  selected,
+  onClose,
+  onSelect
+}: {
+  groups: NotificationTriggerGroup[];
+  selected: string;
+  onClose: () => void;
+  onSelect: (triggerEvent: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-trigger-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="workflow-trigger-title">Add Trigger</h2>
+            <p>Select one event that starts this workflow.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close trigger selector"><X size={16} /></button>
+        </div>
+        <div className="notification-add-groups">
+          {groups.map((group) => (
+            <section className="notification-add-group" key={group.id}>
+              <div className="notification-subtitle">
+                <strong>{group.label}</strong>
+                <Badge tone="gray">{group.events.length}</Badge>
+              </div>
+              <div>
+                {group.events.map((event) => (
+                  <button className={selected === event.value ? "notification-add-option configured" : "notification-add-option"} key={event.value} onClick={() => onSelect(event.value)} type="button">
+                    <span>
+                      <strong>{event.label}</strong>
+                      <small>{event.description}</small>
+                    </span>
+                    <Badge tone={selected === event.value ? "green" : notificationSeverityTone(event.severity)}>{selected === event.value ? "Selected" : titleCase(event.severity)}</Badge>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NotificationConditionModal({
+  people,
+  schedules,
+  onClose,
+  onSelect
+}: {
+  people: Person[];
+  schedules: Schedule[];
+  onClose: () => void;
+  onSelect: (condition: NotificationCondition) => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-condition-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="workflow-condition-title">Add Condition</h2>
+            <p>Conditions are evaluated together before actions run.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close condition selector"><X size={16} /></button>
+        </div>
+        <div className="notification-add-groups">
+          <section className="notification-add-group">
+            <div className="notification-subtitle"><strong>Condition Types</strong><Badge tone="gray">2</Badge></div>
+            <div>
+              <button className="notification-add-option" onClick={() => onSelect({ id: draftId("condition"), type: "schedule", schedule_id: schedules[0]?.id ?? "" })} type="button">
+                <span><strong>Schedule</strong><small>Only continue when the event time falls inside a selected schedule.</small></span>
+                <Clock3 size={18} />
+              </button>
+              <button className="notification-add-option" onClick={() => onSelect({ id: draftId("condition"), type: "presence", mode: "someone_home", person_id: people[0]?.id ?? "" })} type="button">
+                <span><strong>Presence</strong><small>Check whether nobody, somebody, or a specific person is home.</small></span>
+                <Users size={18} />
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NotificationActionModal({
+  onClose,
+  onSelect
+}: {
+  onClose: () => void;
+  onSelect: (actionType: NotificationActionType) => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-action-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="workflow-action-title">Add Action</h2>
+            <p>Stack one or more outputs for this workflow.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close action selector"><X size={16} /></button>
+        </div>
+        <div className="notification-add-groups">
+          <section className="notification-add-group">
+            <div className="notification-subtitle"><strong>Outputs</strong><Badge tone="gray">3</Badge></div>
+            <div>
+              {(["mobile", "voice", "in_app"] as NotificationActionType[]).map((actionType) => {
+                const meta = notificationChannelMeta[actionType];
+                const Icon = meta.icon;
+                return (
+                  <button className="notification-add-option" key={actionType} onClick={() => onSelect(actionType)} type="button">
+                    <span><strong>{meta.label}</strong><small>{meta.description}</small></span>
+                    <Icon size={18} />
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function createWorkflowDraft(): NotificationRule {
+  return {
+    id: draftId("workflow"),
+    name: "New Notification",
+    trigger_event: "",
+    conditions: [],
+    actions: [],
+    is_active: true
+  };
+}
+
+function createWorkflowAction(type: NotificationActionType): NotificationAction {
+  const templates = defaultWorkflowActionTemplates[type];
+  return {
+    id: draftId("action"),
+    type,
+    target_mode: "all",
+    target_ids: [],
+    title_template: templates.title_template,
+    message_template: templates.message_template,
+    media: { attach_camera_snapshot: false, camera_id: "" }
+  };
+}
+
+function cloneNotificationRule(rule: NotificationRule): NotificationRule {
+  return JSON.parse(JSON.stringify(rule)) as NotificationRule;
+}
+
+function workflowRulePayload(rule: NotificationRule) {
+  return {
+    name: rule.name.trim() || "Notification Workflow",
+    trigger_event: rule.trigger_event,
+    conditions: rule.conditions,
+    actions: rule.actions,
+    is_active: rule.is_active
+  };
+}
+
+function notificationEventLabel(value: string, triggerByValue?: Map<string, NotificationTriggerOption>) {
+  return triggerByValue?.get(value)?.label ?? titleCase(value);
+}
+
+function notificationSeverityTone(value: string): BadgeTone {
+  if (value === "critical") return "red";
+  if (value === "warning") return "amber";
+  if (value === "info") return "blue";
+  return "gray";
+}
+
+function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>) {
+  return actions.map((action) => ({
+    ...action,
+    title: renderWorkflowTemplate(action.title_template, context),
+    message: renderWorkflowTemplate(action.message_template, context)
+  }));
+}
+
+function renderWorkflowTemplate(template: string, context: Record<string, string>) {
+  return template.replace(/@([A-Za-z][A-Za-z0-9_]*)/g, (_, token: string) => context[token] ?? "").trim();
+}
+
+function templateToTiptapDoc(template: string, variables: Array<NotificationVariable & { group?: string }>) {
+  const names = new Set(variables.map((variable) => variable.name));
+  const paragraphs = (template || "").split(/\n/);
+  return {
+    type: "doc",
+    content: paragraphs.map((paragraph) => ({
+      type: "paragraph",
+      content: templateLineToTiptap(paragraph, names)
+    }))
+  };
+}
+
+function templateLineToTiptap(line: string, names: Set<string>) {
+  const content: Array<Record<string, unknown>> = [];
+  const pattern = /@([A-Za-z][A-Za-z0-9_]*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(line))) {
+    if (match.index > lastIndex) content.push({ type: "text", text: line.slice(lastIndex, match.index) });
+    if (names.has(match[1])) {
+      content.push({ type: "mention", attrs: { id: match[1], label: match[1] } });
+    } else {
+      content.push({ type: "text", text: match[0] });
+    }
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < line.length) content.push({ type: "text", text: line.slice(lastIndex) });
+  return content.length ? content : undefined;
+}
+
+function tiptapDocToTemplate(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const raw = node as { type?: string; text?: string; attrs?: Record<string, unknown>; content?: unknown[] };
+  if (raw.type === "text") return raw.text ?? "";
+  if (raw.type === "mention") return `@${String(raw.attrs?.label ?? raw.attrs?.id ?? "")}`;
+  const children = raw.content?.map(tiptapDocToTemplate) ?? [];
+  if (raw.type === "doc") return children.join("\n");
+  if (raw.type === "paragraph") return children.join("");
+  return children.join("");
+}
+
+function findMentionSuggestion(editor: NonNullable<ReturnType<typeof useEditor>>) {
+  const { from } = editor.state.selection;
+  const start = Math.max(1, from - 48);
+  const text = editor.state.doc.textBetween(start, from, "\n", " ");
+  const match = text.match(/(?:^|\s)@([A-Za-z0-9_]*)$/);
+  if (!match) return null;
+  const query = match[1];
+  return { query, from: from - query.length - 1, to: from };
+}
+
+function groupVariables(variables: Array<NotificationVariable & { group: string }>) {
+  const grouped = new Map<string, Array<NotificationVariable & { group: string }>>();
+  for (const variable of variables) {
+    const rows = grouped.get(variable.group) ?? [];
+    rows.push(variable);
+    grouped.set(variable.group, rows);
+  }
+  return Array.from(grouped.entries()).map(([group, items]) => ({ group, items }));
+}
+
+function draftId(prefix: string) {
+  return `draft-${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function SettingsView({ slots }: { slots: TimeSlot[] }) {
@@ -5340,6 +7729,7 @@ function normalizeManagedCover(value: unknown): HomeAssistantManagedCover | null
     entity_id: entityId,
     name: String(raw.name || titleFromEntityId(entityId)),
     enabled: raw.enabled !== false,
+    schedule_id: raw.schedule_id ? String(raw.schedule_id) : null,
     open_service: String(raw.open_service || "cover.open_cover"),
     close_service: String(raw.close_service || "cover.close_cover"),
     state: raw.state ?? null
@@ -5350,7 +7740,8 @@ function normalizeManagedCoversForSave(entities: HomeAssistantManagedCover[]) {
   return entities.map((entity) => ({
     entity_id: entity.entity_id,
     name: entity.name || titleFromEntityId(entity.entity_id),
-    enabled: entity.enabled !== false
+    enabled: entity.enabled !== false,
+    schedule_id: entity.schedule_id || null
   }));
 }
 

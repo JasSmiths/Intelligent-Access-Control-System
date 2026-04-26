@@ -16,7 +16,14 @@ class AppriseNotificationSender(NotificationSender):
     def __init__(self, urls: str | None = None) -> None:
         self._urls = urls
 
-    async def send(self, title: str, body: str, context: NotificationContext) -> None:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        context: NotificationContext,
+        *,
+        attachments: list[str] | None = None,
+    ) -> None:
         urls = await self._parse_urls()
         if not urls:
             logger.info(
@@ -34,6 +41,8 @@ class AppriseNotificationSender(NotificationSender):
             notifier = apprise.Apprise()
             for url in urls:
                 notifier.add(url)
+            if attachments:
+                return notifier.notify(title=title, body=body, attach=attachments)
             return notifier.notify(title=title, body=body)
 
         sent = await asyncio.to_thread(notify)
@@ -95,8 +104,50 @@ def normalize_apprise_url(url: str) -> str:
     return f"{scheme}://{user_key}@{app_token}{suffix}"
 
 
+def summarize_apprise_url(index: int, url: str) -> dict[str, str | int]:
+    parsed = urlparse(url)
+    label = _apprise_service_label(parsed.scheme)
+    credentials = _apprise_credentials_preview(parsed)
+    return {
+        "id": f"apprise:{index}",
+        "index": index,
+        "type": label,
+        "scheme": parsed.scheme or "unknown",
+        "preview": credentials,
+    }
+
+
 def _mask_url(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.scheme:
         return "***"
     return f"{parsed.scheme}://***"
+
+
+def _apprise_service_label(scheme: str) -> str:
+    labels = {
+        "pover": "Pushover",
+        "mailto": "Email",
+        "discord": "Discord",
+        "slack": "Slack",
+        "tgram": "Telegram",
+        "telegram": "Telegram",
+    }
+    return labels.get(scheme, scheme.replace("_", " ").title() if scheme else "Unknown")
+
+
+def _apprise_credentials_preview(parsed) -> str:
+    if parsed.scheme == "pover" and parsed.username and parsed.hostname:
+        return f"user {_prefix(parsed.username)} / app {_prefix(parsed.hostname)}"
+    if parsed.username:
+        return f"{_prefix(parsed.username)} / {parsed.hostname or 'service'}"
+    if parsed.hostname:
+        return _prefix(parsed.hostname)
+    return "configured"
+
+
+def _prefix(value: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) <= 6:
+        return f"{cleaned}..."
+    return f"{cleaned[:6]}..."

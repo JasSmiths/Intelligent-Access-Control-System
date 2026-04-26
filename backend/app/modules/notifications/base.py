@@ -19,7 +19,14 @@ class ComposedNotification:
 
 
 class NotificationSender(Protocol):
-    async def send(self, title: str, body: str, context: NotificationContext) -> None:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        context: NotificationContext,
+        *,
+        attachments: list[str] | None = None,
+    ) -> None:
         """Send a contextual notification."""
 
 

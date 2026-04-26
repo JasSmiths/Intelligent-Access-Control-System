@@ -7,6 +7,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
 from app.api.v1 import auth as auth_routes
+from app.api.v1 import schedules as schedule_routes
 from app.api.v1 import users as user_routes
 from app.api.v1 import webhooks as webhook_routes
 from app.core.config import settings
@@ -17,6 +18,7 @@ from app.services.auth import authenticate_request, count_users
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.home_assistant import get_home_assistant_service
+from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config
 from app.services.unifi_protect import get_unifi_protect_service
 
@@ -39,6 +41,7 @@ async def lifespan(app: FastAPI):
     )
     await init_database()
     await event_bus.start()
+    await get_notification_service().start()
     await get_access_event_service().start()
     await get_home_assistant_service().start()
     await get_unifi_protect_service().start()
@@ -48,6 +51,7 @@ async def lifespan(app: FastAPI):
         await get_unifi_protect_service().stop()
         await get_home_assistant_service().stop()
         await get_access_event_service().stop()
+        await get_notification_service().stop()
         await event_bus.stop()
         logger.info("stopped_backend")
 
@@ -147,5 +151,6 @@ async def service_root() -> dict[str, object]:
 
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
+app.include_router(schedule_routes.router, prefix="/api/schedules", tags=["schedules"])
 app.include_router(user_routes.router, prefix="/api/users", tags=["users"])
 app.include_router(webhook_routes.router, prefix="/api/webhooks", tags=["webhooks"])

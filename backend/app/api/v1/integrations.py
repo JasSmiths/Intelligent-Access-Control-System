@@ -1,6 +1,6 @@
 from difflib import SequenceMatcher
+from datetime import UTC, datetime
 import re
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -24,10 +24,16 @@ from app.modules.home_assistant.covers import (
 )
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, HomeAssistantState
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
-from app.modules.notifications.apprise_client import normalize_apprise_url, split_apprise_urls, validate_apprise_urls
+from app.modules.notifications.apprise_client import (
+    normalize_apprise_url,
+    split_apprise_urls,
+    summarize_apprise_url,
+    validate_apprise_urls,
+)
 from app.services.dvla import lookup_vehicle_registration
 from app.services.home_assistant import get_home_assistant_service
 from app.services.notifications import get_notification_service
+from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config, update_settings
 
 router = APIRouter()
@@ -143,7 +149,7 @@ async def auto_detect_home_assistant_garage_doors(_: User = Depends(admin_user))
 async def apprise_urls(_: User = Depends(admin_user)) -> dict:
     config = await get_runtime_config()
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
-    return {"urls": [_apprise_url_summary(index, url) for index, url in enumerate(urls)]}
+    return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
 
 
 @router.post("/apprise/urls")
@@ -159,7 +165,7 @@ async def add_apprise_url(request: AddAppriseUrlRequest, _: User = Depends(admin
     if normalized not in urls:
         urls.append(normalized)
         await update_settings({"apprise_urls": "\n".join(urls)})
-    return {"urls": [_apprise_url_summary(index, url) for index, url in enumerate(urls)]}
+    return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
 
 
 @router.delete("/apprise/urls/{index}")
@@ -170,7 +176,7 @@ async def remove_apprise_url(index: int, _: User = Depends(admin_user)) -> dict:
         raise HTTPException(status_code=404, detail="Apprise URL not found.")
     urls.pop(index)
     await update_settings({"apprise_urls": "\n".join(urls)})
-    return {"urls": [_apprise_url_summary(row_index, url) for row_index, url in enumerate(urls)]}
+    return {"urls": [summarize_apprise_url(row_index, url) for row_index, url in enumerate(urls)]}
 
 
 @router.post("/dvla/lookup")
@@ -217,6 +223,21 @@ async def cover_command(request: CoverCommandRequest, _: User = Depends(current_
     entity = configured_entities.get(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
+
+    if request.action == "open":
+        schedule_evaluation = await evaluate_schedule_id(
+            session,
+            entity.get("schedule_id"),
+            datetime.now(tz=UTC),
+            timezone_name=config.site_timezone,
+            default_policy=config.schedule_default_policy,
+            source="garage_door",
+        )
+        if not schedule_evaluation.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=schedule_evaluation.reason or "Garage door is outside its assigned schedule.",
+            )
 
     client = HomeAssistantClient()
     outcome = await command_cover(client, entity, request.action, request.reason)
@@ -292,47 +313,6 @@ def _merge_cover_entities(
             merged.append(entity)
             by_entity_id[str(entity["entity_id"])] = entity
     return merged
-
-
-def _apprise_url_summary(index: int, url: str) -> dict[str, str | int]:
-    parsed = urlparse(url)
-    label = _apprise_service_label(parsed.scheme)
-    credentials = _apprise_credentials_preview(parsed)
-    return {
-        "index": index,
-        "type": label,
-        "scheme": parsed.scheme or "unknown",
-        "preview": credentials,
-    }
-
-
-def _apprise_service_label(scheme: str) -> str:
-    labels = {
-        "pover": "Pushover",
-        "mailto": "Email",
-        "discord": "Discord",
-        "slack": "Slack",
-        "tgram": "Telegram",
-        "telegram": "Telegram",
-    }
-    return labels.get(scheme, scheme.replace("_", " ").title() if scheme else "Unknown")
-
-
-def _apprise_credentials_preview(parsed) -> str:
-    if parsed.scheme == "pover" and parsed.username and parsed.hostname:
-        return f"user {_prefix(parsed.username)} / app {_prefix(parsed.hostname)}"
-    if parsed.username:
-        return f"{_prefix(parsed.username)} / {parsed.hostname or 'service'}"
-    if parsed.hostname:
-        return _prefix(parsed.hostname)
-    return "configured"
-
-
-def _prefix(value: str) -> str:
-    cleaned = value.strip()
-    if len(cleaned) <= 6:
-        return f"{cleaned}..."
-    return f"{cleaned[:6]}..."
 
 
 def _suggest_presence_mapping(user: User, person_entities: list[dict[str, str | None]]) -> dict:

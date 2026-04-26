@@ -52,11 +52,15 @@ class Person(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL"), index=True
+    )
     garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     group: Mapped[Group | None] = relationship(back_populates="people")
+    schedule: Mapped["Schedule | None"] = relationship(back_populates="people")
     vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="owner")
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
     schedules: Mapped[list["ScheduleAssignment"]] = relationship(back_populates="person")
@@ -67,6 +71,9 @@ class Vehicle(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL"), index=True
+    )
     registration_number: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     vehicle_photo_data_url: Mapped[str | None] = mapped_column(Text)
     make: Mapped[str | None] = mapped_column(String(80))
@@ -76,6 +83,7 @@ class Vehicle(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     owner: Mapped[Person | None] = relationship(back_populates="vehicles")
+    schedule: Mapped["Schedule | None"] = relationship(back_populates="vehicles")
     events: Mapped[list["AccessEvent"]] = relationship(back_populates="vehicle")
 
 
@@ -104,6 +112,29 @@ class SystemSetting(Base, TimestampMixin):
     value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+
+
+class NotificationRule(Base, TimestampMixin):
+    __tablename__ = "notification_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    trigger_event: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    conditions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
+class Schedule(Base, TimestampMixin):
+    __tablename__ = "schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    time_blocks: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    people: Mapped[list["Person"]] = relationship(back_populates="schedule")
+    vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="schedule")
 
 
 class TimeSlot(Base, TimestampMixin):

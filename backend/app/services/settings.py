@@ -31,6 +31,20 @@ LEGACY_DEFAULT_REPLACEMENTS = {
     "ollama_model": {"llama3.1": "llama3"},
 }
 
+AUTHORIZED_ENTRY_TEMPLATE_V1 = "[FirstNamePossessive] [VehicleDisplayName] has been detected at the gate. I've let [FirstName] in."
+AUTHORIZED_ENTRY_TEMPLATE_V2 = "[FirstNamePossessive] [VehicleDisplayName] has been detected at the gate. I've let [ObjectPronoun] in."
+LEGACY_NOTIFICATION_BODY_TEMPLATES = {
+    "authorised-entry": {AUTHORIZED_ENTRY_TEMPLATE_V1},
+    "unauthorised-plate": {"[Message]\nPlate [VehicleRegistrationNumber] • [Source]"},
+    "outside-schedule": {"[Message]\n[VehicleRegistrationNumber] • [TimingClassification]"},
+    "duplicate-entry": {"[Message]"},
+    "duplicate-exit": {"[Message]"},
+    "gate-open-failed": {"[Message]\n[VehicleRegistrationNumber] • [Source]"},
+    "garage-door-open-failed": {"[Message]\n[GarageDoor] • [EntityId]"},
+    "ai-anomaly-alert": {"[Message]"},
+    "integration-tests": {"[Message]"},
+}
+
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "app_name": ("general", settings.app_name, "Application display name."),
@@ -43,6 +57,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "lpr_debounce_quiet_seconds": ("lpr", settings.lpr_debounce_quiet_seconds, "Quiet period before resolving LPR reads."),
     "lpr_debounce_max_seconds": ("lpr", settings.lpr_debounce_max_seconds, "Maximum LPR debounce window."),
     "lpr_similarity_threshold": ("lpr", settings.lpr_similarity_threshold, "Plate similarity threshold."),
+    "schedule_default_policy": (
+        "access",
+        "allow",
+        "Access policy when no schedule is assigned. Use allow or deny.",
+    ),
     "home_assistant_url": ("integrations", str(settings.home_assistant_url) if settings.home_assistant_url else "", "Home Assistant base URL."),
     "home_assistant_token": ("integrations", settings.home_assistant_token or "", "Home Assistant long-lived access token."),
     "home_assistant_gate_entity_id": ("integrations", settings.home_assistant_gate_entity_id or "", "Gate entity ID."),
@@ -61,6 +80,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
     "home_assistant_presence_entities": ("integrations", settings.home_assistant_presence_entities, "Person-to-HA entity mapping."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
+    "notification_rules": (
+        "notifications",
+        [],
+        "Deprecated legacy notification rules. DB workflow rules are the active source of truth.",
+    ),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -105,6 +129,7 @@ class RuntimeConfig:
     lpr_debounce_quiet_seconds: float
     lpr_debounce_max_seconds: float
     lpr_similarity_threshold: float
+    schedule_default_policy: str
     home_assistant_url: str
     home_assistant_token: str
     home_assistant_gate_entity_id: str
@@ -115,6 +140,7 @@ class RuntimeConfig:
     home_assistant_default_media_player: str
     home_assistant_presence_entities: dict[str, str]
     apprise_urls: str
+    notification_rules: list[dict[str, Any]]
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -182,6 +208,31 @@ def bool_value(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _deduplicate_notification_rules(
+    rules: list[dict[str, Any]],
+    default_rule_ids: set[str],
+) -> list[dict[str, Any]]:
+    selected_by_event: dict[str, dict[str, Any]] = {}
+    event_order: list[str] = []
+    for rule in rules:
+        event_type = str((rule.get("event_types") or [rule.get("id") or ""])[0])
+        if not event_type:
+            event_type = str(rule.get("id") or f"rule-{len(event_order) + 1}")
+        existing = selected_by_event.get(event_type)
+        if existing is None:
+            selected_by_event[event_type] = rule
+            event_order.append(event_type)
+            continue
+
+        existing_is_default = str(existing.get("id")) in default_rule_ids
+        rule_is_default = str(rule.get("id")) in default_rule_ids
+        if existing_is_default and not rule_is_default:
+            selected_by_event[event_type] = rule
+        elif existing_is_default == rule_is_default:
+            selected_by_event[event_type] = rule
+    return [selected_by_event[event_type] for event_type in event_order]
+
+
 async def seed_dynamic_settings() -> None:
     async with AsyncSessionLocal() as session:
         await seed_dynamic_settings_for_session(session)
@@ -220,6 +271,9 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
                 "home_assistant_gate_entities",
                 legacy_gate_entities(legacy_gate_entity_id, gate_open_service),
             )
+    notification_rules_record = records_by_key.get("notification_rules")
+    if notification_rules_record:
+        notification_rules_record.value = setting_payload("notification_rules", [])
     for record in records:
         plain_value = record.value.get("plain")
         replacement = (
@@ -260,6 +314,9 @@ async def get_runtime_config() -> RuntimeConfig:
         lpr_debounce_quiet_seconds=float(values["lpr_debounce_quiet_seconds"]),
         lpr_debounce_max_seconds=float(values["lpr_debounce_max_seconds"]),
         lpr_similarity_threshold=float(values["lpr_similarity_threshold"]),
+        schedule_default_policy=(
+            "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
+        ),
         home_assistant_url=str(values["home_assistant_url"] or ""),
         home_assistant_token=str(values["home_assistant_token"] or ""),
         home_assistant_gate_entity_id=str(values["home_assistant_gate_entity_id"] or ""),
@@ -276,6 +333,7 @@ async def get_runtime_config() -> RuntimeConfig:
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
         home_assistant_presence_entities=dict(values["home_assistant_presence_entities"] or {}),
         apprise_urls=str(values["apprise_urls"] or ""),
+        notification_rules=list(values["notification_rules"]) if isinstance(values["notification_rules"], list) else [],
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),

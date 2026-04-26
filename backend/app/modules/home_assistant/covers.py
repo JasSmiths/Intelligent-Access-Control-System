@@ -51,12 +51,14 @@ def normalize_cover_entity(raw: Any, *, default_open_service: str = DEFAULT_OPEN
         enabled = True
         open_service = default_open_service
         close_service = DEFAULT_CLOSE_SERVICE
+        schedule_id = None
     elif isinstance(raw, dict):
         entity_id = str(raw.get("entity_id") or "").strip()
         name = str(raw.get("name") or "").strip() or title_from_entity_id(entity_id)
         enabled = bool(raw.get("enabled", True))
         open_service = default_open_service
         close_service = DEFAULT_CLOSE_SERVICE
+        schedule_id = str(raw.get("schedule_id") or "").strip() or None
     else:
         return None
 
@@ -68,6 +70,7 @@ def normalize_cover_entity(raw: Any, *, default_open_service: str = DEFAULT_OPEN
         "enabled": enabled,
         "open_service": open_service or default_open_service,
         "close_service": close_service or DEFAULT_CLOSE_SERVICE,
+        "schedule_id": schedule_id,
     }
 
 
@@ -111,6 +114,7 @@ def cover_entity_state_payload(entity: dict[str, Any], state: str | None = None)
         "enabled": bool(entity.get("enabled", True)),
         "open_service": str(entity.get("open_service") or DEFAULT_OPEN_SERVICE),
         "close_service": str(entity.get("close_service") or DEFAULT_CLOSE_SERVICE),
+        "schedule_id": str(entity.get("schedule_id") or "") or None,
         "state": state,
     }
 

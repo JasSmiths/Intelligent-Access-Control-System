@@ -11,7 +11,7 @@ from app.models.enums import AccessDecision, AccessDirection
 from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
-from app.modules.notifications.base import NotificationContext
+from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.dvla import lookup_vehicle_registration
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config
@@ -299,14 +299,18 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def trigger_anomaly_alert(arguments: dict[str, Any]) -> dict[str, Any]:
-    notification = await get_notification_service().notify(
-        NotificationContext(
-            event_type="agent_anomaly_alert",
-            subject=str(arguments["subject"]),
-            severity=str(arguments["severity"]),
-            facts={"message": str(arguments["message"])},
+    try:
+        notification = await get_notification_service().notify(
+            NotificationContext(
+                event_type="agent_anomaly_alert",
+                subject=str(arguments["subject"]),
+                severity=str(arguments["severity"]),
+                facts={"message": str(arguments["message"])},
+            ),
+            raise_on_failure=True,
         )
-    )
+    except NotificationDeliveryError as exc:
+        return {"sent": False, "error": str(exc)}
     return {"sent": True, "title": notification.title, "body": notification.body}
 
 
