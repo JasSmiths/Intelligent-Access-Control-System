@@ -5624,11 +5624,13 @@ tr:last-child td {
 }
 
 .chat-pill {
-  min-height: 38px;
+  width: 44px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  padding: 0 14px;
+  padding: 0;
   border: 0;
   border-radius: 12px;
   background: var(--blue);
@@ -6292,8 +6294,9 @@ tr:last-child td {
   }
 
   .chat-pill {
-    min-height: 40px;
-    padding: 0 14px;
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
     border-radius: 12px;
     font-size: 12px;
   }

@@ -7895,8 +7895,7 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
         <div className="chat-panel">
           <div className="chat-header">
             <div className="card-title">
-              <Bot size={18} />
-              <h2>Chat with me</h2>
+              <Bot size={18} aria-label="Chat with me" />
             </div>
             <button className="icon-button" onClick={() => setOpen(false)} type="button" aria-label="Close chat">
               <X size={16} />
@@ -7927,9 +7926,8 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
         </div>
       ) : null}
       {!open ? (
-        <button className="chat-pill" onClick={() => setOpen(true)} type="button">
+        <button className="chat-pill" onClick={() => setOpen(true)} type="button" aria-label="Chat with me">
           <MessageCircle size={18} />
-          Chat with me
         </button>
       ) : null}
     </div>
