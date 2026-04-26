@@ -10,9 +10,7 @@ from app.models.core import (
     Person,
     Presence,
     Schedule,
-    ScheduleAssignment,
     SystemSetting,
-    TimeSlot,
     User,
     Vehicle,
 )
@@ -27,9 +25,7 @@ __all__ = [
     "Person",
     "Presence",
     "Schedule",
-    "ScheduleAssignment",
     "SystemSetting",
-    "TimeSlot",
     "User",
     "Vehicle",
 ]

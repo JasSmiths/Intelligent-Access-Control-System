@@ -29,9 +29,8 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """Start and stop process-wide services.
 
-    Phase 1 keeps lifecycle work intentionally light. Later phases will register
-    queue consumers, Home Assistant listeners, and log streaming broadcasters
-    here without changing API route code.
+    Long-lived services are registered here so route handlers stay focused on
+    request validation and orchestration.
     """
 
     configure_logging()

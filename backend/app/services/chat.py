@@ -8,7 +8,6 @@ from sqlalchemy import select
 
 from app.ai.providers import (
     ChatMessageInput,
-    LlmResult,
     ProviderNotConfiguredError,
     ToolCall,
     get_llm_provider,
@@ -58,7 +57,7 @@ class ChatService:
 
         memory = await self._load_memory(session_uuid)
         planned_calls = self._plan_tool_calls(message, memory)
-        tool_results = [await self._execute_tool_call(call) for call in planned_calls]
+        tool_results = [await self._execute_tool_call(session_uuid, call) for call in planned_calls]
 
         messages = await self._build_messages(session_uuid, tool_results)
         runtime = await get_runtime_config()
@@ -71,7 +70,10 @@ class ChatService:
                 tool_results=tool_results if provider.name == "local" else None,
             )
             if result.tool_calls:
-                native_results = [await self._execute_tool_call(call) for call in result.tool_calls]
+                native_results = [
+                    await self._execute_tool_call(session_uuid, call)
+                    for call in result.tool_calls
+                ]
                 tool_results.extend(native_results)
                 messages = await self._build_messages(session_uuid, tool_results)
                 result = await provider.complete(messages, tool_results=native_results)
@@ -148,6 +150,7 @@ class ChatService:
                 await session.scalars(
                     select(ChatMessage)
                     .where(ChatMessage.session_id == session_id)
+                    .where(ChatMessage.role.in_(("user", "assistant")))
                     .order_by(ChatMessage.created_at.desc())
                     .limit(12)
                 )
@@ -331,7 +334,7 @@ class ChatService:
         ]
         return any(phrase in lower for phrase in lookup_phrases)
 
-    async def _execute_tool_call(self, call: ToolCall) -> dict[str, Any]:
+    async def _execute_tool_call(self, session_id: uuid.UUID, call: ToolCall) -> dict[str, Any]:
         tool = self._tools.get(call.name)
         if not tool:
             return {
@@ -340,13 +343,22 @@ class ChatService:
                 "output": {"error": f"Unknown tool: {call.name}"},
             }
         output = await tool.handler(call.arguments)
-        await self._append_tool_message(call, output)
+        await self._append_tool_message(session_id, call, output)
         return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output}
 
-    async def _append_tool_message(self, call: ToolCall, output: dict[str, Any]) -> None:
-        # Tool outputs are persisted indirectly in the assistant context; keeping
-        # them out of the visible transcript avoids noisy future prompts.
-        _ = call, output
+    async def _append_tool_message(
+        self,
+        session_id: uuid.UUID,
+        call: ToolCall,
+        output: dict[str, Any],
+    ) -> None:
+        await self._append_message(
+            session_id,
+            "tool",
+            json.dumps(output, default=str, separators=(",", ":")),
+            tool_name=call.name,
+            tool_payload=output,
+        )
 
     def _fallback_text(self, tool_results: list[dict[str, Any]]) -> str:
         if not tool_results:

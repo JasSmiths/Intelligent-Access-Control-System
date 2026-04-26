@@ -28,7 +28,6 @@ from app.modules.unifi_protect.client import (
     serialize_unifi_camera,
 )
 from app.modules.unifi_protect.package import (
-    ProtectPackageState,
     activate_unifi_protect_package_overlay,
     current_unifi_protect_version,
     installed_overlay_versions,

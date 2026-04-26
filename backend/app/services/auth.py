@@ -208,13 +208,6 @@ def require_admin(user: User) -> None:
         raise AdminRequiredError()
 
 
-def _extract_http_token(request: Request) -> str | None:
-    authorization = request.headers.get("authorization")
-    if authorization and authorization.lower().startswith("bearer "):
-        return authorization.split(" ", 1)[1].strip()
-    return None
-
-
 async def _extract_http_token_async(request: Request) -> str | None:
     authorization = request.headers.get("authorization")
     if authorization and authorization.lower().startswith("bearer "):

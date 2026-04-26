@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import current_user
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import Group, Person, Schedule, TimeSlot, User, Vehicle
+from app.models import Group, Person, Schedule, User, Vehicle
 from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
 from app.services.settings import get_runtime_config
@@ -41,6 +41,7 @@ class PersonResponse(BaseModel):
     schedule_id: str | None
     schedule: str | None
     is_active: bool
+    notes: str | None
     garage_door_entity_ids: list[str]
     vehicles: list[PersonVehicleResponse]
 
@@ -53,6 +54,7 @@ class CreatePersonRequest(BaseModel):
     schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
     garage_door_entity_ids: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None, max_length=2000)
     is_active: bool = True
 
 
@@ -64,6 +66,7 @@ class UpdatePersonRequest(BaseModel):
     schedule_id: uuid.UUID | None = None
     vehicle_ids: list[uuid.UUID] | None = None
     garage_door_entity_ids: list[str] | None = None
+    notes: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
 
 
@@ -88,6 +91,7 @@ class CreateVehicleRequest(BaseModel):
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     schedule_id: uuid.UUID | None = None
     is_active: bool = True
@@ -99,6 +103,7 @@ class UpdateVehicleRequest(BaseModel):
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     schedule_id: uuid.UUID | None = None
     is_active: bool | None = None
@@ -150,6 +155,13 @@ def normalize_vehicle_text(value: str | None) -> str | None:
     return friendly_vehicle_text(value) if value else None
 
 
+def normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
+
+
 def serialize_vehicle(vehicle: Vehicle) -> dict:
     return {
         "id": str(vehicle.id),
@@ -180,6 +192,7 @@ def serialize_person(person: Person) -> dict:
         "schedule_id": str(person.schedule_id) if person.schedule_id else None,
         "schedule": person.schedule.name if person.schedule else None,
         "is_active": person.is_active,
+        "notes": person.notes,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "vehicles": [
                 {
@@ -280,6 +293,7 @@ async def add_person(
         group_id=group.id if group else None,
         schedule_id=schedule.id if schedule else None,
         garage_door_entity_ids=garage_door_entity_ids,
+        notes=normalize_optional_text(request.notes),
         is_active=request.is_active,
     )
     session.add(person)
@@ -346,6 +360,8 @@ async def update_person(
         person.display_name = compose_person_name(person.first_name, person.last_name)
     if "profile_photo_data_url" in request.model_fields_set:
         person.profile_photo_data_url = request.profile_photo_data_url
+    if "notes" in request.model_fields_set:
+        person.notes = normalize_optional_text(request.notes)
     if request.is_active is not None:
         person.is_active = request.is_active
 
@@ -397,6 +413,7 @@ async def add_vehicle(
         make=normalize_vehicle_text(request.make),
         model=normalize_vehicle_text(request.model),
         color=normalize_vehicle_text(request.color),
+        description=normalize_optional_text(request.description),
         is_active=request.is_active,
     )
     session.add(vehicle)
@@ -450,6 +467,8 @@ async def update_vehicle(
         vehicle.model = normalize_vehicle_text(request.model)
     if "color" in request.model_fields_set:
         vehicle.color = normalize_vehicle_text(request.color)
+    if "description" in request.model_fields_set:
+        vehicle.description = normalize_optional_text(request.description)
     if request.is_active is not None:
         vehicle.is_active = request.is_active
 
@@ -564,21 +583,3 @@ async def update_group(
 
     return GroupResponse(**serialize_group(refreshed_group))
 
-
-@router.get("/time-slots")
-async def list_time_slots() -> list[dict]:
-    async with AsyncSessionLocal() as session:
-        slots = (await session.scalars(select(TimeSlot).order_by(TimeSlot.name))).all()
-
-    return [
-        {
-            "id": str(slot.id),
-            "name": slot.name,
-            "kind": slot.kind.value,
-            "days_of_week": slot.days_of_week,
-            "start_time": slot.start_time.isoformat() if slot.start_time else None,
-            "end_time": slot.end_time.isoformat() if slot.end_time else None,
-            "is_active": slot.is_active,
-        }
-        for slot in slots
-    ]

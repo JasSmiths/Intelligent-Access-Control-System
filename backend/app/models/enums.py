@@ -8,12 +8,6 @@ class GroupCategory(StrEnum):
     CONTRACTORS = "contractors"
 
 
-class ScheduleKind(StrEnum):
-    ALWAYS = "always"
-    WEEKLY = "weekly"
-    ONE_TIME = "one_time"
-
-
 class AccessDecision(StrEnum):
     GRANTED = "granted"
     DENIED = "denied"

@@ -1,7 +1,7 @@
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import admin_user, current_user
@@ -83,9 +83,11 @@ async def test_connection(
         elif integration == "ollama":
             await _test_ollama(values)
         else:
-            return {"ok": False, "message": f"Unknown integration: {request.integration}"}
+            raise HTTPException(status_code=400, detail=f"Unknown integration: {request.integration}")
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"ok": True, "message": "Connection test succeeded."}
 
 

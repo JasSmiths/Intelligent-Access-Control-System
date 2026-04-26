@@ -1,15 +1,14 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Person, Schedule, ScheduleAssignment, TimeSlot, Vehicle
-from app.models.enums import ScheduleKind
+from app.models import Person, Schedule, Vehicle
 from app.services.settings import get_runtime_config
 
 MINUTES_PER_SLOT = 30
@@ -97,14 +96,6 @@ async def evaluate_vehicle_schedule(
             )
         return _evaluate_schedule(owner_schedule, occurred_at, timezone_name, source="person")
 
-    legacy_allowed = await _evaluate_legacy_assignments(session, owner, occurred_at, timezone_name) if owner else None
-    if legacy_allowed is not None:
-        return ScheduleEvaluation(
-            allowed=legacy_allowed,
-            source="legacy",
-            reason="Legacy time-slot assignment matched." if legacy_allowed else "No legacy time-slot assignment matched.",
-        )
-
     return _evaluate_default_policy(default_policy)
 
 
@@ -191,11 +182,6 @@ async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -
     }
 
 
-async def schedule_dependency_count(session: AsyncSession, schedule_id: uuid.UUID) -> int:
-    dependencies = await schedule_dependencies(session, schedule_id)
-    return sum(len(items) for items in dependencies.values())
-
-
 async def _schedule_for_id(
     session: AsyncSession,
     schedule_id: uuid.UUID | None,
@@ -232,58 +218,6 @@ def _evaluate_default_policy(default_policy: str) -> ScheduleEvaluation:
         if allow
         else "No schedule assigned; default policy denied access.",
     )
-
-
-async def _evaluate_legacy_assignments(
-    session: AsyncSession,
-    person: Person | None,
-    occurred_at: datetime,
-    timezone_name: str,
-) -> bool | None:
-    if not person:
-        return None
-    local_at = occurred_at.astimezone(ZoneInfo(timezone_name))
-    assignments = (
-        await session.scalars(
-            select(ScheduleAssignment)
-            .options(selectinload(ScheduleAssignment.time_slot))
-            .where(
-                or_(
-                    ScheduleAssignment.person_id == person.id,
-                    and_(
-                        person.group_id is not None,
-                        ScheduleAssignment.group_id == person.group_id,
-                    ),
-                )
-            )
-        )
-    ).all()
-    if not assignments:
-        return None
-    return any(
-        assignment.time_slot.is_active and _time_slot_matches(assignment.time_slot, local_at)
-        for assignment in assignments
-    )
-
-
-def _time_slot_matches(slot: TimeSlot, local_at: datetime) -> bool:
-    if slot.kind == ScheduleKind.ALWAYS:
-        return True
-    if slot.kind == ScheduleKind.ONE_TIME:
-        return bool(slot.starts_at and slot.ends_at and slot.starts_at <= local_at <= slot.ends_at)
-    if slot.kind == ScheduleKind.WEEKLY:
-        if slot.days_of_week and local_at.weekday() not in slot.days_of_week:
-            return False
-        if slot.start_time and slot.end_time:
-            return _time_in_range(slot.start_time, slot.end_time, local_at.time())
-        return True
-    return False
-
-
-def _time_in_range(start: time, end: time, current: time) -> bool:
-    if start <= end:
-        return start <= current <= end
-    return current >= start or current <= end
 
 
 def _iter_raw_intervals(value: Any) -> list[tuple[int, list[dict[str, Any]]]]:

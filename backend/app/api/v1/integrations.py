@@ -195,7 +195,7 @@ async def dvla_lookup(request: DvlaLookupRequest, _: User = Depends(current_user
 
 
 @router.post("/gate/open")
-async def open_gate(request: GateOpenRequest) -> dict:
+async def open_gate(request: GateOpenRequest, _: User = Depends(current_user)) -> dict:
     result = await HomeAssistantGateController().open_gate(request.reason)
     if not result.accepted:
         raise HTTPException(status_code=503, detail=result.detail or "Gate command failed.")
@@ -207,7 +207,11 @@ async def open_gate(request: GateOpenRequest) -> dict:
 
 
 @router.post("/cover/command")
-async def cover_command(request: CoverCommandRequest, _: User = Depends(current_user)) -> dict:
+async def cover_command(
+    request: CoverCommandRequest,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     entity_id = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
     if not entity_id:
         raise HTTPException(status_code=400, detail="A configured garage door entity is required.")
@@ -254,7 +258,7 @@ async def cover_command(request: CoverCommandRequest, _: User = Depends(current_
 
 
 @router.post("/announcements/say")
-async def say_announcement(request: AnnouncementRequest) -> dict[str, str]:
+async def say_announcement(request: AnnouncementRequest, _: User = Depends(current_user)) -> dict[str, str]:
     config = await get_runtime_config()
     target = request.entity_id or config.home_assistant_default_media_player
     if not target:
@@ -269,7 +273,10 @@ async def say_announcement(request: AnnouncementRequest) -> dict[str, str]:
 
 
 @router.post("/notifications/test")
-async def send_test_notification(request: TestNotificationRequest) -> dict[str, str]:
+async def send_test_notification(
+    request: TestNotificationRequest,
+    _: User = Depends(current_user),
+) -> dict[str, str]:
     config = await get_runtime_config()
     if not config.apprise_urls:
         raise HTTPException(status_code=400, detail="Apprise is not configured.")

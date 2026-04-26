@@ -32,8 +32,8 @@ class UbiquitiLprPayload(BaseModel):
     """Minimal Ubiquiti LPR webhook contract.
 
     Ubiquiti payloads can vary by firmware and webhook configuration. This model
-    accepts extra fields so Phase 2 can preserve the complete payload while
-    normalizing the two fields the access pipeline needs immediately.
+    accepts extra fields so the complete payload is preserved while normalizing
+    the fields the access pipeline needs.
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)

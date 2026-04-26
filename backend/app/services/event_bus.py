@@ -21,10 +21,10 @@ EventListener = Callable[[RealtimeEvent], Awaitable[None]]
 
 
 class EventBus:
-    """Small in-process event bus used by Phase 1.
+    """Small in-process event bus for realtime dashboard and workflow updates.
 
-    The public API is intentionally narrow so Phase 2 can move backing transport
-    to Redis streams or pub/sub without changing API routers or modules.
+    The public API stays narrow so a later worker split can move backing
+    transport to Redis streams or pub/sub without changing routers or modules.
     """
 
     def __init__(self) -> None:

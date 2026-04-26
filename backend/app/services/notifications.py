@@ -490,7 +490,6 @@ class NotificationService:
             return schedule_allows_at(schedule, occurred_at, config.site_timezone)
 
         if condition_type == "presence":
-            mode = str(condition.get("mode") or "")
             rows = (
                 await session.scalars(select(Presence))
             ).all()

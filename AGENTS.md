@@ -25,9 +25,12 @@ Primary goals:
 - Backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis.
 - Frontend: React 18, TypeScript, Vite, Nginx.
 - Icons: `lucide-react`.
+- Rich notification-template editing: Tiptap.
 - Notifications: Apprise.
 - Home Assistant: REST service calls plus WebSocket state listener.
 - DVLA: Vehicle Enquiry Service API lookup integration.
+- UniFi Protect: `uiprotect` camera/event/snapshot integration plus managed
+  package update overlays.
 - LLM providers: local fallback, OpenAI Responses API, Gemini, Claude, Ollama.
 
 ## Ports and Access
@@ -101,8 +104,8 @@ Do not add Docker named volumes. Keep any new persistent runtime data under
 │       ├── db/
 │       ├── models/
 │       ├── modules/
-│       ├── schemas/
 │       ├── services/
+│       ├── schemas/
 │       ├── simulation/
 │       └── workers/
 └── frontend/
@@ -111,6 +114,7 @@ Do not add Docker named volumes. Keep any new persistent runtime data under
     ├── package.json
     ├── vite.config.ts
     └── src/
+        ├── VariableRichTextEditor.tsx
         ├── main.tsx
         └── styles.css
 ```
@@ -138,7 +142,7 @@ Important packages:
 - `app/services`: core orchestration and business logic.
 - `app/ai`: provider wrappers and tool registry.
 - `app/simulation`: hardware-free test endpoints.
-- `app/workers`: queue constants and future worker entry points.
+- `app/workers`: future worker package placeholder.
 
 ### Hard Modularity Rule
 
@@ -170,8 +174,10 @@ Main tables:
 - `groups`: Family, Friends, Visitors, Contractors, subtype support.
 - `people`: driver/person profiles.
 - `vehicles`: one person to many vehicles.
-- `time_slots`: always, weekly, and one-time schedules.
-- `schedule_assignments`: attach schedules to people or groups.
+- `schedules`: reusable weekly access windows assigned directly to people,
+  vehicles, notification conditions, and configured door entities.
+- `notification_rules`: DB-backed notification workflows with triggers,
+  conditions, actions, active state, and templated content.
 - `presence`: current person presence state.
 - `access_events`: final entry/exit/denial records.
 - `anomalies`: unauthorized plates, duplicate states, outside schedule.
@@ -183,22 +189,24 @@ Main tables:
 - `chat_messages`: persisted AI chat messages.
 
 Startup schema creation is currently handled by `app/db/bootstrap.py` through
-`Base.metadata.create_all`. This is acceptable for the current phased scaffold.
-When the schema stabilizes, add Alembic migrations rather than continuing to
-rely only on auto-create.
+`Base.metadata.create_all`, plus a small set of idempotent transitional column
+additions for existing installs. This is acceptable for the current phased
+scaffold. When the schema stabilizes, add Alembic migrations rather than
+continuing to rely only on auto-create.
+
+Retired legacy schedule tables:
+
+- `time_slots` and `schedule_assignments` have been removed from models, API,
+  scheduler logic, and the live database.
+- Do not reintroduce `/api/v1/time-slots` or legacy fallback schedule logic.
+- All access windows now use `schedules.time_blocks`; unassigned records use
+  the `schedule_default_policy` dynamic setting.
 
 Seed data:
 
-- Steph, group `Family`, vehicle `STEPH26`, all-day access.
-- Bob, group `Contractors - Gardener`, vehicle `BOB123`, Wednesday 08:00-12:00.
-
-Optional test account seed helper:
-
-```bash
-docker compose exec backend python -m app.scripts.seed_family_users
-```
-
-This adds standard family accounts only after a master Admin exists.
+- No demo people, vehicles, groups, schedules, or users are seeded at startup.
+- `IACS_SEED_DEMO_DATA=true` is currently ignored with a warning.
+- Create directory records and the first Admin through the UI/API.
 
 ## Configuration
 
@@ -212,13 +220,17 @@ Bootstrap remains in `.env`/Compose:
 - `IACS_ENVIRONMENT`, `IACS_AUTO_CREATE_SCHEMA`, `IACS_SEED_DEMO_DATA`.
 - `IACS_AUTH_SECRET_KEY`.
 - CORS, trusted hosts, public base URL, and root path.
+- Module selectors: `IACS_LPR_ADAPTER`, `IACS_GATE_CONTROLLER`, and
+  `IACS_NOTIFICATION_SENDER`.
 
 Dynamic settings live in `system_settings` and are edited through the UI/API:
 
 - General: app name, log level, timezone.
 - Auth options: cookie name, token lifetimes, secure-cookie flag.
 - LPR tuning: debounce quiet/max seconds and similarity threshold.
-- Integrations: Home Assistant, Apprise, DVLA Vehicle Enquiry Service.
+- Access: default policy when no schedule is assigned.
+- Integrations: Home Assistant, Apprise, DVLA Vehicle Enquiry Service, UniFi
+  Protect.
 - LLM providers: active provider, timeout, base URLs, models, API keys.
 
 Backend service:
@@ -229,7 +241,9 @@ Backend service:
 
 Do not add new provider tokens or operational tuning values back to
 `docker-compose.yml` or `.env.example`. Add them to the dynamic settings seed
-and UI instead. Secret setting keys must be added to `SECRET_KEYS`.
+and UI instead. Secret setting keys must be added to `SECRET_KEYS`; current
+secret dynamic settings include Home Assistant token, Apprise URLs, DVLA API
+key, UniFi Protect username/password/API key, and LLM provider API keys.
 
 ## Authentication and Users
 
@@ -253,7 +267,8 @@ Current behavior:
 - Auth uses signed HTTP-only JWT cookies. Bearer tokens are also accepted for
   API clients.
 - Dashboard APIs, docs, OpenAPI, realtime WebSocket, and AI chat WebSocket are
-  protected once setup is complete.
+  protected once setup is complete. Health, auth setup/login/status/logout, and
+  Ubiquiti webhook ingestion paths remain public.
 - Admin-only user CRUD prevents deleting, demoting, or deactivating the last
   active Admin.
 - Sidebar collapse preference is persisted to `users.preferences`.
@@ -261,13 +276,41 @@ Current behavior:
 Route aliases exist under both `/api/v1/auth` and `/api/auth`, and both
 `/api/v1/users` and `/api/users`, so older clients can use the shorter path.
 
-Relevant environment variables:
+Relevant bootstrap/dynamic keys:
 
 - `IACS_AUTH_SECRET_KEY`
-- `IACS_AUTH_COOKIE_NAME`
-- `IACS_AUTH_ACCESS_TOKEN_MINUTES`
-- `IACS_AUTH_REMEMBER_DAYS`
-- `IACS_AUTH_COOKIE_SECURE`
+- `auth_cookie_name`
+- `auth_access_token_minutes`
+- `auth_remember_days`
+- `auth_cookie_secure`
+
+## Directory and Schedules
+
+Directory routes:
+
+- `backend/app/api/v1/directory.py`
+- `backend/app/api/v1/schedules.py`
+
+Current behavior:
+
+- People, vehicles, groups, and weekly schedules are editable from the UI/API.
+- Person and vehicle records can reference a reusable schedule through
+  `schedule_id`; vehicle schedule takes precedence over owner schedule.
+- People can store profile photos, notes, active state, group, schedule, linked
+  vehicles, and assigned garage-door entity IDs.
+- Vehicles can store photo data, make, model, colour, description, active state,
+  owner, and schedule.
+- Vehicles can be deleted; people and groups currently have create/update flows
+  but no delete/archive endpoint.
+- Schedule deletion is blocked while the schedule is referenced by people,
+  vehicles, or configured Home Assistant door entities.
+
+Schedule rules:
+
+- `schedules.time_blocks` stores Monday-first weekly intervals normalized to
+  30-minute boundaries.
+- If no schedule applies, `schedule_default_policy` controls allow/deny.
+- There is no legacy time-slot fallback.
 
 ## LPR and Access Pipeline
 
@@ -293,6 +336,8 @@ Access service:
 Current behavior:
 
 - Queue every plate read.
+- Accept Ubiquiti Alarm Manager test webhook payloads and publish
+  `webhook.test.received` without creating an access event.
 - Group similar reads from the same source during a debounce window.
 - Wait for a quiet period or max debounce period.
 - Select the highest-confidence candidate.
@@ -303,14 +348,18 @@ Current behavior:
 - Create anomalies for unauthorized plates, outside schedule, duplicate entry,
   and duplicate exit.
 - Broadcast realtime events.
+- On granted entry, request gate open through the configured gate controller.
+- If the person has assigned garage doors, request each configured garage door
+  open after checking the door's optional schedule.
 - Send contextual anomaly notifications.
 
-Relevant environment variables:
+Relevant dynamic settings:
 
-- `IACS_LPR_DEBOUNCE_QUIET_SECONDS`
-- `IACS_LPR_DEBOUNCE_MAX_SECONDS`
-- `IACS_LPR_SIMILARITY_THRESHOLD`
-- `IACS_SITE_TIMEZONE`
+- `lpr_debounce_quiet_seconds`
+- `lpr_debounce_max_seconds`
+- `lpr_similarity_threshold`
+- `site_timezone`
+- `schedule_default_policy`
 
 ## Home Assistant Integration
 
@@ -330,26 +379,36 @@ State sync service:
 
 - `backend/app/services/home_assistant.py`
 
-Configuration:
+Cover helpers:
 
-```env
-IACS_HOME_ASSISTANT_URL=http://homeassistant.local:8123
-IACS_HOME_ASSISTANT_TOKEN=<long-lived-access-token>
-IACS_HOME_ASSISTANT_GATE_ENTITY_ID=cover.driveway_gate
-IACS_HOME_ASSISTANT_GATE_OPEN_SERVICE=cover.open_cover
-IACS_HOME_ASSISTANT_TTS_SERVICE=tts.cloud_say
-IACS_HOME_ASSISTANT_DEFAULT_MEDIA_PLAYER=media_player.all_google_home_speakers
-IACS_HOME_ASSISTANT_PRESENCE_ENTITIES=Steph=person.steph,Bob=person.bob
-```
+- `backend/app/modules/home_assistant/covers.py`
+
+Configuration lives in dynamic encrypted settings:
+
+- `home_assistant_url`
+- `home_assistant_token`
+- `home_assistant_gate_entities`: list of configured gate cover entities with
+  `entity_id`, display `name`, `enabled`, and optional `schedule_id`.
+- `home_assistant_garage_door_entities`: list of configured garage door cover
+  entities with the same shape.
+- `home_assistant_gate_open_service`
+- `home_assistant_tts_service`
+- `home_assistant_default_media_player`
+- `home_assistant_presence_entities`: person-name to `person.*` entity map.
+- `home_assistant_gate_entity_id`: legacy single-gate seed/fallback only; do
+  not build new UI or logic against it.
 
 Rules:
 
 - Route gate commands through the gate module.
+- Route garage door commands through `POST /api/v1/integrations/cover/command`
+  or the configured per-person automatic garage door flow.
 - Route audio announcements through the HA TTS module.
 - Do not call HA directly from API route handlers except through services or
   integration modules.
-- Presence entity mapping is optional and configured as comma-separated
-  `Person Name=entity_id` pairs.
+- Gate and garage door opens can be schedule-gated through `schedule_id`; closed
+  commands are allowed for configured garage doors.
+- Home Assistant entity discovery and auto-detect endpoints are Admin-only.
 
 ## Notifications
 
@@ -365,12 +424,29 @@ Structured notification contract:
 
 - `NotificationContext(event_type, subject, severity, facts)`
 
+Notification workflows:
+
+- Stored in `notification_rules`, not `system_settings`.
+- Configured through `/api/v1/notifications/*` and the Settings /
+  Notifications UI.
+- Trigger catalog currently covers authorised entry, unauthorised plate,
+  outside schedule, duplicate entry/exit, gate open failure, garage door open
+  failure, AI anomaly alert, and integration tests.
+- Supported action channels are mobile/Apprise, in-app realtime dashboard
+  notifications, and Home Assistant voice/TTS.
+- Supported conditions currently include schedule windows and presence state.
+- Templates use `@Variable` tokens in the Tiptap editor. Legacy `[Variable]`
+  tokens are accepted by the renderer but should not be used for new UI.
+
 Rules:
 
 - Always compose notifications from structured facts.
 - Phase 4+ AI naturalization should operate on `NotificationContext`, not raw
   logs or invented context.
-- `IACS_APPRISE_URLS` may be comma-separated or newline-separated.
+- `apprise_urls` lives in encrypted dynamic settings and may be comma-separated
+  or newline-separated.
+- The obsolete `notification_rules` dynamic setting is pruned at startup; do
+  not store notification workflow JSON in `system_settings`.
 
 ## DVLA Vehicle Enquiry Integration
 
@@ -399,6 +475,48 @@ Rules:
 - Surface DVLA HTTP/API failures back to the caller; do not report a successful
   lookup unless DVLA returned a successful response.
 
+## UniFi Protect Integration
+
+Client/module:
+
+- `backend/app/modules/unifi_protect/client.py`
+- `backend/app/services/unifi_protect.py`
+
+Managed `uiprotect` package overlays:
+
+- `backend/app/modules/unifi_protect/package.py`
+- `backend/app/services/unifi_protect_updates.py`
+
+Configuration lives in dynamic encrypted settings:
+
+- `unifi_protect_host`
+- `unifi_protect_port`
+- `unifi_protect_username`
+- `unifi_protect_password`
+- `unifi_protect_api_key`
+- `unifi_protect_verify_ssl`
+- `unifi_protect_snapshot_width`
+- `unifi_protect_snapshot_height`
+
+Runtime behavior:
+
+- The service starts only when UniFi Protect is configured.
+- Camera bootstrap, event reads, snapshots, thumbnails, videos, and websocket
+  update events are exposed through `/api/v1/integrations/unifi-protect/*`.
+- Camera snapshot analysis uses the selected AI provider's image-analysis path;
+  the local fallback provider cannot inspect images.
+- Managed `uiprotect` updates install package overlays under
+  `/app/data/unifi-protect-package` and write backups under
+  `/app/data/unifi-protect-backups`.
+
+Rules:
+
+- Do not log UniFi Protect credentials or API keys.
+- Treat package updates as state-changing Admin-only operations.
+- Always create/keep a backup before applying a managed package update.
+- If a package update verification fails, restore the previous package state and
+  restart the UniFi Protect service.
+
 ## AI Agent
 
 Provider wrappers:
@@ -424,7 +542,8 @@ Supported provider names:
 
 Default provider:
 
-- `IACS_LLM_PROVIDER=local`
+- `llm_provider=local` by default. `IACS_LLM_PROVIDER` only seeds the initial
+  dynamic setting on a fresh database.
 
 The local provider is deterministic and requires no API keys. It summarizes
 tool outputs and is meant to keep the UI and agent tool pipeline usable during
@@ -440,6 +559,7 @@ AI tools:
 - `trigger_anomaly_alert`
 - `get_system_users`
 - `lookup_dvla_vehicle`
+- `analyze_camera_snapshot`
 
 Memory:
 
@@ -456,6 +576,8 @@ Rules:
 - Add new tools in `app/ai/tools.py` with a clear JSON schema and handler.
 - Keep high-risk actions such as gate control as explicit tools/endpoints with
   clear audit context before exposing them to AI automation.
+- Camera image analysis must fetch live media through the UniFi Protect service;
+  do not persist snapshots unless a future feature explicitly adds retention.
 
 ## API Surface
 
@@ -491,9 +613,43 @@ Users:
 Directory:
 
 - `GET /api/v1/people`
+- `POST /api/v1/people`
+- `PATCH /api/v1/people/{person_id}`
 - `GET /api/v1/vehicles`
+- `POST /api/v1/vehicles`
+- `PATCH /api/v1/vehicles/{vehicle_id}`
+- `DELETE /api/v1/vehicles/{vehicle_id}`
 - `GET /api/v1/groups`
-- `GET /api/v1/time-slots`
+- `POST /api/v1/groups`
+- `PATCH /api/v1/groups/{group_id}`
+
+Schedules:
+
+- `GET /api/v1/schedules`
+- `POST /api/v1/schedules`
+- `GET /api/v1/schedules/{schedule_id}`
+- `PATCH /api/v1/schedules/{schedule_id}`
+- `GET /api/v1/schedules/{schedule_id}/dependencies`
+- `DELETE /api/v1/schedules/{schedule_id}`
+
+Settings:
+
+- `GET /api/v1/settings`
+- `GET /api/v1/settings/runtime`
+- `PATCH /api/v1/settings`
+- `POST /api/v1/settings/test`
+
+Notifications:
+
+- `GET /api/v1/notifications/catalog`
+- `GET /api/v1/notifications/rules`
+- `POST /api/v1/notifications/rules`
+- `GET /api/v1/notifications/rules/{rule_id}`
+- `PATCH /api/v1/notifications/rules/{rule_id}`
+- `DELETE /api/v1/notifications/rules/{rule_id}`
+- `POST /api/v1/notifications/rules/preview`
+- `POST /api/v1/notifications/rules/test`
+- `POST /api/v1/notifications/rules/{rule_id}/test`
 
 Events and presence:
 
@@ -517,10 +673,35 @@ Realtime:
 Integrations:
 
 - `GET /api/v1/integrations/home-assistant/status`
+- `GET /api/v1/integrations/home-assistant/entities`
+- `POST /api/v1/integrations/home-assistant/gates/auto-detect`
+- `POST /api/v1/integrations/home-assistant/garage-doors/auto-detect`
+- `GET /api/v1/integrations/apprise/urls`
+- `POST /api/v1/integrations/apprise/urls`
+- `DELETE /api/v1/integrations/apprise/urls/{index}`
 - `POST /api/v1/integrations/gate/open`
+- `POST /api/v1/integrations/cover/command`
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
 - `POST /api/v1/integrations/dvla/lookup`
+
+UniFi Protect:
+
+- `GET /api/v1/integrations/unifi-protect/status`
+- `GET /api/v1/integrations/unifi-protect/cameras`
+- `GET /api/v1/integrations/unifi-protect/events`
+- `GET /api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot`
+- `POST /api/v1/integrations/unifi-protect/cameras/{camera_id}/analyze`
+- `GET /api/v1/integrations/unifi-protect/events/{event_id}/thumbnail`
+- `GET /api/v1/integrations/unifi-protect/events/{event_id}/video`
+- `GET /api/v1/integrations/unifi-protect/update/status`
+- `POST /api/v1/integrations/unifi-protect/update/analyze`
+- `POST /api/v1/integrations/unifi-protect/update/apply`
+- `GET /api/v1/integrations/unifi-protect/backups`
+- `POST /api/v1/integrations/unifi-protect/backups`
+- `GET /api/v1/integrations/unifi-protect/backups/{backup_id}/download`
+- `POST /api/v1/integrations/unifi-protect/backups/{backup_id}/restore`
+- `DELETE /api/v1/integrations/unifi-protect/backups/{backup_id}`
 
 AI:
 
@@ -531,11 +712,19 @@ AI:
 
 Frontend Nginx proxies these under the same host at `:8089`.
 
+Compatibility aliases:
+
+- `/api/auth/*` mirrors `/api/v1/auth/*`.
+- `/api/users/*` mirrors `/api/v1/users/*`.
+- `/api/schedules/*` mirrors `/api/v1/schedules/*`.
+- `/api/webhooks/*` mirrors `/api/v1/webhooks/*`.
+
 ## Frontend Architecture
 
 Frontend app:
 
 - `frontend/src/main.tsx`
+- `frontend/src/VariableRichTextEditor.tsx`
 - `frontend/src/styles.css`
 
 Runtime:
@@ -550,13 +739,30 @@ Current frontend views:
 
 - Dashboard
 - People
+- Groups
+- Schedules
 - Vehicles
 - Events
 - Reports
 - API & Integrations
 - Logs
 - Settings
+- Settings / General
+- Settings / Auth & Security
+- Settings / Notifications
+- Settings / LPR Tuning
 - Settings / Users
+
+Current frontend integration/editor surfaces:
+
+- API & Integrations manages Home Assistant, Apprise, DVLA, UniFi Protect, and
+  LLM providers.
+- Home Assistant settings include discovery, gates, garage doors, and presence
+  mapping tabs.
+- UniFi Protect settings include general config, exposed camera/entity state,
+  camera media/snapshot analysis, and managed update/backup controls.
+- Settings / Notifications is the notification workflow builder with
+  trigger/condition/action editing and Tiptap `@Variable` insertion.
 
 Current realtime behavior:
 
@@ -639,6 +845,24 @@ topology. Do not replace it with a marketing dashboard style.
 3. Keep `NotificationContext` as the input contract.
 4. Do not pass raw database models or free-form logs into sender modules.
 
+### New Notification Trigger or Variable
+
+1. Add trigger metadata or variable metadata in `backend/app/services/notifications.py`.
+2. Populate trigger facts from structured sources such as `AccessEvent`,
+   `Person`, `Vehicle`, Home Assistant covers, or UniFi Protect payloads.
+3. Keep templates based on `@Variable` tokens.
+4. Add or adjust notification workflow tests when rendering or delivery changes.
+
+### New UniFi Protect Capability
+
+1. Keep console I/O in `backend/app/modules/unifi_protect/client.py` or a
+   sibling module.
+2. Route orchestration through `backend/app/services/unifi_protect.py` or
+   `backend/app/services/unifi_protect_updates.py`.
+3. Keep credential handling in dynamic settings and never expose secrets in
+   status responses.
+4. Use `/app/data/...` for package overlays, backups, or retained artifacts.
+
 ### New AI Tool
 
 1. Add an `AgentTool` in `backend/app/ai/tools.py`.
@@ -668,7 +892,7 @@ Frontend install/build:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 ```
 
@@ -702,7 +926,8 @@ curl -fsS http://localhost:8089/api/v1/auth/status
 curl -fsS http://localhost:8089/setup
 curl -fsS http://localhost:8089/api/v1/presence
 curl -fsS http://localhost:8089/api/v1/events?limit=5
-curl -fsS -X POST http://localhost:8089/api/v1/simulation/misread-sequence/STEPH26
+curl -fsS http://localhost:8089/api/v1/schedules
+curl -fsS -X POST http://localhost:8089/api/v1/simulation/misread-sequence/TEST123
 curl -fsS -X POST http://localhost:8089/api/v1/ai/chat \
   -H 'Content-Type: application/json' \
   -d '{"message":"Summarize today"}'
@@ -754,6 +979,7 @@ table and is managed through the Settings/API UI, not `.env`:
 - Home Assistant tokens.
 - Apprise URLs.
 - DVLA API keys.
+- UniFi Protect credentials and API keys.
 - OpenAI/Gemini/Anthropic API keys.
 
 Gate-opening and notification actions are real-world effects. Keep endpoint
@@ -803,10 +1029,19 @@ Completed:
   settings pages, integration tiles, and connection-test API.
 - DVLA Lookup: encrypted API-key setting, connection test, lookup endpoint, and
   AI tool access to the Vehicle Enquiry Service API.
+- Directory Management: CRUD for people, vehicles, groups, reusable schedules,
+  profile/vehicle photos, notes/descriptions, and garage-door assignment.
+- Notification Workflows: DB-backed rules, trigger catalog, conditions,
+  Apprise/in-app/voice actions, rich template variables, preview, and test send.
+- UniFi Protect: dynamic settings, camera/event discovery, media endpoints,
+  AI snapshot analysis, realtime update events, and managed `uiprotect` package
+  update/backup workflow.
+- Legacy Cleanup: old `time_slots` / `schedule_assignments` tables, endpoint,
+  enum, and scheduler fallback have been removed.
 
 Still pending or intentionally incomplete:
 
-- CRUD editing for people, vehicles, and schedules.
+- Person and group deletion/archive workflows.
 - Alembic migrations.
 - Production worker process separation for queues.
 - Real log rotation controls in UI.

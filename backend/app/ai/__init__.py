@@ -1,1 +1,1 @@
-"""LLM provider, tool calling, RAG, and memory boundaries for Phase 4."""
+"""LLM provider, tool calling, image analysis, and chat memory boundaries."""

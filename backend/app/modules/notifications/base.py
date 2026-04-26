@@ -4,7 +4,7 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class NotificationContext:
-    """Structured notification input for AI naturalization in Phase 4."""
+    """Structured notification input shared by workflows and AI tools."""
 
     event_type: str
     subject: str

@@ -19,9 +19,9 @@ async def receive_ubiquiti_lpr(
 ) -> dict[str, str]:
     """Accept Ubiquiti LPR webhooks.
 
-    Phase 2 will replace the placeholder enqueue call with debounce and
-    confidence-window resolution. The API route already depends on an adapter so
-    Ubiquiti-specific payload handling stays out of core event logic.
+    The API route only validates and normalizes the vendor payload; debounce,
+    confidence-window resolution, access decisions, and anomaly handling stay in
+    the access event service.
     """
 
     raw_payload = await request.json()

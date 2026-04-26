@@ -11,9 +11,8 @@ router = APIRouter()
 async def realtime_websocket(websocket: WebSocket) -> None:
     """Stream system events to dashboards.
 
-    This endpoint is intentionally generic in Phase 1. Later phases will publish
-    gate state, presence state, logs, anomalies, and chat tokens through the
-    same event bus so the UI can update without polling.
+    The shared event bus carries access, gate, notification, log, and chat
+    events so the dashboard can refresh without polling every view.
     """
 
     async with AsyncSessionLocal() as session:

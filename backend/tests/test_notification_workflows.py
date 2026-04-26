@@ -69,6 +69,7 @@ class FakeSettingsSession:
             key="notification_rules",
             value={"plain": [{"id": "legacy-rule"}]},
         )
+        self.deleted = []
 
     async def scalars(self, _statement):
         self.calls += 1
@@ -78,6 +79,9 @@ class FakeSettingsSession:
 
     def add(self, _record) -> None:
         raise AssertionError("all default settings should already exist in this fake")
+
+    async def delete(self, record) -> None:
+        self.deleted.append(record.key)
 
     async def commit(self) -> None:
         self.committed = True
@@ -168,8 +172,8 @@ def test_schedule_condition_time_window_uses_existing_scheduler() -> None:
     assert not schedule_allows_at(schedule, datetime(2026, 4, 27, 13, 0, tzinfo=UTC), "UTC")
 
 
-def test_legacy_notification_setting_defaults_to_empty() -> None:
-    assert DEFAULT_DYNAMIC_SETTINGS["notification_rules"][1] == []
+def test_legacy_notification_setting_is_not_seeded() -> None:
+    assert "notification_rules" not in DEFAULT_DYNAMIC_SETTINGS
 
 
 async def test_notification_rule_crud_endpoints_use_db_workflow_shape() -> None:
@@ -352,10 +356,10 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     assert in_app_events[0].payload["body"] == "Gate opened"
 
 
-async def test_startup_seed_clears_legacy_notification_rules() -> None:
+async def test_startup_seed_prunes_legacy_notification_rules() -> None:
     session = FakeSettingsSession()
 
     await seed_dynamic_settings_for_session(session)
 
-    assert session.record.value == {"plain": []}
+    assert session.deleted == ["notification_rules"]
     assert session.committed is True

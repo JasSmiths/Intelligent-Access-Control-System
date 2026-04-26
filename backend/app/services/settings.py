@@ -31,19 +31,7 @@ LEGACY_DEFAULT_REPLACEMENTS = {
     "ollama_model": {"llama3.1": "llama3"},
 }
 
-AUTHORIZED_ENTRY_TEMPLATE_V1 = "[FirstNamePossessive] [VehicleDisplayName] has been detected at the gate. I've let [FirstName] in."
-AUTHORIZED_ENTRY_TEMPLATE_V2 = "[FirstNamePossessive] [VehicleDisplayName] has been detected at the gate. I've let [ObjectPronoun] in."
-LEGACY_NOTIFICATION_BODY_TEMPLATES = {
-    "authorised-entry": {AUTHORIZED_ENTRY_TEMPLATE_V1},
-    "unauthorised-plate": {"[Message]\nPlate [VehicleRegistrationNumber] • [Source]"},
-    "outside-schedule": {"[Message]\n[VehicleRegistrationNumber] • [TimingClassification]"},
-    "duplicate-entry": {"[Message]"},
-    "duplicate-exit": {"[Message]"},
-    "gate-open-failed": {"[Message]\n[VehicleRegistrationNumber] • [Source]"},
-    "garage-door-open-failed": {"[Message]\n[GarageDoor] • [EntityId]"},
-    "ai-anomaly-alert": {"[Message]"},
-    "integration-tests": {"[Message]"},
-}
+OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules"}
 
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
@@ -80,11 +68,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
     "home_assistant_presence_entities": ("integrations", settings.home_assistant_presence_entities, "Person-to-HA entity mapping."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
-    "notification_rules": (
-        "notifications",
-        [],
-        "Deprecated legacy notification rules. DB workflow rules are the active source of truth.",
-    ),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -140,7 +123,6 @@ class RuntimeConfig:
     home_assistant_default_media_player: str
     home_assistant_presence_entities: dict[str, str]
     apprise_urls: str
-    notification_rules: list[dict[str, Any]]
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -208,31 +190,6 @@ def bool_value(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _deduplicate_notification_rules(
-    rules: list[dict[str, Any]],
-    default_rule_ids: set[str],
-) -> list[dict[str, Any]]:
-    selected_by_event: dict[str, dict[str, Any]] = {}
-    event_order: list[str] = []
-    for rule in rules:
-        event_type = str((rule.get("event_types") or [rule.get("id") or ""])[0])
-        if not event_type:
-            event_type = str(rule.get("id") or f"rule-{len(event_order) + 1}")
-        existing = selected_by_event.get(event_type)
-        if existing is None:
-            selected_by_event[event_type] = rule
-            event_order.append(event_type)
-            continue
-
-        existing_is_default = str(existing.get("id")) in default_rule_ids
-        rule_is_default = str(rule.get("id")) in default_rule_ids
-        if existing_is_default and not rule_is_default:
-            selected_by_event[event_type] = rule
-        elif existing_is_default == rule_is_default:
-            selected_by_event[event_type] = rule
-    return [selected_by_event[event_type] for event_type in event_order]
-
-
 async def seed_dynamic_settings() -> None:
     async with AsyncSessionLocal() as session:
         await seed_dynamic_settings_for_session(session)
@@ -255,6 +212,11 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
         )
     records = (await session.scalars(select(SystemSetting))).all()
     records_by_key = {record.key: record for record in records}
+    for record in records:
+        if record.key in OBSOLETE_DYNAMIC_SETTINGS:
+            await session.delete(record)
+            records_by_key.pop(record.key, None)
+
     legacy_gate_entity_record = records_by_key.get("home_assistant_gate_entity_id")
     gate_entities_record = records_by_key.get("home_assistant_gate_entities")
     if legacy_gate_entity_record and gate_entities_record:
@@ -271,10 +233,9 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
                 "home_assistant_gate_entities",
                 legacy_gate_entities(legacy_gate_entity_id, gate_open_service),
             )
-    notification_rules_record = records_by_key.get("notification_rules")
-    if notification_rules_record:
-        notification_rules_record.value = setting_payload("notification_rules", [])
     for record in records:
+        if record.key in OBSOLETE_DYNAMIC_SETTINGS:
+            continue
         plain_value = record.value.get("plain")
         replacement = (
             LEGACY_DEFAULT_REPLACEMENTS.get(record.key, {}).get(plain_value)
@@ -333,7 +294,6 @@ async def get_runtime_config() -> RuntimeConfig:
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
         home_assistant_presence_entities=dict(values["home_assistant_presence_entities"] or {}),
         apprise_urls=str(values["apprise_urls"] or ""),
-        notification_rules=list(values["notification_rules"]) if isinstance(values["notification_rules"], list) else [],
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),
@@ -368,6 +328,7 @@ async def get_runtime_config() -> RuntimeConfig:
 async def list_settings(category: str | None = None, *, reveal: bool = False) -> list[dict[str, Any]]:
     async with AsyncSessionLocal() as session:
         query = select(SystemSetting).order_by(SystemSetting.category, SystemSetting.key)
+        query = query.where(SystemSetting.key.notin_(OBSOLETE_DYNAMIC_SETTINGS))
         if category:
             query = query.where(SystemSetting.category == category)
         records = (await session.scalars(query)).all()

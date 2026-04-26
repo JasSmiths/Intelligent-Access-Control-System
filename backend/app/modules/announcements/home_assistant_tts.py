@@ -10,7 +10,7 @@ class AnnouncementTarget:
 
 
 class HomeAssistantTtsAnnouncer:
-    """Phase 3 announcer for Home Assistant `tts.cloud_say` service calls."""
+    """Announcer for Home Assistant TTS service calls."""
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
         self._client = client or HomeAssistantClient()

@@ -1,8 +1,8 @@
 import uuid
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, Time
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -15,7 +15,6 @@ from app.models.enums import (
     AnomalyType,
     GroupCategory,
     PresenceState,
-    ScheduleKind,
     TimingClassification,
     UserRole,
 )
@@ -40,7 +39,6 @@ class Group(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
 
     people: Mapped[list["Person"]] = relationship(back_populates="group")
-    schedules: Mapped[list["ScheduleAssignment"]] = relationship(back_populates="group")
 
 
 class Person(Base, TimestampMixin):
@@ -63,7 +61,6 @@ class Person(Base, TimestampMixin):
     schedule: Mapped["Schedule | None"] = relationship(back_populates="people")
     vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="owner")
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
-    schedules: Mapped[list["ScheduleAssignment"]] = relationship(back_populates="person")
 
 
 class Vehicle(Base, TimestampMixin):
@@ -135,36 +132,6 @@ class Schedule(Base, TimestampMixin):
 
     people: Mapped[list["Person"]] = relationship(back_populates="schedule")
     vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="schedule")
-
-
-class TimeSlot(Base, TimestampMixin):
-    __tablename__ = "time_slots"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
-    kind: Mapped[ScheduleKind] = mapped_column(Enum(ScheduleKind), nullable=False)
-    days_of_week: Mapped[list[int] | None] = mapped_column(JSONB)
-    start_time: Mapped[time | None] = mapped_column(Time(timezone=False))
-    end_time: Mapped[time | None] = mapped_column(Time(timezone=False))
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-    assignments: Mapped[list["ScheduleAssignment"]] = relationship(back_populates="time_slot")
-
-
-class ScheduleAssignment(Base, TimestampMixin):
-    __tablename__ = "schedule_assignments"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    time_slot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("time_slots.id", ondelete="CASCADE"))
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"))
-    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
-    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
-
-    time_slot: Mapped[TimeSlot] = relationship(back_populates="assignments")
-    person: Mapped[Person | None] = relationship(back_populates="schedules")
-    group: Mapped[Group | None] = relationship(back_populates="schedules")
 
 
 class Presence(Base, TimestampMixin):

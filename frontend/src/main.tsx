@@ -1,8 +1,5 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { EditorContent, useEditor } from "@tiptap/react";
-import { Mention } from "@tiptap/extension-mention";
-import StarterKit from "@tiptap/starter-kit";
 import {
   Activity,
   AlertTriangle,
@@ -63,6 +60,8 @@ import {
   X
 } from "lucide-react";
 import "./styles.css";
+
+const VariableRichTextEditor = React.lazy(() => import("./VariableRichTextEditor"));
 
 type DoorCommandAction = "open" | "close";
 type DashboardCommand = {
@@ -175,6 +174,7 @@ type Person = {
   schedule_id: string | null;
   schedule: string | null;
   is_active: boolean;
+  notes: string | null;
   garage_door_entity_ids: string[];
   vehicles: Vehicle[];
 };
@@ -192,16 +192,6 @@ type Vehicle = {
   schedule_id?: string | null;
   schedule?: string | null;
   is_active?: boolean;
-};
-
-type TimeSlot = {
-  id: string;
-  name: string;
-  kind: string;
-  days_of_week: number[] | null;
-  start_time: string | null;
-  end_time: string | null;
-  is_active: boolean;
 };
 
 type Group = {
@@ -828,7 +818,6 @@ function App() {
   const [vehicles, setVehicles] = React.useState<Vehicle[]>([]);
   const [groups, setGroups] = React.useState<Group[]>([]);
   const [schedules, setSchedules] = React.useState<Schedule[]>([]);
-  const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
@@ -871,7 +860,7 @@ function App() {
   }, [refreshAuth]);
 
   const refresh = React.useCallback(async () => {
-    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextSlots, nextStatus] =
+    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextStatus] =
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
@@ -880,7 +869,6 @@ function App() {
         api.get<Vehicle[]>("/api/v1/vehicles"),
         api.get<Group[]>("/api/v1/groups"),
         api.get<Schedule[]>("/api/v1/schedules"),
-        api.get<TimeSlot[]>("/api/v1/time-slots"),
         api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status")
       ]);
     setPresence(nextPresence);
@@ -890,7 +878,6 @@ function App() {
     setVehicles(nextVehicles);
     setGroups(nextGroups);
     setSchedules(nextSchedules);
-    setTimeSlots(nextSlots);
     setIntegrationStatus(nextStatus);
     setLoading(false);
   }, []);
@@ -1105,7 +1092,6 @@ function App() {
             vehicles={vehicles}
             groups={groups}
             schedules={schedules}
-            timeSlots={timeSlots}
             integrationStatus={integrationStatus}
             realtime={realtime}
             refresh={refresh}
@@ -1345,7 +1331,6 @@ function View(props: {
   vehicles: Vehicle[];
   groups: Group[];
   schedules: Schedule[];
-  timeSlots: TimeSlot[];
   integrationStatus: IntegrationStatus | null;
   realtime: RealtimeMessage[];
   refresh: () => Promise<void>;
@@ -1378,7 +1363,7 @@ function View(props: {
     case "settings_lpr":
       return <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} />;
     case "settings":
-      return <SettingsView slots={props.timeSlots} />;
+      return <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
     case "users":
       return <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />;
     default:
@@ -3250,14 +3235,15 @@ function PersonModal({
     schedule_id: person?.schedule_id ?? "",
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
+    notes: person?.notes ?? "",
     is_active: person?.is_active ?? true
-	  });
+  });
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
 
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
 
-	  const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith("image/")) {
@@ -3303,6 +3289,7 @@ function PersonModal({
       schedule_id: form.schedule_id || null,
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
+      notes: form.notes || null,
       is_active: form.is_active
     };
     try {
@@ -3333,6 +3320,7 @@ function PersonModal({
     schedule_id: form.schedule_id || null,
     schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
     is_active: form.is_active,
+    notes: form.notes || null,
     garage_door_entity_ids: form.garage_door_entity_ids,
     vehicles: []
   };
@@ -3408,6 +3396,10 @@ function PersonModal({
             </select>
           </label>
         </div>
+        <label className="field">
+          <span>Operational notes</span>
+          <textarea value={form.notes} onChange={(event) => update("notes", event.target.value)} rows={3} />
+        </label>
         <div className="field">
           <span>Vehicles</span>
           <div className="vehicle-picker">
@@ -3610,6 +3602,7 @@ function VehicleModal({
     make: vehicle?.make ?? "",
     model: vehicle?.model ?? "",
     color: vehicle?.color ?? "",
+    description: vehicle?.description ?? "",
     person_id: vehicle?.person_id ?? "",
     schedule_id: vehicle?.schedule_id ?? "",
     is_active: vehicle?.is_active ?? true
@@ -3699,6 +3692,7 @@ function VehicleModal({
       make: form.make || null,
       model: form.model || null,
       color: form.color || null,
+      description: form.description || null,
       person_id: form.person_id || null,
       schedule_id: form.schedule_id || null,
       is_active: form.is_active
@@ -3723,7 +3717,7 @@ function VehicleModal({
     id: vehicle?.id ?? "preview",
     registration_number: form.registration_number || "NEW",
     vehicle_photo_data_url: form.vehicle_photo_data_url || null,
-    description: vehicle?.description ?? null,
+    description: form.description || null,
     make: form.make || null,
     model: form.model || null,
     color: form.color || null,
@@ -3805,6 +3799,13 @@ function VehicleModal({
             </select>
           </label>
         </div>
+        <label className="field">
+          <span>Friendly description</span>
+          <div className="field-control">
+            <Type size={17} />
+            <input value={form.description} onChange={(event) => update("description", event.target.value)} />
+          </div>
+        </label>
         <label className="field">
           <span>Assigned person</span>
           <select value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
@@ -6524,21 +6525,23 @@ function NotificationActionCard({
         )}
       </div>
 
-      {supportsTitle ? (
+      <React.Suspense fallback={<div className="loading-panel compact">Loading template editor</div>}>
+        {supportsTitle ? (
+          <VariableRichTextEditor
+            label="Title"
+            value={action.title_template}
+            variables={variables}
+            onChange={(title_template) => onChange({ ...action, title_template })}
+          />
+        ) : null}
         <VariableRichTextEditor
-          label="Title"
-          value={action.title_template}
+          label={action.type === "voice" ? "Spoken message" : "Message"}
+          multiline
+          value={action.message_template}
           variables={variables}
-          onChange={(title_template) => onChange({ ...action, title_template })}
+          onChange={(message_template) => onChange({ ...action, message_template })}
         />
-      ) : null}
-      <VariableRichTextEditor
-        label={action.type === "voice" ? "Spoken message" : "Message"}
-        multiline
-        value={action.message_template}
-        variables={variables}
-        onChange={(message_template) => onChange({ ...action, message_template })}
-      />
+      </React.Suspense>
 
       {supportsMedia ? (
         <section className="workflow-media-row">
@@ -6599,117 +6602,6 @@ function EndpointMultiSelect({
         </label>
       ))}
     </div>
-  );
-}
-
-function VariableRichTextEditor({
-  label,
-  multiline = false,
-  value,
-  variables,
-  onChange
-}: {
-  label: string;
-  multiline?: boolean;
-  value: string;
-  variables: Array<NotificationVariable & { group: string }>;
-  onChange: (value: string) => void;
-}) {
-  const [suggestion, setSuggestion] = React.useState<{ query: string; from: number; to: number } | null>(null);
-  const valueRef = React.useRef(value);
-  const variablesRef = React.useRef(variables);
-  variablesRef.current = variables;
-
-  const editor = useEditor({
-    extensions: [
-      StarterKit.configure({
-        blockquote: false,
-        bulletList: false,
-        codeBlock: false,
-        heading: false,
-        horizontalRule: false,
-        orderedList: false
-      }),
-      Mention.configure({
-        HTMLAttributes: { class: "variable-pill" },
-        renderText({ node }) {
-          return `@${node.attrs.label ?? node.attrs.id}`;
-        },
-        renderHTML({ node }) {
-          return ["span", { class: "variable-pill", "data-variable": node.attrs.label ?? node.attrs.id }, `@${node.attrs.label ?? node.attrs.id}`];
-        }
-      })
-    ],
-    content: templateToTiptapDoc(value, variables),
-    editorProps: {
-      attributes: {
-        class: multiline ? "variable-editor-content multiline" : "variable-editor-content"
-      }
-    },
-    onUpdate({ editor: activeEditor }) {
-      const next = tiptapDocToTemplate(activeEditor.getJSON());
-      valueRef.current = next;
-      onChange(next);
-      setSuggestion(findMentionSuggestion(activeEditor));
-    },
-    onSelectionUpdate({ editor: activeEditor }) {
-      setSuggestion(findMentionSuggestion(activeEditor));
-    }
-  }, []);
-
-  React.useEffect(() => {
-    if (!editor || value === valueRef.current) return;
-    valueRef.current = value;
-    editor.commands.setContent(templateToTiptapDoc(value, variablesRef.current), { emitUpdate: false });
-  }, [editor, value]);
-
-  React.useEffect(() => {
-    if (!editor) return undefined;
-    const element = editor.view.dom;
-    const onClick = (event: MouseEvent) => {
-      const target = event.target instanceof Element ? event.target.closest(".variable-pill") : null;
-      if (!target) return;
-      const pos = editor.view.posAtDOM(target, 0);
-      editor.commands.setTextSelection({ from: pos, to: pos + 1 });
-      setSuggestion({ query: "", from: pos, to: pos + 1 });
-    };
-    element.addEventListener("click", onClick);
-    return () => element.removeEventListener("click", onClick);
-  }, [editor]);
-
-  const filtered = React.useMemo(() => {
-    const query = suggestion?.query.toLowerCase() ?? "";
-    return variables.filter((variable) => `${variable.name} ${variable.label} ${variable.group}`.toLowerCase().includes(query)).slice(0, 10);
-  }, [suggestion?.query, variables]);
-
-  const insertVariable = (variable: NotificationVariable) => {
-    if (!editor || !suggestion) return;
-    editor.chain().focus().deleteRange({ from: suggestion.from, to: suggestion.to }).insertContent({ type: "mention", attrs: { id: variable.name, label: variable.name } }).insertContent(" ").run();
-    setSuggestion(null);
-  };
-
-  return (
-    <label className="field variable-editor-field">
-      <span>{label}</span>
-      <div className="variable-editor-wrap">
-        <EditorContent editor={editor} />
-        {suggestion && filtered.length ? (
-          <div className="variable-suggestion-menu">
-            {groupVariables(filtered).map((group) => (
-              <div className="variable-suggestion-group" key={group.group}>
-                <strong>{group.group}</strong>
-                {group.items.map((variable) => (
-                  <button key={variable.name} onMouseDown={(event) => event.preventDefault()} onClick={() => insertVariable(variable)} type="button">
-                    <code>{variable.token}</code>
-                    <span>{variable.label}</span>
-                  </button>
-                ))}
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </label>
   );
 }
 
@@ -6940,72 +6832,22 @@ function renderWorkflowTemplate(template: string, context: Record<string, string
   return template.replace(/@([A-Za-z][A-Za-z0-9_]*)/g, (_, token: string) => context[token] ?? "").trim();
 }
 
-function templateToTiptapDoc(template: string, variables: Array<NotificationVariable & { group?: string }>) {
-  const names = new Set(variables.map((variable) => variable.name));
-  const paragraphs = (template || "").split(/\n/);
-  return {
-    type: "doc",
-    content: paragraphs.map((paragraph) => ({
-      type: "paragraph",
-      content: templateLineToTiptap(paragraph, names)
-    }))
-  };
-}
-
-function templateLineToTiptap(line: string, names: Set<string>) {
-  const content: Array<Record<string, unknown>> = [];
-  const pattern = /@([A-Za-z][A-Za-z0-9_]*)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(line))) {
-    if (match.index > lastIndex) content.push({ type: "text", text: line.slice(lastIndex, match.index) });
-    if (names.has(match[1])) {
-      content.push({ type: "mention", attrs: { id: match[1], label: match[1] } });
-    } else {
-      content.push({ type: "text", text: match[0] });
-    }
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < line.length) content.push({ type: "text", text: line.slice(lastIndex) });
-  return content.length ? content : undefined;
-}
-
-function tiptapDocToTemplate(node: unknown): string {
-  if (!node || typeof node !== "object") return "";
-  const raw = node as { type?: string; text?: string; attrs?: Record<string, unknown>; content?: unknown[] };
-  if (raw.type === "text") return raw.text ?? "";
-  if (raw.type === "mention") return `@${String(raw.attrs?.label ?? raw.attrs?.id ?? "")}`;
-  const children = raw.content?.map(tiptapDocToTemplate) ?? [];
-  if (raw.type === "doc") return children.join("\n");
-  if (raw.type === "paragraph") return children.join("");
-  return children.join("");
-}
-
-function findMentionSuggestion(editor: NonNullable<ReturnType<typeof useEditor>>) {
-  const { from } = editor.state.selection;
-  const start = Math.max(1, from - 48);
-  const text = editor.state.doc.textBetween(start, from, "\n", " ");
-  const match = text.match(/(?:^|\s)@([A-Za-z0-9_]*)$/);
-  if (!match) return null;
-  const query = match[1];
-  return { query, from: from - query.length - 1, to: from };
-}
-
-function groupVariables(variables: Array<NotificationVariable & { group: string }>) {
-  const grouped = new Map<string, Array<NotificationVariable & { group: string }>>();
-  for (const variable of variables) {
-    const rows = grouped.get(variable.group) ?? [];
-    rows.push(variable);
-    grouped.set(variable.group, rows);
-  }
-  return Array.from(grouped.entries()).map(([group, items]) => ({ group, items }));
-}
-
 function draftId(prefix: string) {
   return `draft-${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function SettingsView({ slots }: { slots: TimeSlot[] }) {
+function SettingsView({
+  currentUser,
+  groups,
+  schedules,
+  vehicles
+}: {
+  currentUser: UserAccount;
+  groups: Group[];
+  schedules: Schedule[];
+  vehicles: Vehicle[];
+}) {
+  const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
   return (
     <section className="dashboard-grid settings-grid">
       <div className="card span-2">
@@ -7019,24 +6861,20 @@ function SettingsView({ slots }: { slots: TimeSlot[] }) {
       <div className="card">
         <CardHeader icon={Users} title="User Accounts" />
         <div className="compact-row">
-          <div className="avatar">F</div>
+          <UserAvatar user={currentUser} />
           <div>
-            <strong>Dashboard logins</strong>
-            <span>Local auth phase</span>
+            <strong>{displayUserName(currentUser)}</strong>
+            <span>{currentUser.role === "admin" ? "Administrator" : "Standard access"}</span>
           </div>
-          <Badge tone="amber">pending</Badge>
+          <Badge tone="green">protected</Badge>
         </div>
       </div>
       <div className="card span-3">
-        <CardHeader icon={Clock3} title="Time Slots" action={<Badge tone="blue">{slots.length}</Badge>} />
-        <div className="slot-grid">
-          {slots.map((slot) => (
-            <div className="slot-tile" key={slot.id}>
-              <strong>{slot.name}</strong>
-              <span>{slot.kind}</span>
-              <Badge tone={slot.is_active ? "green" : "gray"}>{slot.is_active ? "active" : "inactive"}</Badge>
-            </div>
-          ))}
+        <CardHeader icon={Database} title="Operational Data" action={<Badge tone="blue">current</Badge>} />
+        <div className="settings-list">
+          <SettingRow label="Access schedules" value={String(schedules.length)} />
+          <SettingRow label="Access groups" value={String(groups.length)} />
+          <SettingRow label="Active vehicles" value={`${activeVehicles}/${vehicles.length}`} />
         </div>
       </div>
     </section>
@@ -8000,7 +7838,7 @@ function groupCategoryTone(category: string): BadgeTone {
 }
 
 function vehicleTitle(vehicle: Vehicle) {
-  return [vehicle.color, vehicle.make, vehicle.model].filter(Boolean).join(" ") || vehicle.description || "Vehicle details pending";
+  return vehicle.description || [vehicle.color, vehicle.make, vehicle.model].filter(Boolean).join(" ") || "Vehicle details pending";
 }
 
 function normalizePlateInput(value: string) {
