@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any
@@ -40,9 +40,25 @@ from app.services.unifi_protect import get_unifi_protect_service
 logger = get_logger(__name__)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
+KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
+
+
+def _known_vehicle_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
+    match = (read.raw_payload or {}).get(KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY)
+    return match if isinstance(match, dict) else None
+
+
+def _is_exact_known_vehicle_plate_match(read: PlateRead) -> bool:
+    match = _known_vehicle_plate_match_from_read(read)
+    return bool(match and match.get("exact"))
+
+
+def _detected_registration_number(read: PlateRead) -> str:
+    match = _known_vehicle_plate_match_from_read(read)
+    return str(match.get("detected_registration_number") or read.registration_number) if match else read.registration_number
 
 
 @dataclass
@@ -53,11 +69,26 @@ class DebounceWindow:
 
     @property
     def best_read(self) -> PlateRead:
-        return max(self.reads, key=lambda read: (read.confidence, read.captured_at))
+        return max(
+            self.reads,
+            key=lambda read: (
+                1 if _is_exact_known_vehicle_plate_match(read) else 0,
+                read.confidence,
+                read.captured_at,
+            ),
+        )
 
     @property
     def first_read(self) -> PlateRead:
         return min(self.reads, key=lambda read: read.captured_at)
+
+
+@dataclass(frozen=True)
+class ResolvedPlateWindow:
+    source: str
+    registration_number: str
+    first_seen: datetime
+    expires_at: datetime
 
 
 class AccessEventService:
@@ -74,6 +105,7 @@ class AccessEventService:
         self._stop_event = asyncio.Event()
         self._timezone = ZoneInfo(settings.site_timezone)
         self._runtime: RuntimeConfig | None = None
+        self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
 
     async def start(self) -> None:
         if self._worker and not self._worker.done():
@@ -154,12 +186,23 @@ class AccessEventService:
             self._timezone = ZoneInfo(self._runtime.site_timezone)
             try:
                 read = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-                self._add_to_debounce_window(read)
+                await self._handle_queued_read(read)
             except asyncio.TimeoutError:
                 pass
             await self._flush_expired_windows()
 
-    def _add_to_debounce_window(self, read: PlateRead) -> None:
+    async def _handle_queued_read(self, read: PlateRead) -> None:
+        read = await self._read_with_known_vehicle_match(read)
+        if self._suppress_after_exact_resolution(read):
+            await self._publish_suppressed_read(read)
+            return
+
+        window = self._add_to_debounce_window(read)
+        if _is_exact_known_vehicle_plate_match(read):
+            window = self._pop_exact_known_plate_window(window)
+            await self._finalize_exact_known_plate_window(window)
+
+    def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
             best = window.best_read
             if read.source == best.source and self._is_similar_plate(
@@ -167,10 +210,199 @@ class AccessEventService:
             ):
                 window.reads.append(read)
                 window.updated_at = read.captured_at
-                return
+                return window
 
-        self._pending.append(
-            DebounceWindow(first_seen=read.captured_at, updated_at=read.captured_at, reads=[read])
+        window = DebounceWindow(first_seen=read.captured_at, updated_at=read.captured_at, reads=[read])
+        self._pending.append(window)
+        return window
+
+    async def _read_with_known_vehicle_match(self, read: PlateRead) -> PlateRead:
+        registrations = await self._active_vehicle_registrations()
+        threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
+        match = self._known_vehicle_plate_match(read.registration_number, registrations, threshold)
+        if not match:
+            return read
+
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY] = match
+        return PlateRead(
+            registration_number=str(match["registration_number"]),
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+        )
+
+    async def _active_vehicle_registrations(self) -> list[str]:
+        async with AsyncSessionLocal() as session:
+            registrations = (
+                await session.scalars(
+                    select(Vehicle.registration_number).where(Vehicle.is_active.is_(True))
+                )
+            ).all()
+        return [str(registration) for registration in registrations]
+
+    def _known_vehicle_plate_match(
+        self,
+        detected_registration_number: str,
+        stored_registration_numbers: list[str],
+        threshold: float,
+    ) -> dict[str, Any] | None:
+        detected = self._normalize_registration_number(detected_registration_number)
+        if not detected:
+            return None
+
+        best_match: dict[str, Any] | None = None
+        for stored_registration_number in stored_registration_numbers:
+            stored_lookup = str(stored_registration_number).strip().upper().replace(" ", "")
+            stored = self._normalize_registration_number(stored_lookup)
+            if not stored:
+                continue
+            similarity = 1.0 if detected == stored else SequenceMatcher(a=detected, b=stored).ratio()
+            exact = detected == stored
+            if not exact and similarity < threshold:
+                continue
+            candidate = {
+                "detected_registration_number": detected,
+                "registration_number": stored_lookup or stored,
+                "normalized_registration_number": stored,
+                "similarity": similarity,
+                "threshold": threshold,
+                "exact": exact,
+            }
+            if not best_match or (
+                candidate["exact"],
+                candidate["similarity"],
+                candidate["registration_number"],
+            ) > (
+                best_match["exact"],
+                best_match["similarity"],
+                best_match["registration_number"],
+            ):
+                best_match = candidate
+        return best_match
+
+    def _normalize_registration_number(self, registration_number: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "", registration_number).upper()
+
+    async def _finalize_exact_known_plate_window(self, window: DebounceWindow) -> None:
+        try:
+            await self._finalize_window(window)
+        except Exception:
+            logger.exception(
+                "access_event_finalize_failed",
+                extra={
+                    "candidate_count": len(window.reads),
+                    "best_registration_number": window.best_read.registration_number,
+                    "reason": "exact_known_vehicle_plate",
+                },
+            )
+            await event_bus.publish(
+                "access_event.finalize_failed",
+                {
+                    "registration_number": window.best_read.registration_number,
+                    "candidate_count": len(window.reads),
+                    "reason": "exact_known_vehicle_plate",
+                },
+            )
+            return
+        self._remember_exact_plate_resolution(window)
+
+    def _pop_exact_known_plate_window(self, window: DebounceWindow) -> DebounceWindow:
+        exact_read = next(
+            (read for read in window.reads if _is_exact_known_vehicle_plate_match(read)),
+            window.best_read,
+        )
+        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        related: list[DebounceWindow] = []
+        remaining: list[DebounceWindow] = []
+        for item in self._pending:
+            if item is window:
+                continue
+            if item.best_read.source == exact_read.source and self._window_overlaps_exact_read(
+                item,
+                exact_read,
+                max_seconds,
+            ):
+                related.append(item)
+                continue
+            remaining.append(item)
+
+        self._pending = remaining
+        if not related:
+            return window
+
+        reads = [
+            read
+            for related_window in [window, *related]
+            for read in related_window.reads
+        ]
+        return DebounceWindow(
+            first_seen=min(read.captured_at for read in reads),
+            updated_at=max(read.captured_at for read in reads),
+            reads=reads,
+        )
+
+    def _window_overlaps_exact_read(
+        self,
+        window: DebounceWindow,
+        exact_read: PlateRead,
+        max_seconds: float,
+    ) -> bool:
+        exact_at = exact_read.captured_at
+        return window.first_seen <= exact_at <= window.first_seen + timedelta(seconds=max_seconds)
+
+    def _remember_exact_plate_resolution(self, window: DebounceWindow) -> None:
+        exact_read = next(
+            (
+                read
+                for read in sorted(window.reads, key=lambda item: item.captured_at)
+                if _is_exact_known_vehicle_plate_match(read)
+            ),
+            None,
+        )
+        if not exact_read:
+            return
+        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        self._recent_exact_resolutions.append(
+            ResolvedPlateWindow(
+                source=exact_read.source,
+                registration_number=exact_read.registration_number,
+                first_seen=window.first_seen,
+                expires_at=window.first_seen + timedelta(seconds=max_seconds),
+            )
+        )
+
+    def _suppress_after_exact_resolution(self, read: PlateRead) -> bool:
+        self._prune_recent_exact_resolutions(read.captured_at)
+        match = _known_vehicle_plate_match_from_read(read)
+        for resolution in self._recent_exact_resolutions:
+            if read.source != resolution.source:
+                continue
+            if not (resolution.first_seen <= read.captured_at <= resolution.expires_at):
+                continue
+            if match and read.registration_number != resolution.registration_number:
+                continue
+            return True
+        return False
+
+    def _prune_recent_exact_resolutions(self, now: datetime) -> None:
+        self._recent_exact_resolutions = [
+            resolution
+            for resolution in self._recent_exact_resolutions
+            if resolution.expires_at >= now
+        ]
+
+    async def _publish_suppressed_read(self, read: PlateRead) -> None:
+        match = _known_vehicle_plate_match_from_read(read) or {}
+        await event_bus.publish(
+            "plate_read.suppressed",
+            {
+                "registration_number": read.registration_number,
+                "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
+                "source": read.source,
+                "reason": "exact_known_vehicle_plate_already_resolved_in_debounce_window",
+            },
         )
 
     def _is_similar_plate(self, left: str, right: str) -> bool:
@@ -299,8 +531,10 @@ class AccessEventService:
                         "candidates": [
                             {
                                 "registration_number": item.registration_number,
+                                "detected_registration_number": _detected_registration_number(item),
                                 "confidence": item.confidence,
                                 "captured_at": item.captured_at.isoformat(),
+                                "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(item),
                             }
                             for item in window.reads
                         ],

@@ -338,19 +338,51 @@ Current behavior:
 - Queue every plate read.
 - Accept Ubiquiti Alarm Manager test webhook payloads and publish
   `webhook.test.received` without creating an access event.
-- Group similar reads from the same source during a debounce window.
-- Wait for a quiet period or max debounce period.
-- Select the highest-confidence candidate.
+- Capture the current top-gate state as soon as each plate read is queued and
+  store that observation in the read payload. This state is the source of truth
+  for arrival/exit decisions when it is known.
+- Compare every detected plate against active stored vehicle registrations
+  before debounce grouping. If the detected plate is similar to a stored plate
+  above `lpr_similarity_threshold`, canonicalize the read to the stored
+  registration and preserve the original detected value in raw payload metadata.
+- Exact active stored-plate detections win over confidence ordering. If the
+  exact stored plate appears during a debounce burst, finalize that burst
+  immediately as the exact stored registration instead of waiting for the quiet
+  period.
+- After an exact stored-plate detection finalizes a burst, suppress trailing
+  same-source reads inside the original max debounce window so follow-up
+  misreads do not create stray unauthorized events.
+- Group similar canonicalized reads from the same source during a debounce
+  window.
+- Wait for a quiet period or max debounce period unless an exact active stored
+  plate short-circuits the window.
+- Select the best candidate, preferring exact active stored-plate matches, then
+  highest confidence, then latest captured time.
 - Determine authorization from vehicle/person/schedule.
-- Infer direction from explicit payload direction or current presence state.
+- Infer direction primarily from the captured top-gate state:
+  - `closed` means the vehicle/person is arriving and the event is an entry.
+  - `open`, `opening`, or `closing` means the ground exit loop has already
+    opened the gate and the vehicle/person is leaving; the event is an exit.
+  - Unknown gate state falls back to explicit payload direction and then
+    current presence state.
+- If gate state says entry while the person is already marked present, fetch a
+  live UniFi Protect snapshot from `camera.gate` and ask OpenAI image analysis
+  whether the vehicle is facing towards the camera (arriving) or away from the
+  camera (leaving). Use a clear `entry` or `exit` result from that camera
+  tie-breaker as the source of truth; if the tie-breaker fails or returns
+  unknown, keep the gate-state entry decision.
 - Persist one final `access_event`.
 - Update presence if access is granted.
 - Create anomalies for unauthorized plates, outside schedule, duplicate entry,
   and duplicate exit.
 - Broadcast realtime events.
-- On granted entry, request gate open through the configured gate controller.
-- If the person has assigned garage doors, request each configured garage door
-  open after checking the door's optional schedule.
+- On granted entry, request gate open only when the captured top-gate state at
+  plate-read time was `closed`.
+- Open assigned garage doors only after the automatic gate-open command is
+  accepted, only for entries whose captured top-gate state was `closed`, and
+  only after checking each garage door's optional schedule.
+- If the captured top-gate state was already `open`, `opening`, or `closing`,
+  treat the event as leaving and do not open any assigned garage doors.
 - Send contextual anomaly notifications.
 
 Relevant dynamic settings:
@@ -1040,6 +1072,10 @@ Completed:
 - UniFi Protect: dynamic settings, camera/event discovery, media endpoints,
   AI snapshot analysis, realtime update events, and managed `uiprotect` package
   update/backup workflow.
+- Access Pipeline Direction: top-gate-state arrival/exit inference, known-plate
+  misread canonicalization, exact stored-plate debounce short-circuiting,
+  garage-door opening only after an accepted gate-open command, and
+  `camera.gate` OpenAI vision tie-breaking for double-arrival conflicts.
 - Legacy Cleanup: old `time_slots` / `schedule_assignments` tables, endpoint,
   enum, and scheduler fallback have been removed.
 
@@ -1049,7 +1085,8 @@ Still pending or intentionally incomplete:
 - Alembic migrations.
 - Production worker process separation for queues.
 - Real log rotation controls in UI.
-- More robust access direction inference if separate entry/exit cameras exist.
+- Optional dedicated entry/exit camera support beyond the current top-gate-state
+  inference and `camera.gate` tie-breaker.
 - Fine-grained AI action authorization for state-changing tools.
 
 ## Documentation Map
