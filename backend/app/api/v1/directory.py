@@ -13,6 +13,12 @@ from app.models import Group, Person, Schedule, User, Vehicle
 from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
 from app.services.settings import get_runtime_config
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    audit_diff,
+    write_audit_log,
+)
 
 router = APIRouter()
 
@@ -225,6 +231,45 @@ def serialize_person(person: Person) -> dict:
     }
 
 
+def person_audit_snapshot(person: Person) -> dict:
+    return {
+        "id": str(person.id),
+        "first_name": person.first_name,
+        "last_name": person.last_name,
+        "display_name": person.display_name,
+        "group_id": str(person.group_id) if person.group_id else None,
+        "schedule_id": str(person.schedule_id) if person.schedule_id else None,
+        "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
+        "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
+        "notes": person.notes,
+        "is_active": person.is_active,
+    }
+
+
+def vehicle_audit_snapshot(vehicle: Vehicle) -> dict:
+    return {
+        "id": str(vehicle.id),
+        "registration_number": vehicle.registration_number,
+        "person_id": str(vehicle.person_id) if vehicle.person_id else None,
+        "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
+        "make": vehicle.make,
+        "model": vehicle.model,
+        "color": vehicle.color,
+        "description": vehicle.description,
+        "is_active": vehicle.is_active,
+    }
+
+
+def group_audit_snapshot(group: Group) -> dict:
+    return {
+        "id": str(group.id),
+        "name": group.name,
+        "category": group.category.value,
+        "subtype": group.subtype,
+        "description": group.description,
+    }
+
+
 @router.get("/people")
 async def list_people() -> list[PersonResponse]:
     async with AsyncSessionLocal() as session:
@@ -291,7 +336,7 @@ async def validate_garage_door_entity_ids(entity_ids: list[str]) -> list[str]:
 @router.post("/people", response_model=PersonResponse, status_code=status.HTTP_201_CREATED)
 async def add_person(
     request: CreatePersonRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> PersonResponse:
     group = await get_group_or_404(session, request.group_id)
@@ -319,6 +364,17 @@ async def add_person(
     for vehicle in vehicles:
         vehicle.person_id = person.id
 
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="person.create",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Person",
+        target_id=person.id,
+        target_label=person.display_name,
+        diff={"old": {}, "new": person_audit_snapshot(person)},
+    )
     await session.commit()
     refreshed_person = await session.scalar(
         select(Person)
@@ -339,12 +395,13 @@ async def add_person(
 async def update_person(
     person_id: uuid.UUID,
     request: UpdatePersonRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> PersonResponse:
     person = await session.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+    before = person_audit_snapshot(person)
 
     if "group_id" in request.model_fields_set:
         group = await get_group_or_404(session, request.group_id)
@@ -387,6 +444,18 @@ async def update_person(
     if request.is_active is not None:
         person.is_active = request.is_active
 
+    after = person_audit_snapshot(person)
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="person.update",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Person",
+        target_id=person.id,
+        target_label=person.display_name,
+        diff=audit_diff(before, after),
+    )
     await session.commit()
     refreshed_person = await session.scalar(
         select(Person)
@@ -419,7 +488,7 @@ async def list_vehicles() -> list[VehicleResponse]:
 @router.post("/vehicles", response_model=VehicleResponse, status_code=status.HTTP_201_CREATED)
 async def add_vehicle(
     request: CreateVehicleRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VehicleResponse:
     owner = await session.get(Person, request.person_id) if request.person_id else None
@@ -440,6 +509,18 @@ async def add_vehicle(
     )
     session.add(vehicle)
     try:
+        await session.flush()
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="vehicle.create",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Vehicle",
+            target_id=vehicle.id,
+            target_label=vehicle.registration_number,
+            diff={"old": {}, "new": vehicle_audit_snapshot(vehicle)},
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -460,12 +541,13 @@ async def add_vehicle(
 async def update_vehicle(
     vehicle_id: uuid.UUID,
     request: UpdateVehicleRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VehicleResponse:
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    before = vehicle_audit_snapshot(vehicle)
 
     if request.person_id:
         owner = await session.get(Person, request.person_id)
@@ -494,6 +576,17 @@ async def update_vehicle(
     if request.is_active is not None:
         vehicle.is_active = request.is_active
 
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="vehicle.update",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Vehicle",
+        target_id=vehicle.id,
+        target_label=vehicle.registration_number,
+        diff=audit_diff(before, vehicle_audit_snapshot(vehicle)),
+    )
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -514,13 +607,25 @@ async def update_vehicle(
 @router.delete("/vehicles/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vehicle(
     vehicle_id: uuid.UUID,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
 
+    before = vehicle_audit_snapshot(vehicle)
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="vehicle.delete",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Vehicle",
+        target_id=vehicle.id,
+        target_label=vehicle.registration_number,
+        diff={"old": before, "new": {}},
+    )
     await session.delete(vehicle)
     await session.commit()
 
@@ -542,7 +647,7 @@ async def list_groups() -> list[GroupResponse]:
 @router.post("/groups", response_model=GroupResponse, status_code=status.HTTP_201_CREATED)
 async def add_group(
     request: CreateGroupRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> GroupResponse:
     group = Group(
@@ -553,6 +658,18 @@ async def add_group(
     )
     session.add(group)
     try:
+        await session.flush()
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="group.create",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Group",
+            target_id=group.id,
+            target_label=group.name,
+            diff={"old": {}, "new": group_audit_snapshot(group)},
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -573,12 +690,13 @@ async def add_group(
 async def update_group(
     group_id: uuid.UUID,
     request: UpdateGroupRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> GroupResponse:
     group = await session.get(Group, group_id)
     if not group:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    before = group_audit_snapshot(group)
 
     if request.name is not None:
         group.name = request.name.strip()
@@ -589,6 +707,17 @@ async def update_group(
     if "description" in request.model_fields_set:
         group.description = request.description.strip() if request.description else None
 
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="group.update",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Group",
+        target_id=group.id,
+        target_label=group.name,
+        diff=audit_diff(before, group_audit_snapshot(group)),
+    )
     try:
         await session.commit()
     except IntegrityError as exc:

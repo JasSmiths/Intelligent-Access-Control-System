@@ -18,6 +18,12 @@ from app.services.notifications import (
     notification_context_from_payload,
     sample_notification_context,
 )
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    audit_diff,
+    write_audit_log,
+)
 
 router = APIRouter()
 
@@ -72,6 +78,7 @@ async def create_notification_rule(
     _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    user = _
     actions = normalize_actions(request.actions)
     if not actions:
         raise HTTPException(status_code=400, detail="At least one notification action is required.")
@@ -84,6 +91,19 @@ async def create_notification_rule(
         is_active=request.is_active,
     )
     session.add(rule)
+    if hasattr(session, "flush"):
+        await session.flush()
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="notification_rule.create",
+        actor=actor_from_user(user),
+        actor_user_id=getattr(user, "id", None),
+        target_entity="NotificationRule",
+        target_id=rule.id,
+        target_label=rule.name,
+        diff={"old": {}, "new": rule_audit_snapshot(rule)},
+    )
     await session.commit()
     await session.refresh(rule)
     return serialize_rule(rule)
@@ -106,7 +126,9 @@ async def update_notification_rule(
     _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    user = _
     rule = await get_rule_or_404(session, rule_id)
+    before = rule_audit_snapshot(rule)
     if request.name is not None:
         rule.name = request.name.strip()
     if request.trigger_event is not None:
@@ -120,6 +142,17 @@ async def update_notification_rule(
         rule.actions = actions
     if request.is_active is not None:
         rule.is_active = request.is_active
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="notification_rule.update",
+        actor=actor_from_user(user),
+        actor_user_id=getattr(user, "id", None),
+        target_entity="NotificationRule",
+        target_id=rule.id,
+        target_label=rule.name,
+        diff=audit_diff(before, rule_audit_snapshot(rule)),
+    )
     await session.commit()
     await session.refresh(rule)
     return serialize_rule(rule)
@@ -131,7 +164,19 @@ async def delete_notification_rule(
     _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
+    user = _
     rule = await get_rule_or_404(session, rule_id)
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="notification_rule.delete",
+        actor=actor_from_user(user),
+        actor_user_id=getattr(user, "id", None),
+        target_entity="NotificationRule",
+        target_id=rule.id,
+        target_label=rule.name,
+        diff={"old": rule_audit_snapshot(rule), "new": {}},
+    )
     await session.delete(rule)
     await session.commit()
 
@@ -223,4 +268,15 @@ def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
         "is_active": rule.is_active,
         "created_at": rule.created_at.isoformat(),
         "updated_at": rule.updated_at.isoformat(),
+    }
+
+
+def rule_audit_snapshot(rule: NotificationRule) -> dict[str, Any]:
+    return {
+        "id": str(rule.id),
+        "name": rule.name,
+        "trigger_event": rule.trigger_event,
+        "conditions": normalize_conditions(rule.conditions),
+        "actions": normalize_actions(rule.actions),
+        "is_active": rule.is_active,
     }

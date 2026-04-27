@@ -20,8 +20,28 @@ from app.services.auth import (
     normalize_username,
     serialize_user,
 )
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    audit_diff,
+    write_audit_log,
+)
 
 router = APIRouter()
+
+
+def user_audit_snapshot(user: User) -> dict[str, Any]:
+    return {
+        "id": str(user.id),
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "full_name": user.full_name,
+        "email": user.email,
+        "role": user.role.value,
+        "is_active": user.is_active,
+        "preferences": user.preferences or {},
+    }
 
 
 class UserResponse(BaseModel):
@@ -89,7 +109,7 @@ async def list_users(
 @router.post("", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)
 async def add_user(
     request: CreateUserRequest,
-    _: User = Depends(admin_user),
+    actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> CreateUserResponse:
     temporary_password = (
@@ -110,6 +130,19 @@ async def add_user(
             role=request.role,
             is_active=request.is_active,
         )
+        await session.flush()
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="user.create",
+            actor=actor_from_user(actor),
+            actor_user_id=actor.id,
+            target_entity="User",
+            target_id=user.id,
+            target_label=user.username,
+            diff={"old": {}, "new": user_audit_snapshot(user)},
+            metadata={"temporary_password_generated": bool(request.generate_password or not request.temporary_password)},
+        )
         await session.commit()
         await session.refresh(user)
     except IntegrityError as exc:
@@ -123,12 +156,13 @@ async def add_user(
 async def update_user(
     user_id: uuid.UUID,
     request: UpdateUserRequest,
-    _: User = Depends(admin_user),
+    actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserResponse:
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    before = user_audit_snapshot(user)
 
     if request.role is not None and request.role != user.role:
         if user.role == UserRole.ADMIN and await count_active_admins(session, exclude_user_id=user.id) == 0:
@@ -162,6 +196,17 @@ async def update_user(
         user.preferences = {**(user.preferences or {}), **request.preferences}
 
     try:
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="user.update",
+            actor=actor_from_user(actor),
+            actor_user_id=actor.id,
+            target_entity="User",
+            target_id=user.id,
+            target_label=user.username,
+            diff=audit_diff(before, user_audit_snapshot(user)),
+        )
         await session.commit()
         await session.refresh(user)
     except IntegrityError as exc:
@@ -175,7 +220,7 @@ async def update_user(
 async def reset_password(
     user_id: uuid.UUID,
     request: ResetPasswordRequest,
-    _: User = Depends(admin_user),
+    actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ResetPasswordResponse:
     user = await session.get(User, user_id)
@@ -188,6 +233,18 @@ async def reset_password(
         else request.temporary_password
     )
     user.password_hash = hash_password(temporary_password)
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="user.reset_password",
+        actor=actor_from_user(actor),
+        actor_user_id=actor.id,
+        target_entity="User",
+        target_id=user.id,
+        target_label=user.username,
+        diff={"old": {"password": "[redacted]"}, "new": {"password": "[redacted]"}},
+        metadata={"temporary_password_generated": bool(request.generate_password or not request.temporary_password)},
+    )
     await session.commit()
     return ResetPasswordResponse(temporary_password=temporary_password)
 
@@ -195,7 +252,7 @@ async def reset_password(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: uuid.UUID,
-    _: User = Depends(admin_user),
+    actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     user = await session.get(User, user_id)
@@ -206,5 +263,16 @@ async def delete_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete the last active admin account.",
         )
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="user.delete",
+        actor=actor_from_user(actor),
+        actor_user_id=actor.id,
+        target_entity="User",
+        target_id=user.id,
+        target_label=user.username,
+        diff={"old": user_audit_snapshot(user), "new": {}},
+    )
     await session.delete(user)
     await session.commit()

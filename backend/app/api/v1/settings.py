@@ -10,6 +10,13 @@ from app.modules.notifications.apprise_client import validate_apprise_urls
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config, list_settings, update_settings
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    actor_from_user,
+    audit_diff,
+    emit_audit_log,
+)
 from app.services.unifi_protect import get_unifi_protect_service
 
 router = APIRouter()
@@ -46,9 +53,26 @@ async def runtime_settings(_: User = Depends(current_user)) -> dict[str, Any]:
 @router.patch("")
 async def patch_settings(
     request: SettingsUpdateRequest,
-    _: User = Depends(admin_user),
+    user: User = Depends(admin_user),
 ) -> list[dict[str, Any]]:
+    before = {row["key"]: row["value"] for row in await list_settings()}
     rows = await update_settings(request.values)
+    after = {row["key"]: row["value"] for row in rows}
+    changed = {key: after.get(key) for key in request.values if before.get(key) != after.get(key)}
+    if changed:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="settings.update",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="SystemSetting",
+            target_label=", ".join(sorted(changed.keys())[:8]),
+            diff=audit_diff(
+                {key: before.get(key) for key in changed},
+                {key: after.get(key) for key in changed},
+            ),
+            metadata={"keys": sorted(changed.keys())},
+        )
     if any(key.startswith("home_assistant_") for key in request.values):
         service = get_home_assistant_service()
         await service.stop()
@@ -61,7 +85,7 @@ async def patch_settings(
 @router.post("/test")
 async def test_connection(
     request: ConnectionTestRequest,
-    _: User = Depends(admin_user),
+    user: User = Depends(admin_user),
 ) -> dict[str, str | bool]:
     integration = request.integration.lower()
     values = request.values
@@ -85,9 +109,31 @@ async def test_connection(
         else:
             raise HTTPException(status_code=400, detail=f"Unknown integration: {request.integration}")
     except Exception as exc:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="integration.test",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Integration",
+            target_id=integration,
+            target_label=integration,
+            outcome="failed",
+            level="error",
+            metadata={"integration": integration, "error": str(exc)},
+        )
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="integration.test",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Integration",
+        target_id=integration,
+        target_label=integration,
+        metadata={"integration": integration},
+    )
     return {"ok": True, "message": "Connection test succeeded."}
 
 

@@ -1,5 +1,6 @@
 import asyncio
 from functools import lru_cache
+from time import monotonic
 from typing import Any, Callable
 
 from app.core.logging import get_logger
@@ -25,6 +26,8 @@ from app.services.settings import get_runtime_config
 
 logger = get_logger(__name__)
 
+PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS = 5.0
+
 
 class UnifiProtectIntegrationService:
     """Keeps UniFi Protect cameras and detection events available to IACS."""
@@ -36,6 +39,7 @@ class UnifiProtectIntegrationService:
         self._unsubscribers: list[Callable[[], None]] = []
         self._last_error: str | None = None
         self._connected = False
+        self._last_update_publish_at: dict[str, float] = {}
 
     async def configured(self) -> bool:
         return is_unifi_protect_configured(await get_runtime_config())
@@ -192,6 +196,8 @@ class UnifiProtectIntegrationService:
             event_type = "protect.camera.updated"
         if payload.get("event"):
             event_type = "protect.event.detected"
+        if event_type in {"protect.updated", "protect.camera.updated"} and not self._should_publish_update(event_type, payload):
+            return
         try:
             asyncio.get_running_loop().create_task(event_bus.publish(event_type, payload))
         except RuntimeError:
@@ -209,6 +215,16 @@ class UnifiProtectIntegrationService:
             )
         except RuntimeError:
             logger.debug("unifi_protect_state_without_loop")
+
+    def _should_publish_update(self, event_type: str, payload: dict[str, Any]) -> bool:
+        object_id = str(payload.get("object_id") or payload.get("model") or "global")
+        key = f"{event_type}:{object_id}"
+        now = monotonic()
+        previous = self._last_update_publish_at.get(key, 0.0)
+        if now - previous < PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS:
+            return False
+        self._last_update_publish_at[key] = now
+        return True
 
 
 def _runtime_with_overrides(runtime, values: dict[str, Any]):

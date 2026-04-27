@@ -1,5 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { diff as jsonDiff } from "jsondiffpatch";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
@@ -68,6 +70,7 @@ import {
 import "./styles.css";
 
 const VariableRichTextEditor = React.lazy(() => import("./VariableRichTextEditor"));
+const MonacoDiffEditor = React.lazy(() => import("@monaco-editor/react").then((module) => ({ default: module.DiffEditor })));
 
 type DoorCommandAction = "open" | "close";
 type DashboardCommand = {
@@ -162,6 +165,7 @@ type AccessEvent = {
 
 type Anomaly = {
   id: string;
+  event_id?: string | null;
   type: string;
   severity: "info" | "warning" | "critical";
   message: string;
@@ -228,6 +232,75 @@ type RealtimeMessage = {
   type: string;
   payload: Record<string, unknown>;
   created_at?: string;
+};
+
+const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
+
+const REALTIME_DATA_REFRESH_EVENTS = new Set([
+  "access_event.finalize_failed"
+]);
+
+type TelemetrySpan = {
+  id: string;
+  span_id: string;
+  trace_id: string;
+  parent_span_id: string | null;
+  name: string;
+  category: string;
+  step_order: number;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number | null;
+  status: string;
+  attributes: Record<string, unknown>;
+  input_payload: Record<string, unknown>;
+  output_payload: Record<string, unknown>;
+  error: string | null;
+};
+
+type TelemetryTrace = {
+  trace_id: string;
+  name: string;
+  category: string;
+  status: string;
+  level: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number | null;
+  actor: string | null;
+  source: string | null;
+  registration_number: string | null;
+  access_event_id: string | null;
+  summary: string | null;
+  context: Record<string, unknown>;
+  error: string | null;
+};
+
+type TelemetryTraceDetail = TelemetryTrace & {
+  spans: TelemetrySpan[];
+};
+
+type AuditLog = {
+  id: string;
+  timestamp: string;
+  category: string;
+  action: string;
+  actor: string;
+  actor_user_id: string | null;
+  target_entity: string | null;
+  target_id: string | null;
+  target_label: string | null;
+  diff: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  outcome: string;
+  level: string;
+  trace_id: string | null;
+  request_id: string | null;
+};
+
+type PaginatedResponse<T> = {
+  items: T[];
+  next_cursor: string | null;
 };
 
 type NotificationToast = {
@@ -738,9 +811,12 @@ const api = {
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async delete(path: string): Promise<void> {
+  async delete<T = void>(path: string): Promise<T> {
     const response = await fetch(path, { method: "DELETE", credentials: "include" });
     if (!response.ok) throw await apiError(response);
+    if (response.status === 204) return undefined as T;
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
   }
 };
 
@@ -1042,6 +1118,10 @@ function notificationToastFromRealtime(event: RealtimeMessage): NotificationToas
   };
 }
 
+function shouldRefreshDataForRealtimeEvent(event: RealtimeMessage) {
+  return REALTIME_DATA_REFRESH_EVENTS.has(event.type);
+}
+
 function isNotificationSeverity(value: string): value is NotificationToast["severity"] {
   return ["info", "warning", "critical"].includes(value);
 }
@@ -1096,6 +1176,9 @@ function App() {
   const [loading, setLoading] = React.useState(true);
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
+  const [alertsOpen, setAlertsOpen] = React.useState(false);
+  const alertsButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
 
   const navigateToView = React.useCallback((nextView: ViewKey, options?: { replace?: boolean }) => {
     setView(nextView);
@@ -1157,6 +1240,14 @@ function App() {
   const refreshIntegrationStatus = React.useCallback(async () => {
     setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"));
   }, []);
+  const realtimeRefreshLastRunRef = React.useRef(0);
+
+  const refreshFromRealtime = React.useCallback(() => {
+    const now = Date.now();
+    if (now - realtimeRefreshLastRunRef.current < REALTIME_REFRESH_MIN_INTERVAL_MS) return;
+    realtimeRefreshLastRunRef.current = now;
+    refresh().catch(() => undefined);
+  }, [refresh]);
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
@@ -1185,18 +1276,21 @@ function App() {
       if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
         return;
       }
+      if (parsed.type.startsWith("telemetry.") || parsed.type.startsWith("audit.")) {
+        return;
+      }
       const finalizedEvent = accessEventFromRealtime(parsed);
       if (finalizedEvent) {
         setEvents((current) => [finalizedEvent, ...current.filter((item) => item.id !== finalizedEvent.id)].slice(0, 40));
-        refresh().catch(() => undefined);
+        refreshFromRealtime();
         return;
       }
-      if (parsed.type !== "connection.ready") {
-        refresh().catch(() => undefined);
+      if (shouldRefreshDataForRealtimeEvent(parsed)) {
+        refreshFromRealtime();
       }
     };
     return () => socket.close();
-  }, [authStatus?.authenticated, refresh]);
+  }, [authStatus?.authenticated, refreshFromRealtime]);
 
   React.useEffect(() => {
     if (!authStatus) return;
@@ -1219,6 +1313,30 @@ function App() {
       setSettingsExpanded(true);
     }
   }, [settingsActive, sidebarCollapsed]);
+
+  React.useEffect(() => {
+    if (!alertsOpen) return undefined;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAlertsOpen(false);
+      }
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (alertsTrayRef.current?.contains(target) || alertsButtonRef.current?.contains(target)) return;
+      setAlertsOpen(false);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [alertsOpen]);
 
   if (!authStatus) {
     return <AuthLoading />;
@@ -1340,10 +1458,28 @@ function App() {
               <Search size={16} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people, vehicles, events..." />
             </label>
-            <button className="icon-button notification-button" onClick={() => refresh()} type="button" aria-label="Refresh alerts">
-              <Bell size={20} />
-              {anomalies.length ? <span>{Math.min(anomalies.length, 99)}</span> : null}
-            </button>
+            <div className="alert-tray-shell">
+              <button
+                aria-controls="alert-tray"
+                aria-expanded={alertsOpen}
+                aria-haspopup="dialog"
+                aria-label="Open alerts"
+                className="icon-button notification-button"
+                onClick={() => setAlertsOpen((current) => !current)}
+                ref={alertsButtonRef}
+                type="button"
+              >
+                <Bell size={20} />
+                {anomalies.length ? <span>{Math.min(anomalies.length, 99)}</span> : null}
+              </button>
+              {alertsOpen ? (
+                <AlertTray
+                  anomalies={anomalies}
+                  onRefresh={refresh}
+                  ref={alertsTrayRef}
+                />
+              ) : null}
+            </div>
             <button className="icon-button refresh-button" onClick={() => refresh()} type="button" aria-label="Refresh">
               <RefreshCcw size={17} />
             </button>
@@ -1366,6 +1502,7 @@ function App() {
             schedules={schedules}
             integrationStatus={integrationStatus}
             realtime={realtime}
+            onClearRealtime={() => setRealtime([])}
             refresh={refresh}
             currentUser={currentUser}
             onCurrentUserUpdated={(user) =>
@@ -1382,6 +1519,48 @@ function App() {
     </div>
   );
 }
+
+const AlertTray = React.forwardRef<HTMLDivElement, {
+  anomalies: Anomaly[];
+  onRefresh: () => Promise<void>;
+}>(function AlertTray({ anomalies, onRefresh }, ref) {
+  const alertCount = anomalies.length;
+  const recentAnomalies = anomalies.slice(0, 8);
+  return (
+    <div className="alert-tray" id="alert-tray" ref={ref} role="dialog" aria-label="Alerts">
+      <div className="alert-tray-header">
+        <div>
+          <strong>Alerts</strong>
+          <span>{alertCount ? `${alertCount} active alert${alertCount === 1 ? "" : "s"}` : "No active alerts"}</span>
+        </div>
+        <button className="icon-button" onClick={() => onRefresh().catch(() => undefined)} type="button" aria-label="Refresh alerts">
+          <RefreshCcw size={15} />
+        </button>
+      </div>
+      <div className="alert-tray-list">
+        {recentAnomalies.length ? recentAnomalies.map((anomaly) => (
+          <article className="alert-tray-row" key={anomaly.id}>
+            <span className={`alert-tray-icon ${anomaly.severity}`}>
+              <AlertTriangle size={17} />
+            </span>
+            <div>
+              <div className="alert-tray-row-head">
+                <strong>{titleCase(anomaly.type)}</strong>
+                <Badge tone={anomaly.severity === "critical" ? "red" : anomaly.severity === "warning" ? "amber" : "blue"}>
+                  {anomaly.severity}
+                </Badge>
+              </div>
+              <p>{anomaly.message}</p>
+              <time>{formatDate(anomaly.created_at)}</time>
+            </div>
+          </article>
+        )) : (
+          <EmptyState icon={CheckCircle2} label="No active alerts" />
+        )}
+      </div>
+    </div>
+  );
+});
 
 function NotificationToastStack({
   notifications,
@@ -1605,6 +1784,7 @@ function View(props: {
   schedules: Schedule[];
   integrationStatus: IntegrationStatus | null;
   realtime: RealtimeMessage[];
+  onClearRealtime: () => void;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   onCurrentUserUpdated: (user: UserAccount) => void;
@@ -1625,7 +1805,7 @@ function View(props: {
     case "integrations":
       return <IntegrationsView schedules={props.schedules} status={props.integrationStatus} refresh={props.refresh} />;
     case "logs":
-      return <LogsView logs={props.realtime} />;
+      return <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
     case "settings_general":
       return <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} />;
     case "settings_auth":
@@ -6332,30 +6512,573 @@ function MobileAppNotifySelectField({
   );
 }
 
-function LogsView({ logs }: { logs: RealtimeMessage[] }) {
+type LogsTabKey = "lpr" | "ai" | "crud" | "api" | "integrations" | "live";
+
+const logsTabs: Array<{ key: LogsTabKey; label: string; icon: React.ElementType; description: string }> = [
+  { key: "lpr", label: "LPR Telemetry", icon: Car, description: "Plate reads, access decisions, and gate timing." },
+  { key: "ai", label: "AI Audit", icon: Bot, description: "Alfred tools, provider use, and outcomes." },
+  { key: "crud", label: "System CRUD", icon: Database, description: "Directory, schedules, notification rules, users, and settings." },
+  { key: "api", label: "Webhooks & API", icon: GitBranch, description: "Inbound requests and webhook execution times." },
+  { key: "integrations", label: "Integrations", icon: PlugZap, description: "Home Assistant, notifications, DVLA, and provider actions." },
+  { key: "live", label: "Live Stream", icon: Terminal, description: "Current websocket event stream." }
+];
+
+const traceCategories: Partial<Record<LogsTabKey, string>> = {
+  lpr: "lpr_telemetry",
+  api: "webhooks_api"
+};
+
+const auditCategories: Partial<Record<LogsTabKey, string>> = {
+  ai: "alfred_ai",
+  crud: "entity_management",
+  integrations: "integrations"
+};
+
+function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearRealtime: () => void }) {
+  const [tab, setTab] = React.useState<LogsTabKey>("lpr");
+  const [query, setQuery] = React.useState("");
   const [level, setLevel] = React.useState("all");
-  const filtered = logs.filter((log) => level === "all" || log.type.includes(level));
+  const [status, setStatus] = React.useState("all");
+  const [traces, setTraces] = React.useState<TelemetryTrace[]>([]);
+  const [traceCursor, setTraceCursor] = React.useState<string | null>(null);
+  const [traceDetails, setTraceDetails] = React.useState<Record<string, TelemetryTraceDetail>>({});
+  const [expandedTraceId, setExpandedTraceId] = React.useState<string | null>(null);
+  const [auditLogs, setAuditLogs] = React.useState<AuditLog[]>([]);
+  const [auditCursor, setAuditCursor] = React.useState<string | null>(null);
+  const [expandedAuditId, setExpandedAuditId] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [notice, setNotice] = React.useState("");
+  const [clearing, setClearing] = React.useState(false);
+  const [liveFilter, setLiveFilter] = React.useState("all");
+
+  const isTraceTab = Boolean(traceCategories[tab]);
+  const isAuditTab = Boolean(auditCategories[tab]);
+  const visibleLiveLogs = logs.filter((log) => liveFilter === "all" || log.type.includes(liveFilter));
+
+  async function loadTelemetry(mode: "reset" | "append" = "reset") {
+    if (tab === "live") return;
+    setError("");
+    mode === "reset" ? setLoading(true) : setLoadingMore(true);
+    try {
+      if (isTraceTab) {
+        const category = traceCategories[tab];
+        const params = new URLSearchParams({ limit: "40" });
+        if (category) params.set("category", category);
+        if (query.trim()) params.set("q", query.trim());
+        if (level !== "all") params.set("level", level);
+        if (status !== "all") params.set("status", status);
+        if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
+        const response = await api.get<PaginatedResponse<TelemetryTrace>>(`/api/v1/telemetry/traces?${params}`);
+        setTraces((current) => mode === "append" ? [...current, ...response.items] : response.items);
+        setTraceCursor(response.next_cursor);
+      } else if (isAuditTab) {
+        const category = auditCategories[tab];
+        const params = new URLSearchParams({ limit: "40" });
+        if (category) params.set("category", category);
+        if (query.trim()) params.set("q", query.trim());
+        if (level !== "all") params.set("level", level);
+        if (mode === "append" && auditCursor) params.set("cursor", auditCursor);
+        const response = await api.get<PaginatedResponse<AuditLog>>(`/api/v1/telemetry/audit?${params}`);
+        setAuditLogs((current) => mode === "append" ? [...current, ...response.items] : response.items);
+        setAuditCursor(response.next_cursor);
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load telemetry");
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }
+
+  async function clearLogs() {
+    if (!window.confirm("Clear all telemetry, audit, and live log records?")) return;
+    setClearing(true);
+    setError("");
+    setNotice("");
+    try {
+      await api.delete("/api/v1/telemetry/purge");
+      setTraces([]);
+      setTraceCursor(null);
+      setTraceDetails({});
+      setExpandedTraceId(null);
+      setAuditLogs([]);
+      setAuditCursor(null);
+      setExpandedAuditId(null);
+      onClearRealtime();
+      setNotice("Logs cleared");
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Unable to clear logs");
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  React.useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(""), 4500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  React.useEffect(() => {
+    setExpandedTraceId(null);
+    setExpandedAuditId(null);
+    loadTelemetry("reset").catch(() => undefined);
+  }, [tab, query, level, status]);
+
+  const latestRealtime = logs[0];
+  React.useEffect(() => {
+    if (!latestRealtime || tab === "live") return;
+    let shouldReload = false;
+    if (latestRealtime.type === "telemetry.trace.created" && latestRealtime.payload.category === traceCategories[tab]) {
+      shouldReload = true;
+    }
+    if (latestRealtime.type === "audit.log.created" && latestRealtime.payload.category === auditCategories[tab]) {
+      shouldReload = true;
+    }
+    if (!shouldReload) return;
+    const reloadTimer = window.setTimeout(() => {
+      loadTelemetry("reset").catch(() => undefined);
+    }, 750);
+    return () => window.clearTimeout(reloadTimer);
+  }, [latestRealtime?.created_at, latestRealtime?.type, latestRealtime?.payload.category, tab, query, level, status]);
+
+  const toggleTrace = async (traceId: string) => {
+    if (expandedTraceId === traceId) {
+      setExpandedTraceId(null);
+      return;
+    }
+    setExpandedTraceId(traceId);
+    if (!traceDetails[traceId]) {
+      const detail = await api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`);
+      setTraceDetails((current) => ({ ...current, [traceId]: detail }));
+    }
+  };
+
+  const activeTab = logsTabs.find((item) => item.key === tab) ?? logsTabs[0];
+  const count = tab === "live" ? visibleLiveLogs.length : isTraceTab ? traces.length : auditLogs.length;
+
   return (
-    <section className="view-stack">
-      <Toolbar title="Live Logs" count={filtered.length} icon={Terminal}>
-        <select value={level} onChange={(event) => setLevel(event.target.value)}>
-          <option value="all">All</option>
-          <option value="event">Events</option>
-          <option value="chat">Chat</option>
-          <option value="gate">Gate</option>
-        </select>
+    <section className="view-stack telemetry-workspace">
+      <Toolbar title="Telemetry & Audit" count={count} icon={activeTab.icon}>
+        <button className="danger-button" onClick={clearLogs} type="button" disabled={clearing}>
+          <Trash2 size={15} /> {clearing ? "Clearing..." : "Clear Logs"}
+        </button>
+        <button className="secondary-button" onClick={() => loadTelemetry("reset")} type="button">
+          <RefreshCcw size={15} /> Refresh
+        </button>
       </Toolbar>
-      <div className="log-console">
-        {filtered.map((log, index) => (
-          <div className="log-line" key={`${log.type}-${index}`}>
-            <time>{log.created_at ? formatDate(log.created_at) : "now"}</time>
-            <strong>{log.type}</strong>
-            <code>{JSON.stringify(log.payload)}</code>
+
+      <div className="telemetry-layout">
+        <aside className="telemetry-tabs" aria-label="Log categories">
+          {logsTabs.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button className={tab === item.key ? "telemetry-tab active" : "telemetry-tab"} key={item.key} onClick={() => setTab(item.key)} type="button">
+                <Icon size={17} />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </span>
+              </button>
+            );
+          })}
+        </aside>
+
+        <div className="telemetry-panel">
+          <div className="telemetry-filterbar">
+            <label className="search telemetry-search">
+              <Search size={16} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search telemetry, actors, plates, payloads..." disabled={tab === "live"} />
+            </label>
+            {tab === "live" ? (
+              <select value={liveFilter} onChange={(event) => setLiveFilter(event.target.value)}>
+                <option value="all">All live events</option>
+                <option value="event">Access events</option>
+                <option value="chat">Chat</option>
+                <option value="gate">Gate</option>
+                <option value="telemetry">Telemetry</option>
+              </select>
+            ) : (
+              <>
+                <select value={level} onChange={(event) => setLevel(event.target.value)}>
+                  <option value="all">All levels</option>
+                  <option value="info">INFO</option>
+                  <option value="warning">WARN</option>
+                  <option value="error">ERROR</option>
+                  <option value="purple">AI ACTION</option>
+                </select>
+                {isTraceTab ? (
+                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                    <option value="all">All statuses</option>
+                    <option value="ok">OK</option>
+                    <option value="error">Error</option>
+                  </select>
+                ) : null}
+              </>
+            )}
           </div>
-        ))}
+
+          {error ? <div className="error-banner">{error}</div> : null}
+          {notice ? <div className="success-banner">{notice}</div> : null}
+          {loading ? <div className="loading-panel">Loading telemetry</div> : null}
+
+          {!loading && tab === "live" ? <LiveLogStream logs={visibleLiveLogs} /> : null}
+          {!loading && isTraceTab ? (
+            <TraceList
+              details={traceDetails}
+              expandedTraceId={expandedTraceId}
+              onToggle={toggleTrace}
+              traces={traces}
+            />
+          ) : null}
+          {!loading && isAuditTab ? (
+            <AuditLogList
+              expandedAuditId={expandedAuditId}
+              logs={auditLogs}
+              onToggle={(id) => setExpandedAuditId((current) => current === id ? null : id)}
+            />
+          ) : null}
+
+          {!loading && tab !== "live" && ((isTraceTab && !traces.length) || (isAuditTab && !auditLogs.length)) ? (
+            <EmptyState icon={Terminal} label="No telemetry records match these filters." />
+          ) : null}
+
+          {tab !== "live" && ((isTraceTab && traceCursor) || (isAuditTab && auditCursor)) ? (
+            <div className="telemetry-load-more">
+              <button className="secondary-button" disabled={loadingMore} onClick={() => loadTelemetry("append")} type="button">
+                {loadingMore ? "Loading..." : "Load More"}
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
     </section>
   );
+}
+
+function TraceList({
+  traces,
+  details,
+  expandedTraceId,
+  onToggle
+}: {
+  traces: TelemetryTrace[];
+  details: Record<string, TelemetryTraceDetail>;
+  expandedTraceId: string | null;
+  onToggle: (traceId: string) => void;
+}) {
+  const parentRef = React.useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: traces.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 126,
+    overscan: 6
+  });
+  return (
+    <div className="telemetry-virtual-list" ref={parentRef}>
+      <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const trace = traces[virtualRow.index];
+          const expanded = expandedTraceId === trace.trace_id;
+          return (
+            <div
+              className="telemetry-virtual-row"
+              data-index={virtualRow.index}
+              key={trace.trace_id}
+              ref={rowVirtualizer.measureElement}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              <TraceRow detail={details[trace.trace_id]} expanded={expanded} onToggle={() => onToggle(trace.trace_id)} trace={trace} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TraceRow({
+  trace,
+  detail,
+  expanded,
+  onToggle
+}: {
+  trace: TelemetryTrace;
+  detail?: TelemetryTraceDetail;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const display = traceDisplay(trace);
+  const Icon = display.icon;
+  return (
+    <article className={expanded ? "telemetry-card expanded" : "telemetry-card"}>
+      <button className="telemetry-row-button" onClick={onToggle} type="button">
+        <span className={`telemetry-row-icon ${display.tone}`}>
+          <Icon size={18} />
+        </span>
+        <span className="telemetry-row-main">
+          <strong>{display.title}</strong>
+          <small>{trace.summary || trace.name}</small>
+        </span>
+        <span className="telemetry-row-meta">
+          <Badge tone={levelTone(trace.level)}>{levelLabel(trace.level)}</Badge>
+          <code>{formatDuration(trace.duration_ms)}</code>
+          <time>{formatDate(trace.started_at)}</time>
+        </span>
+        {expanded ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+      </button>
+      {expanded ? (
+        detail ? <TraceWaterfall trace={detail} /> : <div className="telemetry-detail-loading">Loading trace spans...</div>
+      ) : null}
+    </article>
+  );
+}
+
+function TraceWaterfall({ trace }: { trace: TelemetryTraceDetail }) {
+  const traceStart = Date.parse(trace.started_at);
+  const totalMs = Math.max(trace.duration_ms || 0, ...trace.spans.map((span) => {
+    const end = span.ended_at ? Date.parse(span.ended_at) : Date.parse(span.started_at);
+    return Math.max(0, end - traceStart);
+  }), 1);
+  return (
+    <div className="trace-waterfall">
+      <div className="trace-summary-grid">
+        <TelemetryFact label="Trace ID" value={trace.trace_id} mono />
+        <TelemetryFact label="Source" value={trace.source || "unknown"} />
+        <TelemetryFact label="Plate" value={trace.registration_number || "n/a"} mono />
+        <TelemetryFact label="Total Duration" value={formatDuration(totalMs)} mono />
+      </div>
+      <div className="waterfall-steps">
+        {trace.spans.map((span, index) => {
+          const started = Date.parse(span.started_at);
+          const offset = Math.max(0, ((started - traceStart) / totalMs) * 100);
+          const width = Math.max(1.5, ((span.duration_ms || 0) / totalMs) * 100);
+          const artifact = artifactFromSpan(span);
+          return (
+            <div className="waterfall-step" key={span.span_id}>
+              <div className="waterfall-step-marker">
+                <span>{index + 1}</span>
+              </div>
+              <div className="waterfall-step-body">
+                <div className="waterfall-step-header">
+                  <strong>{span.name}</strong>
+                  <code>{formatDuration(span.duration_ms)}</code>
+                </div>
+                <div className="waterfall-bar-track">
+                  <span className={span.status === "error" ? "waterfall-bar error" : "waterfall-bar"} style={{ left: `${offset}%`, width: `${Math.min(width, 100 - offset)}%` }} />
+                </div>
+                {artifact ? (
+                  <div className="trace-artifact">
+                    <img alt="Camera snapshot used for direction analysis" src={String(artifact.url)} />
+                    <span>
+                      <strong>Vision Snapshot</strong>
+                      <small>{String(artifact.content_type || "image")} · {formatFileSize(numberPayload(artifact.size_bytes))}</small>
+                    </span>
+                  </div>
+                ) : null}
+                <TraceSpanPayload span={span} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TraceSpanPayload({ span }: { span: TelemetrySpan }) {
+  const payload = {
+    attributes: span.attributes,
+    input: span.input_payload,
+    output: span.output_payload,
+    error: span.error
+  };
+  if (!Object.values(payload).some((value) => value && (typeof value !== "object" || Object.keys(value as Record<string, unknown>).length))) {
+    return null;
+  }
+  return <JsonBlock value={payload} />;
+}
+
+function AuditLogList({
+  logs,
+  expandedAuditId,
+  onToggle
+}: {
+  logs: AuditLog[];
+  expandedAuditId: string | null;
+  onToggle: (id: string) => void;
+}) {
+  const parentRef = React.useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: logs.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 116,
+    overscan: 6
+  });
+  return (
+    <div className="telemetry-virtual-list" ref={parentRef}>
+      <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const log = logs[virtualRow.index];
+          return (
+            <div
+              className="telemetry-virtual-row"
+              data-index={virtualRow.index}
+              key={log.id}
+              ref={rowVirtualizer.measureElement}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              <AuditLogRow expanded={expandedAuditId === log.id} log={log} onToggle={() => onToggle(log.id)} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AuditLogRow({ log, expanded, onToggle }: { log: AuditLog; expanded: boolean; onToggle: () => void }) {
+  const [showEditor, setShowEditor] = React.useState(false);
+  const oldValue = isRecord(log.diff.old) ? log.diff.old : {};
+  const newValue = isRecord(log.diff.new) ? log.diff.new : {};
+  const delta = React.useMemo(() => jsonDiff(oldValue, newValue) || {}, [log.diff]);
+  const original = stringifyJson(oldValue);
+  const modified = stringifyJson(newValue);
+  return (
+    <article className={expanded ? "telemetry-card expanded" : "telemetry-card"}>
+      <button className="telemetry-row-button" onClick={onToggle} type="button">
+        <span className={`telemetry-row-icon ${levelTone(log.level)}`}>
+          {log.category === "alfred_ai" ? <Bot size={18} /> : log.category === "integrations" ? <PlugZap size={18} /> : <Database size={18} />}
+        </span>
+        <span className="telemetry-row-main">
+          <strong>{titleCase(log.action.replace(/\./g, " "))}</strong>
+          <small>{log.target_label || log.target_id || log.target_entity || "System"} · {log.actor}</small>
+        </span>
+        <span className="telemetry-row-meta">
+          <Badge tone={log.category === "alfred_ai" ? "purple" : levelTone(log.level)}>{log.category === "alfred_ai" ? "AI ACTION" : levelLabel(log.level)}</Badge>
+          <Badge tone={outcomeTone(log.outcome)}>{titleCase(log.outcome)}</Badge>
+          <time>{formatDate(log.timestamp)}</time>
+        </span>
+        {expanded ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+      </button>
+      {expanded ? (
+        <div className="audit-detail">
+          <div className="trace-summary-grid">
+            <TelemetryFact label="Actor" value={log.actor} />
+            <TelemetryFact label="Target" value={log.target_entity || "System"} />
+            <TelemetryFact label="Request" value={log.request_id || "n/a"} mono />
+            <TelemetryFact label="Trace" value={log.trace_id || "n/a"} mono />
+          </div>
+          <div className="audit-diff-toolbar">
+            <strong>JSON Diff</strong>
+            <button className="secondary-button" onClick={() => setShowEditor((current) => !current)} type="button">
+              <FileText size={15} /> {showEditor ? "Show Summary" : "Open Diff Editor"}
+            </button>
+          </div>
+          {showEditor ? (
+            <React.Suspense fallback={<div className="telemetry-detail-loading">Loading diff editor...</div>}>
+              <MonacoDiffEditor
+                height="280px"
+                language="json"
+                modified={modified}
+                options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: false, scrollBeyondLastLine: false }}
+                original={original}
+              />
+            </React.Suspense>
+          ) : (
+            <div className="audit-diff-grid">
+              <JsonBlock label="Changed Fields" value={delta} />
+              <JsonBlock label="Metadata" value={log.metadata} />
+            </div>
+          )}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function LiveLogStream({ logs }: { logs: RealtimeMessage[] }) {
+  return (
+    <div className="log-console telemetry-live-console">
+      {logs.map((log, index) => (
+        <div className="log-line" key={`${log.type}-${log.created_at}-${index}`}>
+          <time>{log.created_at ? formatDate(log.created_at) : "now"}</time>
+          <strong>{log.type}</strong>
+          <code>{JSON.stringify(log.payload)}</code>
+        </div>
+      ))}
+      {!logs.length ? <EmptyState icon={Terminal} label="No live events in this filter." /> : null}
+    </div>
+  );
+}
+
+function TelemetryFact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="telemetry-fact">
+      <span>{label}</span>
+      <strong className={mono ? "mono" : undefined}>{value}</strong>
+    </div>
+  );
+}
+
+function JsonBlock({ value, label }: { value: unknown; label?: string }) {
+  return (
+    <div className="json-block">
+      {label ? <strong>{label}</strong> : null}
+      <pre>{stringifyJson(value)}</pre>
+    </div>
+  );
+}
+
+function traceDisplay(trace: TelemetryTrace): { title: string; icon: React.ElementType; tone: BadgeTone } {
+  const decision = stringPayload(trace.context.decision).toLowerCase();
+  const direction = stringPayload(trace.context.direction).toLowerCase();
+  const plate = trace.registration_number || "unknown plate";
+  if (decision === "denied") return { title: `Entry Denied - Plate ${plate}`, icon: AlertTriangle, tone: "red" };
+  if (direction === "exit") return { title: `Exit Granted - Plate ${plate}`, icon: LogOut, tone: "gray" };
+  if (decision === "granted") return { title: `Entry Granted - Plate ${plate}`, icon: LogIn, tone: "green" };
+  if (trace.status === "error") return { title: trace.name, icon: AlertTriangle, tone: "red" };
+  return { title: trace.name, icon: Activity, tone: "blue" };
+}
+
+function artifactFromSpan(span: TelemetrySpan): Record<string, unknown> | null {
+  const artifact = span.output_payload.artifact;
+  return isRecord(artifact) && typeof artifact.url === "string" ? artifact : null;
+}
+
+function levelTone(level: string | null | undefined): BadgeTone {
+  const normalized = String(level || "").toLowerCase();
+  if (normalized === "error" || normalized === "critical") return "red";
+  if (normalized === "warning" || normalized === "warn") return "amber";
+  if (normalized === "purple") return "purple";
+  if (normalized === "success" || normalized === "ok") return "green";
+  return "blue";
+}
+
+function outcomeTone(outcome: string): BadgeTone {
+  if (outcome === "success") return "green";
+  if (outcome === "failed") return "red";
+  if (outcome === "pending_confirmation") return "amber";
+  return "gray";
+}
+
+function levelLabel(level: string | null | undefined) {
+  const normalized = String(level || "info").toLowerCase();
+  if (normalized === "warning") return "WARN";
+  if (normalized === "purple") return "AI ACTION";
+  return normalized.toUpperCase();
+}
+
+function formatDuration(value: number | null | undefined) {
+  const ms = Math.max(0, Number(value || 0));
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 1 : 2)}s`;
+  return `${ms.toFixed(ms >= 100 ? 0 : 1)}ms`;
+}
+
+function stringifyJson(value: unknown) {
+  return JSON.stringify(value ?? {}, null, 2);
 }
 
 const notificationChannelMeta: Record<NotificationChannelId, {
@@ -7865,7 +8588,7 @@ function EmptyState({ icon: Icon, label }: { icon: React.ElementType; label: str
   );
 }
 
-type BadgeTone = "green" | "gray" | "amber" | "red" | "blue";
+type BadgeTone = "green" | "gray" | "amber" | "red" | "blue" | "purple";
 
 type SettingFieldDefinition = {
   key: string;

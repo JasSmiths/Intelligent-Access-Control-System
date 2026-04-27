@@ -44,6 +44,11 @@ from app.services.home_assistant import get_home_assistant_service
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config, update_settings
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    actor_from_user,
+    emit_audit_log,
+)
 
 router = APIRouter()
 
@@ -89,8 +94,8 @@ class DvlaLookupRequest(BaseModel):
 
 
 @router.get("/home-assistant/status")
-async def home_assistant_status(_: User = Depends(current_user)) -> dict:
-    return await get_home_assistant_service().status()
+async def home_assistant_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+    return await get_home_assistant_service().status(refresh=refresh)
 
 
 @router.get("/home-assistant/entities")
@@ -204,25 +209,77 @@ async def remove_apprise_url(index: int, _: User = Depends(admin_user)) -> dict:
 
 
 @router.post("/dvla/lookup")
-async def dvla_lookup(request: DvlaLookupRequest, _: User = Depends(current_user)) -> dict[str, object]:
+async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_user)) -> dict[str, object]:
     registration_number = normalize_registration_number(request.registration_number)
     try:
         vehicle = await lookup_vehicle_registration(registration_number)
     except DvlaVehicleEnquiryError as exc:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="dvla.lookup",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="DVLA",
+            target_id=registration_number,
+            target_label=registration_number,
+            outcome="failed",
+            level="error",
+            metadata={
+                "registration_number": registration_number,
+                "status_code": exc.status_code,
+                "error": str(exc),
+            },
+        )
         status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else 503
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    display_vehicle = display_vehicle_record(vehicle, registration_number)
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="dvla.lookup",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="DVLA",
+        target_id=registration_number,
+        target_label=display_vehicle,
+        outcome="success",
+        level="info",
+        metadata={
+            "registration_number": registration_number,
+            "display_vehicle": display_vehicle,
+        },
+    )
     return {
         "registration_number": registration_number,
         "vehicle": vehicle,
-        "display_vehicle": display_vehicle_record(vehicle, registration_number),
+        "display_vehicle": display_vehicle,
     }
 
 
 @router.post("/gate/open")
-async def open_gate(request: GateOpenRequest, _: User = Depends(current_user)) -> dict:
+async def open_gate(request: GateOpenRequest, user: User = Depends(current_user)) -> dict:
     result = await HomeAssistantGateController().open_gate(request.reason)
     if not result.accepted:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="gate.open",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Gate",
+            target_label="Home Assistant Gate",
+            outcome="failed",
+            level="error",
+            metadata={"reason": request.reason, "detail": result.detail, "state": result.state.value},
+        )
         raise HTTPException(status_code=503, detail=result.detail or "Gate command failed.")
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="gate.open",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Gate",
+        target_label="Home Assistant Gate",
+        metadata={"reason": request.reason, "state": result.state.value, "detail": result.detail},
+    )
     return {
         "accepted": result.accepted,
         "state": result.state.value,
@@ -233,7 +290,7 @@ async def open_gate(request: GateOpenRequest, _: User = Depends(current_user)) -
 @router.post("/cover/command")
 async def cover_command(
     request: CoverCommandRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     entity_id = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
@@ -270,7 +327,29 @@ async def cover_command(
     client = HomeAssistantClient()
     outcome = await command_cover(client, entity, request.action, request.reason)
     if not outcome.accepted:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action=f"cover.{request.action}",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Cover",
+            target_id=outcome.entity_id,
+            target_label=outcome.name,
+            outcome="failed",
+            level="error",
+            metadata={"reason": request.reason, "state": outcome.state, "detail": outcome.detail},
+        )
         raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action=f"cover.{request.action}",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Cover",
+        target_id=outcome.entity_id,
+        target_label=outcome.name,
+        metadata={"reason": request.reason, "state": outcome.state, "detail": outcome.detail},
+    )
     return {
         "accepted": True,
         "entity_id": outcome.entity_id,
@@ -282,7 +361,7 @@ async def cover_command(
 
 
 @router.post("/announcements/say")
-async def say_announcement(request: AnnouncementRequest, _: User = Depends(current_user)) -> dict[str, str]:
+async def say_announcement(request: AnnouncementRequest, user: User = Depends(current_user)) -> dict[str, str]:
     config = await get_runtime_config()
     target = request.entity_id or config.home_assistant_default_media_player
     if not target:
@@ -291,15 +370,35 @@ async def say_announcement(request: AnnouncementRequest, _: User = Depends(curre
     try:
         await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), request.message)
     except (HomeAssistantError, ValueError) as exc:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="announcement.say",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="MediaPlayer",
+            target_id=target,
+            outcome="failed",
+            level="error",
+            metadata={"message": request.message, "error": str(exc)},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="announcement.say",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="MediaPlayer",
+        target_id=target,
+        metadata={"message": request.message},
+    )
     return {"status": "sent", "entity_id": target}
 
 
 @router.post("/home-assistant/mobile-notifications/test")
 async def send_home_assistant_mobile_notification_test(
     request: TestHomeAssistantMobileNotificationRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
 ) -> dict[str, str]:
     person_name = request.person_name.strip() or "this person"
     try:
@@ -315,15 +414,35 @@ async def send_home_assistant_mobile_notification_test(
             ),
         )
     except NotificationDeliveryError as exc:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="notification.mobile_test",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="NotificationTarget",
+            target_id=request.service_name,
+            outcome="failed",
+            level="error",
+            metadata={"error": str(exc), "person_name": person_name},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="notification.mobile_test",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="NotificationTarget",
+        target_id=request.service_name,
+        metadata={"person_name": person_name},
+    )
     return {"status": "sent", "service_name": request.service_name}
 
 
 @router.post("/notifications/test")
 async def send_test_notification(
     request: TestNotificationRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
 ) -> dict[str, str]:
     config = await get_runtime_config()
     if not config.apprise_urls:
@@ -340,7 +459,27 @@ async def send_test_notification(
             raise_on_failure=True,
         )
     except NotificationDeliveryError as exc:
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="notification.test",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Notification",
+            target_label=request.subject,
+            outcome="failed",
+            level="error",
+            metadata={"severity": request.severity, "error": str(exc)},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="notification.test",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Notification",
+        target_label=request.subject,
+        metadata={"severity": request.severity},
+    )
     return {"status": "sent", "title": notification.title, "body": notification.body}
 
 

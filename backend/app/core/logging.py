@@ -20,6 +20,9 @@ def configure_logging() -> None:
     root.handlers.clear()
     root.addHandler(handler)
 
+    for noisy_logger in ("httpx", "httpcore"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)

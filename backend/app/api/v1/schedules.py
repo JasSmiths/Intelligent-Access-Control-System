@@ -11,6 +11,12 @@ from app.api.dependencies import current_user
 from app.db.session import get_db_session
 from app.models import Schedule, User
 from app.services.schedules import empty_time_blocks, normalize_time_blocks, schedule_dependencies
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    audit_diff,
+    write_audit_log,
+)
 
 router = APIRouter()
 
@@ -47,6 +53,15 @@ def serialize_schedule(schedule: Schedule) -> dict[str, Any]:
     }
 
 
+def schedule_audit_snapshot(schedule: Schedule) -> dict[str, Any]:
+    return {
+        "id": str(schedule.id),
+        "name": schedule.name,
+        "description": schedule.description,
+        "time_blocks": normalize_time_blocks(schedule.time_blocks),
+    }
+
+
 @router.get("", response_model=list[ScheduleResponse])
 async def list_schedules(
     _: User = Depends(current_user),
@@ -59,7 +74,7 @@ async def list_schedules(
 @router.post("", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
     request: ScheduleRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ScheduleResponse:
     try:
@@ -74,6 +89,18 @@ async def create_schedule(
     )
     session.add(schedule)
     try:
+        await session.flush()
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="schedule.create",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Schedule",
+            target_id=schedule.id,
+            target_label=schedule.name,
+            diff={"old": {}, "new": schedule_audit_snapshot(schedule)},
+        )
         await session.commit()
         await session.refresh(schedule)
     except IntegrityError as exc:
@@ -99,12 +126,13 @@ async def get_schedule(
 async def update_schedule(
     schedule_id: uuid.UUID,
     request: ScheduleRequest,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ScheduleResponse:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    before = schedule_audit_snapshot(schedule)
     try:
         schedule.time_blocks = normalize_time_blocks(request.time_blocks)
     except (TypeError, ValueError) as exc:
@@ -113,6 +141,17 @@ async def update_schedule(
     schedule.name = request.name.strip()
     schedule.description = request.description.strip() if request.description else None
     try:
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="schedule.update",
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            target_entity="Schedule",
+            target_id=schedule.id,
+            target_label=schedule.name,
+            diff=audit_diff(before, schedule_audit_snapshot(schedule)),
+        )
         await session.commit()
         await session.refresh(schedule)
     except IntegrityError as exc:
@@ -137,7 +176,7 @@ async def get_schedule_dependencies(
 @router.delete("/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_schedule(
     schedule_id: uuid.UUID,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     schedule = await session.get(Schedule, schedule_id)
@@ -151,6 +190,17 @@ async def delete_schedule(
             detail=f"Schedule is currently in use by {_dependency_summary(dependencies)}.",
         )
 
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="schedule.delete",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Schedule",
+        target_id=schedule.id,
+        target_label=schedule.name,
+        diff={"old": schedule_audit_snapshot(schedule), "new": {}},
+    )
     await session.delete(schedule)
     await session.commit()
 

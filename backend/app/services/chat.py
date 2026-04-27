@@ -15,13 +15,14 @@ from app.ai.providers import (
     ToolCall,
     get_llm_provider,
 )
-from app.ai.tools import AgentTool, build_agent_tools, set_chat_tool_context
+from app.ai.tools import AgentTool, build_agent_tools, get_chat_tool_context, set_chat_tool_context
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import ChatMessage, ChatSession
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
+from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log
 
 logger = get_logger(__name__)
 
@@ -73,6 +74,18 @@ FILE_TOOL_NAMES = (
     "export_presence_report_csv",
     "generate_contractor_invoice_pdf",
 )
+STATE_CHANGING_TOOL_NAMES = {
+    "assign_schedule_to_entity",
+    "create_notification_workflow",
+    "create_schedule",
+    "delete_notification_workflow",
+    "delete_schedule",
+    "open_device",
+    "test_notification_workflow",
+    "trigger_anomaly_alert",
+    "update_notification_workflow",
+    "update_schedule",
+}
 
 
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
@@ -206,7 +219,13 @@ class ChatService:
                 return guided_result
 
         context_token = set_chat_tool_context(
-            {"user_id": user_id, "session_id": str(session_uuid)}
+            {
+                "user_id": user_id,
+                "session_id": str(session_uuid),
+                "provider": provider.name,
+                "model": self._model_for_provider(runtime, provider.name),
+                "trigger": "user_requested",
+            }
         )
         try:
             tool_results: list[dict[str, Any]] = []
@@ -336,7 +355,13 @@ class ChatService:
     ) -> ChatTurnResult:
         session_uuid = await self._ensure_session(session_id)
         context_token = set_chat_tool_context(
-            {"user_id": user_id, "session_id": str(session_uuid)}
+            {
+                "user_id": user_id,
+                "session_id": str(session_uuid),
+                "provider": "tool_confirmation",
+                "model": None,
+                "trigger": "user_confirmed",
+            }
         )
         try:
             call = ToolCall(
@@ -856,6 +881,16 @@ class ChatService:
         detail = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", detail)
         detail = re.sub(r"(?i)(api[_-]?key|x-api-key|key)=([^&\s]+)", r"\1=[redacted]", detail)
         return detail[:300]
+
+    def _model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
+        return {
+            "openai": getattr(runtime, "openai_model", None),
+            "gemini": getattr(runtime, "gemini_model", None),
+            "claude": getattr(runtime, "anthropic_model", None),
+            "anthropic": getattr(runtime, "anthropic_model", None),
+            "ollama": getattr(runtime, "ollama_model", None),
+            "local": "local",
+        }.get(provider_name)
 
     def _clean_assistant_text(self, text: str, attachments: list[dict[str, Any]]) -> str:
         file_link_replacement = ""
@@ -1564,7 +1599,64 @@ class ChatService:
             await status_callback(self._tool_status(call.name))
         output = await tool.handler(call.arguments)
         await self._append_tool_message(session_id, call, output)
+        self._audit_agent_tool_call(call, output)
         return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output}
+
+    def _audit_agent_tool_call(self, call: ToolCall, output: dict[str, Any]) -> None:
+        context = get_chat_tool_context()
+        failed = bool(output.get("error")) or output.get("accepted") is False or (
+            output.get("opened") is False and not output.get("requires_confirmation")
+        )
+        requires_confirmation = bool(output.get("requires_confirmation"))
+        state_changing = call.name in STATE_CHANGING_TOOL_NAMES
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_ALFRED,
+            action=f"alfred.tool.{call.name}",
+            actor="Alfred_AI",
+            actor_user_id=context.get("user_id"),
+            target_entity="AgentTool",
+            target_id=call.name,
+            target_label=call.name.replace("_", " ").title(),
+            outcome="pending_confirmation" if requires_confirmation else "failed" if failed else "success",
+            level="purple" if not failed else "error",
+            metadata={
+                "trigger": context.get("trigger") or "user_requested",
+                "provider": context.get("provider"),
+                "model": context.get("model"),
+                "session_id": context.get("session_id"),
+                "tool": call.name,
+                "tool_call_id": call.id,
+                "state_changing": state_changing,
+                "arguments": call.arguments,
+                "requires_confirmation": requires_confirmation,
+                "outcome": output,
+            },
+        )
+        if call.name == "lookup_dvla_vehicle":
+            registration_number = str(output.get("registration_number") or call.arguments.get("registration_number") or "").strip()
+            emit_audit_log(
+                category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                action="dvla.lookup",
+                actor="Alfred_AI",
+                actor_user_id=context.get("user_id"),
+                target_entity="DVLA",
+                target_id=registration_number or None,
+                target_label=str(output.get("display_vehicle") or registration_number or "DVLA lookup"),
+                outcome="failed" if failed else "success",
+                level="error" if failed else "info",
+                metadata={
+                    "source": "alfred",
+                    "trigger": context.get("trigger") or "user_requested",
+                    "provider": context.get("provider"),
+                    "model": context.get("model"),
+                    "session_id": context.get("session_id"),
+                    "tool": call.name,
+                    "tool_call_id": call.id,
+                    "registration_number": registration_number,
+                    "display_vehicle": output.get("display_vehicle"),
+                    "error": output.get("error"),
+                },
+            )
 
     def _tool_status(self, tool_name: str) -> dict[str, Any]:
         labels = {

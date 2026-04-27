@@ -35,6 +35,7 @@ from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
+from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, TELEMETRY_CATEGORY_LPR, telemetry
 from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
@@ -465,7 +466,57 @@ class AccessEventService:
     async def _finalize_window(self, window: DebounceWindow) -> None:
         read = window.best_read
         direction_read = window.first_read
+        finalize_started_at = datetime.now(tz=UTC)
+        trace = telemetry.start_trace(
+            f"Plate Detection - {read.registration_number}",
+            category=TELEMETRY_CATEGORY_LPR,
+            source=read.source,
+            registration_number=read.registration_number,
+            started_at=window.first_seen,
+            context={
+                "candidate_count": len(window.reads),
+                "source": read.source,
+                "first_seen": window.first_seen.isoformat(),
+                "finalize_started_at": finalize_started_at.isoformat(),
+            },
+        )
+        trace.record_span(
+            "Webhook Received",
+            started_at=window.first_seen,
+            ended_at=window.first_seen,
+            attributes={"source": window.first_read.source},
+            output_payload={
+                "registration_number": window.first_read.registration_number,
+                "confidence": window.first_read.confidence,
+                "captured_at": window.first_read.captured_at.isoformat(),
+            },
+        )
+        trace.record_span(
+            "Debounce & Confidence Aggregation",
+            started_at=window.first_seen,
+            ended_at=finalize_started_at,
+            attributes={
+                "candidate_count": len(window.reads),
+                "selected_registration_number": read.registration_number,
+                "selected_confidence": read.confidence,
+            },
+            output_payload={
+                "candidates": [
+                    {
+                        "registration_number": item.registration_number,
+                        "detected_registration_number": _detected_registration_number(item),
+                        "confidence": item.confidence,
+                        "captured_at": item.captured_at.isoformat(),
+                    }
+                    for item in window.reads
+                ],
+            },
+        )
         async with AsyncSessionLocal() as session:
+            vehicle_span = trace.start_span(
+                "Plate Verification against Vehicle DB",
+                attributes={"registration_number": read.registration_number},
+            )
             vehicle = await session.scalar(
                 select(Vehicle)
                 .options(
@@ -478,10 +529,28 @@ class AccessEventService:
                     Vehicle.is_active.is_(True),
                 )
             )
+            vehicle_span.finish(
+                output_payload={
+                    "matched": bool(vehicle),
+                    "vehicle_id": str(vehicle.id) if vehicle else None,
+                    "person_id": str(vehicle.person_id) if vehicle and vehicle.person_id else None,
+                    "vehicle": self._vehicle_display_name(vehicle, read.registration_number) if vehicle else None,
+                    "owner": vehicle.owner.display_name if vehicle and vehicle.owner else None,
+                    "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
+                }
+            )
 
             person = vehicle.owner if vehicle else None
             runtime = self._runtime or await get_runtime_config()
             identity_active = bool(vehicle and (not person or person.is_active))
+            schedule_span = trace.start_span(
+                "Schedule & Access Rule Evaluation",
+                attributes={
+                    "identity_active": identity_active,
+                    "vehicle_id": str(vehicle.id) if vehicle else None,
+                    "person_id": str(person.id) if person else None,
+                },
+            )
             schedule_evaluation = (
                 await evaluate_vehicle_schedule(
                     session,
@@ -493,20 +562,56 @@ class AccessEventService:
                 if vehicle and identity_active
                 else None
             )
+            schedule_span.finish(
+                output_payload={
+                    "allowed": schedule_evaluation.allowed if schedule_evaluation else False,
+                    "source": schedule_evaluation.source if schedule_evaluation else "none",
+                    "schedule_id": str(schedule_evaluation.schedule_id) if schedule_evaluation and schedule_evaluation.schedule_id else None,
+                    "schedule_name": schedule_evaluation.schedule_name if schedule_evaluation else None,
+                    "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
+                }
+            )
             allowed = bool(identity_active and schedule_evaluation and schedule_evaluation.allowed)
+            direction_span = trace.start_span(
+                "Direction Classification",
+                attributes={
+                    "allowed": allowed,
+                    "gate_observation": self._gate_observation_from_read(direction_read),
+                },
+            )
             direction, direction_resolution = await self._resolve_direction(
                 session,
                 direction_read,
                 person,
                 allowed,
+                trace=trace,
+            )
+            direction_span.finish(
+                output_payload={
+                    "direction": direction.value,
+                    "resolution": direction_resolution,
+                }
             )
             decision = AccessDecision.GRANTED if allowed else AccessDecision.DENIED
+            timing_span = trace.start_span(
+                "Presence Timing Classification",
+                attributes={
+                    "allowed": allowed,
+                    "person_id": str(person.id) if person else None,
+                    "direction": direction.value,
+                },
+            )
             timing = (
                 await self._classify_timing(session, person, direction, read.captured_at)
                 if allowed and person
                 else TimingClassification.UNKNOWN
             )
+            timing_span.finish(output_payload={"timing_classification": timing.value})
 
+            persistence_span = trace.start_span(
+                "Persist Access Event, Presence, and Anomalies",
+                attributes={"decision": decision.value, "direction": direction.value},
+            )
             event = AccessEvent(
                 vehicle=vehicle,
                 person_id=person.id if person else None,
@@ -540,6 +645,9 @@ class AccessEventService:
                         ],
                     },
                     "direction_resolution": direction_resolution,
+                    "telemetry": {
+                        "trace_id": trace.trace_id,
+                    },
                 },
             )
             session.add(event)
@@ -552,6 +660,13 @@ class AccessEventService:
                 await self._update_presence(session, person, event)
 
             await session.commit()
+            persistence_span.finish(
+                output_payload={
+                    "event_id": str(event.id),
+                    "anomaly_count": len(anomalies),
+                    "presence_updated": bool(allowed and person),
+                }
+            )
 
         await event_bus.publish(
             "access_event.finalized",
@@ -572,7 +687,7 @@ class AccessEventService:
                 await self._publish_gate_open_skipped(event, direction_resolution)
                 gate_opened = False
             else:
-                gate_opened = await self._open_gate_for_event(event, person, open_garage_doors=True)
+                gate_opened = await self._open_gate_for_event(event, person, open_garage_doors=True, trace=trace)
             if gate_opened and person:
                 await get_notification_service().notify(
                     NotificationContext(
@@ -597,19 +712,53 @@ class AccessEventService:
                     facts=self._notification_facts(event, person, vehicle, anomaly.message),
                 )
                 )
+        trace.finish(
+            status="ok",
+            level="warning" if anomalies or decision == AccessDecision.DENIED else "info",
+            summary=f"{decision.value.title()} {direction.value} for plate {event.registration_number}",
+            access_event_id=event.id,
+            context={
+                "event_id": str(event.id),
+                "decision": decision.value,
+                "direction": direction.value,
+                "timing_classification": timing.value,
+                "anomaly_count": len(anomalies),
+            },
+        )
 
     async def _open_gate_for_event(
-        self, event: AccessEvent, person: Person | None, *, open_garage_doors: bool
+        self,
+        event: AccessEvent,
+        person: Person | None,
+        *,
+        open_garage_doors: bool,
+        trace: Any | None = None,
     ) -> bool:
         reason = (
             f"Automatic LPR grant for {event.registration_number}"
             f"{f' ({person.display_name})' if person else ''}"
         )
         gate_opened = False
+        gate_span = (
+            trace.start_span(
+                "Home Assistant Gate Open Command Sent",
+                category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                attributes={
+                    "event_id": str(event.id),
+                    "registration_number": event.registration_number,
+                    "controller": settings.gate_controller,
+                },
+                input_payload={"reason": reason},
+            )
+            if trace
+            else None
+        )
         try:
             gate = get_gate_controller(settings.gate_controller)
             result = await gate.open_gate(reason)
         except UnsupportedModuleError as exc:
+            if gate_span:
+                gate_span.finish(status="error", error=exc)
             logger.error(
                 "gate_controller_unavailable",
                 extra={
@@ -640,6 +789,16 @@ class AccessEventService:
                 )
             )
         else:
+            if gate_span:
+                gate_span.finish(
+                    status="ok" if result.accepted else "error",
+                    output_payload={
+                        "accepted": result.accepted,
+                        "state": result.state.value,
+                        "detail": result.detail,
+                    },
+                    error=None if result.accepted else result.detail,
+                )
             event_type = "gate.open_requested" if result.accepted else "gate.open_failed"
             await event_bus.publish(
                 event_type,
@@ -686,7 +845,7 @@ class AccessEventService:
                 )
 
         if gate_opened and open_garage_doors:
-            await self._open_garage_doors_for_event(event, person, reason)
+            await self._open_garage_doors_for_event(event, person, reason, trace=trace)
         return gate_opened
 
     async def _publish_gate_open_skipped(
@@ -707,7 +866,7 @@ class AccessEventService:
         )
 
     async def _open_garage_doors_for_event(
-        self, event: AccessEvent, person: Person | None, reason: str
+        self, event: AccessEvent, person: Person | None, reason: str, *, trace: Any | None = None
     ) -> None:
         if not person or not person.garage_door_entity_ids:
             return
@@ -741,6 +900,20 @@ class AccessEventService:
 
         for entity in entities:
             schedule_evaluation = schedule_evaluations[str(entity["entity_id"])]
+            garage_span = (
+                trace.start_span(
+                    "Home Assistant Garage Door Command",
+                    category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                    attributes={
+                        "event_id": str(event.id),
+                        "entity_id": str(entity["entity_id"]),
+                        "name": str(entity.get("name") or entity["entity_id"]),
+                    },
+                    input_payload={"reason": reason, "action": "open"},
+                )
+                if trace
+                else None
+            )
             if not schedule_evaluation.allowed:
                 detail = (
                     schedule_evaluation.reason
@@ -775,9 +948,29 @@ class AccessEventService:
                         ),
                     )
                 )
+                if garage_span:
+                    garage_span.finish(
+                        status="error",
+                        output_payload={
+                            "accepted": False,
+                            "state": "schedule_denied",
+                            "detail": detail,
+                        },
+                        error=detail,
+                    )
                 continue
 
             outcome = await command_cover(client, entity, "open", reason)
+            if garage_span:
+                garage_span.finish(
+                    status="ok" if outcome.accepted else "error",
+                    output_payload={
+                        "accepted": outcome.accepted,
+                        "state": outcome.state,
+                        "detail": outcome.detail,
+                    },
+                    error=None if outcome.accepted else outcome.detail,
+                )
             event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
             await event_bus.publish(
                 event_type,
@@ -881,7 +1074,13 @@ class AccessEventService:
         return label or vehicle.description or vehicle.registration_number or fallback
 
     async def _resolve_direction(
-        self, session: AsyncSession, read: PlateRead, person: Person | None, allowed: bool
+        self,
+        session: AsyncSession,
+        read: PlateRead,
+        person: Person | None,
+        allowed: bool,
+        *,
+        trace: Any | None = None,
     ) -> tuple[AccessDirection, dict[str, Any]]:
         gate_observation = self._gate_observation_from_read(read)
         gate_state = self._coerce_gate_state(gate_observation.get("state"))
@@ -900,7 +1099,11 @@ class AccessEventService:
             resolution["source"] = "gate_state"
             resolution["direction"] = direction.value
             if person and await self._person_is_present(session, person):
-                camera_decision = await self._resolve_duplicate_arrival_with_camera(read, person)
+                camera_decision = (
+                    await self._resolve_duplicate_arrival_with_camera(read, person, trace=trace)
+                    if trace
+                    else await self._resolve_duplicate_arrival_with_camera(read, person)
+                )
                 resolution["camera_tiebreaker"] = camera_decision
                 camera_direction = camera_decision.get("direction")
                 if camera_direction in {AccessDirection.ENTRY.value, AccessDirection.EXIT.value}:
@@ -941,7 +1144,7 @@ class AccessEventService:
         return bool(presence and presence.state == PresenceState.PRESENT)
 
     async def _resolve_duplicate_arrival_with_camera(
-        self, read: PlateRead, person: Person
+        self, read: PlateRead, person: Person, *, trace: Any | None = None
     ) -> dict[str, Any]:
         runtime = self._runtime or await get_runtime_config()
         prompt = (
@@ -952,12 +1155,40 @@ class AccessEventService:
             "towards the camera, which means Arriving, or away from the camera, which means Leaving. "
             'Return only JSON like {"direction":"entry|exit|unknown","confidence":0.0,"reason":"short reason"}.'
         )
+        camera_span = (
+            trace.start_span(
+                "LLM Vision Direction Tie-breaker",
+                category=TELEMETRY_CATEGORY_LPR,
+                attributes={
+                    "provider": "openai",
+                    "model": runtime.openai_model,
+                    "camera": GATE_CAMERA_IDENTIFIER,
+                    "prompt_category": "access_direction_tiebreaker",
+                },
+            )
+            if trace
+            else None
+        )
+        artifact: dict[str, Any] | None = None
         try:
             media = await get_unifi_protect_service().snapshot(
                 GATE_CAMERA_IDENTIFIER,
                 width=runtime.unifi_protect_snapshot_width,
                 height=runtime.unifi_protect_snapshot_height,
             )
+            if trace:
+                artifact = await telemetry.store_artifact(
+                    media.content,
+                    content_type=media.content_type,
+                    kind="camera_snapshot",
+                    trace_id=trace.trace_id,
+                    span_id=camera_span.span_id if camera_span else None,
+                    metadata={
+                        "camera": GATE_CAMERA_IDENTIFIER,
+                        "registration_number": read.registration_number,
+                        "person_id": str(person.id),
+                    },
+                )
             result = await analyze_image_with_provider(
                 "openai",
                 prompt=prompt,
@@ -965,6 +1196,15 @@ class AccessEventService:
                 mime_type=media.content_type,
             )
         except Exception as exc:
+            if camera_span:
+                camera_span.finish(
+                    status="error",
+                    error=exc,
+                    output_payload={
+                        "artifact": artifact,
+                        "direction": "unknown",
+                    },
+                )
             logger.warning(
                 "access_direction_camera_tiebreaker_failed",
                 extra={
@@ -980,9 +1220,22 @@ class AccessEventService:
                 "direction": "unknown",
                 "confidence": 0.0,
                 "error": str(exc),
+                "artifact": artifact,
             }
 
         direction, confidence, reason = self._parse_camera_direction_analysis(result.text)
+        if camera_span:
+            camera_span.finish(
+                output_payload={
+                    "artifact": artifact,
+                    "provider": "openai",
+                    "model": runtime.openai_model,
+                    "direction": direction,
+                    "confidence": confidence,
+                    "reason": reason,
+                    "analysis": result.text[:1000],
+                }
+            )
         await event_bus.publish(
             "access_event.direction_tiebreaker",
             {
@@ -1003,6 +1256,7 @@ class AccessEventService:
             "confidence": confidence,
             "reason": reason,
             "analysis": result.text[:1000],
+            "artifact": artifact,
         }
 
     def _parse_camera_direction_analysis(self, text: str) -> tuple[str, float | None, str | None]:

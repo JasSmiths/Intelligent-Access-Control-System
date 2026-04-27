@@ -7,6 +7,7 @@ from app.core.logging import get_logger
 from app.modules.lpr.ubiquiti import UbiquitiLprAdapter, UbiquitiLprPayload
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
+from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -25,6 +26,12 @@ async def receive_ubiquiti_lpr(
     """
 
     raw_payload = await request.json()
+    telemetry.record_span(
+        "Webhook payload received",
+        category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+        attributes={"source": "ubiquiti_lpr"},
+        output_payload={"payload_shape": _payload_shape(raw_payload)},
+    )
     try:
         payload = UbiquitiLprPayload.model_validate(raw_payload)
     except ValidationError as exc:
@@ -45,11 +52,26 @@ async def receive_ubiquiti_lpr(
                     "event_id": event_id,
                 },
             )
+            telemetry.record_span(
+                "Webhook test payload accepted",
+                category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+                attributes={"source": "ubiquiti_alarm_manager"},
+                output_payload={"event_id": event_id},
+            )
             return {"status": "accepted", "event": "Test Alarm Manager webhook"}
 
         logger.warning(
             "ubiquiti_lpr_payload_invalid",
             extra={
+                "payload_shape": _payload_shape(raw_payload),
+                "errors": exc.errors(include_url=False, include_input=False),
+            },
+        )
+        telemetry.record_span(
+            "Webhook payload validation failed",
+            category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+            status="error",
+            output_payload={
                 "payload_shape": _payload_shape(raw_payload),
                 "errors": exc.errors(include_url=False, include_input=False),
             },
@@ -64,6 +86,15 @@ async def receive_ubiquiti_lpr(
         ) from exc
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
+    telemetry.record_span(
+        "Webhook payload normalized to PlateRead",
+        category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+        output_payload={
+            "registration_number": read.registration_number,
+            "confidence": read.confidence,
+            "source": read.source,
+        },
+    )
     await service.enqueue_plate_read(read)
     return {"status": "accepted", "plate": read.registration_number}
 

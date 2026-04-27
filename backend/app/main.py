@@ -21,6 +21,13 @@ from app.services.access_events import get_access_event_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config
+from app.services.telemetry import (
+    CURRENT_REQUEST_ID,
+    TELEMETRY_CATEGORY_WEBHOOKS_API,
+    actor_from_user,
+    telemetry,
+    telemetry_request_id,
+)
 from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
@@ -86,6 +93,12 @@ PUBLIC_AUTH_PATHS = {
     "/api/webhooks/ubiquiti/lpr",
 }
 
+READ_ONLY_METHODS = {"GET", "HEAD"}
+ALWAYS_TRACE_API_PREFIXES = (
+    "/api/v1/webhooks/",
+    "/api/webhooks/",
+)
+
 
 def _requires_auth(path: str) -> bool:
     if path in {"/", "/health", "/api/v1/health"}:
@@ -93,6 +106,14 @@ def _requires_auth(path: str) -> bool:
     if path in PUBLIC_AUTH_PATHS:
         return False
     return path.startswith("/api/") or path in {"/docs", "/openapi.json", "/redoc"}
+
+
+def _should_trace_api_request(method: str, path: str) -> bool:
+    if not path.startswith("/api/") or path.startswith("/api/v1/telemetry"):
+        return False
+    if path.startswith(ALWAYS_TRACE_API_PREFIXES):
+        return True
+    return method.upper() not in READ_ONLY_METHODS
 
 
 @app.middleware("http")
@@ -123,6 +144,61 @@ async def auth_guard(request: Request, call_next):
     request.state.user = user
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def telemetry_http_middleware(request: Request, call_next):
+    path = request.url.path
+    if not _should_trace_api_request(request.method, path):
+        return await call_next(request)
+
+    request_id = request.headers.get("x-request-id") or telemetry_request_id()
+    request_token = CURRENT_REQUEST_ID.set(request_id)
+    client_host = request.client.host if request.client else None
+    trace = telemetry.start_trace(
+        f"HTTP {request.method} {path}",
+        category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+        actor="System",
+        source=client_host,
+        context={
+            "method": request.method,
+            "path": path,
+            "query": str(request.url.query or ""),
+            "client": client_host,
+            "user_agent": request.headers.get("user-agent"),
+            "request_id": request_id,
+        },
+    )
+    span = trace.start_span(
+        "HTTP request execution",
+        attributes={"method": request.method, "path": path},
+    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        span.finish(status="error", error=exc)
+        trace.actor = actor_from_user(getattr(request.state, "user", None))
+        trace.finish(
+            status="error",
+            level="error",
+            summary=f"{request.method} {path} failed",
+            error=exc,
+        )
+        CURRENT_REQUEST_ID.reset(request_token)
+        raise
+
+    span.finish(output_payload={"status_code": response.status_code})
+    level = "error" if response.status_code >= 500 else "warning" if response.status_code >= 400 else "info"
+    trace.actor = actor_from_user(getattr(request.state, "user", None))
+    trace.finish(
+        status="error" if response.status_code >= 500 else "ok",
+        level=level,
+        summary=f"{request.method} {path} returned HTTP {response.status_code}",
+        context={"status_code": response.status_code},
+    )
+    response.headers["X-IACS-Request-ID"] = request_id
+    CURRENT_REQUEST_ID.reset(request_token)
+    return response
 
 
 @app.get("/health", tags=["health"])

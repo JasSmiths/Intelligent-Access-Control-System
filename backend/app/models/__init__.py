@@ -2,6 +2,7 @@
 
 from app.models.core import (
     AccessEvent,
+    AuditLog,
     Anomaly,
     ChatMessage,
     ChatSession,
@@ -11,12 +12,15 @@ from app.models.core import (
     Presence,
     Schedule,
     SystemSetting,
+    TelemetrySpan,
+    TelemetryTrace,
     User,
     Vehicle,
 )
 
 __all__ = [
     "AccessEvent",
+    "AuditLog",
     "Anomaly",
     "ChatMessage",
     "ChatSession",
@@ -26,6 +30,8 @@ __all__ = [
     "Presence",
     "Schedule",
     "SystemSetting",
+    "TelemetrySpan",
+    "TelemetryTrace",
     "User",
     "Vehicle",
 ]
