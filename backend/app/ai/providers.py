@@ -466,6 +466,17 @@ class LocalProvider:
                 "verify_schedule_access",
             }:
                 summaries.append(self._summarize_schedule_tool(tool_name, output))
+            elif tool_name in {
+                "query_notification_catalog",
+                "query_notification_workflows",
+                "get_notification_workflow",
+                "create_notification_workflow",
+                "update_notification_workflow",
+                "delete_notification_workflow",
+                "preview_notification_workflow",
+                "test_notification_workflow",
+            }:
+                summaries.append(self._summarize_notification_tool(tool_name, output))
             else:
                 summaries.append(f"{tool_name}: {json.dumps(output, default=str)}")
         return "\n".join(summaries)
@@ -478,9 +489,10 @@ class LocalProvider:
         person = latest.get("person") or latest.get("registration_number")
         decision = latest.get("decision")
         direction = latest.get("direction")
+        occurred_at = latest.get("occurred_at_display") or latest.get("occurred_at")
         if decision == "denied":
-            return f"{person} had a denied access event at {latest.get('occurred_at')}."
-        return f"{person} had a {direction} event at {latest.get('occurred_at')}."
+            return f"{person} had a denied access event at {occurred_at}."
+        return f"{person} had a {direction} event at {occurred_at}."
 
     def _summarize_presence(self, output: dict[str, Any]) -> str:
         records = output.get("presence", [])
@@ -503,8 +515,11 @@ class LocalProvider:
         )
 
     def _summarize_device_open(self, output: dict[str, Any]) -> str:
+        if output.get("requires_details"):
+            return str(output.get("detail") or "Which gate or garage door should I open?")
         if output.get("requires_confirmation"):
-            target = output.get("target") or "that device"
+            device = output.get("device") if isinstance(output.get("device"), dict) else {}
+            target = device.get("name") or output.get("target") or "that device"
             return f"Please use the confirmation button before I open {target}."
         device = output.get("device") if isinstance(output.get("device"), dict) else {}
         name = device.get("name") or output.get("target") or "the device"
@@ -587,13 +602,13 @@ class LocalProvider:
     def _summarize_camera_attachment(self, output: dict[str, Any]) -> str:
         if output.get("error"):
             return f"Camera snapshot failed: {output.get('error')}"
-        attachment = output.get("attachment") if isinstance(output.get("attachment"), dict) else {}
-        filename = attachment.get("filename") or "the camera snapshot"
-        return f"I fetched {filename} and attached it here."
+        return "I fetched the latest camera snapshot and attached it here."
 
     def _summarize_schedule_tool(self, tool_name: str, output: dict[str, Any]) -> str:
         if output.get("requires_details"):
             return str(output.get("detail") or "I need more schedule details before I can do that.")
+        if output.get("requires_confirmation"):
+            return str(output.get("detail") or "Please use the confirmation button before I change that schedule.")
         if output.get("error"):
             return f"Schedule action failed: {output.get('error')}"
 
@@ -625,6 +640,59 @@ class LocalProvider:
         if tool_name == "verify_schedule_access":
             return str(output.get("reason") or "Schedule access verification completed.")
         return json.dumps(output, default=str)
+
+    def _summarize_notification_tool(self, tool_name: str, output: dict[str, Any]) -> str:
+        if output.get("requires_confirmation"):
+            return str(output.get("detail") or "Please use the confirmation button before I make that notification change.")
+        if output.get("error"):
+            return f"Notification action failed: {output.get('error')}"
+
+        if tool_name == "query_notification_catalog":
+            triggers = [
+                str(event.get("label") or event.get("value"))
+                for group in output.get("triggers", [])
+                for event in group.get("events", [])
+                if isinstance(event, dict)
+            ]
+            integrations = [
+                f"{item.get('name')} ({'configured' if item.get('configured') else 'not configured'})"
+                for item in output.get("integrations", [])
+                if isinstance(item, dict)
+            ]
+            trigger_text = ", ".join(triggers[:8]) if triggers else "the standard access-control events"
+            integration_text = "; ".join(integrations) if integrations else "no delivery integrations reported"
+            return (
+                "Notification options available: "
+                f"triggers include {trigger_text}. "
+                f"Delivery options: {integration_text}."
+            )
+
+        if tool_name == "query_notification_workflows":
+            workflows = output.get("workflows", [])
+            if not workflows:
+                return "I found no notification workflows."
+            names = ", ".join(str(workflow.get("name")) for workflow in workflows[:5] if isinstance(workflow, dict))
+            return f"I found {output.get('count', len(workflows))} notification workflow(s): {names}."
+
+        workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+        name = workflow.get("name") or output.get("workflow_name") or "notification workflow"
+        if tool_name == "get_notification_workflow":
+            if output.get("found"):
+                return f"{name} is a notification workflow for {workflow.get('trigger_event') or 'the selected trigger'}."
+            return "I could not find that notification workflow."
+        if tool_name == "create_notification_workflow":
+            return f"Created notification workflow {name}." if output.get("created") else str(output.get("detail") or "I did not create the notification workflow.")
+        if tool_name == "update_notification_workflow":
+            return f"Updated notification workflow {name}." if output.get("updated") else str(output.get("detail") or "I did not update the notification workflow.")
+        if tool_name == "delete_notification_workflow":
+            return f"Deleted notification workflow {name}." if output.get("deleted") else str(output.get("detail") or "I did not delete the notification workflow.")
+        if tool_name == "preview_notification_workflow":
+            preview = output.get("preview") if isinstance(output.get("preview"), dict) else {}
+            action_count = len(preview.get("actions", [])) if isinstance(preview.get("actions"), list) else 0
+            return f"Previewed the notification workflow with {action_count} action(s)."
+        if tool_name == "test_notification_workflow":
+            return "Sent the notification workflow test." if output.get("sent") else str(output.get("detail") or "I did not send the notification workflow test.")
+        return "Notification workflow action completed."
 
 
 def _format_engine_capacity(value: Any) -> str | None:

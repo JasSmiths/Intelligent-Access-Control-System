@@ -1,17 +1,22 @@
 import asyncio
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from functools import lru_cache
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.ai.providers import analyze_image_with_provider
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
+from app.modules.gate.base import GateState
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
@@ -30,8 +35,14 @@ from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
+from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
+
+GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
+GATE_CAMERA_IDENTIFIER = "camera.gate"
+ARRIVAL_GATE_STATES = {GateState.CLOSED}
+DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 
 
 @dataclass
@@ -43,6 +54,10 @@ class DebounceWindow:
     @property
     def best_read(self) -> PlateRead:
         return max(self.reads, key=lambda read: (read.confidence, read.captured_at))
+
+    @property
+    def first_read(self) -> PlateRead:
+        return min(self.reads, key=lambda read: read.captured_at)
 
 
 class AccessEventService:
@@ -75,12 +90,15 @@ class AccessEventService:
         logger.info("access_event_service_stopped")
 
     async def enqueue_plate_read(self, read: PlateRead) -> None:
+        read = await self._read_with_gate_observation(read)
+        gate_observation = self._gate_observation_from_read(read)
         logger.info(
             "plate_read_received",
             extra={
                 "registration_number": read.registration_number,
                 "confidence": read.confidence,
                 "source": read.source,
+                "gate_state": gate_observation.get("state"),
             },
         )
         await self._queue.put(read)
@@ -90,7 +108,44 @@ class AccessEventService:
                 "registration_number": read.registration_number,
                 "confidence": read.confidence,
                 "source": read.source,
+                "gate_state": gate_observation.get("state"),
             },
+        )
+
+    async def _read_with_gate_observation(self, read: PlateRead) -> PlateRead:
+        observed_at = datetime.now(tz=UTC)
+        detail: str | None = None
+        try:
+            gate = get_gate_controller(settings.gate_controller)
+            state = self._coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
+        except UnsupportedModuleError as exc:
+            state = GateState.UNKNOWN
+            detail = str(exc)
+        except Exception as exc:
+            state = GateState.UNKNOWN
+            detail = str(exc)
+            logger.warning(
+                "gate_state_observation_failed",
+                extra={
+                    "registration_number": read.registration_number,
+                    "source": read.source,
+                    "error": str(exc),
+                },
+            )
+
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[GATE_OBSERVATION_PAYLOAD_KEY] = {
+            "state": state.value,
+            "observed_at": observed_at.isoformat(),
+            "controller": settings.gate_controller,
+            "detail": detail,
+        }
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
         )
 
     async def _process_queue(self) -> None:
@@ -177,6 +232,7 @@ class AccessEventService:
 
     async def _finalize_window(self, window: DebounceWindow) -> None:
         read = window.best_read
+        direction_read = window.first_read
         async with AsyncSessionLocal() as session:
             vehicle = await session.scalar(
                 select(Vehicle)
@@ -206,7 +262,12 @@ class AccessEventService:
                 else None
             )
             allowed = bool(identity_active and schedule_evaluation and schedule_evaluation.allowed)
-            direction = await self._resolve_direction(session, read, person, allowed)
+            direction, direction_resolution = await self._resolve_direction(
+                session,
+                direction_read,
+                person,
+                allowed,
+            )
             decision = AccessDecision.GRANTED if allowed else AccessDecision.DENIED
             timing = (
                 await self._classify_timing(session, person, direction, read.captured_at)
@@ -244,6 +305,7 @@ class AccessEventService:
                             for item in window.reads
                         ],
                     },
+                    "direction_resolution": direction_resolution,
                 },
             )
             session.add(event)
@@ -272,7 +334,11 @@ class AccessEventService:
             },
         )
         if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
-            gate_opened = await self._open_gate_for_event(event, person)
+            if not self._automatic_open_allowed(direction_resolution):
+                await self._publish_gate_open_skipped(event, direction_resolution)
+                gate_opened = False
+            else:
+                gate_opened = await self._open_gate_for_event(event, person, open_garage_doors=True)
             if gate_opened and person:
                 await get_notification_service().notify(
                     NotificationContext(
@@ -298,7 +364,9 @@ class AccessEventService:
                 )
                 )
 
-    async def _open_gate_for_event(self, event: AccessEvent, person: Person | None) -> bool:
+    async def _open_gate_for_event(
+        self, event: AccessEvent, person: Person | None, *, open_garage_doors: bool
+    ) -> bool:
         reason = (
             f"Automatic LPR grant for {event.registration_number}"
             f"{f' ({person.display_name})' if person else ''}"
@@ -383,8 +451,26 @@ class AccessEventService:
                     )
                 )
 
-        await self._open_garage_doors_for_event(event, person, reason)
+        if gate_opened and open_garage_doors:
+            await self._open_garage_doors_for_event(event, person, reason)
         return gate_opened
+
+    async def _publish_gate_open_skipped(
+        self, event: AccessEvent, direction_resolution: dict[str, Any]
+    ) -> None:
+        gate_observation = direction_resolution.get("gate_observation") or {}
+        await event_bus.publish(
+            "gate.open_skipped",
+            {
+                "event_id": str(event.id),
+                "registration_number": event.registration_number,
+                "state": gate_observation.get("state") or GateState.UNKNOWN.value,
+                "detail": (
+                    "Automatic gate and garage-door commands require the top gate "
+                    "to be closed at plate-read time."
+                ),
+            },
+        )
 
     async def _open_garage_doors_for_event(
         self, event: AccessEvent, person: Person | None, reason: str
@@ -422,7 +508,10 @@ class AccessEventService:
         for entity in entities:
             schedule_evaluation = schedule_evaluations[str(entity["entity_id"])]
             if not schedule_evaluation.allowed:
-                detail = schedule_evaluation.reason or f"{entity.get('name') or entity['entity_id']} is outside its assigned schedule."
+                detail = (
+                    schedule_evaluation.reason
+                    or f"{entity.get('name') or entity['entity_id']} is outside its assigned schedule."
+                )
                 await event_bus.publish(
                     "garage_door.open_failed",
                     {
@@ -559,21 +648,223 @@ class AccessEventService:
 
     async def _resolve_direction(
         self, session: AsyncSession, read: PlateRead, person: Person | None, allowed: bool
-    ) -> AccessDirection:
+    ) -> tuple[AccessDirection, dict[str, Any]]:
+        gate_observation = self._gate_observation_from_read(read)
+        gate_state = self._coerce_gate_state(gate_observation.get("state"))
+        resolution: dict[str, Any] = {
+            "source": "unknown",
+            "gate_observation": gate_observation,
+        }
+
+        if not allowed:
+            resolution["source"] = "access_denied"
+            resolution["direction"] = AccessDirection.DENIED.value
+            return AccessDirection.DENIED, resolution
+
+        if gate_state in ARRIVAL_GATE_STATES:
+            direction = AccessDirection.ENTRY
+            resolution["source"] = "gate_state"
+            resolution["direction"] = direction.value
+            if person and await self._person_is_present(session, person):
+                camera_decision = await self._resolve_duplicate_arrival_with_camera(read, person)
+                resolution["camera_tiebreaker"] = camera_decision
+                camera_direction = camera_decision.get("direction")
+                if camera_direction in {AccessDirection.ENTRY.value, AccessDirection.EXIT.value}:
+                    direction = AccessDirection(camera_direction)
+                    resolution["source"] = "camera_tiebreaker"
+                    resolution["direction"] = direction.value
+            return direction, resolution
+
+        if gate_state in DEPARTURE_GATE_STATES:
+            resolution["source"] = "gate_state"
+            resolution["direction"] = AccessDirection.EXIT.value
+            return AccessDirection.EXIT, resolution
+
         explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
         if explicit in {"entry", "enter", "arrival", "in"}:
-            return AccessDirection.ENTRY if allowed else AccessDirection.DENIED
+            resolution["source"] = "payload"
+            resolution["direction"] = AccessDirection.ENTRY.value
+            return AccessDirection.ENTRY, resolution
         if explicit in {"exit", "leave", "departure", "out"}:
-            return AccessDirection.EXIT if allowed else AccessDirection.DENIED
-        if not allowed:
-            return AccessDirection.DENIED
+            resolution["source"] = "payload"
+            resolution["direction"] = AccessDirection.EXIT.value
+            return AccessDirection.EXIT, resolution
         if not person:
-            return AccessDirection.ENTRY
+            resolution["source"] = "default_entry_no_person"
+            resolution["direction"] = AccessDirection.ENTRY.value
+            return AccessDirection.ENTRY, resolution
 
+        if await self._person_is_present(session, person):
+            resolution["source"] = "presence"
+            resolution["direction"] = AccessDirection.EXIT.value
+            return AccessDirection.EXIT, resolution
+        resolution["source"] = "presence"
+        resolution["direction"] = AccessDirection.ENTRY.value
+        return AccessDirection.ENTRY, resolution
+
+    async def _person_is_present(self, session: AsyncSession, person: Person) -> bool:
         presence = await session.get(Presence, person.id)
-        if presence and presence.state == PresenceState.PRESENT:
-            return AccessDirection.EXIT
-        return AccessDirection.ENTRY
+        return bool(presence and presence.state == PresenceState.PRESENT)
+
+    async def _resolve_duplicate_arrival_with_camera(
+        self, read: PlateRead, person: Person
+    ) -> dict[str, Any]:
+        runtime = self._runtime or await get_runtime_config()
+        prompt = (
+            "You are resolving an access-control direction conflict. "
+            f"The top gate was closed when plate {read.registration_number} was read, "
+            f"but {person.display_name} is already marked present. "
+            "Inspect the gate camera snapshot and decide whether the visible vehicle is facing "
+            "towards the camera, which means Arriving, or away from the camera, which means Leaving. "
+            'Return only JSON like {"direction":"entry|exit|unknown","confidence":0.0,"reason":"short reason"}.'
+        )
+        try:
+            media = await get_unifi_protect_service().snapshot(
+                GATE_CAMERA_IDENTIFIER,
+                width=runtime.unifi_protect_snapshot_width,
+                height=runtime.unifi_protect_snapshot_height,
+            )
+            result = await analyze_image_with_provider(
+                "openai",
+                prompt=prompt,
+                image_bytes=media.content,
+                mime_type=media.content_type,
+            )
+        except Exception as exc:
+            logger.warning(
+                "access_direction_camera_tiebreaker_failed",
+                extra={
+                    "registration_number": read.registration_number,
+                    "person_id": str(person.id),
+                    "camera": GATE_CAMERA_IDENTIFIER,
+                    "error": str(exc),
+                },
+            )
+            return {
+                "camera": GATE_CAMERA_IDENTIFIER,
+                "provider": "openai",
+                "direction": "unknown",
+                "confidence": 0.0,
+                "error": str(exc),
+            }
+
+        direction, confidence, reason = self._parse_camera_direction_analysis(result.text)
+        await event_bus.publish(
+            "access_event.direction_tiebreaker",
+            {
+                "registration_number": read.registration_number,
+                "person_id": str(person.id),
+                "person": person.display_name,
+                "camera": GATE_CAMERA_IDENTIFIER,
+                "provider": "openai",
+                "direction": direction,
+                "confidence": confidence,
+                "reason": reason,
+            },
+        )
+        return {
+            "camera": GATE_CAMERA_IDENTIFIER,
+            "provider": "openai",
+            "direction": direction,
+            "confidence": confidence,
+            "reason": reason,
+            "analysis": result.text[:1000],
+        }
+
+    def _parse_camera_direction_analysis(self, text: str) -> tuple[str, float | None, str | None]:
+        parsed = self._json_object_from_text(text)
+        if parsed:
+            direction = self._normalize_camera_direction(parsed.get("direction"))
+            confidence = self._coerce_confidence(parsed.get("confidence"))
+            reason = str(parsed.get("reason") or "").strip() or None
+            if direction != "unknown":
+                return direction, confidence, reason
+
+        normalized = text.lower()
+        if any(
+            phrase in normalized
+            for phrase in ("away from the camera", "facing away", "leaving", "departing", "rear of")
+        ):
+            return AccessDirection.EXIT.value, None, text[:240].strip() or None
+        if any(
+            phrase in normalized
+            for phrase in (
+                "towards the camera",
+                "toward the camera",
+                "facing the camera",
+                "arriving",
+                "approaching",
+            )
+        ):
+            return AccessDirection.ENTRY.value, None, text[:240].strip() or None
+        return "unknown", None, text[:240].strip() or None
+
+    def _json_object_from_text(self, text: str) -> dict[str, Any] | None:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(
+                r"^```(?:json)?\s*|\s*```$",
+                "",
+                stripped,
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip()
+        candidates = [stripped]
+        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    def _normalize_camera_direction(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"entry", "enter", "arrival", "arriving", "toward_camera", "towards_camera"}:
+            return AccessDirection.ENTRY.value
+        if normalized in {"exit", "leave", "leaving", "departure", "departing", "away_from_camera"}:
+            return AccessDirection.EXIT.value
+        return "unknown"
+
+    def _coerce_confidence(self, value: Any) -> float | None:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return None
+        if confidence > 1:
+            confidence = confidence / 100
+        return max(0.0, min(confidence, 1.0))
+
+    def _automatic_open_allowed(self, direction_resolution: dict[str, Any]) -> bool:
+        gate_observation = direction_resolution.get("gate_observation") or {}
+        return self._coerce_gate_state(gate_observation.get("state")) == GateState.CLOSED
+
+    def _gate_observation_from_read(self, read: PlateRead) -> dict[str, Any]:
+        value = (read.raw_payload or {}).get(GATE_OBSERVATION_PAYLOAD_KEY)
+        if not isinstance(value, dict):
+            return {
+                "state": GateState.UNKNOWN.value,
+                "observed_at": None,
+                "detail": "No gate observation captured.",
+            }
+        state = self._coerce_gate_state(value.get("state")) or GateState.UNKNOWN
+        return {
+            "state": state.value,
+            "observed_at": value.get("observed_at"),
+            "controller": value.get("controller"),
+            "detail": value.get("detail"),
+        }
+
+    def _coerce_gate_state(self, value: Any) -> GateState | None:
+        if isinstance(value, GateState):
+            return value
+        try:
+            return GateState(str(value or "").lower())
+        except ValueError:
+            return None
 
     async def _classify_timing(
         self, session: AsyncSession, person: Person, direction: AccessDirection, occurred_at: datetime

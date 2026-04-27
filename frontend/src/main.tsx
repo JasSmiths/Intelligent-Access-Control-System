@@ -611,7 +611,9 @@ type ChatAttachmentDraft = ChatAttachment & {
 };
 
 type ChatConfirmationAction = {
-  type: "open_device" | "update_schedule";
+  type: string;
+  toolName: string;
+  toolArguments: Record<string, unknown>;
   target: string;
   displayTarget: string;
   command: string;
@@ -631,6 +633,13 @@ type ChatMessageItem = {
   attachments?: ChatAttachment[];
   confirmationAction?: ChatConfirmationAction | null;
   streaming?: boolean;
+};
+
+type ChatCopyMenu = {
+  messageId: string;
+  text: string;
+  x: number;
+  y: number;
 };
 
 type ThemeMode = "system" | "light" | "dark";
@@ -798,11 +807,59 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function formatDeviceTargetName(value: string) {
   return value
+    .replace(/\*\*/g, "")
     .replace(/[_-]+/g, " ")
     .trim()
     .split(/\s+/)
     .map((part) => part ? part[0].toUpperCase() + part.slice(1) : part)
     .join(" ");
+}
+
+function cleanChatText(text: string, attachments: ChatAttachment[] = []) {
+  const fileLinkReplacement = attachments.length
+    ? (attachments.some((attachment) => attachment.kind === "image") ? "the snapshot" : "the attached file")
+    : "$1";
+  let cleaned = text
+    .replace(/\[([^\]]+)\]\((\/api\/chat\/files\/[^)]+)\)/g, fileLinkReplacement)
+    .replace(/\s*\/api\/chat\/files\/[A-Za-z0-9_-]+\b/g, "")
+    .replace(/\*\*\*([^*]+)\*\*\*/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*\*/g, "")
+    .replace(/\bHome Assistant cover entity ID\b/gi, "device name")
+    .replace(/\bHome Assistant entity ID\b/gi, "device name")
+    .replace(/\bHome Assistant\b/gi, "the system")
+    .replace(/\bcover entity ID\b/gi, "device name")
+    .replace(/\bentity ID\b/gi, "device name")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  attachments.forEach((attachment) => {
+    if (attachment.source === "system_media" && attachment.filename) {
+      cleaned = cleaned.replaceAll(attachment.filename, "the snapshot");
+    }
+  });
+  if (!cleaned && attachments.some((attachment) => attachment.kind === "image")) {
+    cleaned = "Here's the latest snapshot.";
+  }
+  return cleaned;
+}
+
+async function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
 }
 
 function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | null {
@@ -811,12 +868,17 @@ function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | 
     if (!isRecord(result) || !isRecord(result.output)) continue;
     if (result.output.requires_confirmation !== true) continue;
     const args = isRecord(result.arguments) ? result.arguments : {};
+    const toolName = String(result.name || "").trim();
+    const confirmationField = String(result.output.confirmation_field || (toolName === "test_notification_workflow" ? "confirm_send" : "confirm"));
+    const toolArguments = { ...args, [confirmationField]: true };
     if (result.name === "open_device") {
       const target = String(result.output.target || args.target || args.entity_id || "").trim();
       if (!target) return null;
       const displayTarget = formatDeviceTargetName(target);
       return {
         type: "open_device",
+        toolName,
+        toolArguments,
         target,
         displayTarget,
         command: `confirm open ${target}`,
@@ -834,6 +896,8 @@ function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | 
       const summary = typeof result.output.summary === "string" ? result.output.summary : "the requested times";
       return {
         type: "update_schedule",
+        toolName,
+        toolArguments,
         target,
         displayTarget: target,
         command: `confirm update ${target} schedule`,
@@ -843,6 +907,71 @@ function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | 
         pendingLabel: "Update confirmed",
         statusLabel: `Updating ${target}...`,
         userEcho: `Confirmed: update ${target}`
+      };
+    }
+    if (result.name === "delete_schedule") {
+      const schedule = isRecord(result.output.schedule) ? result.output.schedule : {};
+      const target = String(result.output.schedule_name || schedule.name || args.schedule_name || args.name || "").trim();
+      if (!target) return null;
+      return {
+        type: "delete_schedule",
+        toolName,
+        toolArguments,
+        target,
+        displayTarget: target,
+        command: `confirm delete ${target} schedule`,
+        title: `Delete ${target}?`,
+        description: String(result.output.detail || "This schedule will be permanently deleted."),
+        buttonLabel: "Delete schedule",
+        pendingLabel: "Delete confirmed",
+        statusLabel: `Deleting ${target}...`,
+        userEcho: `Confirmed: delete ${target}`
+      };
+    }
+    if ([
+      "create_notification_workflow",
+      "update_notification_workflow",
+      "delete_notification_workflow",
+      "test_notification_workflow"
+    ].includes(toolName)) {
+      const target = String(result.output.workflow_name || args.rule_name || args.name || "notification workflow").trim();
+      const actionVerb = toolName === "create_notification_workflow"
+        ? "Create"
+        : toolName === "update_notification_workflow"
+          ? "Update"
+          : toolName === "delete_notification_workflow"
+            ? "Delete"
+            : "Send test for";
+      return {
+        type: toolName,
+        toolName,
+        toolArguments,
+        target,
+        displayTarget: target,
+        command: `${actionVerb.toLowerCase()} ${target}`,
+        title: `${actionVerb} ${target}?`,
+        description: String(result.output.detail || "This changes notification workflow behaviour."),
+        buttonLabel: toolName === "test_notification_workflow" ? "Send test" : actionVerb,
+        pendingLabel: "Confirmed",
+        statusLabel: `${actionVerb} ${target}...`,
+        userEcho: `Confirmed: ${actionVerb.toLowerCase()} ${target}`
+      };
+    }
+    if (toolName) {
+      const target = String(result.output.target || result.output.schedule_name || result.output.workflow_name || args.target || args.schedule_name || args.name || toolName.replace(/_/g, " ")).trim();
+      return {
+        type: toolName,
+        toolName,
+        toolArguments,
+        target,
+        displayTarget: target,
+        command: `confirm ${toolName}`,
+        title: `Confirm ${target}?`,
+        description: String(result.output.detail || "This action needs confirmation before Alfred continues."),
+        buttonLabel: "Confirm",
+        pendingLabel: "Confirmed",
+        statusLabel: `Confirming ${target}...`,
+        userEcho: `Confirmed: ${target}`
       };
     }
   }
@@ -4287,6 +4416,7 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
   const { values, loading, save, reload } = useSettings();
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
+  const [llmProviderSaving, setLlmProviderSaving] = React.useState(false);
   const [protectStatus, setProtectStatus] = React.useState<UnifiProtectStatus | null>(null);
   const [protectCameras, setProtectCameras] = React.useState<UnifiProtectCamera[]>([]);
   const [protectSnapshotRefreshToken, setProtectSnapshotRefreshToken] = React.useState(0);
@@ -4345,11 +4475,27 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
         {groupedTiles.map((category) => (
           <section className="integration-category" key={category.key}>
             <div className="integration-category-header">
-              <div>
+              <div className="integration-category-title">
                 <strong>{category.label}</strong>
                 <span>{category.description}</span>
               </div>
-              <Badge tone="gray">{category.tiles.length}</Badge>
+              <div className="integration-category-actions">
+                {category.key === "ai" ? (
+                  <LlmProviderSelector
+                    saving={llmProviderSaving || loading}
+                    values={values}
+                    onChange={async (provider) => {
+                      setLlmProviderSaving(true);
+                      try {
+                        await save({ llm_provider: provider });
+                      } finally {
+                        setLlmProviderSaving(false);
+                      }
+                    }}
+                  />
+                ) : null}
+                <Badge tone="gray">{category.tiles.length}</Badge>
+              </div>
             </div>
             <div className="integration-tile-grid">
               {category.tiles.map((tile) => {
@@ -4427,6 +4573,65 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
   );
 }
 
+const llmProviderDefinitions = [
+  { key: "local", label: "Local fallback" },
+  { key: "openai", label: "OpenAI" },
+  { key: "gemini", label: "Gemini" },
+  { key: "anthropic", label: "Claude" },
+  { key: "ollama", label: "Ollama" }
+] as const;
+
+type LlmProviderKey = typeof llmProviderDefinitions[number]["key"];
+
+function normalizeLlmProvider(value: unknown): LlmProviderKey {
+  const provider = String(value || "local").toLowerCase();
+  if (provider === "claude") return "anthropic";
+  return llmProviderDefinitions.some((option) => option.key === provider) ? provider as LlmProviderKey : "local";
+}
+
+function isLlmProviderConfigured(key: LlmProviderKey, values: SettingsMap): boolean {
+  if (key === "local") return true;
+  if (key === "openai") return Boolean(values.openai_api_key);
+  if (key === "gemini") return Boolean(values.gemini_api_key);
+  if (key === "anthropic") return Boolean(values.anthropic_api_key);
+  if (key === "ollama") return Boolean(values.ollama_base_url);
+  return false;
+}
+
+function LlmProviderSelector({
+  saving,
+  values,
+  onChange
+}: {
+  saving: boolean;
+  values: SettingsMap;
+  onChange: (provider: LlmProviderKey) => Promise<void>;
+}) {
+  const activeProvider = normalizeLlmProvider(values.llm_provider);
+  return (
+    <div className="llm-provider-selector">
+      <Bot size={15} />
+      <label className="llm-provider-select">
+        <span>System LLM</span>
+        <select
+          disabled={saving}
+          value={activeProvider}
+          onChange={(event) => onChange(event.target.value as LlmProviderKey)}
+        >
+          {llmProviderDefinitions.map((provider) => {
+            const configured = isLlmProviderConfigured(provider.key, values);
+            return (
+              <option disabled={!configured && provider.key !== activeProvider} key={provider.key} value={provider.key}>
+                {provider.label}{configured ? "" : " (not configured)"}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+    </div>
+  );
+}
+
 type IntegrationDefinition = {
   key: string;
   title: string;
@@ -4481,9 +4686,9 @@ function integrationDefinitions(
   protectStatus: UnifiProtectStatus | null,
   protectUpdateStatus: UnifiProtectUpdateStatus | null
 ): IntegrationDefinition[] {
-  const activeProvider = String(values.llm_provider || "local");
+  const activeProvider = normalizeLlmProvider(values.llm_provider);
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
-    if (activeProvider === key) return { statusLabel: "Connected", statusTone: "green" };
+    if (activeProvider === key) return { statusLabel: "Active", statusTone: "green" };
     if (secretKey && values[secretKey]) return { statusLabel: "Configured", statusTone: "blue" };
     if (key === "ollama" && values.ollama_base_url) return { statusLabel: "Configured", statusTone: "blue" };
     return { statusLabel: "Not Configured", statusTone: "gray" };
@@ -4590,7 +4795,6 @@ function integrationDefinitions(
       ...providerStatus("openai", "openai_api_key"),
       oauth: true,
       fields: [
-        { key: "llm_provider", label: "Active provider", type: "select", options: ["local", "openai", "gemini", "anthropic", "ollama"] },
         { key: "openai_api_key", label: "API key", type: "password", href: "https://platform.openai.com/api-keys" },
         { key: "openai_model", label: "Model" },
         { key: "openai_base_url", label: "Base URL" }
@@ -4605,7 +4809,6 @@ function integrationDefinitions(
       ...providerStatus("gemini", "gemini_api_key"),
       oauth: true,
       fields: [
-        { key: "llm_provider", label: "Active provider", type: "select", options: ["local", "openai", "gemini", "anthropic", "ollama"] },
         { key: "gemini_api_key", label: "API key", type: "password", href: "https://aistudio.google.com/app/apikey" },
         { key: "gemini_model", label: "Model" },
         { key: "gemini_base_url", label: "Base URL" }
@@ -4619,7 +4822,6 @@ function integrationDefinitions(
       icon: MessageCircle,
       ...providerStatus("anthropic", "anthropic_api_key"),
       fields: [
-        { key: "llm_provider", label: "Active provider", type: "select", options: ["local", "openai", "gemini", "anthropic", "ollama"] },
         { key: "anthropic_api_key", label: "API key", type: "password", href: "https://console.anthropic.com/settings/keys" },
         { key: "anthropic_model", label: "Model" },
         { key: "anthropic_base_url", label: "Base URL" }
@@ -4633,7 +4835,6 @@ function integrationDefinitions(
       icon: Database,
       ...providerStatus("ollama"),
       fields: [
-        { key: "llm_provider", label: "Active provider", type: "select", options: ["local", "openai", "gemini", "anthropic", "ollama"] },
         { key: "ollama_model", label: "Model" },
         { key: "ollama_base_url", label: "Base URL" }
       ]
@@ -8119,18 +8320,29 @@ const chatMessageVariants = {
 };
 
 function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
+  const llmSettings = useSettings("llm");
   const [open, setOpen] = React.useState(false);
   const teaserStorageKey = `iacs-chat-teaser-dismissed:${currentUser.id}`;
   const [showTeaser, setShowTeaser] = React.useState(() => sessionStorage.getItem(teaserStorageKey) !== "true");
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<ChatMessageItem[]>([]);
   const [draft, setDraft] = React.useState("");
+  const [llmPickerOpen, setLlmPickerOpen] = React.useState(false);
+  const [llmSaving, setLlmSaving] = React.useState(false);
+  const [llmFeedback, setLlmFeedback] = React.useState("");
   const [pendingAttachments, setPendingAttachments] = React.useState<ChatAttachmentDraft[]>([]);
   const [connected, setConnected] = React.useState(false);
+  const [connectionNonce, setConnectionNonce] = React.useState(0);
   const [thinking, setThinking] = React.useState(false);
   const [toolStatus, setToolStatus] = React.useState("");
   const [dragActive, setDragActive] = React.useState(false);
+  const [copyMenu, setCopyMenu] = React.useState<ChatCopyMenu | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
+  const [viewportHeight, setViewportHeight] = React.useState(() => window.visualViewport?.height ?? window.innerHeight);
+  const [viewportTop, setViewportTop] = React.useState(() => window.visualViewport?.offsetTop ?? 0);
   const socketRef = React.useRef<WebSocket | null>(null);
+  const reconnectTimerRef = React.useRef<number | null>(null);
+  const connectionTimeoutRef = React.useRef<number | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const feedRef = React.useRef<HTMLDivElement | null>(null);
@@ -8138,9 +8350,14 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
   const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
   const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
+  const activeLlmProvider = normalizeLlmProvider(llmSettings.values.llm_provider);
   const uploading = pendingAttachments.some((attachment) => attachment.uploadState === "uploading");
   const readyAttachments = pendingAttachments.filter((attachment) => attachment.uploadState === "ready");
   const canSend = Boolean((draft.trim() || readyAttachments.length) && connected && !uploading);
+  const widgetStyle = {
+    "--chat-vvh": `${Math.round(viewportHeight)}px`,
+    "--chat-vv-top": `${Math.round(viewportTop)}px`
+  } as React.CSSProperties;
 
   React.useEffect(() => {
     setShowTeaser(sessionStorage.getItem(teaserStorageKey) !== "true");
@@ -8177,12 +8394,97 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
   }, [open]);
 
   React.useEffect(() => {
-    if (!open || socketRef.current) return;
+    if (!open) return;
+    const updateViewportHeight = () => {
+      const viewport = window.visualViewport;
+      setViewportHeight(viewport?.height ?? window.innerHeight);
+      setViewportTop(viewport?.offsetTop ?? 0);
+    };
+    updateViewportHeight();
+    window.visualViewport?.addEventListener("resize", updateViewportHeight);
+    window.visualViewport?.addEventListener("scroll", updateViewportHeight);
+    window.addEventListener("resize", updateViewportHeight);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", updateViewportHeight);
+      window.visualViewport?.removeEventListener("scroll", updateViewportHeight);
+      window.removeEventListener("resize", updateViewportHeight);
+    };
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    if (!window.matchMedia("(max-width: 720px)").matches) return;
+    const scrollY = window.scrollY;
+    const originalOverflow = document.body.style.overflow;
+    const originalHtmlOverflow = document.documentElement.style.overflow;
+    document.body.classList.add("alfred-chat-open");
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.classList.remove("alfred-chat-open");
+      document.body.style.overflow = originalOverflow;
+      document.documentElement.style.overflow = originalHtmlOverflow;
+      window.scrollTo(0, scrollY);
+    };
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!copyMenu) return undefined;
+    const close = () => setCopyMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [copyMenu]);
+
+  React.useEffect(() => {
+    if (!open) setCopyMenu(null);
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open) {
+      setLlmPickerOpen(false);
+      setLlmFeedback("");
+    }
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    let connectionTimeoutId: number | null = null;
+    let reconnectTimerId: number | null = null;
+    const clearConnectionTimeout = () => {
+      if (connectionTimeoutId) window.clearTimeout(connectionTimeoutId);
+      if (connectionTimeoutRef.current === connectionTimeoutId) connectionTimeoutRef.current = null;
+      connectionTimeoutId = null;
+    };
+    const clearReconnectTimer = () => {
+      if (reconnectTimerId) window.clearTimeout(reconnectTimerId);
+      if (reconnectTimerRef.current === reconnectTimerId) reconnectTimerRef.current = null;
+      reconnectTimerId = null;
+    };
     const socket = new WebSocket(wsUrl("/api/v1/ai/chat/ws"));
     setConnected(false);
-    socket.onopen = () => setConnected(true);
+    connectionTimeoutId = window.setTimeout(() => {
+      if (socket.readyState !== WebSocket.OPEN) socket.close();
+    }, 10000);
+    connectionTimeoutRef.current = connectionTimeoutId;
+    socket.onopen = () => {
+      clearConnectionTimeout();
+      setConnected(true);
+    };
     socket.onmessage = (event) => {
-      const data = JSON.parse(event.data) as { type: string; payload?: Record<string, unknown> };
+      let data: { type: string; payload?: Record<string, unknown> };
+      try {
+        data = JSON.parse(event.data) as { type: string; payload?: Record<string, unknown> };
+      } catch {
+        return;
+      }
       const payload = data.payload ?? {};
       if (data.type === "connection.ready") {
         setConnected(true);
@@ -8266,18 +8568,32 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
         setToolStatus("");
       }
     };
+    socket.onerror = () => {
+      socket.close();
+    };
     socket.onclose = () => {
-      socketRef.current = null;
+      clearConnectionTimeout();
+      if (socketRef.current === socket) socketRef.current = null;
       setConnected(false);
       setThinking(false);
       setToolStatus("");
+      if (!cancelled) {
+        const delay = Math.min(8000, 700 + connectionNonce * 600);
+        reconnectTimerId = window.setTimeout(() => {
+          setConnectionNonce((current) => current + 1);
+        }, delay);
+        reconnectTimerRef.current = reconnectTimerId;
+      }
     };
     socketRef.current = socket;
     return () => {
+      cancelled = true;
+      clearReconnectTimer();
+      clearConnectionTimeout();
       socket.close();
-      socketRef.current = null;
+      if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [open]);
+  }, [connectionNonce, open]);
 
   React.useEffect(() => {
     if (!feedRef.current) return;
@@ -8358,13 +8674,66 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
         text: action.userEcho
       }
     ]);
-    socket.send(JSON.stringify({ message: action.command, session_id: sessionId, attachments: [] }));
+    socket.send(JSON.stringify({
+      message: action.userEcho,
+      session_id: sessionId,
+      attachments: [],
+      tool_confirmation: {
+        name: action.toolName,
+        arguments: action.toolArguments
+      }
+    }));
     setThinking(true);
     setToolStatus(action.statusLabel);
   }, [connected, sessionId, thinking]);
 
+  const selectLlmProvider = React.useCallback(async (provider: LlmProviderKey) => {
+    if (llmSaving || llmSettings.loading) return;
+    const definition = llmProviderDefinitions.find((item) => item.key === provider);
+    const label = definition?.label ?? provider;
+    if (!isLlmProviderConfigured(provider, llmSettings.values)) {
+      setLlmFeedback(`${label} is not configured yet.`);
+      return;
+    }
+    setLlmSaving(true);
+    setLlmFeedback("");
+    try {
+      await llmSettings.save({ llm_provider: provider });
+      setLlmPickerOpen(false);
+      setMessages((current) => [
+        ...current,
+        {
+          id: clientId("alfred-llm"),
+          role: "assistant",
+          text: `System LLM set to ${label}.`
+        }
+      ]);
+      window.setTimeout(() => composerRef.current?.focus({ preventScroll: true }), 20);
+    } catch (error) {
+      setLlmFeedback(error instanceof Error ? error.message : "Unable to update the system LLM.");
+    } finally {
+      setLlmSaving(false);
+    }
+  }, [llmSaving, llmSettings]);
+
+  const updateDraft = React.useCallback((value: string) => {
+    if (value.trim().toLowerCase() === "/llm") {
+      setDraft("");
+      setLlmFeedback("");
+      setLlmPickerOpen(true);
+      return;
+    }
+    setDraft(value);
+  }, []);
+
   const sendMessage = React.useCallback(() => {
     const socket = socketRef.current;
+    if (draft.trim().toLowerCase() === "/llm") {
+      setDraft("");
+      setLlmFeedback("");
+      setLlmPickerOpen(true);
+      return;
+    }
     if (!canSend || !socket || socket.readyState !== WebSocket.OPEN) return;
     const text = draft.trim() || "Please inspect the attached file.";
     const attachments = readyAttachments.map(publicChatAttachment);
@@ -8374,12 +8743,20 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
     ]);
     socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments }));
     setDraft("");
+    setLlmPickerOpen(false);
+    setLlmFeedback("");
     setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
     setThinking(true);
     setToolStatus("Thinking...");
   }, [canSend, draft, readyAttachments, sessionId]);
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Escape" && llmPickerOpen) {
+      event.preventDefault();
+      setLlmPickerOpen(false);
+      setLlmFeedback("");
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       sendMessage();
@@ -8400,12 +8777,11 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
   };
 
   return (
-    <div className={open ? "chat-widget open" : "chat-widget"}>
+    <div className={open ? "chat-widget open" : "chat-widget"} style={widgetStyle}>
       <AnimatePresence>
         {open ? (
           <motion.div
             className={dragActive ? "chat-panel drag-active" : "chat-panel"}
-            layoutId="alfred-surface"
             initial={{ opacity: 0, scale: 0.86, y: 28 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.9, y: 24 }}
@@ -8440,6 +8816,7 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
                     key={message.id}
                     message={message}
                     onConfirm={sendConfirmationAction}
+                    onOpenCopyMenu={setCopyMenu}
                     senderName={message.role === "assistant" ? "Alfred" : firstName}
                   />
                 ))}
@@ -8448,6 +8825,23 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
             </div>
 
             <div className="chat-composer">
+              <AnimatePresence>
+                {llmPickerOpen ? (
+                  <ChatLlmProviderPopover
+                    activeProvider={activeLlmProvider}
+                    error={llmSettings.error || llmFeedback}
+                    loading={llmSettings.loading}
+                    saving={llmSaving}
+                    values={llmSettings.values}
+                    onClose={() => {
+                      setLlmPickerOpen(false);
+                      setLlmFeedback("");
+                      composerRef.current?.focus({ preventScroll: true });
+                    }}
+                    onSelect={selectLlmProvider}
+                  />
+                ) : null}
+              </AnimatePresence>
               {pendingAttachments.length ? (
                 <div className="chat-composer-attachments" aria-label="Pending attachments">
                   {pendingAttachments.map((attachment) => (
@@ -8471,7 +8865,7 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
                 </button>
                 <textarea
                   value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => updateDraft(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
                   placeholder="Ask Alfred..."
                   ref={composerRef}
@@ -8511,18 +8905,96 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
       {!open ? (
         <motion.button
           className="chat-pill"
-          layoutId="alfred-surface"
           onClick={() => setOpen(true)}
           type="button"
           aria-label="Open Alfred"
-          whileHover={{ y: -2, scale: 1.02 }}
           whileTap={{ scale: 0.97 }}
         >
           <MessageCircle size={18} />
           <span>Alfred</span>
         </motion.button>
       ) : null}
+      {copyMenu ? (
+        <ChatCopyMenu
+          copied={copiedMessageId === copyMenu.messageId}
+          menu={copyMenu}
+          onCopy={async () => {
+            await copyToClipboard(copyMenu.text);
+            setCopiedMessageId(copyMenu.messageId);
+            window.setTimeout(() => setCopyMenu(null), 450);
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function ChatLlmProviderPopover({
+  activeProvider,
+  error,
+  loading,
+  saving,
+  values,
+  onClose,
+  onSelect
+}: {
+  activeProvider: LlmProviderKey;
+  error: string;
+  loading: boolean;
+  saving: boolean;
+  values: SettingsMap;
+  onClose: () => void;
+  onSelect: (provider: LlmProviderKey) => Promise<void>;
+}) {
+  return (
+    <motion.div
+      className="chat-llm-popover"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 8, scale: 0.98 }}
+      transition={{ type: "spring", stiffness: 420, damping: 34 }}
+    >
+      <div className="chat-llm-popover-head">
+        <span>
+          <Bot size={15} />
+          <strong>System LLM</strong>
+        </span>
+        <button className="icon-button" onClick={onClose} type="button" aria-label="Close LLM selector">
+          <X size={14} />
+        </button>
+      </div>
+      <div className="chat-llm-provider-grid">
+        {llmProviderDefinitions.map((provider) => {
+          const configured = isLlmProviderConfigured(provider.key, values);
+          const active = provider.key === activeProvider;
+          const disabled = saving || loading || (!configured && !active);
+          const Icon = provider.key === "gemini"
+            ? CircleDot
+            : provider.key === "anthropic"
+              ? MessageCircle
+              : provider.key === "ollama"
+                ? Terminal
+                : Bot;
+          return (
+            <button
+              className={active ? "chat-llm-provider active" : "chat-llm-provider"}
+              disabled={disabled}
+              key={provider.key}
+              onClick={() => onSelect(provider.key)}
+              type="button"
+            >
+              <Icon size={16} />
+              <span>
+                <strong>{provider.label}</strong>
+                <small>{active ? "Active" : configured ? "Ready" : "Not configured"}</small>
+              </span>
+              {saving && active ? <Loader2 className="spin" size={14} /> : null}
+            </button>
+          );
+        })}
+      </div>
+      {error ? <p className="chat-llm-feedback" role="status">{error}</p> : null}
+    </motion.div>
   );
 }
 
@@ -8530,13 +9002,26 @@ function ChatMessageBubble({
   message,
   index,
   senderName,
+  onOpenCopyMenu,
   onConfirm
 }: {
   message: ChatMessageItem;
   index: number;
   senderName: string;
+  onOpenCopyMenu: (menu: ChatCopyMenu) => void;
   onConfirm: (messageId: string, action: ChatConfirmationAction) => void;
 }) {
+  const longPressTimerRef = React.useRef<number | null>(null);
+  const displayText = cleanChatText(message.text, message.attachments ?? []);
+  const clearLongPress = React.useCallback(() => {
+    if (!longPressTimerRef.current) return;
+    window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }, []);
+  const openCopyMenu = React.useCallback((x: number, y: number) => {
+    if (!displayText) return;
+    onOpenCopyMenu({ messageId: message.id, text: displayText, x, y });
+  }, [displayText, message.id, onOpenCopyMenu]);
   return (
     <motion.div
       className={`chat-message ${message.role}`}
@@ -8549,8 +9034,24 @@ function ChatMessageBubble({
     >
       <div className="chat-message-stack">
         <span className="chat-sender-label">{senderName}</span>
-        <div className={`chat-bubble ${message.role}`}>
-          {message.text ? <p>{message.text}</p> : null}
+        <div
+          className={`chat-bubble ${message.role}`}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            openCopyMenu(event.clientX, event.clientY);
+          }}
+          onPointerCancel={clearLongPress}
+          onPointerDown={(event) => {
+            if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+            clearLongPress();
+            const { clientX, clientY } = event;
+            longPressTimerRef.current = window.setTimeout(() => openCopyMenu(clientX, clientY), 560);
+          }}
+          onPointerLeave={clearLongPress}
+          onPointerMove={clearLongPress}
+          onPointerUp={clearLongPress}
+        >
+          {displayText ? <p>{displayText}</p> : null}
           {message.confirmationAction ? (
             <ChatConfirmationCard
               action={message.confirmationAction}
@@ -8570,6 +9071,32 @@ function ChatMessageBubble({
   );
 }
 
+function ChatCopyMenu({
+  copied,
+  menu,
+  onCopy
+}: {
+  copied: boolean;
+  menu: ChatCopyMenu;
+  onCopy: () => void;
+}) {
+  const left = Math.max(8, Math.min(menu.x, window.innerWidth - 112));
+  const top = Math.max(8, Math.min(menu.y, window.innerHeight - 48));
+  return (
+    <div
+      className="chat-copy-menu"
+      onClick={(event) => event.stopPropagation()}
+      role="menu"
+      style={{ left, top }}
+    >
+      <button onClick={onCopy} role="menuitem" type="button">
+        <Copy size={14} />
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+    </div>
+  );
+}
+
 function ChatConfirmationCard({
   action,
   onConfirm
@@ -8580,7 +9107,7 @@ function ChatConfirmationCard({
   return (
     <div className="chat-confirm-card">
       <span className="chat-confirm-icon">
-        {action.type === "update_schedule" ? <Clock3 size={17} /> : <DoorOpen size={17} />}
+        {action.type === "update_schedule" ? <Clock3 size={17} /> : action.type === "delete_schedule" ? <Trash2 size={17} /> : <DoorOpen size={17} />}
       </span>
       <span>
         <strong>{action.title}</strong>

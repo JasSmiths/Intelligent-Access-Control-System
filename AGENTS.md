@@ -791,6 +791,10 @@ Follow the established Modern SaaS Clean operational style:
   broadly. The hours pill is a `.badge` rendered as a `span`; use
   `.schedule-card-main div > span` for description text and keep
   `.schedule-card-main .badge` as `display: inline-flex` with centered content.
+- In integration category headers, never style `.integration-category-header
+  span` broadly. Scope title copy to `.integration-category-title span` so
+  header controls, select labels, and count badges remain aligned and
+  content-sized.
 - Use neutral foundation colors.
 - Reserve color for function:
   - Blue: primary actions and live markers.

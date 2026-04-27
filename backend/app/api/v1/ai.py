@@ -151,7 +151,8 @@ async def chat_websocket(websocket: WebSocket) -> None:
             payload = await websocket.receive_json()
             message = str(payload.get("message") or "").strip()
             attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
-            if not message and not attachments:
+            tool_confirmation = payload.get("tool_confirmation")
+            if not message and not attachments and not isinstance(tool_confirmation, dict):
                 await websocket.send_json(
                     {"type": "chat.error", "payload": {"message": "Message or attachment is required."}}
                 )
@@ -163,14 +164,30 @@ async def chat_websocket(websocket: WebSocket) -> None:
             async def publish_status(status: dict[str, Any]) -> None:
                 await websocket.send_json({"type": "chat.tool_status", "payload": status})
 
-            result = await chat_service.handle_message(
-                message,
-                session_id=payload.get("session_id"),
-                provider_name=payload.get("provider"),
-                attachments=attachments,
-                user_id=str(user.id),
-                status_callback=publish_status,
-            )
+            if isinstance(tool_confirmation, dict):
+                tool_name = str(tool_confirmation.get("name") or "").strip()
+                arguments = tool_confirmation.get("arguments") if isinstance(tool_confirmation.get("arguments"), dict) else {}
+                if not tool_name:
+                    await websocket.send_json(
+                        {"type": "chat.error", "payload": {"message": "Confirmation action is missing its tool name."}}
+                    )
+                    continue
+                result = await chat_service.handle_tool_confirmation(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    session_id=payload.get("session_id"),
+                    user_id=str(user.id),
+                    status_callback=publish_status,
+                )
+            else:
+                result = await chat_service.handle_message(
+                    message,
+                    session_id=payload.get("session_id"),
+                    provider_name=payload.get("provider"),
+                    attachments=attachments,
+                    user_id=str(user.id),
+                    status_callback=publish_status,
+                )
             remaining_typing = MIN_CHAT_TYPING_SECONDS - (time.monotonic() - thinking_started_at)
             if remaining_typing > 0:
                 await asyncio.sleep(remaining_typing)

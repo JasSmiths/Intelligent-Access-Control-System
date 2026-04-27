@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
@@ -139,17 +140,50 @@ async def get_camera_by_identifier(api: Any, identifier: str) -> Any:
     camera = bootstrap_camera(api, identifier)
     if camera is not None:
         return camera
+    best_camera: Any | None = None
+    best_score = 0
     for candidate in list_bootstrap_cameras(api):
-        if normalized in {
+        candidate_values = {
             str(getattr(candidate, "id", "")).lower(),
             str(getattr(candidate, "name", "")).lower(),
             str(getattr(candidate, "display_name", "")).lower(),
-        }:
+        }
+        if normalized in candidate_values:
             return candidate
+        score = max(_camera_identifier_score(normalized, value) for value in candidate_values)
+        if score > best_score:
+            best_camera = candidate
+            best_score = score
+    if best_camera is not None and best_score >= 2:
+        return best_camera
     try:
         return await api.get_camera(identifier)
     except Exception as exc:
         raise UnifiProtectError(f"UniFi Protect camera not found: {identifier}") from exc
+
+
+def _camera_identifier_score(requested: str, candidate: str) -> int:
+    requested_key = _camera_match_key(requested)
+    candidate_key = _camera_match_key(candidate)
+    if not requested_key or not candidate_key:
+        return 0
+    if requested_key == candidate_key:
+        return 100
+    if requested_key in candidate_key or candidate_key in requested_key:
+        return 50
+    requested_tokens = set(requested_key.split())
+    candidate_tokens = set(candidate_key.split())
+    return len(requested_tokens & candidate_tokens)
+
+
+def _camera_match_key(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", value.lower())
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token not in {"camera", "cam", "snapshot", "image", "latest", "the", "from", "of"}
+    ]
+    return " ".join(tokens)
 
 
 async def get_event_by_id(api: Any, event_id: str) -> Any:

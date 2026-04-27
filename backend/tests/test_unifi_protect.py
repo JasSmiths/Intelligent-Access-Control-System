@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.ai.providers import _looks_like_ollama_vision_model
-from app.modules.unifi_protect.client import serialize_unifi_camera, serialize_unifi_event
+from app.modules.unifi_protect.client import _camera_identifier_score, serialize_unifi_camera, serialize_unifi_event
 
 
 class EnumValue:
@@ -84,3 +84,7 @@ def test_ollama_vision_model_detection() -> None:
     assert _looks_like_ollama_vision_model("llava:latest")
     assert not _looks_like_ollama_vision_model("llama3")
 
+
+def test_camera_identifier_score_ignores_generic_camera_words() -> None:
+    assert _camera_identifier_score("back garden camera", "Back Garden") >= 2
+    assert _camera_identifier_score("latest snapshot from driveway camera", "Driveway") >= 2

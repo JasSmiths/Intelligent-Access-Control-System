@@ -2,7 +2,9 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -24,6 +26,53 @@ from app.services.settings import get_runtime_config
 logger = get_logger(__name__)
 
 MAX_AGENT_TOOL_ITERATIONS = 5
+RELEVANT_HISTORY_SCAN_LIMIT = 24
+RECENT_HISTORY_LIMIT = 6
+MAX_RELEVANT_HISTORY_MESSAGES = 8
+
+DEFAULT_AGENT_TOOL_NAMES = (
+    "query_presence",
+    "query_access_events",
+    "query_anomalies",
+    "query_schedules",
+    "query_device_states",
+)
+
+EVENT_TOOL_NAMES = (
+    "query_presence",
+    "query_access_events",
+    "query_anomalies",
+    "summarize_access_rhythm",
+    "calculate_visit_duration",
+    "trigger_anomaly_alert",
+)
+SCHEDULE_TOOL_NAMES = (
+    "query_schedules",
+    "get_schedule",
+    "create_schedule",
+    "update_schedule",
+    "delete_schedule",
+    "query_schedule_targets",
+    "assign_schedule_to_entity",
+    "verify_schedule_access",
+)
+NOTIFICATION_TOOL_NAMES = (
+    "query_notification_catalog",
+    "query_notification_workflows",
+    "get_notification_workflow",
+    "create_notification_workflow",
+    "update_notification_workflow",
+    "delete_notification_workflow",
+    "preview_notification_workflow",
+    "test_notification_workflow",
+)
+DEVICE_TOOL_NAMES = ("query_device_states", "open_device")
+CAMERA_TOOL_NAMES = ("analyze_camera_snapshot", "get_camera_snapshot")
+FILE_TOOL_NAMES = (
+    "read_chat_attachment",
+    "export_presence_report_csv",
+    "generate_contractor_invoice_pdf",
+)
 
 
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
@@ -36,14 +85,26 @@ that are not present in tool results. When a DVLA vehicle lookup succeeds,
 format the result as a short human-readable vehicle details summary rather than
 raw JSON. When a tool result says a device open requires confirmation, do not
 ask the user to type a confirmation phrase; tell them to use the on-screen
-confirmation button. For schedule creation or edits, understand natural
-language day/time descriptions, ask concise follow-up questions for missing
-name or allowed time blocks, and only call schedule mutation tools once the
-required details are known. Schedule tools accept either strict time_blocks JSON
-or a natural-language time_description such as "Wednesdays and Fridays 6am to
-7pm"; use time_description when that is the most reliable representation. If a
-schedule already exists, ask whether to update the existing schedule rather than
-giving up. Camera snapshots are ephemeral and are not retained by default."""
+confirmation button. For any state-changing workflow tool that requires
+confirmation, call the tool with the proposed arguments and confirm=false so the
+UI can render a confirmation button; never merely claim a button exists. For
+device opens, use the user's natural device name as target, for example "main
+garage door"; never ask the user for internal integration names or entity IDs.
+Do not mention Home Assistant, entity IDs, cover IDs, or internal integration
+implementation details unless the user explicitly asks about integration
+configuration. For
+schedule creation or edits, understand natural language day/time descriptions,
+ask concise follow-up questions for missing name or allowed time blocks, and
+only call schedule mutation tools once the required details are known. Schedule
+tools accept either strict time_blocks JSON or a natural-language
+time_description such as "Wednesdays and Fridays 6am to 7pm"; use
+time_description when that is the most reliable representation. If a schedule
+already exists, ask whether to update the existing schedule rather than giving
+up. When explaining notification workflow options, use friendly labels and short
+plain-language bullets; do not dump raw JSON, internal action IDs, or decorative
+Markdown. Camera snapshots are ephemeral and are not retained by default. When
+returning a camera snapshot, say that the image is attached; do not mention the
+generated filename or chat file URL."""
 
 AGENT_TOOL_PROTOCOL = """Agent tool protocol:
 - You are a tool-using AI agent for IACS. Use tools whenever the user asks about live system state, records, schedules, devices, cameras, users, reports, file contents, or any state-changing operation.
@@ -89,6 +150,9 @@ SCHEDULE_DAY_PATTERN = (
     r"sat(?:urday)?(?:'s|s)?|"
     r"sun(?:day)?(?:'s|s)?"
 )
+CHAT_FILE_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((/api/chat/files/[^)]+)\)")
+CHAT_FILE_URL_PATTERN = re.compile(r"\s*/api/chat/files/[A-Za-z0-9_-]+\b")
+DEFAULT_CHAT_TIMEZONE = "Europe/London"
 
 
 @dataclass(frozen=True)
@@ -146,6 +210,58 @@ class ChatService:
         )
         try:
             tool_results: list[dict[str, Any]] = []
+            if self._looks_like_schedule_delete_request(message.lower()):
+                tool_result = await self._execute_tool_call(
+                    session_uuid,
+                    self._planned_schedule_delete_call(message),
+                    status_callback=status_callback,
+                )
+                return await self._direct_response(
+                    session_uuid,
+                    self._schedule_delete_direct_text(tool_result.get("output", {})),
+                    tool_results=[tool_result],
+                    provider="guided",
+                )
+
+            if self._looks_like_device_open_request(message.lower()):
+                tool_result = await self._execute_tool_call(
+                    session_uuid,
+                    self._planned_device_open_call(message),
+                    status_callback=status_callback,
+                )
+                return await self._direct_response(
+                    session_uuid,
+                    self._device_open_direct_text(tool_result.get("output", {})),
+                    tool_results=[tool_result],
+                    provider="guided",
+                )
+
+            if self._looks_like_camera_snapshot_request(message.lower()):
+                tool_result = await self._execute_tool_call(
+                    session_uuid,
+                    self._planned_camera_snapshot_call(message),
+                    status_callback=status_callback,
+                )
+                return await self._direct_response(
+                    session_uuid,
+                    self._camera_snapshot_direct_text(tool_result.get("output", {})),
+                    tool_results=[tool_result],
+                    provider="guided",
+                )
+
+            if self._looks_like_access_event_time_request(message.lower()):
+                tool_result = await self._execute_tool_call(
+                    session_uuid,
+                    self._planned_access_event_time_call(message, memory),
+                    status_callback=status_callback,
+                )
+                return await self._direct_response(
+                    session_uuid,
+                    self._access_event_time_direct_text(message, tool_result.get("output", {})),
+                    tool_results=[tool_result],
+                    provider="guided",
+                )
+
             if use_local_router:
                 planned_calls = self._plan_tool_calls(message, memory, attachment_refs)
                 tool_results = [
@@ -153,7 +269,13 @@ class ChatService:
                     for call in planned_calls
                 ]
 
-            messages = await self._build_messages(session_uuid, tool_results)
+            selected_tools = self._select_tools_for_request(
+                message,
+                memory,
+                attachment_refs,
+                tool_results,
+            )
+            messages = await self._build_messages(session_uuid, tool_results, selected_tools)
 
             try:
                 result = await self._run_provider_agent_loop(
@@ -161,6 +283,7 @@ class ChatService:
                     session_uuid,
                     messages,
                     tool_results,
+                    selected_tools,
                     memory,
                     status_callback=status_callback,
                 )
@@ -181,10 +304,10 @@ class ChatService:
         finally:
             set_chat_tool_context({}, token=context_token)
 
-        text = result.text or self._fallback_text(tool_results)
+        response_attachments = self._attachments_from_tool_results(tool_results)
+        text = self._clean_assistant_text(result.text or self._fallback_text(tool_results), response_attachments)
         await self._append_message(session_uuid, "assistant", text)
         await self._update_memory(session_uuid, message, tool_results)
-        response_attachments = self._attachments_from_tool_results(tool_results)
         await event_bus.publish(
             "chat.message",
             {
@@ -202,6 +325,62 @@ class ChatService:
             response_attachments,
         )
 
+    async def handle_tool_confirmation(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        session_id: str | None = None,
+        user_id: str | None = None,
+        status_callback: StatusCallback | None = None,
+    ) -> ChatTurnResult:
+        session_uuid = await self._ensure_session(session_id)
+        context_token = set_chat_tool_context(
+            {"user_id": user_id, "session_id": str(session_uuid)}
+        )
+        try:
+            call = ToolCall(
+                id=f"confirmed-{tool_name}-{uuid.uuid4().hex[:8]}",
+                name=tool_name,
+                arguments=arguments,
+            )
+            await self._append_message(
+                session_uuid,
+                "user",
+                self._confirmation_user_message(tool_name, arguments),
+            )
+            tool_result = await self._execute_tool_call(
+                session_uuid,
+                call,
+                status_callback=status_callback,
+            )
+        finally:
+            set_chat_tool_context({}, token=context_token)
+
+        attachments = self._attachments_from_tool_results([tool_result])
+        text = self._clean_assistant_text(
+            self._confirmation_result_text(tool_name, tool_result.get("output", {})),
+            attachments,
+        )
+        await self._append_message(session_uuid, "assistant", text)
+        await self._update_memory(session_uuid, text, [tool_result])
+        await event_bus.publish(
+            "chat.message",
+            {
+                "session_id": str(session_uuid),
+                "provider": "tool_confirmation",
+                "text": text,
+                "attachments": attachments,
+            },
+        )
+        return ChatTurnResult(
+            str(session_uuid),
+            "tool_confirmation",
+            text,
+            [tool_result],
+            attachments,
+        )
+
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
 
@@ -211,11 +390,12 @@ class ChatService:
         session_id: uuid.UUID,
         messages: list[ChatMessageInput],
         tool_results: list[dict[str, Any]],
+        selected_tools: list[AgentTool],
         memory: dict[str, Any],
         *,
         status_callback: StatusCallback | None,
     ) -> LlmResult | ChatTurnResult:
-        tool_schemas = [tool.as_llm_tool() for tool in self._tools.values()]
+        tool_schemas = [tool.as_llm_tool() for tool in selected_tools]
         executed: set[str] = set()
         result = LlmResult(text="")
 
@@ -237,10 +417,7 @@ class ChatService:
                     fresh_calls.append(call)
             if not fresh_calls:
                 return LlmResult(
-                    text=(
-                        "I already ran the relevant system tool and could not make further progress. "
-                        "Please rephrase the request or provide the missing detail."
-                    ),
+                    text=self._fallback_text(tool_results),
                     raw=result.raw,
                 )
 
@@ -256,7 +433,7 @@ class ChatService:
             conflict_result = await self._schedule_conflict_response(session_id, memory, tool_results)
             if conflict_result:
                 return conflict_result
-            messages = await self._build_messages(session_id, tool_results)
+            messages = await self._build_messages(session_id, tool_results, selected_tools)
 
         return LlmResult(
             text=(
@@ -633,8 +810,9 @@ class ChatService:
         provider: str = "guided",
     ) -> ChatTurnResult:
         tool_results = tool_results or []
-        await self._append_message(session_id, "assistant", text)
         attachments = self._attachments_from_tool_results(tool_results)
+        text = self._clean_assistant_text(text, attachments)
+        await self._append_message(session_id, "assistant", text)
         await event_bus.publish(
             "chat.message",
             {
@@ -679,6 +857,79 @@ class ChatService:
         detail = re.sub(r"(?i)(api[_-]?key|x-api-key|key)=([^&\s]+)", r"\1=[redacted]", detail)
         return detail[:300]
 
+    def _clean_assistant_text(self, text: str, attachments: list[dict[str, Any]]) -> str:
+        file_link_replacement = ""
+        if attachments:
+            file_link_replacement = (
+                "the snapshot"
+                if any(attachment.get("kind") == "image" for attachment in attachments)
+                else "the attached file"
+            )
+        else:
+            file_link_replacement = r"\1"
+        cleaned = CHAT_FILE_LINK_PATTERN.sub(file_link_replacement, text)
+        cleaned = CHAT_FILE_URL_PATTERN.sub("", cleaned)
+        for attachment in attachments:
+            filename = str(attachment.get("filename") or "")
+            if filename and attachment.get("source") == "system_media":
+                cleaned = cleaned.replace(filename, "the snapshot")
+        cleaned = re.sub(r"\bHome Assistant cover entity ID\b", "device name", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bHome Assistant entity ID\b", "device name", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bHome Assistant\b", "the system", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bcover entity ID\b", "device name", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bentity ID\b", "device name", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\*\*\*([^*]+)\*\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+        cleaned = cleaned.replace("***", "")
+        cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        if not cleaned and any(attachment.get("kind") == "image" for attachment in attachments):
+            return "Here's the latest snapshot."
+        return cleaned
+
+    def _confirmation_user_message(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        target = (
+            arguments.get("target")
+            or arguments.get("schedule_name")
+            or arguments.get("rule_name")
+            or arguments.get("name")
+            or tool_name.replace("_", " ")
+        )
+        return f"Confirmed {tool_name.replace('_', ' ')} for {target}."
+
+    def _confirmation_result_text(self, tool_name: str, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return str(output.get("detail") or output.get("error") or "I could not complete that action.")
+        if tool_name == "open_device":
+            device = output.get("device") if isinstance(output.get("device"), dict) else {}
+            name = device.get("name") or output.get("target") or "the device"
+            return f"Opened {name}. This was logged as an Alfred action." if output.get("opened") else f"I could not open {name}."
+        if tool_name == "update_schedule":
+            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
+            summary = schedule.get("summary")
+            return f"Updated {name}{f' to {summary}' if summary else ''}."
+        if tool_name == "delete_schedule":
+            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
+            return f"Deleted {name}." if output.get("deleted") else str(output.get("detail") or f"I did not delete {name}.")
+        if tool_name == "create_notification_workflow":
+            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            return f"Created notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
+        if tool_name == "update_notification_workflow":
+            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            return f"Updated notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
+        if tool_name == "delete_notification_workflow":
+            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            return f"Deleted notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
+        if tool_name == "test_notification_workflow":
+            if output.get("sent"):
+                return "Sent the notification workflow test."
+            return str(output.get("detail") or "I did not send the notification workflow test.")
+        return str(output.get("detail") or "Action completed.")
+
     async def _ensure_session(self, session_id: str | None) -> uuid.UUID:
         async with AsyncSessionLocal() as session:
             if session_id:
@@ -719,6 +970,7 @@ class ChatService:
         self,
         session_id: uuid.UUID,
         tool_results: list[dict[str, Any]],
+        selected_tools: list[AgentTool],
     ) -> list[ChatMessageInput]:
         async with AsyncSessionLocal() as session:
             rows = (
@@ -727,28 +979,35 @@ class ChatService:
                     .where(ChatMessage.session_id == session_id)
                     .where(ChatMessage.role.in_(("user", "assistant")))
                     .order_by(ChatMessage.created_at.desc())
-                    .limit(12)
+                    .limit(RELEVANT_HISTORY_SCAN_LIMIT)
                 )
             ).all()
             chat_session = await session.get(ChatSession, session_id)
             memory = chat_session.context if chat_session and chat_session.context else {}
 
+        runtime = await get_runtime_config()
+        site_timezone = runtime.site_timezone or DEFAULT_CHAT_TIMEZONE
+        history_rows = self._select_relevant_history(list(reversed(rows)), memory)
         tool_protocol = AGENT_TOOL_PROTOCOL.replace(
             "{tool_catalog}",
             json.dumps(
-                [tool.as_llm_tool() for tool in self._tools.values()],
+                [tool.as_llm_tool() for tool in selected_tools],
                 separators=(",", ":"),
             ),
         )
         messages = [
             ChatMessageInput(
                 "system",
-                f"{SYSTEM_PROMPT}\nSession memory: {json.dumps(memory, default=str)}\n\n{tool_protocol}",
+                (
+                    f"{SYSTEM_PROMPT}\nSite timezone: {site_timezone}. "
+                    "All user-facing dates and times must use this timezone; "
+                    "do not present UTC timestamps unless the user explicitly asks for UTC.\n"
+                    f"Session memory: {json.dumps(memory, default=str)}\n\n{tool_protocol}"
+                ),
             )
         ]
-        for row in reversed(rows):
-            if row.role in {"user", "assistant"}:
-                messages.append(ChatMessageInput(row.role, row.content))
+        for row in history_rows:
+            messages.append(ChatMessageInput(row.role, row.content))
         if tool_results:
             messages.append(
                 ChatMessageInput(
@@ -758,6 +1017,60 @@ class ChatService:
                 )
             )
         return messages
+
+    def _select_relevant_history(
+        self,
+        rows: list[ChatMessage],
+        memory: dict[str, Any],
+    ) -> list[ChatMessage]:
+        if len(rows) <= MAX_RELEVANT_HISTORY_MESSAGES:
+            return rows
+
+        latest_user = next((row for row in reversed(rows) if row.role == "user"), None)
+        latest_content = latest_user.content if latest_user else ""
+        if memory.get("pending_schedule_create"):
+            return rows[-MAX_RELEVANT_HISTORY_MESSAGES:]
+
+        relevant_terms = self._history_terms(latest_content)
+        for key in ("last_subject", "last_person", "last_group"):
+            relevant_terms.update(self._history_terms(str(memory.get(key) or "")))
+
+        selected_ids = {id(row) for row in rows[-RECENT_HISTORY_LIMIT:]}
+        if relevant_terms:
+            for row in rows[:-RECENT_HISTORY_LIMIT]:
+                if row.role not in {"user", "assistant"}:
+                    continue
+                if relevant_terms.intersection(self._history_terms(row.content)):
+                    selected_ids.add(id(row))
+
+        selected = [row for row in rows if id(row) in selected_ids]
+        if len(selected) > MAX_RELEVANT_HISTORY_MESSAGES:
+            protected_ids = {id(row) for row in rows[-RECENT_HISTORY_LIMIT:]}
+            older = [row for row in selected if id(row) not in protected_ids]
+            recent = [row for row in selected if id(row) in protected_ids]
+            selected = older[-(MAX_RELEVANT_HISTORY_MESSAGES - len(recent)):] + recent
+        return selected
+
+    def _history_terms(self, text: str) -> set[str]:
+        stop_words = {
+            "about",
+            "after",
+            "again",
+            "already",
+            "before",
+            "could",
+            "should",
+            "their",
+            "there",
+            "these",
+            "those",
+            "would",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())
+            if len(token) >= 4 and token not in stop_words
+        }
 
     async def _load_memory(self, session_id: uuid.UUID) -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
@@ -798,6 +1111,81 @@ class ChatService:
                     memory["last_subject"] = presence["person"]
 
         await self._save_memory(session_id, memory)
+
+    def _select_tools_for_request(
+        self,
+        message: str,
+        memory: dict[str, Any],
+        attachments: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> list[AgentTool]:
+        lower = message.lower()
+        names: set[str] = set()
+
+        if attachments:
+            names.add("read_chat_attachment")
+
+        if self._looks_like_device_open_request(lower):
+            names.update(DEVICE_TOOL_NAMES)
+        elif self._looks_like_device_state_request(lower):
+            names.add("query_device_states")
+
+        if any(word in lower for word in ["gate", "garage", "door", "cover", "device"]):
+            names.add("query_device_states")
+
+        if any(word in lower for word in ["present", "presence", "onsite", "on site", "here", "who is", "who's"]):
+            names.add("query_presence")
+
+        if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "leave", "left", "exit", "exited", "event", "denied", "access log"]):
+            names.update(("query_access_events", "query_anomalies"))
+
+        if any(phrase in lower for phrase in ["how long", "duration", "stay", "stayed"]):
+            names.update(("calculate_visit_duration", "query_access_events"))
+
+        if any(word in lower for word in ["anomaly", "anomalies", "unauthorized", "unauthorised", "alert"]):
+            names.update(("query_anomalies", "trigger_anomaly_alert"))
+
+        if any(word in lower for word in ["summary", "summarize", "summarise", "rhythm", "report"]):
+            names.update(("summarize_access_rhythm", "query_access_events"))
+
+        if any(word in lower for word in ["schedule", "schedules", "timeframe", "allowed", "access window"]):
+            names.update(SCHEDULE_TOOL_NAMES)
+
+        if memory.get("pending_schedule_create"):
+            names.update(SCHEDULE_TOOL_NAMES)
+
+        if any(word in lower for word in ["notification", "notifications", "workflow", "workflows", "template", "apprise"]):
+            names.update(NOTIFICATION_TOOL_NAMES)
+
+        if any(word in lower for word in ["vehicle", "registration", "reg", "plate", "dvla", "mot", "tax"]):
+            names.update(("lookup_dvla_vehicle", "query_access_events"))
+
+        if any(word in lower for word in ["camera", "snapshot", "image", "photo", "picture", "visible", "see"]):
+            names.update(CAMERA_TOOL_NAMES)
+
+        if any(word in lower for word in ["file", "attachment", "download", "csv", "pdf", "export", "invoice"]):
+            names.update(FILE_TOOL_NAMES)
+
+        if any(word in lower for word in ["user", "users", "account", "accounts", "admin"]):
+            names.add("get_system_users")
+
+        for result in tool_results:
+            name = str(result.get("name") or "")
+            if name:
+                names.add(name)
+            output = result.get("output")
+            if isinstance(output, dict) and output.get("requires_confirmation"):
+                if name == "open_device":
+                    names.update(DEVICE_TOOL_NAMES)
+                elif name in SCHEDULE_TOOL_NAMES:
+                    names.update(SCHEDULE_TOOL_NAMES)
+                elif name in NOTIFICATION_TOOL_NAMES:
+                    names.update(NOTIFICATION_TOOL_NAMES)
+
+        if not names:
+            names.update(DEFAULT_AGENT_TOOL_NAMES)
+
+        return [tool for name, tool in self._tools.items() if name in names]
 
     def _plan_tool_calls(
         self,
@@ -844,11 +1232,17 @@ class ChatService:
                 )
             )
 
+        if self._looks_like_schedule_delete_request(lower):
+            calls.append(self._planned_schedule_delete_call(message))
+
         if any(word in lower for word in ["present", "here", "onsite", "on site", "who is"]):
             calls.append(ToolCall("planned-query-presence", "query_presence", self._subject_args(subject)))
 
-        if any(word in lower for word in ["arrive", "arrival", "came", "event", "denied"]):
+        if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "left", "leave", "exit", "exited", "event", "denied"]):
             args = self._subject_args(subject)
+            person_name = self._person_name_from_event_time_message(lower)
+            if person_name:
+                args["person"] = person_name
             args["day"] = "today" if "today" in lower else "recent"
             calls.append(ToolCall("planned-query-events", "query_access_events", args))
 
@@ -924,7 +1318,7 @@ class ChatService:
             )
 
         if any(word in lower for word in ["snapshot", "image", "camera"]) and any(
-            word in lower for word in ["attach", "fetch", "get", "send", "show"]
+            word in lower for word in ["attach", "fetch", "get", "send", "show", "latest"]
         ):
             camera_name = self._camera_name_from_message(message)
             if camera_name:
@@ -939,6 +1333,103 @@ class ChatService:
         if not calls:
             calls.append(ToolCall("planned-query-presence", "query_presence", {}))
         return calls
+
+    def _planned_device_open_call(self, message: str) -> ToolCall:
+        lower = message.lower()
+        target = self._device_target_from_message(lower) or ""
+        return ToolCall(
+            "planned-open-device",
+            "open_device",
+            {
+                "target": target,
+                "kind": "all",
+                "reason": message,
+                "confirm": self._explicitly_confirmed_device_open(lower),
+            },
+        )
+
+    def _planned_schedule_delete_call(self, message: str) -> ToolCall:
+        return ToolCall(
+            "planned-delete-schedule",
+            "delete_schedule",
+            {
+                "schedule_name": self._schedule_delete_name_from_message(message) or self._schedule_name_from_message(message) or "",
+                "confirm": False,
+            },
+        )
+
+    def _planned_camera_snapshot_call(self, message: str) -> ToolCall:
+        return ToolCall(
+            "planned-camera-snapshot",
+            "get_camera_snapshot",
+            {"camera_name": self._camera_name_from_message(message) or ""},
+        )
+
+    def _planned_access_event_time_call(self, message: str, memory: dict[str, Any]) -> ToolCall:
+        lower = message.lower()
+        args: dict[str, Any] = {"limit": 50, "day": self._day_from_message(lower)}
+        person_name = self._person_name_from_event_time_message(lower)
+        if person_name:
+            args["person"] = person_name
+        elif memory.get("last_person"):
+            args["person"] = memory["last_person"]
+        subject = self._subject_from_message(lower, memory)
+        args.update(self._subject_args(subject))
+        return ToolCall("planned-access-event-time", "query_access_events", args)
+
+    def _device_open_direct_text(self, output: dict[str, Any]) -> str:
+        device = output.get("device") if isinstance(output.get("device"), dict) else {}
+        name = str(device.get("name") or output.get("target") or "that device").strip()
+        if output.get("requires_details"):
+            return str(output.get("detail") or "Which gate or garage door should I open?")
+        if output.get("requires_confirmation"):
+            return f"Please confirm before I open {name}."
+        if output.get("opened"):
+            return f"Opened {name}. This was logged as an Alfred action."
+        return str(output.get("detail") or output.get("error") or f"I could not open {name}.")
+
+    def _schedule_delete_direct_text(self, output: dict[str, Any]) -> str:
+        schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+        name = str(schedule.get("name") or output.get("schedule_name") or "that schedule").strip()
+        if output.get("requires_confirmation"):
+            return str(output.get("detail") or f"Delete the {name} schedule? Use the confirmation button to continue.")
+        if output.get("deleted"):
+            return f"Deleted {name}."
+        if output.get("dependencies"):
+            return f"I cannot delete {name} because it is still assigned. Remove its assignments first, then try again."
+        return str(output.get("detail") or output.get("error") or f"I could not delete {name}.")
+
+    def _camera_snapshot_direct_text(self, output: dict[str, Any]) -> str:
+        if output.get("fetched"):
+            return "Here's the latest snapshot."
+        camera = output.get("camera") or "that camera"
+        detail = str(output.get("error") or "I could not fetch the snapshot.")
+        return f"I couldn't fetch {camera}: {detail}"
+
+    def _access_event_time_direct_text(self, message: str, output: dict[str, Any]) -> str:
+        events = output.get("events") if isinstance(output.get("events"), list) else []
+        lower = message.lower()
+        direction = "exit" if any(word in lower for word in ["leave", "left", "exit", "exited"]) else "entry"
+        matching = [event for event in events if event.get("direction") == direction]
+        event = matching[0] if matching else (events[0] if events else None)
+        if not event:
+            person = self._person_name_from_event_time_message(lower)
+            subject = f" for {person.title()}" if person else ""
+            action = "leave" if direction == "exit" else "arrive"
+            return f"I couldn't find a recent {action} event{subject}."
+        person_name = event.get("person") or event.get("registration_number") or "They"
+        verb = "left" if event.get("direction") == "exit" else "arrived"
+        occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
+        return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
+
+    def _chat_time_from_iso(self, value: str) -> str | None:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(ZoneInfo(DEFAULT_CHAT_TIMEZONE)).strftime("%H:%M")
 
     def _subject_from_message(self, lower: str, memory: dict[str, Any]) -> dict[str, str]:
         if "gardener" in lower:
@@ -967,14 +1458,74 @@ class ChatService:
         return None
 
     def _camera_name_from_message(self, message: str) -> str | None:
-        match = re.search(
-            r"(?:camera|snapshot|image)\s+(?:called|named|from|of)?\s*([A-Za-z0-9 _.-]{2,80})",
-            message,
-            re.IGNORECASE,
+        patterns = (
+            r"(?:show|get|fetch|send)\s+(?:me\s+)?(?:the\s+)?([A-Za-z0-9 _.-]{2,80}?\s+camera)\b",
+            r"(?:camera|snapshot|image|photo|picture)\s+(?:called|named|from|of)?\s*([A-Za-z0-9 _.-]{2,80})",
+            r"(?:latest\s+)?(?:snapshot|image|photo|picture)\s+(?:from|of)\s+(?:the\s+)?([A-Za-z0-9 _.-]{2,80})",
+            r"(?:show|get|fetch|send)\s+(?:me\s+)?(?:the\s+)?([A-Za-z0-9 _.-]{2,80})",
         )
-        if not match:
+        for pattern in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if not match:
+                continue
+            camera_name = self._clean_camera_name(match.group(1))
+            if camera_name:
+                return camera_name
+        return None
+
+    def _clean_camera_name(self, value: str) -> str | None:
+        cleaned = value.strip(" .")
+        cleaned = re.sub(r"\b(?:please|thanks|thank you)\b.*$", "", cleaned, flags=re.IGNORECASE).strip(" .")
+        cleaned = re.sub(r"^(?:latest|current|live)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .")
+        cleaned = re.sub(r"^(?:snapshot|image|photo|picture)\s+(?:from|of)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .")
+        cleaned = re.sub(r"\s+(?:camera|cam|snapshot|image|photo|picture)$", "", cleaned, flags=re.IGNORECASE).strip(" .")
+        if not cleaned:
             return None
-        return match.group(1).strip(" .")
+        if self._is_non_camera_show_target(cleaned.lower()):
+            return None
+        return cleaned
+
+    def _is_non_camera_show_target(self, lower: str) -> bool:
+        blocked_terms = {
+            "schedule",
+            "schedules",
+            "notification",
+            "notifications",
+            "workflow",
+            "workflows",
+            "presence",
+            "people",
+            "person",
+            "users",
+            "events",
+            "logs",
+            "report",
+            "reports",
+            "settings",
+        }
+        return any(term in lower.split() for term in blocked_terms)
+
+    def _day_from_message(self, lower: str) -> str:
+        if "yesterday" in lower:
+            return "yesterday"
+        if "today" in lower:
+            return "today"
+        return "recent"
+
+    def _person_name_from_event_time_message(self, lower: str) -> str | None:
+        patterns = [
+            r"(?:what time did|when did|did|has|have)\s+([a-z][a-z .'-]{1,40}?)\s+(?:leave|left|exit|exited|arrive|arrived|come|came)\b",
+            r"\b([a-z][a-z .'-]{1,40}?)\s+(?:left|exited|arrived|came)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, lower)
+            if not match:
+                continue
+            name = re.sub(r"\b(the|a|an|person|user|resident|visitor|contractor)\b", "", match.group(1))
+            name = re.sub(r"\s+", " ", name).strip(" ?.")
+            if name:
+                return name
+        return None
 
     def _is_vehicle_lookup_request(self, lower: str) -> bool:
         lookup_phrases = [
@@ -1040,11 +1591,22 @@ class ChatService:
             "query_schedule_targets": "Checking schedule assignments...",
             "assign_schedule_to_entity": "Assigning schedule...",
             "verify_schedule_access": "Verifying schedule access...",
+            "query_notification_catalog": "Checking notification options...",
+            "query_notification_workflows": "Checking notification workflows...",
+            "get_notification_workflow": "Checking notification workflow...",
+            "create_notification_workflow": "Preparing notification workflow...",
+            "update_notification_workflow": "Preparing notification workflow update...",
+            "delete_notification_workflow": "Preparing notification workflow deletion...",
+            "preview_notification_workflow": "Previewing notification workflow...",
+            "test_notification_workflow": "Preparing notification test...",
         }
         return {"tool": tool_name, "label": labels.get(tool_name, "Running system tool...")}
 
     def _looks_like_schedule_create_request(self, lower: str) -> bool:
         return "schedule" in lower and any(word in lower for word in ["create", "new", "add", "make"])
+
+    def _looks_like_schedule_delete_request(self, lower: str) -> bool:
+        return "schedule" in lower and bool(re.search(r"\b(delete|remove)\b", lower))
 
     def _is_confirmation_message(self, lower: str) -> bool:
         return bool(re.search(r"\b(yes|confirm|confirmed|update|replace|proceed|go ahead|do it|approved|approve)\b", lower))
@@ -1072,6 +1634,22 @@ class ChatService:
                 flags=re.IGNORECASE,
             )[0].strip()
             if name and name.lower() not in {"a new", "new", "called", "named"}:
+                return name
+        return None
+
+    def _schedule_delete_name_from_message(self, message: str) -> str | None:
+        patterns = (
+            r"(?:delete|remove)\s+(?:the\s+)?schedule\s+(?:called|named)\s+['\"]?([A-Za-z0-9 _.-]{2,80})['\"]?",
+            r"(?:delete|remove)\s+(?:the\s+)?schedule\s+['\"]?([A-Za-z0-9 _.-]{2,80})['\"]?",
+            r"(?:delete|remove)\s+['\"]?([A-Za-z0-9 _.-]{2,80})['\"]?\s+schedule\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if not match:
+                continue
+            name = self._clean_schedule_name(match.group(1))
+            name = re.sub(r"^(?:called|named)\s+", "", name, flags=re.IGNORECASE).strip()
+            if name:
                 return name
         return None
 
@@ -1200,20 +1778,62 @@ class ChatService:
         return int(hour) * 60 + int(minute)
 
     def _looks_like_device_state_request(self, lower: str) -> bool:
-        if self._looks_like_device_open_request(lower):
-            return False
         device_words = ["gate", "door", "garage", "cover"]
-        state_words = ["state", "status", "open", "closed", "opening", "closing", "locked", "unlocked"]
-        question_words = ["is the", "is my", "are the", "what is", "what's", "check the", "show me"]
-        return any(word in lower for word in device_words) and (
-            any(word in lower for word in state_words)
-            or any(phrase in lower for phrase in question_words)
+        if not any(word in lower for word in device_words):
+            return False
+        return bool(
+            re.search(r"\b(?:is|are|was|were)\b[^?]*\b(?:open|closed|opening|closing|locked|unlocked)\b", lower)
+            or re.search(r"\b(?:state|status)\b", lower)
+            or re.search(r"\b(?:what(?:'s| is)|check)\b", lower)
         )
 
     def _looks_like_device_open_request(self, lower: str) -> bool:
-        if not re.search(r"\bopen\b", lower):
+        if not any(word in lower for word in ["gate", "garage", "door", "cover"]):
             return False
-        return any(word in lower for word in ["gate", "garage", "door", "cover"])
+        if re.search(r"\b(?:is|are|was|were)\b[^?]*\bopen\b", lower):
+            return False
+        return bool(
+            re.search(r"^\s*(?:please\s+)?(?:confirm(?:ed)?\s+)?open\s+(?:the\s+|my\s+)?", lower)
+            or re.search(r"\b(?:can|could|would)\s+you\s+open\s+(?:the\s+|my\s+)?", lower)
+        )
+
+    def _looks_like_access_event_time_request(self, lower: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:what time did|when did|did|has|have)\s+[a-z][a-z .'-]{1,40}?\s+"
+                r"(?:leave|left|exit|exited|arrive|arrived|come|came)\b",
+                lower,
+            )
+            or re.search(r"\b[a-z][a-z .'-]{1,40}?\s+(?:left|exited|arrived|came)\b", lower)
+        )
+
+    def _looks_like_camera_snapshot_request(self, lower: str) -> bool:
+        if any(word in lower for word in ["analyze", "analyse", "describe", "visible", "see if", "look for"]):
+            return False
+        if any(word in lower for word in ["camera", "snapshot", "image", "photo", "picture"]):
+            return bool(re.search(r"\b(?:show|get|fetch|send|latest)\b", lower))
+        if not re.search(r"\b(?:show|get|fetch|send)\s+(?:me\s+)?(?:the\s+)?[a-z0-9 _.-]{2,80}\b", lower):
+            return False
+        camera_name = self._camera_name_from_message(lower)
+        if not camera_name:
+            return False
+        camera_like_terms = {
+            "back",
+            "front",
+            "side",
+            "garden",
+            "drive",
+            "driveway",
+            "yard",
+            "patio",
+            "gate",
+            "garage",
+            "entrance",
+            "door",
+            "parking",
+            "courtyard",
+        }
+        return bool(camera_like_terms.intersection(camera_name.lower().split()))
 
     def _explicitly_confirmed_device_open(self, lower: str) -> bool:
         return bool(
@@ -1256,6 +1876,32 @@ class ChatService:
     def _fallback_text(self, tool_results: list[dict[str, Any]]) -> str:
         if not tool_results:
             return "I could not find any live system context for that request."
+        latest = tool_results[-1]
+        tool_name = str(latest.get("name") or "")
+        output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
+        if tool_name == "get_camera_snapshot":
+            return self._camera_snapshot_direct_text(output)
+        if tool_name == "query_access_events":
+            events = output.get("events") if isinstance(output.get("events"), list) else []
+            if not events:
+                return "I couldn't find any matching recent access events."
+            event = events[0]
+            person_name = event.get("person") or event.get("registration_number") or "The matched subject"
+            verb = "left" if event.get("direction") == "exit" else "arrived"
+            occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
+            return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
+        if tool_name == "query_device_states":
+            devices = output.get("devices") if isinstance(output.get("devices"), list) else []
+            if not devices:
+                return "I couldn't find a matching configured device."
+            return "; ".join(
+                f"{device.get('name') or 'Device'} is {device.get('state') or 'unknown'}"
+                for device in devices[:5]
+            )
+        if tool_name == "open_device":
+            return self._device_open_direct_text(output)
+        if tool_name == "delete_schedule":
+            return self._schedule_delete_direct_text(output)
         return json.dumps([result["output"] for result in tool_results], default=str)
 
     def _normalize_attachments(

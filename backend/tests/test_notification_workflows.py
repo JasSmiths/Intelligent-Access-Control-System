@@ -366,11 +366,14 @@ async def test_ai_notification_mutation_tools_require_confirmation() -> None:
     )
 
     assert create_result["created"] is False
-    assert "confirm=true" in create_result["error"]
+    assert create_result["requires_confirmation"] is True
+    assert create_result["confirmation_field"] == "confirm"
     assert delete_result["deleted"] is False
-    assert "confirm=true" in delete_result["error"]
+    assert delete_result["requires_confirmation"] is True
+    assert delete_result["confirmation_field"] == "confirm"
     assert test_result["sent"] is False
-    assert "confirm_send=true" in test_result["error"]
+    assert test_result["requires_confirmation"] is True
+    assert test_result["confirmation_field"] == "confirm_send"
 
 
 async def test_ai_notification_test_tool_propagates_provider_failure(monkeypatch) -> None:

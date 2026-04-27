@@ -47,6 +47,7 @@ from app.services.unifi_protect import get_unifi_protect_service
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context", default={})
 logger = get_logger(__name__)
+DEFAULT_AGENT_TIMEZONE = "Europe/London"
 
 SCHEDULE_TIME_BLOCKS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -187,13 +188,13 @@ def build_agent_tools() -> dict[str, AgentTool]:
         ),
         AgentTool(
             name="query_device_states",
-            description="Return current Home Assistant device states for configured gates, doors, and garage doors.",
+            description="Return current states for configured gates, doors, and garage doors.",
             parameters={
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Optional device name or entity ID, for example Top Gate, Back Door, or cover.main_gate.",
+                        "description": "Optional friendly device name, for example Top Gate, Back Door, or Main Garage Door.",
                     },
                     "kind": {
                         "type": "string",
@@ -207,15 +208,15 @@ def build_agent_tools() -> dict[str, AgentTool]:
         ),
         AgentTool(
             name="open_device",
-            description="Open a configured gate or garage door through Home Assistant. This is a real-world side effect and requires confirm=true.",
+            description="Open a configured gate or garage door. This is a real-world side effect and requires confirm=true.",
             parameters={
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Device name or entity ID, for example Top Gate, Main Garage Door, or cover.top_gate.",
+                        "description": "Friendly device name, for example Top Gate or Main Garage Door.",
                     },
-                    "entity_id": {"type": "string", "description": "Optional Home Assistant cover entity ID."},
+                    "entity_id": {"type": "string", "description": "Optional internal device identifier when already known."},
                     "kind": {
                         "type": "string",
                         "enum": ["all", "gate", "garage_door"],
@@ -687,6 +688,7 @@ def get_chat_tool_context() -> dict[str, Any]:
 
 async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
     person_filter = _normalize(arguments.get("person"))
+    config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
         query = select(Presence).options(selectinload(Presence.person)).order_by(Presence.updated_at.desc())
         rows = (await session.scalars(query)).all()
@@ -695,12 +697,13 @@ async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
         {
             "person": row.person.display_name,
             "state": row.state.value,
-            "last_changed_at": row.last_changed_at.isoformat() if row.last_changed_at else None,
+            "last_changed_at": _agent_datetime_iso(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
+            "last_changed_at_display": _agent_datetime_display(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
         }
         for row in rows
         if not person_filter or person_filter in row.person.display_name.lower()
     ]
-    return {"presence": records}
+    return {"presence": records, "timezone": config.site_timezone}
 
 
 async def query_device_states(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -758,17 +761,10 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
     if kind_filter not in {"", "all", "gate", "garage_door"}:
         return {"opened": False, "error": "kind must be all, gate, or garage_door."}
     if not target_text:
-        return {"opened": False, "error": "target or entity_id is required."}
-
-    if not bool(arguments.get("confirm")):
         return {
             "opened": False,
-            "requires_confirmation": True,
-            "target": target_text,
-            "detail": (
-                "Opening gates and garage doors is a real-world action. "
-                "Use the chat confirmation action before I open it."
-            ),
+            "requires_details": True,
+            "detail": "Which gate or garage door should I open?",
         }
 
     target = await _resolve_openable_device(arguments, kind_filter=kind_filter or "all")
@@ -776,7 +772,20 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
         return {
             "opened": False,
             "target": target_text,
-            "error": "No configured openable gate or garage door matched that target.",
+            "error": f"I could not find a configured gate or garage door called {target_text}.",
+        }
+
+    if not bool(arguments.get("confirm")):
+        device = _agent_device_payload(target)
+        return {
+            "opened": False,
+            "requires_confirmation": True,
+            "target": device["name"],
+            "device": device,
+            "detail": (
+                "Opening gates and garage doors is a real-world action. "
+                "Use the chat confirmation action before I open it."
+            ),
         }
 
     config = await get_runtime_config()
@@ -854,7 +863,8 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
 
 async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
     limit = int(arguments.get("limit") or 25)
-    start, end = _period_bounds(arguments.get("day") or "recent")
+    config = await get_runtime_config()
+    start, end = _period_bounds(arguments.get("day") or "recent", config.site_timezone)
 
     async with AsyncSessionLocal() as session:
         query = (
@@ -873,7 +883,7 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
     records = []
     for event in events:
         person = person_map.get(str(event.person_id)) if event.person_id else None
-        if person_filter and (not person or person_filter not in person["display_name"].lower()):
+        if person_filter and (not person or not _person_record_matches(person, person_filter)):
             continue
         if group_filter and (not person or group_filter not in person.get("group", "").lower()):
             continue
@@ -888,17 +898,19 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
                 "direction": event.direction.value,
                 "decision": event.decision.value,
                 "confidence": event.confidence,
-                "occurred_at": event.occurred_at.isoformat(),
+                "occurred_at": _agent_datetime_iso(event.occurred_at, config.site_timezone),
+                "occurred_at_display": _agent_datetime_display(event.occurred_at, config.site_timezone),
                 "anomaly_count": len(event.anomalies),
             }
         )
 
-    return {"events": records, "count": len(records)}
+    return {"events": records, "count": len(records), "timezone": config.site_timezone}
 
 
 async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
     limit = int(arguments.get("limit") or 25)
     severity = _normalize(arguments.get("severity"))
+    config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
         query = select(Anomaly).order_by(Anomaly.created_at.desc()).limit(limit)
         anomalies = (await session.scalars(query)).all()
@@ -908,12 +920,13 @@ async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
             "type": anomaly.anomaly_type.value,
             "severity": anomaly.severity.value,
             "message": anomaly.message,
-            "created_at": anomaly.created_at.isoformat(),
+            "created_at": _agent_datetime_iso(anomaly.created_at, config.site_timezone),
+            "created_at_display": _agent_datetime_display(anomaly.created_at, config.site_timezone),
         }
         for anomaly in anomalies
         if not severity or severity == anomaly.severity.value
     ]
-    return {"anomalies": records, "count": len(records)}
+    return {"anomalies": records, "count": len(records), "timezone": config.site_timezone}
 
 
 async def summarize_access_rhythm(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -939,10 +952,14 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
             "limit": 100,
         }
     )
-    events = sorted(result["events"], key=lambda item: item["occurred_at"])
+    timezone_name = str(result.get("timezone") or DEFAULT_AGENT_TIMEZONE)
+    events = sorted(
+        result["events"],
+        key=lambda item: datetime.fromisoformat(str(item["occurred_at"])).astimezone(UTC),
+    )
     open_entry: datetime | None = None
     total = timedelta()
-    intervals: list[dict[str, str]] = []
+    intervals: list[dict[str, str | None]] = []
 
     for event in events:
         occurred = datetime.fromisoformat(event["occurred_at"])
@@ -952,19 +969,34 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
             open_entry = occurred
         elif event["direction"] == AccessDirection.EXIT.value and open_entry:
             total += occurred - open_entry
-            intervals.append({"entry": open_entry.isoformat(), "exit": occurred.isoformat()})
+            intervals.append(
+                {
+                    "entry": _agent_datetime_iso(open_entry, timezone_name),
+                    "entry_display": _agent_datetime_display(open_entry, timezone_name),
+                    "exit": _agent_datetime_iso(occurred, timezone_name),
+                    "exit_display": _agent_datetime_display(occurred, timezone_name),
+                }
+            )
             open_entry = None
 
     if open_entry:
-        now = datetime.now(tz=UTC)
+        now = _agent_now(timezone_name)
         total += now - open_entry
-        intervals.append({"entry": open_entry.isoformat(), "exit": "still_present"})
+        intervals.append(
+            {
+                "entry": _agent_datetime_iso(open_entry, timezone_name),
+                "entry_display": _agent_datetime_display(open_entry, timezone_name),
+                "exit": "still_present",
+                "exit_display": None,
+            }
+        )
 
     return {
         "duration_seconds": int(total.total_seconds()),
         "duration_human": _human_duration(total),
         "intervals": intervals,
         "matched_events": len(events),
+        "timezone": timezone_name,
     }
 
 
@@ -1126,6 +1158,7 @@ async def export_presence_report_csv(arguments: dict[str, Any]) -> dict[str, Any
     if not user_id:
         return {"generated": False, "error": "File generation requires an authenticated chat user."}
 
+    runtime = await get_runtime_config()
     day = str(arguments.get("day") or "today")
     presence = await query_presence({"person": arguments.get("person")})
     events = await query_access_events(
@@ -1156,7 +1189,7 @@ async def export_presence_report_csv(arguments: dict[str, Any]) -> dict[str, Any
             ]
         )
 
-    filename = f"presence-report-{day}-{datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')}.csv"
+    filename = f"presence-report-{day}-{_agent_now(runtime.site_timezone).strftime('%Y%m%d-%H%M%S')}.csv"
     try:
         attachment = chat_attachment_store.save_generated(
             filename=filename,
@@ -1184,6 +1217,7 @@ async def generate_contractor_invoice_pdf(arguments: dict[str, Any]) -> dict[str
     if not user_id:
         return {"generated": False, "error": "File generation requires an authenticated chat user."}
 
+    runtime = await get_runtime_config()
     contractor_name = str(arguments.get("contractor_name") or "Contractor").strip()
     day = str(arguments.get("day") or "today")
     hourly_rate = float(arguments.get("hourly_rate") or 0)
@@ -1191,7 +1225,7 @@ async def generate_contractor_invoice_pdf(arguments: dict[str, Any]) -> dict[str
     duration = await calculate_visit_duration({"group": "contractor", "day": day})
     hours = round(int(duration.get("duration_seconds") or 0) / 3600, 2)
     amount = round(hours * hourly_rate, 2)
-    issued_at = datetime.now(tz=UTC)
+    issued_at = _agent_now(runtime.site_timezone)
 
     lines = [
         "Intelligent Access Control System",
@@ -1199,7 +1233,7 @@ async def generate_contractor_invoice_pdf(arguments: dict[str, Any]) -> dict[str
         "",
         f"Contractor: {contractor_name}",
         f"Period: {day}",
-        f"Issued: {issued_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Issued: {_agent_datetime_display(issued_at, runtime.site_timezone)}",
         f"Matched events: {duration.get('matched_events', 0)}",
         f"Visit duration: {duration.get('duration_human', '0m')} ({hours:.2f} hours)",
         f"Hourly rate: {currency} {hourly_rate:.2f}",
@@ -1255,7 +1289,7 @@ async def get_camera_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
             height=runtime.unifi_protect_snapshot_height,
         )
         attachment = chat_attachment_store.save_generated(
-            filename=f"camera-snapshot-{_filename_slug(camera_identifier)}-{datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')}.jpg",
+            filename=f"camera-snapshot-{_filename_slug(camera_identifier)}-{_agent_now(runtime.site_timezone).strftime('%Y%m%d-%H%M%S')}.jpg",
             content=media.content,
             content_type=media.content_type,
             owner_user_id=user_id,
@@ -1329,7 +1363,14 @@ async def get_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]
 
 async def create_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
     if not bool(arguments.get("confirm")):
-        return {"created": False, "error": "confirm=true is required before creating a notification workflow."}
+        name = str(arguments.get("name") or "notification workflow").strip()
+        return {
+            "created": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "workflow_name": name,
+            "detail": "Create this notification workflow? Future matching events may send real notifications.",
+        }
 
     name = str(arguments.get("name") or "").strip()
     trigger_event = str(arguments.get("trigger_event") or "").strip()
@@ -1367,7 +1408,14 @@ async def create_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
 
 async def update_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
     if not bool(arguments.get("confirm")):
-        return {"updated": False, "error": "confirm=true is required before editing a notification workflow."}
+        name = str(arguments.get("rule_name") or arguments.get("name") or "notification workflow").strip()
+        return {
+            "updated": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "workflow_name": name,
+            "detail": "Update this notification workflow? Future matching events may use the changed delivery rules.",
+        }
 
     async with AsyncSessionLocal() as session:
         rule = await _resolve_notification_rule(session, arguments)
@@ -1411,7 +1459,14 @@ async def update_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
 
 async def delete_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
     if not bool(arguments.get("confirm")):
-        return {"deleted": False, "error": "confirm=true is required before deleting a notification workflow."}
+        name = str(arguments.get("rule_name") or arguments.get("rule_id") or "notification workflow").strip()
+        return {
+            "deleted": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "workflow_name": name,
+            "detail": "Delete this notification workflow?",
+        }
 
     async with AsyncSessionLocal() as session:
         rule = await _resolve_notification_rule(session, arguments)
@@ -1436,7 +1491,14 @@ async def preview_notification_workflow(arguments: dict[str, Any]) -> dict[str, 
 
 async def test_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
     if not bool(arguments.get("confirm_send")):
-        return {"sent": False, "error": "confirm_send=true is required before sending a real test notification."}
+        name = str(arguments.get("rule_name") or arguments.get("name") or "notification workflow").strip()
+        return {
+            "sent": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm_send",
+            "workflow_name": name,
+            "detail": "Send a real test notification for this workflow?",
+        }
 
     rule = await _notification_rule_payload_for_agent(arguments)
     if not rule:
@@ -1565,9 +1627,6 @@ async def update_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def delete_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not bool(arguments.get("confirm")):
-        return {"deleted": False, "error": "confirm=true is required before deleting a schedule."}
-
     async with AsyncSessionLocal() as session:
         schedule = await _resolve_schedule(session, arguments)
         if not schedule:
@@ -1577,9 +1636,19 @@ async def delete_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
             return {
                 "deleted": False,
                 "error": "Schedule is currently assigned and cannot be deleted.",
+                "schedule_name": schedule.name,
                 "dependencies": dependencies,
             }
         serialized = _serialize_schedule_for_agent(schedule)
+        if not bool(arguments.get("confirm")):
+            return {
+                "deleted": False,
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "schedule_name": schedule.name,
+                "schedule": serialized,
+                "detail": f"Delete the {schedule.name} schedule? This cannot be undone.",
+            }
         await session.delete(schedule)
         await session.commit()
         return {"deleted": True, "schedule": serialized}
@@ -1698,7 +1767,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "verified": True,
                 "allowed": allowed,
                 "source": "schedule",
-                "checked_at": occurred_at.isoformat(),
+                "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
+                "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
                 "timezone": config.site_timezone,
                 "schedule": _serialize_schedule_for_agent(schedule),
                 "reason": f"{schedule.name} allows this time." if allowed else f"{schedule.name} does not allow this time.",
@@ -1724,7 +1794,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "source": evaluation.source,
                 "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
                 "schedule_name": evaluation.schedule_name,
-                "checked_at": occurred_at.isoformat(),
+                "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
+                "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
                 "timezone": config.site_timezone,
                 "reason": evaluation.reason,
             }
@@ -1749,7 +1820,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "source": evaluation.source,
                 "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
                 "schedule_name": evaluation.schedule_name,
-                "checked_at": occurred_at.isoformat(),
+                "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
+                "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
                 "timezone": config.site_timezone,
                 "reason": evaluation.reason,
             }
@@ -1776,7 +1848,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             "source": evaluation.source,
             "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
             "schedule_name": evaluation.schedule_name,
-            "checked_at": occurred_at.isoformat(),
+            "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
+            "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
             "timezone": config.site_timezone,
             "reason": evaluation.reason,
         }
@@ -1827,8 +1900,10 @@ def _serialize_notification_rule_for_agent(rule: NotificationRule) -> dict[str, 
         "conditions": normalize_conditions(rule.conditions),
         "actions": normalize_actions(rule.actions),
         "is_active": rule.is_active,
-        "created_at": rule.created_at.isoformat() if rule.created_at else None,
-        "updated_at": rule.updated_at.isoformat() if rule.updated_at else None,
+        "created_at": _agent_datetime_iso(rule.created_at) if rule.created_at else None,
+        "created_at_display": _agent_datetime_display(rule.created_at) if rule.created_at else None,
+        "updated_at": _agent_datetime_iso(rule.updated_at) if rule.updated_at else None,
+        "updated_at_display": _agent_datetime_display(rule.updated_at) if rule.updated_at else None,
     }
 
 
@@ -1858,6 +1933,23 @@ async def _person_map(session) -> dict[str, dict[str, str]]:
         }
         for person in people
     }
+
+
+def _person_record_matches(person: dict[str, str], requested: str) -> bool:
+    requested_key = _person_match_key(requested)
+    display_key = _person_match_key(person.get("display_name", ""))
+    group_key = _person_match_key(person.get("group", ""))
+    if not requested_key:
+        return False
+    if requested_key == display_key or requested_key in display_key:
+        return True
+    requested_tokens = set(requested_key.split())
+    display_tokens = set(display_key.split())
+    return bool(requested_tokens and requested_tokens <= display_tokens) or requested_key == group_key
+
+
+def _person_match_key(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
 
 
 async def _resolve_schedule(session, arguments: dict[str, Any]) -> Schedule | None:
@@ -1903,7 +1995,14 @@ async def _resolve_person(session, arguments: dict[str, Any]) -> Person | None:
     exact = [person for person in people if person.display_name.lower() == person_name]
     if exact:
         return exact[0]
-    partial = [person for person in people if person_name in person.display_name.lower()]
+    partial = [
+        person
+        for person in people
+        if _person_record_matches(
+            {"display_name": person.display_name, "group": person.group.name if person.group else ""},
+            person_name,
+        )
+    ]
     return partial[0] if len(partial) == 1 else None
 
 
@@ -1950,8 +2049,10 @@ def _serialize_schedule_for_agent(schedule: Schedule) -> dict[str, Any]:
         "description": schedule.description,
         "time_blocks": time_blocks,
         "summary": _schedule_summary(time_blocks),
-        "created_at": schedule.created_at.isoformat(),
-        "updated_at": schedule.updated_at.isoformat(),
+        "created_at": _agent_datetime_iso(schedule.created_at),
+        "created_at_display": _agent_datetime_display(schedule.created_at),
+        "updated_at": _agent_datetime_iso(schedule.updated_at),
+        "updated_at_display": _agent_datetime_display(schedule.updated_at),
     }
 
 
@@ -2049,7 +2150,7 @@ async def _resolve_cover_target(arguments: dict[str, Any], *, entity_type: str) 
         or ""
     ).strip()
     requested_name = _normalize(arguments.get("entity_name") or arguments.get("name") or arguments.get("target"))
-    matches: list[dict[str, Any]] = []
+    matches: list[tuple[int, dict[str, Any]]] = []
 
     for kind, entities in _cover_entities_by_kind(config).items():
         if entity_type not in {"door", kind}:
@@ -2058,12 +2159,49 @@ async def _resolve_cover_target(arguments: dict[str, Any], *, entity_type: str) 
         for entity in entities:
             entity_id = str(entity.get("entity_id") or "")
             name = str(entity.get("name") or entity_id)
+            match = {"kind": kind, "setting_key": setting_key, "entity": dict(entity)}
             if requested_id and entity_id == requested_id:
-                matches.append({"kind": kind, "setting_key": setting_key, "entity": dict(entity)})
+                matches.append((100, match))
             elif requested_name and (requested_name == name.lower() or requested_name in f"{name} {entity_id}".lower()):
-                matches.append({"kind": kind, "setting_key": setting_key, "entity": dict(entity)})
+                matches.append((90, match))
+            elif requested_name:
+                score = _cover_target_match_score(requested_name, name, entity_id, kind)
+                if score >= 2:
+                    matches.append((score, match))
 
-    return matches[0] if len(matches) == 1 else None
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    if len(matches) == 1 or matches[0][0] > matches[1][0]:
+        return matches[0][1]
+    return None
+
+
+def _cover_target_match_score(requested: str, name: str, entity_id: str, kind: str) -> int:
+    requested_key = _cover_match_key(requested)
+    name_key = _cover_match_key(name)
+    entity_key = _cover_match_key(entity_id)
+    kind_key = _cover_match_key(kind)
+    candidate_key = " ".join(part for part in [name_key, entity_key, kind_key] if part)
+    if not requested_key or not candidate_key:
+        return 0
+    if requested_key == name_key or requested_key == entity_key:
+        return 100
+    if requested_key in candidate_key or name_key and name_key in requested_key:
+        return 50
+    requested_tokens = set(requested_key.split())
+    candidate_tokens = set(candidate_key.split())
+    return len(requested_tokens & candidate_tokens)
+
+
+def _cover_match_key(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", value.lower())
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token not in {"the", "a", "an", "cover", "entity", "id"}
+    ]
+    return " ".join(tokens)
 
 
 def _cover_entities_by_kind(config: Any) -> dict[str, list[dict[str, Any]]]:
@@ -2224,12 +2362,12 @@ def _parse_schedule_minute(value: str) -> int:
 
 def _parse_agent_datetime(value: Any, timezone_name: str) -> datetime:
     if not value:
-        return datetime.now(tz=UTC)
+        return _agent_now(timezone_name)
     text = str(value).strip()
     parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
-    return parsed
+        parsed = parsed.replace(tzinfo=_agent_timezone(timezone_name))
+    return parsed.astimezone(_agent_timezone(timezone_name))
 
 
 def _uuid_from_value(value: Any) -> UUID | None:
@@ -2381,15 +2519,42 @@ def _pdf_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _period_bounds(day: str) -> tuple[datetime, datetime]:
-    now = datetime.now(tz=UTC)
+def _agent_timezone(timezone_name: str | None = None) -> ZoneInfo:
+    try:
+        return ZoneInfo(str(timezone_name or DEFAULT_AGENT_TIMEZONE))
+    except Exception:
+        return ZoneInfo(DEFAULT_AGENT_TIMEZONE)
+
+
+def _agent_now(timezone_name: str | None = None) -> datetime:
+    return datetime.now(tz=_agent_timezone(timezone_name))
+
+
+def _agent_datetime(value: datetime, timezone_name: str | None = None) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_agent_timezone(timezone_name))
+
+
+def _agent_datetime_iso(value: datetime, timezone_name: str | None = None) -> str:
+    return _agent_datetime(value, timezone_name).isoformat()
+
+
+def _agent_datetime_display(value: datetime, timezone_name: str | None = None) -> str:
+    timezone = _agent_timezone(timezone_name)
+    label = getattr(timezone, "key", DEFAULT_AGENT_TIMEZONE)
+    return f"{_agent_datetime(value, label).strftime('%d %b %Y, %H:%M')} {label}"
+
+
+def _period_bounds(day: str, timezone_name: str = DEFAULT_AGENT_TIMEZONE) -> tuple[datetime, datetime]:
+    now = _agent_now(timezone_name)
     if day == "today":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return start, now
+        return start.astimezone(UTC), now.astimezone(UTC)
     if day == "yesterday":
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return today - timedelta(days=1), today
-    return now - timedelta(days=14), now
+        return (today - timedelta(days=1)).astimezone(UTC), today.astimezone(UTC)
+    return (now - timedelta(days=14)).astimezone(UTC), now.astimezone(UTC)
 
 
 def _normalize(value: Any) -> str:
