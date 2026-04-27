@@ -16,7 +16,8 @@
     `media_player.all_google_home_speakers`.
 - Home Assistant state sync:
   - Broadcasts gate state changes over the realtime event bus.
-  - Optional HA presence entity mapping back into IACS presence.
+  - Broadcasts configured door and cover state changes over the realtime event
+    bus.
 - Apprise notification sender:
   - Comma-separated or newline-separated URL config.
   - Non-blocking dispatch through a worker thread.
@@ -37,14 +38,12 @@ IACS_HOME_ASSISTANT_GATE_ENTITY_ID=cover.driveway_gate
 IACS_HOME_ASSISTANT_GATE_OPEN_SERVICE=cover.open_cover
 IACS_HOME_ASSISTANT_TTS_SERVICE=tts.cloud_say
 IACS_HOME_ASSISTANT_DEFAULT_MEDIA_PLAYER=media_player.all_google_home_speakers
-IACS_HOME_ASSISTANT_PRESENCE_ENTITIES=Steph=person.steph,Bob=person.bob
 
 IACS_APPRISE_URLS=pover://user@token
 ```
 
-`IACS_HOME_ASSISTANT_PRESENCE_ENTITIES` is optional. When configured, HA states
-such as `home`, `on`, `present`, or `detected` map to IACS `present`; states
-such as `not_home`, `off`, `away`, or `clear` map to IACS `exited`.
+Home Assistant `person.*` geofence/entity states are not used as IACS
+presence. Access-event entry/exit records are the presence source of truth.
 
 ## API Endpoints
 

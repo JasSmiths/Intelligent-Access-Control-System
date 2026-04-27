@@ -182,7 +182,6 @@ type Person = {
   is_active: boolean;
   notes: string | null;
   garage_door_entity_ids: string[];
-  home_assistant_presence_entity_id: string | null;
   home_assistant_mobile_app_notify_service: string | null;
   vehicles: Vehicle[];
 };
@@ -269,16 +268,6 @@ type HomeAssistantManagedCover = {
   close_service?: string;
 };
 
-type HomeAssistantPresenceSuggestion = {
-  person_id: string;
-  first_name: string;
-  last_name: string;
-  display_name: string;
-  suggested_entity_id: string | null;
-  suggested_name: string | null;
-  confidence: number;
-};
-
 type HomeAssistantMobileAppService = {
   service_id: string;
   name: string | null;
@@ -300,18 +289,11 @@ type HomeAssistantDiscovery = {
   gate_suggestions?: HomeAssistantManagedCover[];
   garage_door_suggestions?: HomeAssistantManagedCover[];
   media_player_entities: HomeAssistantEntity[];
-  person_entities: HomeAssistantEntity[];
   mobile_app_notification_services: HomeAssistantMobileAppService[];
-  presence_mappings: HomeAssistantPresenceSuggestion[];
   mobile_app_notification_mappings: HomeAssistantMobileAppSuggestion[];
 };
 
 type HomeAssistantPersonSuggestion = {
-  presence?: {
-    id: string;
-    label: string;
-    confidence: number;
-  };
   mobile?: {
     id: string;
     label: string;
@@ -3478,7 +3460,6 @@ function PeopleView({
     matches(item.group ?? "", query) ||
     item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
     (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoors.find((door) => door.entity_id === entityId)?.name ?? entityId, query)) ||
-    matches(item.home_assistant_presence_entity_id ?? "", query) ||
     matches(item.home_assistant_mobile_app_notify_service ?? "", query)
   );
   const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
@@ -3546,7 +3527,6 @@ function PeopleView({
                   {(person.garage_door_entity_ids ?? []).map((entityId) => (
                     <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
                   ))}
-                  {person.home_assistant_presence_entity_id ? <span className="vehicle-chip ha-chip">HA presence</span> : null}
                   {person.home_assistant_mobile_app_notify_service ? <span className="vehicle-chip ha-chip">HA mobile</span> : null}
                 </div>
               </article>
@@ -3612,7 +3592,6 @@ function PersonModal({
     schedule_id: person?.schedule_id ?? "",
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
-    home_assistant_presence_entity_id: person?.home_assistant_presence_entity_id ?? "",
     home_assistant_mobile_app_notify_service: person?.home_assistant_mobile_app_notify_service ?? "",
     notes: person?.notes ?? "",
     is_active: person?.is_active ?? true
@@ -3621,7 +3600,7 @@ function PersonModal({
   const [haDiscovery, setHaDiscovery] = React.useState<HomeAssistantDiscovery | null>(null);
   const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
   const [haDiscoveryLoading, setHaDiscoveryLoading] = React.useState(false);
-  const [haSelectionTouched, setHaSelectionTouched] = React.useState({ presence: Boolean(person?.home_assistant_presence_entity_id), mobile: Boolean(person?.home_assistant_mobile_app_notify_service) });
+  const [haMobileSelectionTouched, setHaMobileSelectionTouched] = React.useState(Boolean(person?.home_assistant_mobile_app_notify_service));
   const [haSuggestion, setHaSuggestion] = React.useState<HomeAssistantPersonSuggestion>({});
   const [haTestFeedback, setHaTestFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [sendingHaTest, setSendingHaTest] = React.useState(false);
@@ -3662,13 +3641,8 @@ function PersonModal({
     );
   };
 
-  const updatePresenceEntity = (entityId: string) => {
-    setHaSelectionTouched((current) => ({ ...current, presence: true }));
-    update("home_assistant_presence_entity_id", entityId);
-  };
-
   const updateMobileNotifyService = (serviceId: string) => {
-    setHaSelectionTouched((current) => ({ ...current, mobile: true }));
+    setHaMobileSelectionTouched(true);
     setHaTestFeedback(null);
     update("home_assistant_mobile_app_notify_service", serviceId);
   };
@@ -3732,19 +3706,15 @@ function PersonModal({
       setHaSuggestion(suggestion);
       setForm((current) => ({
         ...current,
-        home_assistant_presence_entity_id:
-          !haSelectionTouched.presence && !current.home_assistant_presence_entity_id && suggestion.presence?.id
-            ? suggestion.presence.id
-            : current.home_assistant_presence_entity_id,
         home_assistant_mobile_app_notify_service:
-          !haSelectionTouched.mobile && !current.home_assistant_mobile_app_notify_service && suggestion.mobile?.id
+          !haMobileSelectionTouched && !current.home_assistant_mobile_app_notify_service && suggestion.mobile?.id
             ? suggestion.mobile.id
             : current.home_assistant_mobile_app_notify_service
       }));
     }, 700);
 
     return () => window.clearTimeout(timeout);
-  }, [form.first_name, form.last_name, haDiscovery, haSelectionTouched.mobile, haSelectionTouched.presence]);
+  }, [form.first_name, form.last_name, haDiscovery, haMobileSelectionTouched]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -3759,7 +3729,6 @@ function PersonModal({
       schedule_id: form.schedule_id || null,
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
-      home_assistant_presence_entity_id: form.home_assistant_presence_entity_id || null,
       home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
       notes: form.notes || null,
       is_active: form.is_active
@@ -3794,7 +3763,6 @@ function PersonModal({
     is_active: form.is_active,
     notes: form.notes || null,
     garage_door_entity_ids: form.garage_door_entity_ids,
-    home_assistant_presence_entity_id: form.home_assistant_presence_entity_id || null,
     home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
     vehicles: []
   };
@@ -3875,18 +3843,11 @@ function PersonModal({
             <span className="ha-device-icon"><Home size={17} /></span>
             <div>
               <strong>Home Assistant</strong>
-              <span>{haDiscoveryLoading ? "Loading discovered entities" : haDiscovery ? "Presence and mobile notification links" : "Save credentials in API & Integrations to enable discovery"}</span>
+              <span>{haDiscoveryLoading ? "Loading discovered entities" : haDiscovery ? "Mobile notification link" : "Save credentials in API & Integrations to enable discovery"}</span>
             </div>
           </div>
           {haDiscoveryError ? <div className="auth-error inline-error">{haDiscoveryError}</div> : null}
           <div className="field-grid">
-            <EntitySelectField
-              label="Presence entity"
-              value={form.home_assistant_presence_entity_id}
-              entities={haDiscovery?.person_entities ?? []}
-              domainLabel="person"
-              onChange={updatePresenceEntity}
-            />
             <MobileAppNotifySelectField
               label="Mobile app notification"
               value={form.home_assistant_mobile_app_notify_service}
@@ -3908,14 +3869,9 @@ function PersonModal({
           {haTestFeedback ? (
             <div className={`person-ha-test-feedback ${haTestFeedback.tone}`}>{haTestFeedback.text}</div>
           ) : null}
-          {(haSuggestion.presence || haSuggestion.mobile) ? (
+          {haSuggestion.mobile ? (
             <div className="person-ha-suggestions">
-              {haSuggestion.presence ? (
-                <span>Presence match {Math.round(haSuggestion.presence.confidence * 100)}%</span>
-              ) : null}
-              {haSuggestion.mobile ? (
-                <span>Mobile match {Math.round(haSuggestion.mobile.confidence * 100)}%</span>
-              ) : null}
+              <span>Mobile match {Math.round(haSuggestion.mobile.confidence * 100)}%</span>
             </div>
           ) : null}
         </section>
@@ -8066,7 +8022,7 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     const current = values[field.key];
     if (secretSettingKeys.has(field.key)) {
       acc[field.key] = "";
-    } else if (["home_assistant_presence_entities", "home_assistant_gate_entities", "home_assistant_garage_door_entities"].includes(field.key) && typeof current === "object") {
+    } else if (["home_assistant_gate_entities", "home_assistant_garage_door_entities"].includes(field.key) && typeof current === "object") {
       acc[field.key] = JSON.stringify(current ?? {}, null, 2);
     } else {
       acc[field.key] = stringifySetting(current || defaults[field.key] || "");
@@ -8085,32 +8041,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function parsePresenceMapping(value: unknown): Record<string, string> {
-  if (!value) return {};
-  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, string>;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, string> : {};
-  } catch {
-    return {};
-  }
-}
-
 function suggestHomeAssistantPersonIntegrations(
   firstName: string,
   lastName: string,
   discovery: HomeAssistantDiscovery
 ): HomeAssistantPersonSuggestion {
   const displayName = `${firstName} ${lastName}`.trim();
-  const presence = bestHomeAssistantMatch(
-    displayName,
-    discovery.person_entities.map((entity) => ({
-      id: entity.entity_id,
-      label: entity.name ? `${entity.name} ${entity.entity_id}` : entity.entity_id
-    })),
-    0.45
-  );
   const mobile = bestHomeAssistantMatch(
     displayName,
     discovery.mobile_app_notification_services.map((service) => ({
@@ -8120,7 +8056,6 @@ function suggestHomeAssistantPersonIntegrations(
     0.45
   );
   return {
-    presence: presence ? { id: presence.id, label: titleFromEntityId(presence.id), confidence: presence.confidence } : undefined,
     mobile: mobile ? { id: mobile.id, label: titleFromEntityId(mobile.id), confidence: mobile.confidence } : undefined
   };
 }
@@ -8155,7 +8090,6 @@ function homeAssistantNameTokens(value: string) {
     value
       .toLowerCase()
       .replace(/notify\.mobile_app_/g, " ")
-      .replace(/person\./g, " ")
       .split(/[^a-z0-9]+/)
       .filter(Boolean)
   );
@@ -8263,13 +8197,7 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
     ) {
       if (!value.trim()) continue;
     }
-    if (key === "home_assistant_presence_entities") {
-      try {
-        payload[key] = value.trim() ? JSON.parse(value) : {};
-      } catch {
-        payload[key] = {};
-      }
-    } else if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
+    if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
       try {
         const parsed = value.trim() ? JSON.parse(value) : [];
         payload[key] = Array.isArray(parsed) ? parsed : [];

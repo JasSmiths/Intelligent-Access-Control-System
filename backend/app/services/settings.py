@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.session import AsyncSessionLocal
-from app.models import Person, SystemSetting
+from app.models import SystemSetting
 from app.modules.home_assistant.covers import legacy_gate_entities, normalize_cover_entities
 
 
@@ -31,7 +31,7 @@ LEGACY_DEFAULT_REPLACEMENTS = {
     "ollama_model": {"llama3.1": "llama3"},
 }
 
-OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules"}
+OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities"}
 
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
@@ -66,7 +66,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "home_assistant_tts_service": ("integrations", settings.home_assistant_tts_service, "TTS service name."),
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
-    "home_assistant_presence_entities": ("integrations", settings.home_assistant_presence_entities, "Legacy person-to-HA entity mapping fallback."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
@@ -121,7 +120,6 @@ class RuntimeConfig:
     home_assistant_garage_door_entities: list[dict[str, Any]]
     home_assistant_tts_service: str
     home_assistant_default_media_player: str
-    home_assistant_presence_entities: dict[str, str]
     apprise_urls: str
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
@@ -233,17 +231,6 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
                 "home_assistant_gate_entities",
                 legacy_gate_entities(legacy_gate_entity_id, gate_open_service),
             )
-    presence_entities_record = records_by_key.get("home_assistant_presence_entities")
-    if presence_entities_record:
-        presence_entities = decrypted_value(presence_entities_record)
-        if isinstance(presence_entities, dict) and presence_entities:
-            for person_name, entity_id in presence_entities.items():
-                entity_id_text = str(entity_id or "").strip()
-                if not entity_id_text.startswith("person."):
-                    continue
-                person = await session.scalar(select(Person).where(Person.display_name == str(person_name)))
-                if person and not person.home_assistant_presence_entity_id:
-                    person.home_assistant_presence_entity_id = entity_id_text
     for record in records:
         if record.key in OBSOLETE_DYNAMIC_SETTINGS:
             continue
@@ -303,7 +290,6 @@ async def get_runtime_config() -> RuntimeConfig:
         ),
         home_assistant_tts_service=str(values["home_assistant_tts_service"]),
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
-        home_assistant_presence_entities=dict(values["home_assistant_presence_entities"] or {}),
         apprise_urls=str(values["apprise_urls"] or ""),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),

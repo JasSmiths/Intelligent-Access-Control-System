@@ -53,7 +53,6 @@ class Settings(BaseSettings):
     home_assistant_gate_open_service: str = "cover.open_cover"
     home_assistant_tts_service: str = "tts.cloud_say"
     home_assistant_default_media_player: str | None = None
-    home_assistant_presence_entities: dict[str, str] = Field(default_factory=dict)
     apprise_urls: str | None = None
 
     openai_api_key: str | None = None
@@ -87,22 +86,6 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [host.strip() for host in value.split(",") if host.strip()]
         return value
-
-    @field_validator("home_assistant_presence_entities", mode="before")
-    @classmethod
-    def parse_presence_entities(cls, value: str | dict[str, str] | None) -> dict[str, str]:
-        if not value:
-            return {}
-        if isinstance(value, dict):
-            return value
-
-        pairs: dict[str, str] = {}
-        for item in value.split(","):
-            if not item.strip() or "=" not in item:
-                continue
-            name, entity_id = item.split("=", 1)
-            pairs[name.strip()] = entity_id.strip()
-        return pairs
 
     @field_validator(
         "public_base_url",

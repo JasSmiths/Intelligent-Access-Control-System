@@ -426,7 +426,6 @@ Configuration lives in dynamic encrypted settings:
 - `home_assistant_gate_open_service`
 - `home_assistant_tts_service`
 - `home_assistant_default_media_player`
-- `home_assistant_presence_entities`: person-name to `person.*` entity map.
 - `home_assistant_gate_entity_id`: legacy single-gate seed/fallback only; do
   not build new UI or logic against it.
 
@@ -436,6 +435,9 @@ Rules:
 - Route garage door commands through `POST /api/v1/integrations/cover/command`
   or the configured per-person automatic garage door flow.
 - Route audio announcements through the HA TTS module.
+- Do not use Home Assistant `person.*` geofence/entity states as IACS
+  presence. Presence is derived from LPR access events because HA person state
+  is already `home` by the time a vehicle reaches the gate.
 - Do not call HA directly from API route handlers except through services or
   integration modules.
 - Gate and garage door opens can be schedule-gated through `schedule_id`; closed

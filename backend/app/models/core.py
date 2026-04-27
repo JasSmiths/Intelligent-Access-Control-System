@@ -54,7 +54,6 @@ class Person(Base, TimestampMixin):
         ForeignKey("schedules.id", ondelete="SET NULL"), index=True
     )
     garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    home_assistant_presence_entity_id: Mapped[str | None] = mapped_column(String(255))
     home_assistant_mobile_app_notify_service: Mapped[str | None] = mapped_column(String(255))
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

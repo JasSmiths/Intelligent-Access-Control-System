@@ -107,7 +107,6 @@ async def home_assistant_entities(
 
     cover_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")]
     media_players = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("media_player.")]
-    person_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("person.")]
     mobile_app_notification_services = [
         _serialize_ha_service(service)
         for service in services
@@ -126,12 +125,7 @@ async def home_assistant_entities(
         "gate_suggestions": gate_suggestions,
         "garage_door_suggestions": garage_door_suggestions,
         "media_player_entities": media_players,
-        "person_entities": person_entities,
         "mobile_app_notification_services": mobile_app_notification_services,
-        "presence_mappings": [
-            _suggest_presence_mapping(person, person_entities)
-            for person in people
-        ],
         "mobile_app_notification_mappings": [
             _suggest_mobile_app_notification_mapping(person, mobile_app_notification_services)
             for person in people
@@ -382,17 +376,6 @@ def _merge_cover_entities(
             merged.append(entity)
             by_entity_id[str(entity["entity_id"])] = entity
     return merged
-
-
-def _suggest_presence_mapping(person: Person, person_entities: list[dict[str, str | None]]) -> dict:
-    return _suggest_person_mapping(
-        person,
-        person_entities,
-        id_key="entity_id",
-        name_key="name",
-        suggested_id_key="suggested_entity_id",
-        suggested_name_key="suggested_name",
-    )
 
 
 def _suggest_mobile_app_notification_mapping(
