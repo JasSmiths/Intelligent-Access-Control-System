@@ -45,6 +45,12 @@ class AnomalySeverity(StrEnum):
     CRITICAL = "critical"
 
 
+class GateMalfunctionStatus(StrEnum):
+    ACTIVE = "active"
+    RESOLVED = "resolved"
+    FUBAR = "fubar"
+
+
 class UserRole(StrEnum):
     ADMIN = "admin"
     STANDARD = "standard"

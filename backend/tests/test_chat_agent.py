@@ -152,6 +152,39 @@ def test_device_status_question_is_not_treated_as_open_request() -> None:
     assert [tool.name for tool in service._select_tools_for_request(lower, {}, [], [])] == ["query_device_states"]
 
 
+def test_gate_malfunction_tools_are_registered_and_selected() -> None:
+    tools = ai_tools.build_agent_tools()
+    service = ChatService()
+
+    selected = service._select_tools_for_request("What is the gate doing right now?", {}, [], [])
+    planned = service._plan_tool_calls("What is the gate doing right now?", {}, [])
+
+    assert "get_active_malfunctions" in tools
+    assert "get_malfunction_history" in tools
+    assert "trigger_manual_malfunction_override" in tools
+    assert [tool.name for tool in selected] == ["query_device_states", "get_active_malfunctions"]
+    assert any(call.name == "get_active_malfunctions" for call in planned)
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_override_tool_requires_admin_context() -> None:
+    token = ai_tools.set_chat_tool_context({"user_role": "standard"})
+    try:
+        result = await ai_tools.trigger_manual_malfunction_override(
+            {
+                "malfunction_id": str(uuid.uuid4()),
+                "action": "mark_resolved",
+                "reason": "test",
+                "confirm": True,
+            }
+        )
+    finally:
+        ai_tools.set_chat_tool_context({}, token=token)
+
+    assert result["changed"] is False
+    assert "Admin access" in result["error"]
+
+
 def test_camera_snapshot_planner_understands_show_me_camera() -> None:
     service = ChatService()
     call = service._planned_camera_snapshot_call("show me the back garden camera")
@@ -196,6 +229,130 @@ def test_leaderboard_tool_is_registered_and_selected() -> None:
     assert [tool.name for tool in selected] == ["query_leaderboard"]
     assert planned[0].name == "query_leaderboard"
     assert planned[0].arguments["scope"] == "top_known"
+
+
+def test_access_diagnostic_tools_are_registered_and_planned() -> None:
+    tools = ai_tools.build_agent_tools()
+    service = ChatService()
+    message = "Why did Steph's latest LPR take much longer than the rest?"
+
+    selected = service._select_tools_for_request(message, {}, [], [])
+    planned = service._plan_tool_calls(message, {}, [])
+
+    assert "diagnose_access_event" in tools
+    assert "query_lpr_timing" in tools
+    assert "query_vehicle_detection_history" in tools
+    assert "diagnose_access_event" in [tool.name for tool in selected]
+    assert "query_lpr_timing" in [tool.name for tool in selected]
+    assert planned[0].name == "diagnose_access_event"
+    assert planned[0].arguments["person"] == "steph"
+    assert planned[1].name == "query_lpr_timing"
+
+
+def test_hosted_provider_prefetches_deep_access_diagnostics() -> None:
+    service = ChatService()
+    calls = service._preplanned_context_calls(
+        "Why did Steph's latest LPR take much longer than the rest (700ms+)?",
+        {},
+        [],
+    )
+
+    assert [call.name for call in calls] == ["diagnose_access_event", "query_lpr_timing"]
+    assert calls[0].arguments["person"] == "steph"
+
+
+def test_process_arrival_wording_prefetches_diagnostics_without_lpr_keyword() -> None:
+    service = ChatService()
+    message = "why did Stephs latest arrival take so much longer to process than the other arrivals today? 700ms+"
+
+    assert service._looks_like_access_diagnostic_request(message.lower())
+    assert not service._looks_like_access_event_time_request(message.lower())
+
+    calls = service._preplanned_context_calls(message, {}, [])
+    planned = service._plan_tool_calls(message, {}, [])
+
+    assert [call.name for call in calls] == ["diagnose_access_event", "query_lpr_timing"]
+    assert calls[0].arguments == {"day": "today", "person": "steph", "direction": "entry"}
+    assert planned[0].name == "diagnose_access_event"
+    assert planned[0].arguments == {"day": "today", "person": "steph", "direction": "entry"}
+
+
+def test_unhelpful_latency_answer_is_replaced_with_diagnostic_summary() -> None:
+    service = ChatService()
+    tool_results = [
+        {
+            "name": "diagnose_access_event",
+            "output": {
+                "found": True,
+                "event": {
+                    "person": "Steph Smith",
+                    "registration_number": "PE70DHX",
+                    "occurred_at_display": "28 Apr 2026, 17:46 Europe/London",
+                },
+                "recognition": {
+                    "total_pipeline_ms": 742.3,
+                    "debounce_or_recognition_ms": 701.0,
+                    "slowest_steps": [
+                        {"name": "Debounce & Confidence Aggregation", "duration_ms": 701.0}
+                    ],
+                    "likely_delay_reason": "Most of the time was spent waiting in the LPR debounce/confidence window.",
+                },
+                "gate": {"outcome_reason": "The automatic gate open command was accepted."},
+                "notifications": {"summary": "A persisted notification delivery record exists for this trigger."},
+            },
+        }
+    ]
+
+    bad_text = "However, this system view doesn’t include the per-scan LPR processing/latency metrics."
+
+    assert service._should_replace_with_diagnostic_answer(
+        "Why did Steph's latest LPR take much longer than the rest?",
+        bad_text,
+        tool_results,
+    )
+    replacement = service._access_diagnostic_direct_text(tool_results[0]["output"])
+    assert "742.3ms" in replacement
+    assert "Debounce/recognition accounted for 701.0ms" in replacement
+
+
+def test_unknown_notification_diagnostic_plans_latest_unknown() -> None:
+    service = ChatService()
+    planned = service._plan_tool_calls(
+        "Why didn't I get a notification that there was an unknown vehicle at the gate?",
+        {},
+        [],
+    )
+    diagnostic = next(call for call in planned if call.name == "diagnose_access_event")
+
+    assert diagnostic.arguments["unknown_only"] is True
+    assert diagnostic.arguments["decision"] == "denied"
+
+
+def test_detection_count_planner_uses_latest_unknown_for_that_car() -> None:
+    service = ChatService()
+    planned = service._plan_tool_calls("How many times has that car been at the gate?", {}, [])
+
+    assert planned[0].name == "query_vehicle_detection_history"
+    assert planned[0].arguments["latest_unknown"] is True
+    assert planned[0].arguments["period"] == "all"
+
+
+def test_lpr_timing_observation_reports_capture_delay() -> None:
+    observation = ai_tools._serialize_lpr_timing_observation(
+        {
+            "id": "obs-1",
+            "source": "uiprotect_track",
+            "source_detail": "smart_detect_track.licensePlate.attempt_2",
+            "registration_number": "PE70DHX",
+            "received_at": "2026-04-28T16:46:28.800000+00:00",
+            "captured_at": "2026-04-28T16:46:28.086000+00:00",
+            "confidence": 92,
+        },
+        "Europe/London",
+    )
+
+    assert observation["captured_to_received_ms"] == 714.0
+    assert observation["received_at"] == "2026-04-28T17:46:28.800000+01:00"
 
 
 @pytest.mark.asyncio

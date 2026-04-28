@@ -2,10 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   BarChart3,
   Bell,
   Bot,
@@ -20,6 +21,7 @@ import {
   Clock3,
   Command,
   ClipboardPaste,
+  Construction,
   Copy,
   Database,
   DoorClosed,
@@ -28,8 +30,10 @@ import {
   File as FileIcon,
   FileImage,
   FileText,
+  Filter,
   Gauge,
   GitBranch,
+  HardHat,
   Home,
   Key,
   KeyRound,
@@ -42,10 +46,12 @@ import {
   Menu,
   Moon,
   Monitor,
+  MoreHorizontal,
   Play,
   PlugZap,
   Plus,
   Paperclip,
+  Pencil,
   RefreshCcw,
   RefreshCw,
   Search,
@@ -67,7 +73,8 @@ import {
   Users,
   Volume2,
   Warehouse,
-  X
+  X,
+  Zap
 } from "lucide-react";
 import "./styles.css";
 
@@ -316,10 +323,43 @@ type IntegrationStatus = {
   mums_garage_door_state?: string;
 };
 
+type MaintenanceStatus = {
+  is_active: boolean;
+  enabled_by: string | null;
+  enabled_at: string | null;
+  source: string | null;
+  reason: string | null;
+  duration_seconds: number;
+  duration_label: string | null;
+  ha_entity_id?: string;
+};
+
 type RealtimeMessage = {
   type: string;
   payload: Record<string, unknown>;
   created_at?: string;
+};
+
+type LprTimingSource = "webhook" | "uiprotect" | "uiprotect_track";
+
+type LprTimingObservation = {
+  id: string;
+  source: LprTimingSource;
+  source_detail: string;
+  registration_number: string;
+  received_at: string;
+  raw_value: string | null;
+  candidate_kind: "normalized_plate" | "possible_lpr_field";
+  captured_at: string | null;
+  event_id: string | null;
+  camera_id: string | null;
+  camera_name: string | null;
+  confidence: number | null;
+  confidence_scale: string | null;
+  protect_action: string | null;
+  protect_model: string | null;
+  smart_detect_types: string[] | null;
+  payload_path: string | null;
 };
 
 const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
@@ -367,6 +407,40 @@ type TelemetryTrace = {
 
 type TelemetryTraceDetail = TelemetryTrace & {
   spans: TelemetrySpan[];
+};
+
+type GateMalfunctionTimelineEvent = {
+  id: string;
+  kind: string;
+  occurred_at: string;
+  title: string;
+  details: Record<string, unknown>;
+  attempt_number: number | null;
+  notification_trigger: string | null;
+  notification_channel: string | null;
+  telemetry_span_id: string | null;
+  status?: string | null;
+};
+
+type GateMalfunctionRecord = {
+  id: string;
+  gate_entity_id: string;
+  gate_name: string | null;
+  status: "active" | "resolved" | "fubar" | string;
+  opened_at: string;
+  declared_at: string;
+  resolved_at: string | null;
+  fubar_at: string | null;
+  fix_attempts_count: number;
+  next_attempt_scheduled_at: string | null;
+  last_known_vehicle_event_id: string | null;
+  last_known_vehicle: string;
+  telemetry_trace_id: string | null;
+  last_gate_state: string | null;
+  last_checked_at: string | null;
+  total_downtime_seconds: number;
+  summary: string;
+  timeline?: GateMalfunctionTimelineEvent[];
 };
 
 type AuditLog = {
@@ -520,6 +594,7 @@ type NotificationRule = {
   conditions: NotificationCondition[];
   actions: NotificationAction[];
   is_active: boolean;
+  last_fired_at?: string | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -553,6 +628,29 @@ type NotificationCatalogResponse = {
   variables: NotificationVariableGroup[];
   integrations: NotificationIntegration[];
   mock_context: Record<string, string>;
+};
+
+type TwoPaneCategory = {
+  id: string;
+  label: string;
+  count: number;
+  icon?: React.ElementType;
+  disabled?: boolean;
+};
+
+type NotificationActionMethod = {
+  id: string;
+  actionType: NotificationActionType;
+  label: string;
+  provider: string;
+  detail: string;
+  icon: React.ElementType;
+  tone: BadgeTone;
+  targets: NotificationEndpoint[];
+  targetMode: NotificationTargetMode;
+  requiresTarget: boolean;
+  defaultTargetIds: string[];
+  unavailableReason?: string;
 };
 
 type NotificationPreview = {
@@ -891,6 +989,11 @@ function viewFromPath(pathname: string): ViewKey | null {
   return pathViews[normalized] ?? null;
 }
 
+function isLprTimingTestPath(pathname: string) {
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  return normalized === "/lpr-timing-test";
+}
+
 function initialViewFromLocation(): ViewKey {
   const routeView = viewFromPath(window.location.pathname);
   if (routeView) return routeView;
@@ -1149,6 +1252,64 @@ function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | 
   return null;
 }
 
+function applyMaintenanceRealtimeEvent(
+  event: RealtimeMessage,
+  setMaintenanceStatus: React.Dispatch<React.SetStateAction<MaintenanceStatus | null>>
+) {
+  if (event.type !== "maintenance_mode.changed") return false;
+  const status = maintenanceStatusFromPayload(event.payload);
+  if (!status) return false;
+  setMaintenanceStatus(status);
+  return true;
+}
+
+function maintenanceStatusFromPayload(payload: Record<string, unknown>): MaintenanceStatus | null {
+  const candidate = isRecord(payload.status) ? payload.status : payload;
+  if (typeof candidate.is_active !== "boolean") return null;
+  return {
+    is_active: candidate.is_active,
+    enabled_by: nullableString(candidate.enabled_by),
+    enabled_at: nullableString(candidate.enabled_at),
+    source: nullableString(candidate.source),
+    reason: nullableString(candidate.reason),
+    duration_seconds: numberPayload(candidate.duration_seconds),
+    duration_label: nullableString(candidate.duration_label),
+    ha_entity_id: nullableString(candidate.ha_entity_id) ?? undefined
+  };
+}
+
+function auditLogFromRealtimePayload(payload: Record<string, unknown>): AuditLog | null {
+  const candidate = isRecord(payload.log) ? payload.log : payload;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.timestamp !== "string" ||
+    typeof candidate.category !== "string" ||
+    typeof candidate.action !== "string" ||
+    typeof candidate.actor !== "string" ||
+    typeof candidate.outcome !== "string" ||
+    typeof candidate.level !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: candidate.id,
+    timestamp: candidate.timestamp,
+    category: candidate.category,
+    action: candidate.action,
+    actor: candidate.actor,
+    actor_user_id: nullableString(candidate.actor_user_id),
+    target_entity: nullableString(candidate.target_entity),
+    target_id: nullableString(candidate.target_id),
+    target_label: nullableString(candidate.target_label),
+    diff: isRecord(candidate.diff) ? candidate.diff : {},
+    metadata: isRecord(candidate.metadata) ? candidate.metadata : {},
+    outcome: candidate.outcome,
+    level: candidate.level,
+    trace_id: nullableString(candidate.trace_id),
+    request_id: nullableString(candidate.request_id)
+  };
+}
+
 function applyIntegrationRealtimeEvent(
   event: RealtimeMessage,
   setIntegrationStatus: React.Dispatch<React.SetStateAction<IntegrationStatus | null>>
@@ -1251,6 +1412,10 @@ function stringPayload(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
+function nullableString(value: unknown) {
+  return typeof value === "string" && value ? value : null;
+}
+
 function numberPayload(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -1272,6 +1437,7 @@ function updateManagedCoverState(entities: HomeAssistantManagedCover[] | undefin
 
 function App() {
   const [view, setView] = React.useState<ViewKey>(() => initialViewFromLocation());
+  const [lprTimingTestActive, setLprTimingTestActive] = React.useState(() => isLprTimingTestPath(window.location.pathname));
   const [theme, setTheme] = useTheme();
   const [authStatus, setAuthStatus] = React.useState<AuthStatus | null>(null);
   const currentUser = authStatus?.user ?? null;
@@ -1284,6 +1450,7 @@ function App() {
   const [groups, setGroups] = React.useState<Group[]>([]);
   const [schedules, setSchedules] = React.useState<Schedule[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
+  const [maintenanceStatus, setMaintenanceStatus] = React.useState<MaintenanceStatus | null>(null);
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -1299,6 +1466,7 @@ function App() {
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
 
   const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
+    setLprTimingTestActive(false);
     setView(nextView);
     localStorage.setItem("iacs-active-view", nextView);
     const nextPath = `${viewPaths[nextView]}${options?.search ?? ""}${options?.hash ?? ""}`;
@@ -1314,6 +1482,7 @@ function App() {
 
   React.useEffect(() => {
     const onPopState = () => {
+      setLprTimingTestActive(isLprTimingTestPath(window.location.pathname));
       const nextView = viewFromPath(window.location.pathname);
       if (nextView) {
         setView(nextView);
@@ -1334,7 +1503,7 @@ function App() {
   }, [refreshAuth]);
 
   const refresh = React.useCallback(async () => {
-    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextStatus] =
+    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextStatus, nextMaintenanceStatus] =
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
@@ -1343,7 +1512,8 @@ function App() {
         api.get<Vehicle[]>("/api/v1/vehicles"),
         api.get<Group[]>("/api/v1/groups"),
         api.get<Schedule[]>("/api/v1/schedules"),
-        api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status")
+        api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"),
+        api.get<MaintenanceStatus>("/api/v1/maintenance/status")
       ]);
     setPresence(nextPresence);
     setEvents(nextEvents);
@@ -1353,6 +1523,7 @@ function App() {
     setGroups(nextGroups);
     setSchedules(nextSchedules);
     setIntegrationStatus(nextStatus);
+    setMaintenanceStatus(nextMaintenanceStatus);
     setLoading(false);
   }, []);
 
@@ -1369,27 +1540,33 @@ function App() {
   }, [refresh]);
 
   React.useEffect(() => {
-    if (!authStatus?.authenticated) return;
+    if (!authStatus?.authenticated || lprTimingTestActive) return;
     refresh().catch(() => setLoading(false));
-  }, [authStatus?.authenticated, refresh]);
+  }, [authStatus?.authenticated, lprTimingTestActive, refresh]);
 
   React.useEffect(() => {
-    if (!authStatus?.authenticated) return;
+    if (!authStatus?.authenticated || lprTimingTestActive) return;
     const timer = window.setInterval(() => {
       refreshIntegrationStatus().catch(() => undefined);
     }, 15000);
     return () => window.clearInterval(timer);
-  }, [authStatus?.authenticated, refreshIntegrationStatus]);
+  }, [authStatus?.authenticated, lprTimingTestActive, refreshIntegrationStatus]);
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
-    const socket = new WebSocket(wsUrl("/api/v1/realtime/ws"));
-    socket.onmessage = (event) => {
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let stopped = false;
+
+    const handleMessage = (event: MessageEvent) => {
       const parsed = JSON.parse(event.data) as RealtimeMessage;
       setRealtime((current) => [parsed, ...current].slice(0, 80));
       const notificationToast = notificationToastFromRealtime(parsed);
       if (notificationToast) {
         setNotificationToasts((current) => [notificationToast, ...current].slice(0, 4));
+        return;
+      }
+      if (applyMaintenanceRealtimeEvent(parsed, setMaintenanceStatus)) {
         return;
       }
       if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
@@ -1408,7 +1585,32 @@ function App() {
         refreshFromRealtime();
       }
     };
-    return () => socket.close();
+
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer !== null) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        openSocket();
+      }, 1500);
+    };
+
+    const openSocket = () => {
+      if (stopped) return;
+      const nextSocket = new WebSocket(wsUrl("/api/v1/realtime/ws"));
+      socket = nextSocket;
+      nextSocket.onmessage = handleMessage;
+      nextSocket.onclose = scheduleReconnect;
+      nextSocket.onerror = () => nextSocket.close();
+    };
+
+    openSocket();
+    return () => {
+      stopped = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      socket?.close();
+    };
   }, [authStatus?.authenticated, refreshFromRealtime]);
 
   React.useEffect(() => {
@@ -1515,6 +1717,10 @@ function App() {
 
   if (!authStatus.authenticated || !currentUser) {
     return <LoginPage onLogin={(user) => setAuthStatus({ setup_required: false, authenticated: true, user })} />;
+  }
+
+  if (lprTimingTestActive) {
+    return <LprTimingTestPage realtime={realtime} currentUser={currentUser} theme={theme} setTheme={setTheme} />;
   }
 
   return (
@@ -1672,6 +1878,7 @@ function App() {
             groups={groups}
             schedules={schedules}
             integrationStatus={integrationStatus}
+            maintenanceStatus={maintenanceStatus}
             realtime={realtime}
             onClearRealtime={() => setRealtime([])}
             refresh={refresh}
@@ -1680,6 +1887,7 @@ function App() {
             onCurrentUserUpdated={(user) =>
               setAuthStatus((current) => current ? { ...current, user } : current)
             }
+            onMaintenanceStatusChanged={setMaintenanceStatus}
           />
         )}
       </main>
@@ -1687,7 +1895,7 @@ function App() {
         notifications={notificationToasts}
         onDismiss={(id) => setNotificationToasts((current) => current.filter((item) => item.id !== id))}
       />
-      <ChatWidget currentUser={currentUser} />
+      <ChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
     </div>
   );
 }
@@ -1788,6 +1996,354 @@ function AuthLoading() {
       </section>
     </main>
   );
+}
+
+function LprTimingTestPage({
+  realtime,
+  currentUser,
+  theme,
+  setTheme
+}: {
+  realtime: RealtimeMessage[];
+  currentUser: UserAccount;
+  theme: ThemeMode;
+  setTheme: (mode: ThemeMode) => void;
+}) {
+  const [observations, setObservations] = React.useState<LprTimingObservation[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const processedIdsRef = React.useRef<Set<string>>(new Set());
+
+  const mergeObservation = React.useCallback((observation: LprTimingObservation) => {
+    processedIdsRef.current.add(observation.id);
+    setObservations((current) => {
+      const next = [observation, ...current.filter((item) => item.id !== observation.id)];
+      return [...next]
+        .sort((left, right) => Date.parse(right.received_at) - Date.parse(left.received_at))
+        .slice(0, 1000);
+    });
+  }, []);
+
+  const loadObservations = React.useCallback(async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const payload = await api.get<{ observations: LprTimingObservation[] }>("/api/v1/diagnostics/lpr-timing?limit=1000");
+      processedIdsRef.current = new Set(payload.observations.map((observation) => observation.id));
+      setObservations(payload.observations);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load timing observations");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadObservations().catch(() => undefined);
+  }, [loadObservations]);
+
+  React.useEffect(() => {
+    for (const message of realtime) {
+      if (message.type === "lpr_timing.cleared") {
+        processedIdsRef.current.clear();
+        setObservations([]);
+        continue;
+      }
+      if (message.type !== "lpr_timing.observed") continue;
+      const observation = lprTimingObservationFromPayload(message.payload);
+      if (!observation || processedIdsRef.current.has(observation.id)) continue;
+      mergeObservation(observation);
+    }
+  }, [mergeObservation, realtime]);
+
+  const comparisons = React.useMemo(() => buildLprTimingComparisons(observations), [observations]);
+  const webhookCount = observations.filter((observation) => observation.source === "webhook").length;
+  const protectPlateCount = observations.filter((observation) => observation.source === "uiprotect" && observation.registration_number).length;
+  const trackPlateCount = observations.filter((observation) => observation.source === "uiprotect_track" && observation.registration_number).length;
+  const protectPossibleCount = observations.filter((observation) => observation.source !== "webhook" && !observation.registration_number).length;
+
+  const clearObservations = async () => {
+    setError("");
+    try {
+      await api.delete("/api/v1/diagnostics/lpr-timing");
+      processedIdsRef.current.clear();
+      setObservations([]);
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Unable to clear timing observations");
+    }
+  };
+
+  return (
+    <main className="lpr-test-page">
+      <header className="lpr-test-header">
+        <div>
+          <p className="eyebrow">Diagnostics</p>
+          <h1>LPR timing test</h1>
+          <p>Server-side arrival timestamps for UniFi Protect and webhook plate reads.</p>
+        </div>
+        <div className="lpr-test-actions">
+          <span className="lpr-test-user">{displayUserName(currentUser)}</span>
+          <ThemeControl theme={theme} setTheme={setTheme} />
+          <button className="secondary-button" type="button" onClick={() => loadObservations().catch(() => undefined)}>
+            <RefreshCcw size={16} />
+            Refresh
+          </button>
+          <button className="secondary-button danger" type="button" onClick={() => clearObservations().catch(() => undefined)}>
+            <Trash2 size={16} />
+            Clear
+          </button>
+        </div>
+      </header>
+
+      {error ? <div className="auth-error lpr-test-error">{error}</div> : null}
+
+      <section className="lpr-test-summary">
+        <article>
+          <span>Total</span>
+          <strong>{observations.length}</strong>
+        </article>
+        <article>
+          <span>Webhook</span>
+          <strong>{webhookCount}</strong>
+        </article>
+        <article>
+          <span>Protect Websocket</span>
+          <strong>{protectPlateCount}</strong>
+        </article>
+        <article>
+          <span>Protect Track</span>
+          <strong>{trackPlateCount}</strong>
+        </article>
+        <article>
+          <span>Possible Fields</span>
+          <strong>{protectPossibleCount}</strong>
+        </article>
+      </section>
+
+      <section className="lpr-test-card">
+        <div className="section-heading">
+          <div>
+            <h2>Nearest Matches</h2>
+            <p>Matched by plate number and source using server arrival time.</p>
+          </div>
+        </div>
+        {comparisons.length ? (
+          <div className="lpr-test-table-wrap">
+            <table className="data-table lpr-test-table">
+              <thead>
+                <tr>
+                  <th>Plate</th>
+                  <th>Winner</th>
+                  <th>Delta</th>
+                  <th>Webhook arrival</th>
+                  <th>Source arrival</th>
+                  <th>Source</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparisons.slice(0, 30).map((comparison) => (
+                  <tr key={`${comparison.protect.id}-${comparison.webhook.id}`}>
+                    <td><strong>{comparison.registration_number}</strong></td>
+                    <td><Badge tone={comparison.delta_ms < 0 ? "green" : comparison.delta_ms > 0 ? "blue" : "gray"}>{comparison.winner}</Badge></td>
+                    <td>{formatLprDelta(comparison.delta_ms)}</td>
+                    <td><time title={comparison.webhook.received_at}>{formatExactTimestamp(comparison.webhook.received_at)}</time></td>
+                    <td><time title={comparison.protect.received_at}>{formatExactTimestamp(comparison.protect.received_at)}</time></td>
+                    <td><Badge tone={lprTimingSourceTone(comparison.protect.source)}>{lprTimingSourceLabel(comparison.protect.source)}</Badge></td>
+                    <td>{comparison.protect.source_detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState icon={Clock3} label={loading ? "Loading timing observations" : "Waiting for matching plate reads"} />
+        )}
+      </section>
+
+      <section className="lpr-test-card">
+        <div className="section-heading">
+          <div>
+            <h2>Raw Observations</h2>
+            <p>Every clean plate and every plausible LPR field/value seen from UniFi Protect.</p>
+          </div>
+        </div>
+        {observations.length ? (
+          <div className="lpr-test-table-wrap">
+            <table className="data-table lpr-test-table">
+              <thead>
+                <tr>
+                  <th>Arrival time</th>
+                  <th>Source</th>
+                  <th>Plate</th>
+                  <th>Raw value</th>
+                  <th>Detail</th>
+                  <th>Camera</th>
+                  <th>Captured/best frame</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {observations.map((observation) => (
+                  <tr key={observation.id}>
+                    <td>
+                      <time title={observation.received_at}>{formatExactTimestamp(observation.received_at)}</time>
+                      <small>{observation.received_at}</small>
+                    </td>
+                    <td><Badge tone={lprTimingSourceTone(observation.source)}>{lprTimingSourceLabel(observation.source)}</Badge></td>
+                    <td>
+                      {observation.registration_number ? <strong>{observation.registration_number}</strong> : <Badge tone="amber">possible</Badge>}
+                      {observation.candidate_kind === "possible_lpr_field" ? <small>not normalized</small> : null}
+                    </td>
+                    <td><small className="lpr-raw-value">{observation.raw_value || "-"}</small></td>
+                    <td>
+                      {observation.source_detail}
+                      {observation.payload_path ? <small>{observation.payload_path}</small> : null}
+                    </td>
+                    <td>{observation.camera_name || observation.camera_id || "-"}</td>
+                    <td>{observation.captured_at ? <time title={observation.captured_at}>{formatExactTimestamp(observation.captured_at)}</time> : "-"}</td>
+                    <td>{formatLprConfidence(observation)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState icon={Clock3} label={loading ? "Loading timing observations" : "No plate observations yet"} />
+        )}
+      </section>
+    </main>
+  );
+}
+
+type LprTimingComparison = {
+  registration_number: string;
+  webhook: LprTimingObservation;
+  protect: LprTimingObservation;
+  delta_ms: number;
+  winner: string;
+};
+
+function buildLprTimingComparisons(observations: LprTimingObservation[]): LprTimingComparison[] {
+  const webhooks = observations.filter((observation) => observation.source === "webhook" && observation.registration_number);
+  const protectCandidates = observations.filter((observation) => observation.source !== "webhook" && observation.registration_number);
+  const comparisons: LprTimingComparison[] = [];
+  const protectsBySourceAndEvent = new Map<string, LprTimingObservation>();
+
+  for (const protect of protectCandidates) {
+    const key = [protect.source, protect.event_id || protect.received_at, protect.registration_number].join("|");
+    const existing = protectsBySourceAndEvent.get(key);
+    if (!existing || Date.parse(protect.received_at) < Date.parse(existing.received_at)) {
+      protectsBySourceAndEvent.set(key, protect);
+    }
+  }
+
+  for (const protect of protectsBySourceAndEvent.values()) {
+    const protectTime = Date.parse(protect.received_at);
+    if (!Number.isFinite(protectTime)) continue;
+    const nearestWebhook = webhooks
+      .filter((webhook) => webhook.registration_number === protect.registration_number)
+      .map((webhook) => ({ webhook, distance: Math.abs(Date.parse(webhook.received_at) - protectTime) }))
+      .filter((candidate) => Number.isFinite(candidate.distance) && candidate.distance <= 10 * 60 * 1000)
+      .sort((left, right) => left.distance - right.distance)[0]?.webhook;
+    if (!nearestWebhook) continue;
+    const delta = protectTime - Date.parse(nearestWebhook.received_at);
+    comparisons.push({
+      registration_number: protect.registration_number,
+      webhook: nearestWebhook,
+      protect,
+      delta_ms: delta,
+      winner: delta < 0 ? lprTimingSourceLabel(protect.source) : delta > 0 ? "Webhook" : "Tie"
+    });
+  }
+
+  return [...comparisons]
+    .sort((left, right) =>
+      Math.max(Date.parse(right.webhook.received_at), Date.parse(right.protect.received_at)) -
+      Math.max(Date.parse(left.webhook.received_at), Date.parse(left.protect.received_at))
+    )
+    .slice(0, 60);
+}
+
+function lprTimingObservationFromPayload(payload: Record<string, unknown>): LprTimingObservation | null {
+  const raw = isRecord(payload.observation) ? payload.observation : payload;
+  const id = stringPayload(raw.id);
+  const source = stringPayload(raw.source);
+  const sourceDetail = stringPayload(raw.source_detail);
+  const registrationNumber = stringPayload(raw.registration_number);
+  const receivedAt = stringPayload(raw.received_at);
+  const candidateKind = stringPayload(raw.candidate_kind);
+  if (!id || !isLprTimingSource(source) || !sourceDetail || !receivedAt) return null;
+  return {
+    id,
+    source,
+    source_detail: sourceDetail,
+    registration_number: registrationNumber,
+    received_at: receivedAt,
+    raw_value: nullableString(raw.raw_value),
+    candidate_kind: candidateKind === "possible_lpr_field" ? "possible_lpr_field" : "normalized_plate",
+    captured_at: nullableString(raw.captured_at),
+    event_id: nullableString(raw.event_id),
+    camera_id: nullableString(raw.camera_id),
+    camera_name: nullableString(raw.camera_name),
+    confidence: nullableNumber(raw.confidence),
+    confidence_scale: nullableString(raw.confidence_scale),
+    protect_action: nullableString(raw.protect_action),
+    protect_model: nullableString(raw.protect_model),
+    smart_detect_types: Array.isArray(raw.smart_detect_types) ? raw.smart_detect_types.filter((item): item is string => typeof item === "string") : null,
+    payload_path: nullableString(raw.payload_path)
+  };
+}
+
+function isLprTimingSource(value: string): value is LprTimingSource {
+  return value === "webhook" || value === "uiprotect" || value === "uiprotect_track";
+}
+
+function lprTimingSourceLabel(source: LprTimingSource) {
+  if (source === "webhook") return "Webhook";
+  if (source === "uiprotect_track") return "Protect Track";
+  return "Protect WS";
+}
+
+function lprTimingSourceTone(source: LprTimingSource): BadgeTone {
+  if (source === "webhook") return "blue";
+  if (source === "uiprotect_track") return "purple";
+  return "green";
+}
+
+function nullableNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatExactTimestamp(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      fractionalSecondDigits: 3,
+      day: "2-digit",
+      month: "short",
+      timeZoneName: "short"
+    }).format(date);
+  } catch {
+    return date.toISOString();
+  }
+}
+
+function formatLprDelta(deltaMs: number) {
+  const absolute = Math.abs(deltaMs);
+  if (absolute < 1000) return `${absolute} ms`;
+  return `${(absolute / 1000).toFixed(3)} s`;
+}
+
+function formatLprConfidence(observation: LprTimingObservation) {
+  if (observation.confidence === null) return "-";
+  if (observation.confidence_scale === "0_1") return `${Math.round(observation.confidence * 100)}%`;
+  return `${Math.round(observation.confidence)}%`;
 }
 
 function LoginPage({ onLogin }: { onLogin: (user: UserAccount) => void }) {
@@ -1958,12 +2514,14 @@ function View(props: {
   groups: Group[];
   schedules: Schedule[];
   integrationStatus: IntegrationStatus | null;
+  maintenanceStatus: MaintenanceStatus | null;
   realtime: RealtimeMessage[];
   onClearRealtime: () => void;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
   onCurrentUserUpdated: (user: UserAccount) => void;
+  onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
   switch (props.view) {
     case "people":
@@ -1987,11 +2545,19 @@ function View(props: {
     case "logs":
       return <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
     case "settings_general":
-      return <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} />;
+      return (
+        <DynamicSettingsView
+          category="general"
+          title="General Settings"
+          icon={SlidersHorizontal}
+          maintenanceStatus={props.maintenanceStatus}
+          onMaintenanceStatusChanged={props.onMaintenanceStatusChanged}
+        />
+      );
     case "settings_auth":
       return <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} />;
     case "settings_notifications":
-      return <NotificationsView people={props.people} schedules={props.schedules} />;
+      return <NotificationsView currentUser={props.currentUser} people={props.people} schedules={props.schedules} />;
     case "settings_lpr":
       return <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} />;
     case "settings":
@@ -2008,27 +2574,35 @@ function Dashboard({
   events,
   anomalies,
   integrationStatus,
+  maintenanceStatus,
   people,
   vehicles,
   refresh,
   currentUser,
-  navigateToView
+  navigateToView,
+  onMaintenanceStatusChanged
 }: {
   presence: Presence[];
   events: AccessEvent[];
   anomalies: Anomaly[];
   integrationStatus: IntegrationStatus | null;
+  maintenanceStatus: MaintenanceStatus | null;
   people: Person[];
   vehicles: Vehicle[];
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
+  onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
   const [now, setNow] = React.useState(() => new Date());
   const [simulatorPlate, setSimulatorPlate] = React.useState("");
   const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
+  const [maintenanceDisableOpen, setMaintenanceDisableOpen] = React.useState(false);
+  const [maintenanceLoading, setMaintenanceLoading] = React.useState(false);
+  const [maintenanceError, setMaintenanceError] = React.useState("");
   const [commandLoading, setCommandLoading] = React.useState(false);
   const [commandError, setCommandError] = React.useState("");
+  const maintenanceActive = maintenanceStatus?.is_active === true;
   const present = presence.filter((item) => item.state === "present").length;
   const exited = presence.filter((item) => item.state === "exited").length;
   const unknown = Math.max(presence.length - present - exited, 0);
@@ -2047,8 +2621,8 @@ function Dashboard({
   const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
   const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
-  const siteStatusTitle = critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
-  const siteStatusDetail = critical
+  const siteStatusTitle = maintenanceActive ? "Maintenance Mode Enabled" : critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
+  const siteStatusDetail = maintenanceActive ? "All automated actions disabled" : critical
     ? `${critical} critical alert${critical === 1 ? "" : "s"}`
     : warning
       ? `${warning} warning alert${warning === 1 ? "" : "s"}`
@@ -2096,6 +2670,24 @@ function Dashboard({
     }
   };
 
+  const disableMaintenanceMode = async () => {
+    if (maintenanceLoading) return;
+    setMaintenanceLoading(true);
+    setMaintenanceError("");
+    try {
+      const status = await api.post<MaintenanceStatus>("/api/v1/maintenance/disable", {
+        reason: "Disabled from Dashboard Site Status icon"
+      });
+      onMaintenanceStatusChanged(status);
+      setMaintenanceDisableOpen(false);
+      await refresh();
+    } catch (error) {
+      setMaintenanceError(error instanceof Error ? error.message : "Unable to disable Maintenance Mode.");
+    } finally {
+      setMaintenanceLoading(false);
+    }
+  };
+
   return (
     <section className="dashboard-page">
       <div className="dashboard-intro">
@@ -2112,8 +2704,22 @@ function Dashboard({
       <div className="dashboard-grid">
         <div className="card site-status-card">
           <PanelHeader title="Site Status" />
-          <div className="site-status-main">
-            <ShieldCheck size={54} />
+          <div className={maintenanceActive ? "site-status-main maintenance" : "site-status-main"}>
+            {maintenanceActive ? (
+              <button
+                className="maintenance-status-icon"
+                onClick={() => {
+                  setMaintenanceError("");
+                  setMaintenanceDisableOpen(true);
+                }}
+                type="button"
+                aria-label="Disable Maintenance Mode"
+              >
+                <Construction size={54} strokeWidth={1} />
+              </button>
+            ) : (
+              <ShieldCheck size={54} />
+            )}
             <div>
               <strong>{siteStatusTitle}</strong>
               <span>{siteStatusDetail}</span>
@@ -2128,6 +2734,7 @@ function Dashboard({
 
         <div className="card gate-card">
           <PanelHeader title="Status" action="View all" />
+          <div className={maintenanceActive ? "gate-control-section maintenance-disabled" : "gate-control-section"}>
           <div className="gate-list">
             {gateEntities.length ? gateEntities.map((gate) => (
               <GateRow
@@ -2135,14 +2742,14 @@ function Dashboard({
                 key={gate.entity_id}
                 label={gate.name || "Gate"}
                 state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : gate.state ?? topGateState}
-                onActionClick={commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive ? undefined : commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
               />
             )) : (
               <GateRow
                 icon={Car}
                 label="Top Gate"
                 state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : topGateState}
-                onActionClick={commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive ? undefined : commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
               />
             )}
             {garageDoorEntities.map((door) => (
@@ -2150,10 +2757,16 @@ function Dashboard({
                 key={door.entity_id}
                 label={door.name || door.entity_id}
                 state={commandLoading && pendingCommand?.kind === "garage_door" && pendingCommand.entity_id === door.entity_id ? inProgressState(pendingCommand.action) : door.state ?? "unknown"}
-                onActionClick={commandForGarageDoor(door, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive ? undefined : commandForGarageDoor(door, setPendingCommand, setCommandError)}
               />
             ))}
             <DoorRow label="Back Door" state={integrationStatus?.back_door_state ?? "unknown"} />
+          </div>
+          {maintenanceActive ? (
+            <div className="maintenance-control-overlay" aria-hidden="true">
+              <HardHat size={96} strokeWidth={1} />
+            </div>
+          ) : null}
           </div>
         </div>
 
@@ -2284,7 +2897,59 @@ function Dashboard({
           onConfirm={runDashboardCommand}
         />
       ) : null}
+      {maintenanceDisableOpen ? (
+        <MaintenanceDisableModal
+          error={maintenanceError}
+          loading={maintenanceLoading}
+          onCancel={() => {
+            if (maintenanceLoading) return;
+            setMaintenanceDisableOpen(false);
+            setMaintenanceError("");
+          }}
+          onConfirm={disableMaintenanceMode}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function MaintenanceDisableModal({
+  error,
+  loading,
+  onCancel,
+  onConfirm
+}: {
+  error: string;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="maintenance-disable-title">
+        <div className="modal-header">
+          <div className="gate-confirm-title">
+            <span className="gate-confirm-icon maintenance">
+              <Construction size={20} strokeWidth={1} />
+            </span>
+            <div>
+              <h2 className="maintenance-disable-title" id="maintenance-disable-title">Disable Maintenance Mode</h2>
+              <p>Allow automated actions to resume normal operation</p>
+            </div>
+          </div>
+        </div>
+        {error ? <div className="auth-error inline-error">{error}</div> : null}
+        <div className="modal-actions">
+          <button className="secondary-button" disabled={loading} onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button className="primary-button" disabled={loading} onClick={onConfirm} type="button">
+            <Check size={16} />
+            {loading ? "Resuming..." : "Confirm"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -4838,8 +5503,9 @@ function VehicleModal({
 }
 
 function motComplianceTone(status: string | null | undefined): BadgeTone {
-  if (!status) return "gray";
-  return status.trim().toLowerCase() === "valid" ? "green" : "red";
+  const normalized = String(status || "").trim().toLowerCase().replace(/_/g, " ");
+  if (!normalized) return "gray";
+  return normalized === "valid" || normalized === "not required" ? "green" : "red";
 }
 
 function taxComplianceTone(status: string | null | undefined): BadgeTone {
@@ -7322,10 +7988,12 @@ function MobileAppNotifySelectField({
   );
 }
 
-type LogsTabKey = "lpr" | "ai" | "crud" | "api" | "integrations" | "live";
+type LogsTabKey = "lpr" | "gate" | "maintenance" | "ai" | "crud" | "api" | "integrations" | "live";
 
 const logsTabs: Array<{ key: LogsTabKey; label: string; icon: React.ElementType; description: string }> = [
   { key: "lpr", label: "LPR Telemetry", icon: Car, description: "Plate reads, access decisions, and gate timing." },
+  { key: "gate", label: "Gate Events", icon: DoorOpen, description: "Malfunctions, recovery attempts, notifications, and resolution." },
+  { key: "maintenance", label: "Maintenance Mode", icon: Construction, description: "Kill-switch changes, actor, duration, and HA sync." },
   { key: "ai", label: "AI Audit", icon: Bot, description: "Alfred tools, provider use, and outcomes." },
   { key: "crud", label: "System CRUD", icon: Database, description: "Directory, schedules, notification rules, users, and settings." },
   { key: "api", label: "Webhooks & API", icon: GitBranch, description: "Inbound requests and webhook execution times." },
@@ -7335,6 +8003,7 @@ const logsTabs: Array<{ key: LogsTabKey; label: string; icon: React.ElementType;
 
 const traceCategories: Partial<Record<LogsTabKey, string>> = {
   lpr: "lpr_telemetry",
+  gate: "gate_malfunction",
   api: "webhooks_api"
 };
 
@@ -7343,6 +8012,41 @@ const auditCategories: Partial<Record<LogsTabKey, string>> = {
   crud: "entity_management",
   integrations: "integrations"
 };
+
+const auditActionPrefixes: Partial<Record<LogsTabKey, string>> = {
+  maintenance: "maintenance_mode."
+};
+
+function auditLogBelongsToTab(log: AuditLog, tab: LogsTabKey) {
+  const category = auditCategories[tab];
+  const actionPrefix = auditActionPrefixes[tab];
+  return Boolean((category && log.category === category) || (actionPrefix && log.action.startsWith(actionPrefix)));
+}
+
+function auditLogMatchesFilters(log: AuditLog, query: string, level: string) {
+  if (level !== "all" && log.level !== level) return false;
+  const trimmedQuery = query.trim().toLowerCase();
+  if (!trimmedQuery) return true;
+  return [
+    log.action,
+    log.actor,
+    log.target_entity,
+    log.target_id,
+    log.target_label,
+    JSON.stringify(log.diff),
+    JSON.stringify(log.metadata)
+  ].some((value) => String(value || "").toLowerCase().includes(trimmedQuery));
+}
+
+function realtimeLogKey(log: RealtimeMessage) {
+  return [
+    log.type,
+    log.created_at || "",
+    stringPayload(log.payload.id),
+    stringPayload(log.payload.action),
+    stringPayload(log.payload.category)
+  ].join("|");
+}
 
 function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearRealtime: () => void }) {
   const [tab, setTab] = React.useState<LogsTabKey>("lpr");
@@ -7362,10 +8066,20 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
   const [notice, setNotice] = React.useState("");
   const [clearing, setClearing] = React.useState(false);
   const [liveFilter, setLiveFilter] = React.useState("all");
+  const [countdownNow, setCountdownNow] = React.useState(() => Date.now());
+  const reloadTimerRef = React.useRef<number | null>(null);
+  const processedRealtimeKeysRef = React.useRef<Set<string>>(new Set());
 
   const isTraceTab = Boolean(traceCategories[tab]);
-  const isAuditTab = Boolean(auditCategories[tab]);
+  const isAuditTab = Boolean(auditCategories[tab] || auditActionPrefixes[tab]);
   const visibleLiveLogs = logs.filter((log) => liveFilter === "all" || log.type.includes(liveFilter));
+  const hasActiveGateMalfunction = tab === "gate" && traces.some((trace) => trace.status === "active");
+
+  const clearScheduledTelemetryReload = React.useCallback(() => {
+    if (reloadTimerRef.current === null) return;
+    window.clearTimeout(reloadTimerRef.current);
+    reloadTimerRef.current = null;
+  }, []);
 
   async function loadTelemetry(mode: "reset" | "append" = "reset") {
     if (tab === "live") return;
@@ -7373,20 +8087,34 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
     mode === "reset" ? setLoading(true) : setLoadingMore(true);
     try {
       if (isTraceTab) {
-        const category = traceCategories[tab];
-        const params = new URLSearchParams({ limit: "40" });
-        if (category) params.set("category", category);
-        if (query.trim()) params.set("q", query.trim());
-        if (level !== "all") params.set("level", level);
-        if (status !== "all") params.set("status", status);
-        if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
-        const response = await api.get<PaginatedResponse<TelemetryTrace>>(`/api/v1/telemetry/traces?${params}`);
-        setTraces((current) => mode === "append" ? [...current, ...response.items] : response.items);
-        setTraceCursor(response.next_cursor);
+        if (tab === "gate") {
+          const params = new URLSearchParams({ limit: "40" });
+          if (status !== "all") params.set("status", status);
+          if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
+          const response = await api.get<PaginatedResponse<GateMalfunctionRecord>>(`/api/v1/gate-malfunctions/history?${params}`);
+          const items = response.items
+            .map(gateMalfunctionRecordToTrace)
+            .filter((trace) => gateTraceMatchesFilters(trace, query, level, status));
+          setTraces((current) => mode === "append" ? [...current, ...items] : items);
+          setTraceCursor(response.next_cursor);
+        } else {
+          const category = traceCategories[tab];
+          const params = new URLSearchParams({ limit: "40" });
+          if (category) params.set("category", category);
+          if (query.trim()) params.set("q", query.trim());
+          if (level !== "all") params.set("level", level);
+          if (status !== "all") params.set("status", status);
+          if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
+          const response = await api.get<PaginatedResponse<TelemetryTrace>>(`/api/v1/telemetry/traces?${params}`);
+          setTraces((current) => mode === "append" ? [...current, ...response.items] : response.items);
+          setTraceCursor(response.next_cursor);
+        }
       } else if (isAuditTab) {
         const category = auditCategories[tab];
+        const actionPrefix = auditActionPrefixes[tab];
         const params = new URLSearchParams({ limit: "40" });
         if (category) params.set("category", category);
+        if (actionPrefix) params.set("action_prefix", actionPrefix);
         if (query.trim()) params.set("q", query.trim());
         if (level !== "all") params.set("level", level);
         if (mode === "append" && auditCursor) params.set("cursor", auditCursor);
@@ -7416,6 +8144,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
       setAuditLogs([]);
       setAuditCursor(null);
       setExpandedAuditId(null);
+      processedRealtimeKeysRef.current.clear();
       onClearRealtime();
       setNotice("Logs cleared");
     } catch (clearError) {
@@ -7434,34 +8163,104 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
   React.useEffect(() => {
     setExpandedTraceId(null);
     setExpandedAuditId(null);
+    clearScheduledTelemetryReload();
     loadTelemetry("reset").catch(() => undefined);
-  }, [tab, query, level, status]);
+  }, [tab, query, level, status, clearScheduledTelemetryReload]);
 
-  const latestRealtime = logs[0];
   React.useEffect(() => {
-    if (!latestRealtime || tab === "live") return;
+    const gateStatuses = new Set(["all", "active", "resolved", "fubar"]);
+    const traceStatuses = new Set(["all", "ok", "error"]);
+    if (tab === "gate" && !gateStatuses.has(status)) setStatus("all");
+    if (tab !== "gate" && isTraceTab && !traceStatuses.has(status)) setStatus("all");
+  }, [tab, status, isTraceTab]);
+
+  React.useEffect(() => () => clearScheduledTelemetryReload(), [clearScheduledTelemetryReload]);
+
+  React.useEffect(() => {
+    if (!hasActiveGateMalfunction) return undefined;
+    const timer = window.setInterval(() => setCountdownNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveGateMalfunction]);
+
+  React.useEffect(() => {
+    if (!logs.length || tab === "live") return;
     let shouldReload = false;
-    if (latestRealtime.type === "telemetry.trace.created" && latestRealtime.payload.category === traceCategories[tab]) {
-      shouldReload = true;
+    const actionPrefix = auditActionPrefixes[tab];
+    const nextAuditLogs: AuditLog[] = [];
+    const recentLogs = logs.slice(0, 20).reverse();
+    for (const realtimeLog of recentLogs) {
+      const realtimeKey = realtimeLogKey(realtimeLog);
+      if (processedRealtimeKeysRef.current.has(realtimeKey)) continue;
+      processedRealtimeKeysRef.current.add(realtimeKey);
+
+      if (realtimeLog.type === "telemetry.trace.created" && realtimeLog.payload.category === traceCategories[tab]) {
+        shouldReload = true;
+      }
+      if (realtimeLog.type === "audit.log.created" && realtimeLog.payload.category === auditCategories[tab]) {
+        shouldReload = true;
+      }
+      if (
+        realtimeLog.type === "audit.log.created" &&
+        actionPrefix &&
+        stringPayload(realtimeLog.payload.action).startsWith(actionPrefix)
+      ) {
+        shouldReload = true;
+      }
+      if (tab === "maintenance" && realtimeLog.type === "maintenance_mode.changed") {
+        shouldReload = true;
+      }
+      if (tab === "gate" && realtimeLog.type.startsWith("gate_malfunction.")) {
+        shouldReload = true;
+      }
+
+      if (realtimeLog.type === "audit.log.created") {
+        const liveAuditLog = auditLogFromRealtimePayload(realtimeLog.payload);
+        if (
+          liveAuditLog &&
+          auditLogBelongsToTab(liveAuditLog, tab) &&
+          auditLogMatchesFilters(liveAuditLog, query, level)
+        ) {
+          nextAuditLogs.push(liveAuditLog);
+        }
+      }
     }
-    if (latestRealtime.type === "audit.log.created" && latestRealtime.payload.category === auditCategories[tab]) {
-      shouldReload = true;
+    if (processedRealtimeKeysRef.current.size > 200) {
+      const staleKeys = Array.from(processedRealtimeKeysRef.current).slice(0, processedRealtimeKeysRef.current.size - 200);
+      staleKeys.forEach((key) => processedRealtimeKeysRef.current.delete(key));
     }
     if (!shouldReload) return;
-    const reloadTimer = window.setTimeout(() => {
+    if (nextAuditLogs.length) {
+      setAuditLogs((current) => {
+        let merged = current;
+        nextAuditLogs.forEach((liveAuditLog) => {
+          merged = [liveAuditLog, ...merged.filter((item) => item.id !== liveAuditLog.id)];
+        });
+        return merged.slice(0, 40);
+      });
+    }
+    clearScheduledTelemetryReload();
+    reloadTimerRef.current = window.setTimeout(() => {
+      reloadTimerRef.current = null;
       loadTelemetry("reset").catch(() => undefined);
-    }, 750);
-    return () => window.clearTimeout(reloadTimer);
-  }, [latestRealtime?.created_at, latestRealtime?.type, latestRealtime?.payload.category, tab, query, level, status]);
+    }, 900);
+  }, [logs, tab, query, level, status, clearScheduledTelemetryReload]);
 
-  const toggleTrace = async (traceId: string) => {
+  const toggleTrace = async (trace: TelemetryTrace) => {
+    const traceId = trace.trace_id;
     if (expandedTraceId === traceId) {
       setExpandedTraceId(null);
       return;
     }
     setExpandedTraceId(traceId);
     if (!traceDetails[traceId]) {
-      const detail = await api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`);
+      const malfunctionId = trace.category === "gate_malfunction"
+        ? stringPayload(trace.context.malfunction_id || trace.context.id)
+        : "";
+      const detail = malfunctionId
+        ? gateMalfunctionRecordToTraceDetail(
+            await api.get<GateMalfunctionRecord>(`/api/v1/gate-malfunctions/${malfunctionId}/trace`)
+          )
+        : await api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`);
       setTraceDetails((current) => ({ ...current, [traceId]: detail }));
     }
   };
@@ -7508,6 +8307,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
                 <option value="event">Access events</option>
                 <option value="chat">Chat</option>
                 <option value="gate">Gate</option>
+                <option value="maintenance">Maintenance</option>
                 <option value="telemetry">Telemetry</option>
               </select>
             ) : (
@@ -7519,13 +8319,23 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
                   <option value="error">ERROR</option>
                   <option value="purple">AI ACTION</option>
                 </select>
-                {isTraceTab ? (
-                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
-                    <option value="all">All statuses</option>
-                    <option value="ok">OK</option>
-                    <option value="error">Error</option>
-                  </select>
-                ) : null}
+	                {isTraceTab ? (
+	                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
+	                    <option value="all">All statuses</option>
+	                    {tab === "gate" ? (
+	                      <>
+	                        <option value="active">Active</option>
+	                        <option value="resolved">Resolved</option>
+	                        <option value="fubar">FUBAR</option>
+	                      </>
+	                    ) : (
+	                      <>
+	                        <option value="ok">OK</option>
+	                        <option value="error">Error</option>
+	                      </>
+	                    )}
+	                  </select>
+	                ) : null}
               </>
             )}
           </div>
@@ -7539,6 +8349,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
             <TraceList
               details={traceDetails}
               expandedTraceId={expandedTraceId}
+              now={countdownNow}
               onToggle={toggleTrace}
               traces={traces}
             />
@@ -7572,12 +8383,14 @@ function TraceList({
   traces,
   details,
   expandedTraceId,
+  now,
   onToggle
 }: {
   traces: TelemetryTrace[];
   details: Record<string, TelemetryTraceDetail>;
   expandedTraceId: string | null;
-  onToggle: (traceId: string) => void;
+  now: number;
+  onToggle: (trace: TelemetryTrace) => void;
 }) {
   const parentRef = React.useRef<HTMLDivElement | null>(null);
   const rowVirtualizer = useVirtualizer({
@@ -7600,7 +8413,7 @@ function TraceList({
               ref={rowVirtualizer.measureElement}
               style={{ transform: `translateY(${virtualRow.start}px)` }}
             >
-              <TraceRow detail={details[trace.trace_id]} expanded={expanded} onToggle={() => onToggle(trace.trace_id)} trace={trace} />
+              <TraceRow detail={details[trace.trace_id]} expanded={expanded} now={now} onToggle={() => onToggle(trace)} trace={trace} />
             </div>
           );
         })}
@@ -7613,15 +8426,18 @@ function TraceRow({
   trace,
   detail,
   expanded,
+  now,
   onToggle
 }: {
   trace: TelemetryTrace;
   detail?: TelemetryTraceDetail;
   expanded: boolean;
+  now: number;
   onToggle: () => void;
 }) {
   const display = traceDisplay(trace);
   const Icon = display.icon;
+  const countdown = gateMalfunctionCountdown(trace, now);
   return (
     <article className={expanded ? "telemetry-card expanded" : "telemetry-card"}>
       <button className="telemetry-row-button" onClick={onToggle} type="button">
@@ -7634,6 +8450,7 @@ function TraceRow({
         </span>
         <span className="telemetry-row-meta">
           <Badge tone={levelTone(trace.level)}>{levelLabel(trace.level)}</Badge>
+          {countdown ? <Badge tone={countdown.overdue ? "red" : "amber"}>{countdown.label}</Badge> : null}
           <code>{formatDuration(trace.duration_ms)}</code>
           <time>{formatDate(trace.started_at)}</time>
         </span>
@@ -7647,6 +8464,9 @@ function TraceRow({
 }
 
 function TraceWaterfall({ trace }: { trace: TelemetryTraceDetail }) {
+  if (trace.category === "gate_malfunction") {
+    return <GateMalfunctionTimeline trace={trace} />;
+  }
   const traceStart = Date.parse(trace.started_at);
   const totalMs = Math.max(trace.duration_ms || 0, ...trace.spans.map((span) => {
     const end = span.ended_at ? Date.parse(span.ended_at) : Date.parse(span.started_at);
@@ -7689,6 +8509,56 @@ function TraceWaterfall({ trace }: { trace: TelemetryTraceDetail }) {
                   </div>
                 ) : null}
                 <TraceSpanPayload span={span} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function GateMalfunctionTimeline({ trace }: { trace: TelemetryTraceDetail }) {
+  const context = trace.context;
+  const status = stringPayload(context.status || trace.status);
+  const nextAttempt = stringPayload(context.next_attempt_scheduled_at);
+  const downtimeSeconds = numberPayload(context.total_downtime_seconds);
+  const attempts = stringPayload(context.fix_attempts_count || "0");
+  const gateName = stringPayload(context.gate_name || trace.source || "Primary gate");
+  const sortedSpans = [...trace.spans].sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at));
+  return (
+    <div className="gate-trace">
+      <div className="trace-summary-grid">
+        <TelemetryFact label="Gate" value={gateName} />
+        <TelemetryFact label="Status" value={titleCase(status || "unknown")} />
+        <TelemetryFact label="Attempts" value={attempts} mono />
+        <TelemetryFact label={status === "active" ? "Open Duration" : "Total Downtime"} value={formatSecondsDuration(downtimeSeconds)} mono />
+      </div>
+      {status === "active" && nextAttempt ? (
+        <div className="gate-trace-countdown">
+          <Clock3 size={16} />
+          <span>
+            <strong>{gateMalfunctionCountdownLabel(nextAttempt, Date.now())}</strong>
+            <small>Next automated recovery attempt</small>
+          </span>
+        </div>
+      ) : null}
+      <div className="gate-timeline">
+        {sortedSpans.map((span, index) => {
+          const details = span.output_payload || {};
+          const kind = stringPayload(span.attributes.kind || "");
+          return (
+            <div className={`gate-timeline-step ${span.status === "error" ? "error" : ""}`} key={span.span_id}>
+              <div className="gate-timeline-marker">
+                <span>{index + 1}</span>
+              </div>
+              <div className="gate-timeline-body">
+                <div className="gate-timeline-header">
+                  <strong>{span.name}</strong>
+                  <time>{formatDate(span.started_at)}</time>
+                </div>
+                <p>{gateTimelineSummary(kind, details)}</p>
+                {Object.keys(details).length ? <JsonBlock value={details} /> : null}
               </div>
             </div>
           );
@@ -7753,21 +8623,31 @@ function AuditLogRow({ log, expanded, onToggle }: { log: AuditLog; expanded: boo
   const [showEditor, setShowEditor] = React.useState(false);
   const oldValue = isRecord(log.diff.old) ? log.diff.old : {};
   const newValue = isRecord(log.diff.new) ? log.diff.new : {};
+  const auditSummary = typeof log.metadata.summary === "string" ? log.metadata.summary : "";
   const delta = React.useMemo(() => jsonDiff(oldValue, newValue) || {}, [log.diff]);
   const original = stringifyJson(oldValue);
   const modified = stringifyJson(newValue);
+  const AuditIcon = log.category === "alfred_ai"
+    ? Bot
+    : log.category === "integrations"
+      ? PlugZap
+      : log.action.startsWith("maintenance_mode.")
+        ? Construction
+        : Database;
+  const auditTone = log.category === "alfred_ai" ? "purple" : log.action.startsWith("maintenance_mode.") ? "amber" : levelTone(log.level);
   return (
     <article className={expanded ? "telemetry-card expanded" : "telemetry-card"}>
       <button className="telemetry-row-button" onClick={onToggle} type="button">
-        <span className={`telemetry-row-icon ${levelTone(log.level)}`}>
-          {log.category === "alfred_ai" ? <Bot size={18} /> : log.category === "integrations" ? <PlugZap size={18} /> : <Database size={18} />}
+        <span className={`telemetry-row-icon ${auditTone}`}>
+          <AuditIcon size={18} />
         </span>
         <span className="telemetry-row-main">
           <strong>{titleCase(log.action.replace(/\./g, " "))}</strong>
           <small>{log.target_label || log.target_id || log.target_entity || "System"} · {log.actor}</small>
+          {auditSummary ? <small className="telemetry-row-summary">{auditSummary}</small> : null}
         </span>
         <span className="telemetry-row-meta">
-          <Badge tone={log.category === "alfred_ai" ? "purple" : levelTone(log.level)}>{log.category === "alfred_ai" ? "AI ACTION" : levelLabel(log.level)}</Badge>
+          <Badge tone={auditTone}>{log.category === "alfred_ai" ? "AI ACTION" : log.action.startsWith("maintenance_mode.") ? "MAINTENANCE" : levelLabel(log.level)}</Badge>
           <Badge tone={outcomeTone(log.outcome)}>{titleCase(log.outcome)}</Badge>
           <time>{formatDate(log.timestamp)}</time>
         </span>
@@ -7842,7 +8722,99 @@ function JsonBlock({ value, label }: { value: unknown; label?: string }) {
   );
 }
 
+function gateMalfunctionTraceId(record: GateMalfunctionRecord) {
+  return record.telemetry_trace_id || record.id;
+}
+
+function gateMalfunctionLevel(status: string) {
+  if (status === "fubar") return "error";
+  if (status === "active") return "warning";
+  return "info";
+}
+
+function gateMalfunctionRecordToTrace(record: GateMalfunctionRecord): TelemetryTrace {
+  return {
+    trace_id: gateMalfunctionTraceId(record),
+    name: `Gate Malfunction - ${record.gate_name || record.gate_entity_id}`,
+    category: "gate_malfunction",
+    status: record.status,
+    level: gateMalfunctionLevel(record.status),
+    started_at: record.opened_at,
+    ended_at: record.resolved_at || record.fubar_at,
+    duration_ms: Math.max(0, record.total_downtime_seconds || 0) * 1000,
+    actor: "System",
+    source: record.gate_entity_id,
+    registration_number: null,
+    access_event_id: record.last_known_vehicle_event_id,
+    summary: record.summary,
+    context: {
+      ...record,
+      malfunction_id: record.id,
+      status: record.status,
+      gate_entity_id: record.gate_entity_id,
+      gate_name: record.gate_name,
+      next_attempt_scheduled_at: record.next_attempt_scheduled_at,
+      fix_attempts_count: record.fix_attempts_count,
+      total_downtime_seconds: record.total_downtime_seconds
+    },
+    error: null
+  };
+}
+
+function gateMalfunctionRecordToTraceDetail(record: GateMalfunctionRecord): TelemetryTraceDetail {
+  const trace = gateMalfunctionRecordToTrace(record);
+  return {
+    ...trace,
+    spans: (record.timeline || []).map((event, index) => {
+      const failed = event.status === "error" || event.kind === "fubar" || event.kind === "notification_failed" || event.details.accepted === false;
+      return {
+        id: event.id,
+        span_id: event.telemetry_span_id || event.id.replace(/-/g, "").slice(0, 16),
+        trace_id: trace.trace_id,
+        parent_span_id: null,
+        name: event.title,
+        category: "gate_malfunction",
+        step_order: index + 1,
+        started_at: event.occurred_at,
+        ended_at: event.occurred_at,
+        duration_ms: 0,
+        status: failed ? "error" : "ok",
+        attributes: { kind: event.kind, attempt_number: event.attempt_number },
+        input_payload: {},
+        output_payload: {
+          ...event.details,
+          notification_trigger: event.notification_trigger,
+          notification_channel: event.notification_channel
+        },
+        error: null
+      };
+    })
+  };
+}
+
+function gateTraceMatchesFilters(trace: TelemetryTrace, query: string, level: string, status: string) {
+  if (level !== "all" && trace.level !== level) return false;
+  if (status !== "all" && trace.status !== status) return false;
+  const trimmedQuery = query.trim().toLowerCase();
+  if (!trimmedQuery) return true;
+  return [
+    trace.name,
+    trace.summary,
+    trace.source,
+    trace.context.gate_name,
+    trace.context.last_known_vehicle,
+    JSON.stringify(trace.context)
+  ].some((value) => String(value || "").toLowerCase().includes(trimmedQuery));
+}
+
 function traceDisplay(trace: TelemetryTrace): { title: string; icon: React.ElementType; tone: BadgeTone } {
+  if (trace.category === "gate_malfunction") {
+    const status = stringPayload(trace.context.status || trace.status).toLowerCase();
+    const gate = stringPayload(trace.context.gate_name || trace.source || "Primary gate");
+    if (status === "fubar") return { title: `Gate Malfunction - ${gate}`, icon: AlertTriangle, tone: "red" };
+    if (status === "resolved") return { title: `Gate Resolved - ${gate}`, icon: CheckCircle2, tone: "green" };
+    return { title: `Gate Malfunction - ${gate}`, icon: DoorOpen, tone: "amber" };
+  }
   const decision = stringPayload(trace.context.decision).toLowerCase();
   const direction = stringPayload(trace.context.direction).toLowerCase();
   const plate = trace.registration_number || "unknown plate";
@@ -7851,6 +8823,48 @@ function traceDisplay(trace: TelemetryTrace): { title: string; icon: React.Eleme
   if (decision === "granted") return { title: `Entry Granted - Plate ${plate}`, icon: LogIn, tone: "green" };
   if (trace.status === "error") return { title: trace.name, icon: AlertTriangle, tone: "red" };
   return { title: trace.name, icon: Activity, tone: "blue" };
+}
+
+function gateMalfunctionCountdown(trace: TelemetryTrace, now: number): { label: string; overdue: boolean } | null {
+  if (trace.category !== "gate_malfunction" || trace.status !== "active") return null;
+  const scheduledAt = stringPayload(trace.context.next_attempt_scheduled_at);
+  if (!scheduledAt) return null;
+  return {
+    label: gateMalfunctionCountdownLabel(scheduledAt, now),
+    overdue: Date.parse(scheduledAt) <= now
+  };
+}
+
+function gateMalfunctionCountdownLabel(scheduledAt: string, now: number) {
+  const target = Date.parse(scheduledAt);
+  if (!Number.isFinite(target)) return "Next attempt pending";
+  const remainingSeconds = Math.ceil((target - now) / 1000);
+  if (remainingSeconds <= 0) return "Attempt due now";
+  return `Next attempt in ${formatSecondsDuration(remainingSeconds)}`;
+}
+
+function gateTimelineSummary(kind: string, details: Record<string, unknown>) {
+  if (kind === "preceding_event") {
+    return "Closest entry or exit event before the gate was declared malfunctioning.";
+  }
+  if (kind === "declared") {
+    return `Declared after the gate remained ${stringPayload(details.gate_state || "open")}.`;
+  }
+  if (kind === "attempt" || kind === "manual_attempt") {
+    const accepted = details.accepted === true ? "accepted" : "failed";
+    return `Recovery command ${accepted}; gate state reported ${stringPayload(details.state || "unknown")}.`;
+  }
+  if (kind.startsWith("notification")) {
+    const channel = stringPayload(details.channel || details.trigger || "workflow");
+    return `Notification workflow update via ${channel}.`;
+  }
+  if (kind === "resolved") {
+    return `Resolved after ${formatSecondsDuration(numberPayload(details.total_downtime_seconds))}.`;
+  }
+  if (kind === "fubar") {
+    return "Automated recovery has stopped and manual intervention is required.";
+  }
+  return stringPayload(details.detail || details.reason || "Gate malfunction timeline event.");
 }
 
 function artifactFromSpan(span: TelemetrySpan): Record<string, unknown> | null {
@@ -7887,6 +8901,16 @@ function formatDuration(value: number | null | undefined) {
   return `${ms.toFixed(ms >= 100 ? 0 : 1)}ms`;
 }
 
+function formatSecondsDuration(value: number | null | undefined) {
+  const totalSeconds = Math.max(0, Math.floor(Number(value || 0)));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function stringifyJson(value: unknown) {
   return JSON.stringify(value ?? {}, null, 2);
 }
@@ -7919,14 +8943,63 @@ const notificationChannelMeta: Record<NotificationChannelId, {
 
 const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
   {
-    id: "events",
-    label: "Events",
+    id: "ai_agents",
+    label: "AI Agents",
+    events: [
+      { value: "agent_anomaly_alert", label: "AI Anomaly Alert", severity: "critical", description: "The AI agent raises an explicit anomaly alert." }
+    ]
+  },
+  {
+    id: "compliance",
+    label: "Compliance",
+    events: [
+      { value: "expired_mot_detected", label: "Expired MOT Detected", severity: "warning", description: "DVLA reports a vehicle MOT status other than Valid or Not Required on arrival." },
+      { value: "expired_tax_detected", label: "Expired Tax Detected", severity: "warning", description: "DVLA reports a vehicle tax status other than Taxed or SORN on arrival." }
+    ]
+  },
+  {
+    id: "gate_actions",
+    label: "Gate Actions",
+    events: [
+      { value: "garage_door_open_failed", label: "Garage Door Failed", severity: "critical", description: "A linked garage door command failed." },
+      { value: "gate_open_failed", label: "Gate Open Failed", severity: "critical", description: "The access decision was granted but the gate command failed." }
+    ]
+  },
+  {
+    id: "gate_malfunctions",
+    label: "Gate Malfunctions",
+    events: [
+      { value: "gate_malfunction_2hrs", label: "Gate Malfunction - 2hrs", severity: "critical", description: "The gate malfunction has been active for at least two hours." },
+      { value: "gate_malfunction_30m", label: "Gate Malfunction - 30m", severity: "warning", description: "The gate malfunction has been active for at least 30 minutes." },
+      { value: "gate_malfunction_60m", label: "Gate Malfunction - 60m", severity: "critical", description: "The gate malfunction has been active for at least 60 minutes." },
+      { value: "gate_malfunction_fubar", label: "Gate Malfunction - FUBAR", severity: "critical", description: "Automated gate recovery attempts have been exhausted." },
+      { value: "gate_malfunction_initial", label: "Gate Malfunction - Initial", severity: "warning", description: "The primary gate has remained open for more than five minutes." }
+    ]
+  },
+  {
+    id: "leaderboard",
+    label: "Leaderboard",
+    events: [
+      { value: "leaderboard_overtake", label: "Leaderboard Overtake", severity: "info", description: "A known vehicle takes the top spot on Top Charts." }
+    ]
+  },
+  {
+    id: "maintenance_mode",
+    label: "Maintenance Mode",
+    events: [
+      { value: "maintenance_mode_disabled", label: "Maintenance Mode Disabled", severity: "info", description: "The global automation kill-switch was disabled." },
+      { value: "maintenance_mode_enabled", label: "Maintenance Mode Enabled", severity: "warning", description: "The global automation kill-switch was enabled." }
+    ]
+  },
+  {
+    id: "vehicle_detections",
+    label: "Vehicle Detections",
     events: [
       { value: "authorized_entry", label: "Authorised Vehicle Detected", severity: "info", description: "A known vehicle is granted entry inside its access policy." },
-      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "warning", description: "A plate is denied because it is unknown or inactive." },
-      { value: "expired_mot_detected", label: "Expired MOT Detected", severity: "warning", description: "DVLA reports a vehicle MOT status other than Valid on arrival." },
-      { value: "expired_tax_detected", label: "Expired Tax Detected", severity: "warning", description: "DVLA reports a vehicle tax status other than Taxed or SORN on arrival." },
-      { value: "leaderboard_overtake", label: "Leaderboard Overtake", severity: "info", description: "A known vehicle takes the top spot on Top Charts." }
+      { value: "duplicate_entry", label: "Duplicate Entry", severity: "warning", description: "A person already marked home is detected entering again." },
+      { value: "duplicate_exit", label: "Duplicate Exit", severity: "info", description: "A person already marked away is detected exiting again." },
+      { value: "outside_schedule", label: "Outside Schedule", severity: "warning", description: "A known vehicle is denied by schedule or access policy." },
+      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "warning", description: "A plate is denied because it is unknown or inactive." }
     ]
   }
 ];
@@ -7959,7 +9032,8 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
     items: [
       { name: "Time", token: "@Time", label: "Event time" },
       { name: "GateStatus", token: "@GateStatus", label: "Gate status" },
-      { name: "Message", token: "@Message", label: "Message" }
+      { name: "Message", token: "@Message", label: "Message" },
+      { name: "MaintenanceModeReason", token: "@MaintenanceModeReason", label: "Maintenance mode reason" }
     ]
   },
   {
@@ -7968,6 +9042,17 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
       { name: "NewWinnerName", token: "@NewWinnerName", label: "New winner" },
       { name: "OvertakenName", token: "@OvertakenName", label: "Overtaken person" },
       { name: "ReadCount", token: "@ReadCount", label: "Read count" }
+    ]
+  },
+  {
+    group: "Malfunction",
+    items: [
+      { name: "MalfunctionDuration", token: "@MalfunctionDuration", label: "Malfunction duration" },
+      { name: "MalfunctionOpenedTime", token: "@MalfunctionOpenedTime", label: "Gate opened time" },
+      { name: "MalfunctionFixAttemptTime", token: "@MalfunctionFixAttemptTime", label: "Latest fix attempt time" },
+      { name: "MalfunctionFixAttempts", token: "@MalfunctionFixAttempts", label: "Fix attempt count" },
+      { name: "MalfunctionResolutionTime", token: "@MalfunctionResolutionTime", label: "Resolution time" },
+      { name: "LastKnownVehicle", token: "@LastKnownVehicle", label: "Last known vehicle" }
     ]
   }
 ];
@@ -7998,6 +9083,7 @@ const mockNotificationContext: Record<string, string> = {
   EventType: "Authorised Entry",
   Subject: "Steph arrived at the gate",
   Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
+  MaintenanceModeReason: "Enabled by Jason from UI",
   NewWinnerName: "Steph Smith",
   OvertakenName: "Jason Smith",
   ReadCount: "42"
@@ -8018,7 +9104,20 @@ const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<Notifi
   }
 };
 
-function NotificationsView({ people, schedules }: { people: Person[]; schedules: Schedule[] }) {
+const vehicleTtsPhonetics: Record<string, string> = {
+  BMW: "bee em double you",
+  BYD: "bee why dee",
+  GMC: "gee em see",
+  MG: "em gee",
+  VW: "vee double you",
+  DS: "dee ess"
+};
+
+const vehicleTtsPhoneticPattern = new RegExp(
+  `\\b(${Object.keys(vehicleTtsPhonetics).sort((left, right) => right.length - left.length).join("|")})\\b`
+);
+
+function NotificationsView({ currentUser, people, schedules }: { currentUser: UserAccount; people: Person[]; schedules: Schedule[] }) {
   const [catalog, setCatalog] = React.useState<NotificationCatalogResponse | null>(null);
   const [rules, setRules] = React.useState<NotificationRule[]>([]);
   const [cameras, setCameras] = React.useState<UnifiProtectCamera[]>([]);
@@ -8028,8 +9127,10 @@ function NotificationsView({ people, schedules }: { people: Person[]; schedules:
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
+  const [togglingRuleIds, setTogglingRuleIds] = React.useState<Set<string>>(() => new Set());
   const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [error, setError] = React.useState("");
+  const prefersReducedMotion = useReducedMotion();
 
   const triggerGroups = catalog?.triggers.length ? catalog.triggers : fallbackNotificationTriggers;
   const variableGroups = catalog?.variables.length ? catalog.variables : fallbackNotificationVariables;
@@ -8037,6 +9138,7 @@ function NotificationsView({ people, schedules }: { people: Person[]; schedules:
   const triggerOptions = React.useMemo(() => triggerGroups.flatMap((group) => group.events), [triggerGroups]);
   const triggerByValue = React.useMemo(() => new Map(triggerOptions.map((trigger) => [trigger.value, trigger])), [triggerOptions]);
   const activeDraft = draft;
+  const workflowModalMode: "editor" | "trigger" | "action" = modal === "trigger" || modal === "action" ? modal : "editor";
   const previewContext = catalog?.mock_context && Object.keys(catalog.mock_context).length ? catalog.mock_context : mockNotificationContext;
   const previewActions = activeDraft ? renderWorkflowPreview(activeDraft.actions, previewContext) : [];
 
@@ -8101,6 +9203,51 @@ function NotificationsView({ people, schedules }: { people: Person[]; schedules:
       setFeedback({ tone: "success", text: "Notification workflow deleted." });
     } catch (deleteError) {
       setFeedback({ tone: "error", text: deleteError instanceof Error ? deleteError.message : "Unable to delete notification workflow." });
+    }
+  };
+
+  const toggleRuleActive = async (rule: NotificationRule, isActive: boolean) => {
+    if (rule.id.startsWith("draft-")) return;
+    setFeedback(null);
+    setTogglingRuleIds((current) => {
+      const next = new Set(current);
+      next.add(rule.id);
+      return next;
+    });
+    try {
+      const updated = await api.patch<NotificationRule>(`/api/v1/notifications/rules/${rule.id}`, { is_active: isActive });
+      setRules((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setDraft((current) => current?.id === updated.id ? cloneNotificationRule(updated) : current);
+      setFeedback({ tone: "success", text: `${updated.name} ${updated.is_active ? "activated" : "paused"}.` });
+    } catch (toggleError) {
+      setFeedback({ tone: "error", text: toggleError instanceof Error ? toggleError.message : "Unable to update notification workflow." });
+    } finally {
+      setTogglingRuleIds((current) => {
+        const next = new Set(current);
+        next.delete(rule.id);
+        return next;
+      });
+    }
+  };
+
+  const duplicateRule = async (rule: NotificationRule) => {
+    if (rule.id.startsWith("draft-")) return;
+    setFeedback(null);
+    const payload = workflowRulePayload({
+      ...cloneNotificationRule(rule),
+      id: draftId("workflow"),
+      name: `${rule.name} Copy`,
+      is_active: false,
+    });
+    try {
+      const created = await api.post<NotificationRule>("/api/v1/notifications/rules", payload);
+      await load();
+      setDraft(cloneNotificationRule(created));
+      setSelectedRuleId(created.id);
+      setModal(null);
+      setFeedback({ tone: "success", text: "Notification workflow duplicated and paused for review." });
+    } catch (duplicateError) {
+      setFeedback({ tone: "error", text: duplicateError instanceof Error ? duplicateError.message : "Unable to duplicate notification workflow." });
     }
   };
 
@@ -8175,65 +9322,99 @@ function NotificationsView({ people, schedules }: { people: Person[]; schedules:
       </Toolbar>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
-      {feedback ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
+      {feedback && !activeDraft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
 
       <div className="workflow-notification-shell list-only">
         <NotificationWorkflowList
           activeId={activeDraft?.id ?? ""}
           rules={rules}
           triggerByValue={triggerByValue}
-          onAdd={addWorkflow}
+          togglingRuleIds={togglingRuleIds}
           onDelete={deleteRule}
+          onDuplicate={duplicateRule}
           onSelect={selectRule}
+          onToggleActive={toggleRuleActive}
         />
       </div>
 
       {activeDraft ? (
         <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
-          <div className="modal-card workflow-editor-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-editor-title">
-            <div className="modal-header">
-              <div>
-                <h2 id="workflow-editor-title">{activeDraft.id.startsWith("draft-") ? "Add Notification" : "Edit Notification"}</h2>
-                <p>Build the trigger, conditions, and delivery actions for this workflow.</p>
-              </div>
-              <button className="icon-button" onClick={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }} type="button" aria-label="Close notification editor">
-                <X size={16} />
-              </button>
-            </div>
-          <NotificationWorkflowEditor
-            cameras={cameras}
-            integrations={catalog?.integrations ?? []}
-            people={people}
-            previewActions={previewActions}
-            rule={activeDraft}
-            saving={saving}
-            schedules={schedules}
-            testing={testing}
-            trigger={triggerByValue.get(activeDraft.trigger_event)}
-            variables={variables}
-            onAddAction={() => setModal("action")}
-            onAddCondition={() => setModal("condition")}
-            onCancel={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }}
-            onDelete={() => deleteRule(activeDraft)}
-            onSave={save}
-            onSendTest={sendTest}
-            onShowTrigger={() => setModal("trigger")}
-            onUpdate={updateDraft}
-          />
+          <div
+            className={workflowModalMode === "editor" ? "modal-card workflow-editor-modal" : "modal-card workflow-editor-modal selector-mode"}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={workflowModalMode === "editor" ? "workflow-editor-title" : "two-pane-selection-title"}
+          >
+            <AnimatePresence mode="popLayout" initial={false}>
+              <motion.div
+                animate={{ y: 0 }}
+                className={workflowModalMode === "editor" ? "workflow-modal-panel editor" : "workflow-modal-panel selector"}
+                exit={prefersReducedMotion ? undefined : { y: -6, transition: { duration: 0.06, ease: "easeOut" } }}
+                initial={prefersReducedMotion ? false : { y: 8 }}
+                key={workflowModalMode}
+                transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.13, ease: [0.2, 0, 0, 1] }}
+              >
+                {workflowModalMode === "trigger" ? (
+                  <NotificationTriggerModal
+                    embedded
+                    groups={triggerGroups}
+                    selected={activeDraft.trigger_event}
+                    onClose={() => setModal(null)}
+                    onSelect={(triggerEvent) => {
+                      updateDraft((rule) => ({ ...rule, trigger_event: triggerEvent, name: rule.name === "New Notification" ? notificationEventLabel(triggerEvent, triggerByValue) : rule.name }));
+                      setModal(null);
+                    }}
+                  />
+                ) : workflowModalMode === "action" ? (
+                  <NotificationActionModal
+                    embedded
+                    currentUser={currentUser}
+                    integrations={catalog?.integrations ?? []}
+                    people={people}
+                    onClose={() => setModal(null)}
+                    onSelect={(action) => {
+                      updateDraft((rule) => ({ ...rule, actions: [...rule.actions, action] }));
+                      setModal(null);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <div className="modal-header">
+                      <div>
+                        <h2 id="workflow-editor-title">{activeDraft.id.startsWith("draft-") ? "Add Notification" : "Edit Notification"}</h2>
+                        <p>Build the trigger, conditions, and delivery actions for this workflow.</p>
+                      </div>
+                      <button className="icon-button" onClick={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }} type="button" aria-label="Close notification editor">
+                        <X size={16} />
+                      </button>
+                    </div>
+                    <NotificationWorkflowEditor
+                      cameras={cameras}
+                      feedback={feedback}
+                      integrations={catalog?.integrations ?? []}
+                      people={people}
+                      previewActions={previewActions}
+                      rule={activeDraft}
+                      saving={saving}
+                      schedules={schedules}
+                      testing={testing}
+                      trigger={triggerByValue.get(activeDraft.trigger_event)}
+                      variables={variables}
+                      onAddAction={() => setModal("action")}
+                      onAddCondition={() => setModal("condition")}
+                      onCancel={() => { setDraft(null); setSelectedRuleId(""); setModal(null); }}
+                      onDelete={() => deleteRule(activeDraft)}
+                      onSave={save}
+                      onSendTest={sendTest}
+                      onShowTrigger={() => setModal("trigger")}
+                      onUpdate={updateDraft}
+                    />
+                  </>
+                )}
+              </motion.div>
+            </AnimatePresence>
           </div>
         </div>
-      ) : null}
-
-      {activeDraft && modal === "trigger" ? (
-        <NotificationTriggerModal
-          groups={triggerGroups}
-          selected={activeDraft.trigger_event}
-          onClose={() => setModal(null)}
-          onSelect={(triggerEvent) => {
-            updateDraft((rule) => ({ ...rule, trigger_event: triggerEvent, name: rule.name === "New Notification" ? notificationEventLabel(triggerEvent, triggerByValue) : rule.name }));
-            setModal(null);
-          }}
-        />
       ) : null}
 
       {activeDraft && modal === "condition" ? (
@@ -8247,16 +9428,6 @@ function NotificationsView({ people, schedules }: { people: Person[]; schedules:
           }}
         />
       ) : null}
-
-      {activeDraft && modal === "action" ? (
-        <NotificationActionModal
-          onClose={() => setModal(null)}
-          onSelect={(actionType) => {
-            updateDraft((rule) => ({ ...rule, actions: [...rule.actions, createWorkflowAction(actionType)] }));
-            setModal(null);
-          }}
-        />
-      ) : null}
     </section>
   );
 }
@@ -8265,48 +9436,122 @@ function NotificationWorkflowList({
   activeId,
   rules,
   triggerByValue,
-  onAdd,
   onDelete,
-  onSelect
+  onDuplicate,
+  onSelect,
+  onToggleActive,
+  togglingRuleIds
 }: {
   activeId: string;
   rules: NotificationRule[];
   triggerByValue: Map<string, NotificationTriggerOption>;
-  onAdd: () => void;
   onDelete: (rule: NotificationRule) => void | Promise<void>;
+  onDuplicate: (rule: NotificationRule) => void | Promise<void>;
   onSelect: (rule: NotificationRule) => void;
+  onToggleActive: (rule: NotificationRule, isActive: boolean) => void | Promise<void>;
+  togglingRuleIds: Set<string>;
 }) {
+  const [openMenuId, setOpenMenuId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!openMenuId) return undefined;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest("[data-workflow-rule-menu]")) return;
+      setOpenMenuId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenMenuId(null);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openMenuId]);
+
   return (
     <aside className="workflow-rule-table card" aria-label="Notification workflows">
-      <div className="workflow-rule-table-header">
-        <div>
-          <strong>Workflows</strong>
-          <span>DB-backed rules only</span>
-        </div>
-        <button className="icon-button" onClick={onAdd} type="button" aria-label="Add notification workflow">
-          <Plus size={16} />
-        </button>
-      </div>
       {rules.length ? (
         <div className="workflow-rule-rows">
           {rules.map((rule) => {
             const active = activeId === rule.id;
+            const menuOpen = openMenuId === rule.id;
+            const toggling = togglingRuleIds.has(rule.id);
             return (
-              <article className={active ? "workflow-rule-row active" : "workflow-rule-row"} key={rule.id}>
-                <button onClick={() => onSelect(rule)} type="button">
-                  <span>
+              <article className={[active ? "workflow-rule-row active" : "workflow-rule-row", rule.is_active ? "" : "paused"].filter(Boolean).join(" ")} key={rule.id}>
+                <button className="workflow-rule-main" onClick={() => onSelect(rule)} type="button">
+                  <span className="workflow-rule-copy">
                     <strong>{rule.name}</strong>
-                    <small>{notificationEventLabel(rule.trigger_event, triggerByValue)}</small>
-                  </span>
-                  <Badge tone={rule.is_active ? "green" : "gray"}>{rule.is_active ? "Active" : "Paused"}</Badge>
-                  <span className="workflow-rule-icons" aria-label="Workflow summary">
-                    <Badge tone={rule.conditions.length ? "amber" : "gray"}>{rule.conditions.length} if</Badge>
-                    <Badge tone={rule.actions.length ? "blue" : "red"}>{rule.actions.length} then</Badge>
+                    <small>{notificationRuleSummary(rule, triggerByValue)}</small>
+                    <span className="workflow-rule-metrics" aria-label="Workflow summary">
+                      <span><Zap size={13} /> 1 trigger</span>
+                      <span><Filter size={13} /> {rule.conditions.length} {pluralize("condition", rule.conditions.length)}</span>
+                      <span><Play size={13} /> {rule.actions.length} {pluralize("action", rule.actions.length)}</span>
+                      <span><Clock3 size={13} /> {formatLastFired(rule.last_fired_at)}</span>
+                    </span>
                   </span>
                 </button>
-                <button className="icon-button danger" onClick={() => onDelete(rule)} type="button" aria-label={`Delete ${rule.name}`}>
-                  <Trash2 size={15} />
-                </button>
+                <div className="workflow-rule-controls">
+                  <label className={rule.is_active ? "workflow-rule-toggle active" : "workflow-rule-toggle"} aria-label={`${rule.is_active ? "Pause" : "Activate"} ${rule.name}`}>
+                    <input
+                      checked={rule.is_active}
+                      disabled={toggling}
+                      onChange={(event) => onToggleActive(rule, event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="workflow-rule-toggle-track" aria-hidden="true">
+                      <span />
+                    </span>
+                  </label>
+                  <div className="workflow-rule-menu" data-workflow-rule-menu>
+                    <button
+                      aria-expanded={menuOpen}
+                      aria-haspopup="menu"
+                      aria-label={`Options for ${rule.name}`}
+                      className="icon-button workflow-rule-menu-button"
+                      onClick={() => setOpenMenuId((current) => current === rule.id ? null : rule.id)}
+                      type="button"
+                    >
+                      <MoreHorizontal size={16} />
+                    </button>
+                    {menuOpen ? (
+                      <div className="workflow-rule-menu-popover" role="menu">
+                        <button
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onSelect(rule);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          <Pencil size={14} /> Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onDuplicate(rule);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          <Copy size={14} /> Duplicate
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onDelete(rule);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          <Trash2 size={14} /> Delete
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
               </article>
             );
           })}
@@ -8315,10 +9560,7 @@ function NotificationWorkflowList({
         <div className="notification-empty-list workflow-empty-list">
           <Bell size={20} />
           <strong>No notification workflows</strong>
-          <span>Start from a clean workflow table.</span>
-          <button className="primary-button" onClick={onAdd} type="button">
-            <Plus size={15} /> Add Notification
-          </button>
+          <span>Use Add Notification to create the first automation.</span>
         </div>
       )}
     </aside>
@@ -8327,6 +9569,7 @@ function NotificationWorkflowList({
 
 function NotificationWorkflowEditor({
   cameras,
+  feedback,
   integrations,
   people,
   previewActions,
@@ -8346,6 +9589,7 @@ function NotificationWorkflowEditor({
   onUpdate
 }: {
   cameras: UnifiProtectCamera[];
+  feedback: { tone: "success" | "error" | "info"; text: string } | null;
   integrations: NotificationIntegration[];
   people: Person[];
   previewActions: Array<NotificationAction & { title: string; message: string }>;
@@ -8449,6 +9693,7 @@ function NotificationWorkflowEditor({
           </div>
 
           <div className="modal-actions workflow-editor-footer">
+            {feedback ? <div className={`notification-feedback workflow-editor-feedback ${feedback.tone}`} role="status">{feedback.text}</div> : null}
             <button className="secondary-button" onClick={onCancel} type="button">
               Cancel
             </button>
@@ -8567,11 +9812,11 @@ function NotificationActionCard({
   const Icon = meta.icon;
   const supportsTitle = action.type !== "voice";
   const supportsMedia = action.type === "mobile" || action.type === "in_app";
-  const targetLabel = action.type === "voice" ? "Voice targets" : action.type === "mobile" ? "Mobile targets" : "Dashboard targets";
   const selectedCamera = cameras.find((camera) => camera.id === action.media.camera_id);
   const cameraSnapshotUrl = selectedCamera
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
     : "";
+  const targetChips = notificationActionTargetChips(action, integration);
   return (
     <article className="workflow-action-card">
       <div className="workflow-card-title">
@@ -8585,27 +9830,13 @@ function NotificationActionCard({
         </button>
       </div>
 
-      <div className="workflow-action-grid">
-        <label className="field compact-field">
-          <span>{targetLabel}</span>
-          <select value={action.target_mode} onChange={(event) => onChange({ ...action, target_mode: event.target.value as NotificationTargetMode })}>
-            <option value="all">All</option>
-            {action.type === "voice" ? <option value="many">Many</option> : null}
-            <option value="selected">Specific targets</option>
-          </select>
-        </label>
-        {action.target_mode !== "all" ? (
-          <EndpointMultiSelect
-            action={action}
-            endpoints={integration?.endpoints ?? []}
-            onChange={(target_ids) => onChange({ ...action, target_ids })}
-          />
-        ) : (
-          <div className="workflow-target-summary">
-            <Badge tone={integration?.configured ? meta.tone : "gray"}>{integration?.configured ? "Configured" : "Unavailable"}</Badge>
-            <span>{integration?.endpoints.length ? `${integration.endpoints.length} endpoint${integration.endpoints.length === 1 ? "" : "s"}` : "No endpoints discovered"}</span>
-          </div>
-        )}
+      <div className="workflow-target-chips" aria-label={`${meta.label} selected endpoints`}>
+        {targetChips.map((chip) => (
+          <span className={chip.unavailable ? "workflow-target-chip unavailable" : "workflow-target-chip"} key={chip.id}>
+            <strong>{chip.provider}</strong>
+            {chip.label}
+          </span>
+        ))}
       </div>
 
       <React.Suspense fallback={<div className="loading-panel compact">Loading template editor</div>}>
@@ -8654,44 +9885,10 @@ function NotificationActionCard({
   );
 }
 
-function EndpointMultiSelect({
-  action,
-  endpoints,
-  onChange
-}: {
-  action: NotificationAction;
-  endpoints: NotificationEndpoint[];
-  onChange: (targetIds: string[]) => void;
-}) {
-  const selected = new Set(action.target_ids);
-  const toggle = (endpointId: string) => {
-    const next = new Set(selected);
-    if (next.has(endpointId)) next.delete(endpointId);
-    else next.add(endpointId);
-    onChange(Array.from(next));
-  };
-  if (!endpoints.length) {
-    return <div className="workflow-target-summary"><span>No endpoints available</span></div>;
-  }
-  return (
-    <div className="workflow-endpoint-picks">
-      {endpoints.filter((endpoint) => !endpoint.id.endsWith(":*")).map((endpoint) => (
-        <label className="workflow-endpoint-pick" key={endpoint.id}>
-          <input checked={selected.has(endpoint.id)} onChange={() => toggle(endpoint.id)} type="checkbox" />
-          <span>
-            <strong>{endpoint.label}</strong>
-            <small>{endpoint.detail}</small>
-          </span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
 function NotificationLivePreviewPanel({
   actions
 }: {
-  actions: Array<NotificationAction & { title: string; message: string }>;
+  actions: Array<NotificationAction & { title: string; message: string; phoneticsApplied?: boolean }>;
 }) {
   return (
     <aside className="notification-preview-panel" aria-label="Live notification preview">
@@ -8712,6 +9909,7 @@ function NotificationLivePreviewPanel({
                   <Icon size={16} />
                   <strong>{meta.label}</strong>
                   <Badge tone={meta.tone}>{action.target_mode}</Badge>
+                  {action.phoneticsApplied ? <span className="phonetic-preview-badge"><Volume2 size={12} /> Phonetics Applied</span> : null}
                 </div>
                 {action.title ? <h3>{action.title}</h3> : null}
                 <p>{action.message}</p>
@@ -8727,50 +9925,189 @@ function NotificationLivePreviewPanel({
   );
 }
 
+function TwoPaneSelectionModal({
+  activeCategoryId,
+  backLabel = "Back to editor",
+  categories,
+  children,
+  embedded = false,
+  footer,
+  onBack,
+  onCategoryChange,
+  onClose,
+  onSearchChange,
+  searchPlaceholder = "Search",
+  searchQuery,
+  subtitle,
+  title,
+  wide = false
+}: {
+  activeCategoryId: string;
+  backLabel?: string;
+  categories: TwoPaneCategory[];
+  children: React.ReactNode;
+  embedded?: boolean;
+  footer?: React.ReactNode;
+  onBack?: () => void;
+  onCategoryChange: (categoryId: string) => void;
+  onClose: () => void;
+  onSearchChange: (query: string) => void;
+  searchPlaceholder?: string;
+  searchQuery: string;
+  subtitle: string;
+  title: string;
+  wide?: boolean;
+}) {
+  const className = [
+    "modal-card",
+    "two-pane-selection-modal",
+    embedded ? "embedded" : "",
+    wide ? "wide" : "",
+  ].filter(Boolean).join(" ");
+  const content = (
+    <div className={className} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="two-pane-selection-title">
+      <div className="two-pane-selection-header">
+        <div className="modal-header compact">
+          <div>
+            <h2 id="two-pane-selection-title">{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label={`Close ${title}`}>
+            <X size={16} />
+          </button>
+        </div>
+        <label className="two-pane-search">
+          <Search size={16} />
+          <input
+            autoFocus
+            placeholder={searchPlaceholder}
+            value={searchQuery}
+            onChange={(event) => onSearchChange(event.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="two-pane-selection-body">
+        <nav className="two-pane-category-list" aria-label={`${title} categories`}>
+          {categories.map((category) => {
+            const Icon = category.icon;
+            return (
+              <button
+                className={category.id === activeCategoryId ? "two-pane-category active" : "two-pane-category"}
+                disabled={category.disabled}
+                key={category.id}
+                onClick={() => onCategoryChange(category.id)}
+                type="button"
+              >
+                {Icon ? <Icon size={16} /> : null}
+                <span>{category.label}</span>
+                <Badge tone={category.count ? "blue" : "gray"}>{category.count}</Badge>
+              </button>
+            );
+          })}
+        </nav>
+        <section className="two-pane-selection-content">{children}</section>
+      </div>
+      {footer || onBack ? (
+        <div className="two-pane-selection-footer">
+          {onBack ? (
+            <button className="secondary-button two-pane-editor-back" onClick={onBack} type="button">
+              <ArrowLeft size={15} /> {backLabel}
+            </button>
+          ) : null}
+          {footer ? <div className="two-pane-selection-footer-actions">{footer}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+  if (embedded) return content;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      {content}
+    </div>
+  );
+}
+
 function NotificationTriggerModal({
+  embedded = false,
   groups,
   selected,
   onClose,
   onSelect
 }: {
+  embedded?: boolean;
   groups: NotificationTriggerGroup[];
   selected: string;
   onClose: () => void;
   onSelect: (triggerEvent: string) => void;
 }) {
+  const sortedGroups = React.useMemo(() => normalizeTriggerGroups(groups, selected), [groups, selected]);
+  const initialTriggerCategoryId = sortedGroups.find((group) => group.events.some((event) => event.value === selected))?.id ?? sortedGroups[0]?.id ?? "";
+  const [activeCategoryId, setActiveCategoryId] = React.useState(initialTriggerCategoryId);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const query = searchQuery.trim().toLowerCase();
+  const visibleGroups = React.useMemo(() => {
+    return sortedGroups
+      .map((group) => {
+        const categoryMatches = matchesSearchText(group.label, query);
+        const events = categoryMatches
+          ? group.events
+          : group.events.filter((event) => matchesSearchText(`${event.label} ${event.description} ${event.value}`, query));
+        return { ...group, events };
+      })
+      .filter((group) => group.events.length > 0 || matchesSearchText(group.label, query));
+  }, [query, sortedGroups]);
+  React.useEffect(() => {
+    if (!visibleGroups.length) return;
+    if (!visibleGroups.some((group) => group.id === activeCategoryId)) {
+      setActiveCategoryId(visibleGroups[0].id);
+    }
+  }, [activeCategoryId, visibleGroups]);
+  const activeGroup = visibleGroups.find((group) => group.id === activeCategoryId) ?? visibleGroups[0];
+  const categories = visibleGroups.map((group) => ({
+    id: group.id,
+    label: group.label,
+    count: group.events.length,
+    icon: notificationTriggerGroupIcon(group.id),
+  }));
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-trigger-title">
-        <div className="modal-header">
-          <div>
-            <h2 id="workflow-trigger-title">Add Trigger</h2>
-            <p>Select one event that starts this workflow.</p>
-          </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close trigger selector"><X size={16} /></button>
+    <TwoPaneSelectionModal
+      activeCategoryId={activeGroup?.id ?? ""}
+      categories={categories}
+      embedded={embedded}
+      onBack={embedded ? onClose : undefined}
+      onCategoryChange={setActiveCategoryId}
+      onClose={onClose}
+      onSearchChange={setSearchQuery}
+      searchPlaceholder="Search triggers"
+      searchQuery={searchQuery}
+      subtitle="Choose the event that starts this workflow."
+      title="Add Trigger"
+    >
+      {activeGroup ? (
+        <div className="two-pane-card-grid trigger-card-grid">
+          {activeGroup.events.map((event) => {
+            const isSelected = selected === event.value;
+            return (
+              <button
+                className={isSelected ? "two-pane-item-card selected" : "two-pane-item-card"}
+                key={event.value}
+                onClick={() => onSelect(event.value)}
+                type="button"
+              >
+                <span>
+                  <strong>{event.label}</strong>
+                  <small>{event.description}</small>
+                </span>
+                <Badge tone={isSelected ? "green" : notificationSeverityTone(event.severity)}>{isSelected ? "Selected" : titleCase(event.severity)}</Badge>
+              </button>
+            );
+          })}
         </div>
-        <div className="notification-add-groups">
-          {groups.map((group) => (
-            <section className="notification-add-group" key={group.id}>
-              <div className="notification-subtitle">
-                <strong>{group.label}</strong>
-                <Badge tone="gray">{group.events.length}</Badge>
-              </div>
-              <div>
-                {group.events.map((event) => (
-                  <button className={selected === event.value ? "notification-add-option configured" : "notification-add-option"} key={event.value} onClick={() => onSelect(event.value)} type="button">
-                    <span>
-                      <strong>{event.label}</strong>
-                      <small>{event.description}</small>
-                    </span>
-                    <Badge tone={selected === event.value ? "green" : notificationSeverityTone(event.severity)}>{selected === event.value ? "Selected" : titleCase(event.severity)}</Badge>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
-      </div>
-    </div>
+      ) : (
+        <div className="two-pane-empty">No triggers match this search.</div>
+      )}
+    </TwoPaneSelectionModal>
   );
 }
 
@@ -8816,42 +10153,437 @@ function NotificationConditionModal({
 }
 
 function NotificationActionModal({
+  embedded = false,
+  currentUser,
+  integrations,
+  people,
   onClose,
   onSelect
 }: {
+  embedded?: boolean;
+  currentUser: UserAccount;
+  integrations: NotificationIntegration[];
+  people: Person[];
   onClose: () => void;
-  onSelect: (actionType: NotificationActionType) => void;
+  onSelect: (action: NotificationAction) => void;
 }) {
+  const actionCategories = React.useMemo(() => notificationActionCategories(), []);
+  const defaultCategory = actionCategories[0]?.id as NotificationActionType;
+  const [activeCategory, setActiveCategory] = React.useState<NotificationActionType>(defaultCategory ?? "in_app");
+  const [selectedMethodId, setSelectedMethodId] = React.useState<string | null>(null);
+  const [selectedTargetIds, setSelectedTargetIds] = React.useState<Set<string>>(() => new Set());
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const prefersReducedMotion = useReducedMotion();
+  const query = searchQuery.trim().toLowerCase();
+  const currentUserPerson = React.useMemo(() => findCurrentUserPerson(people, currentUser), [currentUser, people]);
+  const methodsByCategory = React.useMemo(
+    () => buildNotificationActionMethods(integrations, currentUserPerson),
+    [currentUserPerson, integrations]
+  );
+  const visibleCategoryRows = React.useMemo(() => {
+    return actionCategories
+      .map((category) => {
+        const categoryMatches = matchesSearchText(category.label, query);
+        const methods = (methodsByCategory[category.id as NotificationActionType] ?? []).filter((method) =>
+          categoryMatches || matchesSearchText(`${method.label} ${method.provider} ${method.detail}`, query)
+        );
+        return { ...category, count: methods.length, disabled: false };
+      })
+      .filter((category) => category.count > 0 || matchesSearchText(category.label, query) || !query);
+  }, [actionCategories, methodsByCategory, query]);
+  React.useEffect(() => {
+    if (!visibleCategoryRows.length) return;
+    if (!visibleCategoryRows.some((category) => category.id === activeCategory)) {
+      setActiveCategory(visibleCategoryRows[0].id as NotificationActionType);
+      setSelectedMethodId(null);
+      setSelectedTargetIds(new Set());
+    }
+  }, [activeCategory, visibleCategoryRows]);
+
+  const activeCategoryMeta = actionCategories.find((category) => category.id === activeCategory) ?? actionCategories[0];
+  const categoryMatches = matchesSearchText(activeCategoryMeta?.label ?? "", query);
+  const activeMethods = (methodsByCategory[activeCategory] ?? []).filter((method) =>
+    categoryMatches || matchesSearchText(`${method.label} ${method.provider} ${method.detail}`, query)
+  );
+  const selectedMethod = activeMethods.find((method) => method.id === selectedMethodId)
+    ?? (selectedMethodId ? (methodsByCategory[activeCategory] ?? []).find((method) => method.id === selectedMethodId) : undefined);
+  const targetQuery = query;
+  const visibleTargets = selectedMethod
+    ? selectedMethod.targets.filter((target) =>
+      !targetQuery || matchesSearchText(`${target.label} ${target.detail} ${target.provider} ${target.id}`, targetQuery)
+    )
+    : [];
+  const canConfirm = Boolean(selectedMethod && (!selectedMethod.requiresTarget || selectedTargetIds.size > 0));
+  const suggestedTargetId = selectedMethod?.defaultTargetIds[0] ?? "";
+
+  const chooseCategory = (categoryId: string) => {
+    setActiveCategory(categoryId as NotificationActionType);
+    setSelectedMethodId(null);
+    setSelectedTargetIds(new Set());
+  };
+
+  const chooseMethod = (method: NotificationActionMethod) => {
+    setSelectedMethodId(method.id);
+    setSelectedTargetIds(new Set(method.defaultTargetIds));
+  };
+
+  const toggleTarget = (targetId: string) => {
+    setSelectedTargetIds((current) => {
+      const next = new Set(current);
+      if (next.has(targetId)) next.delete(targetId);
+      else next.add(targetId);
+      return next;
+    });
+  };
+
+  const confirm = () => {
+    if (!selectedMethod || !canConfirm) return;
+    onSelect(createWorkflowAction(selectedMethod.actionType, {
+      target_mode: selectedMethod.targetMode,
+      target_ids: selectedMethod.targetMode === "all" ? [] : Array.from(selectedTargetIds),
+    }));
+  };
+
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-action-title">
-        <div className="modal-header">
-          <div>
-            <h2 id="workflow-action-title">Add Action</h2>
-            <p>Stack one or more outputs for this workflow.</p>
-          </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close action selector"><X size={16} /></button>
-        </div>
-        <div className="notification-add-groups">
-          <section className="notification-add-group">
-            <div className="notification-subtitle"><strong>Outputs</strong><Badge tone="gray">3</Badge></div>
-            <div>
-              {(["mobile", "voice", "in_app"] as NotificationActionType[]).map((actionType) => {
-                const meta = notificationChannelMeta[actionType];
-                const Icon = meta.icon;
+    <TwoPaneSelectionModal
+      activeCategoryId={activeCategory}
+      categories={visibleCategoryRows}
+      embedded={embedded}
+      footer={selectedMethod ? (
+        <>
+          <button className="secondary-button" onClick={() => { setSelectedMethodId(null); setSelectedTargetIds(new Set()); }} type="button">
+            <ArrowLeft size={15} /> Back to methods
+          </button>
+          <button className="primary-button" disabled={!canConfirm} onClick={confirm} type="button">
+            <Check size={15} /> Confirm Selection
+          </button>
+        </>
+      ) : null}
+      onBack={embedded ? onClose : undefined}
+      onCategoryChange={chooseCategory}
+      onClose={onClose}
+      onSearchChange={setSearchQuery}
+      searchPlaceholder={selectedMethod ? "Search targets" : "Search actions"}
+      searchQuery={searchQuery}
+      subtitle={selectedMethod ? `Choose one or more targets for ${selectedMethod.label}.` : "Choose a delivery method, then select its targets."}
+      title="Add Action"
+      wide
+    >
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.div
+          animate={{ x: 0 }}
+          className="two-pane-selection-panel"
+          exit={prefersReducedMotion ? undefined : { x: selectedMethod ? 6 : -6, transition: { duration: 0.06, ease: "easeOut" } }}
+          initial={prefersReducedMotion ? false : { x: selectedMethod ? 8 : -8 }}
+          key={selectedMethod ? "targets" : "methods"}
+          transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.11, ease: [0.2, 0, 0, 1] }}
+        >
+          {selectedMethod ? (
+            <div className="action-target-step">
+              <div className="action-target-step-head">
+                <button className="secondary-button compact" onClick={() => { setSelectedMethodId(null); setSelectedTargetIds(new Set()); }} type="button">
+                  <ArrowLeft size={14} /> Methods
+                </button>
+                <div>
+                  <strong>{selectedMethod.label}</strong>
+                  <span>{selectedMethod.provider}</span>
+                </div>
+              </div>
+              {selectedMethod.unavailableReason ? (
+                <div className="two-pane-empty warning">{selectedMethod.unavailableReason}</div>
+              ) : null}
+              {visibleTargets.length ? (
+                <div className="two-pane-card-grid action-target-grid">
+                  {visibleTargets.map((target) => {
+                    const isSelected = selectedTargetIds.has(target.id) || selectedMethod.targetMode === "all";
+                    const isSuggested = target.id === suggestedTargetId;
+                    return (
+                      <button
+                        className={isSelected ? "two-pane-target-tile selected" : "two-pane-target-tile"}
+                        key={target.id}
+                        onClick={() => selectedMethod.targetMode === "all" ? undefined : toggleTarget(target.id)}
+                        type="button"
+                      >
+                        <span className="target-select-mark">{isSelected ? <Check size={14} /> : null}</span>
+                        <span className="target-tile-copy">
+                          <span className="target-tile-title-line">
+                            <strong>{target.label}</strong>
+                            {isSuggested ? <Badge tone="green">Your device</Badge> : <Badge tone="gray">{target.provider}</Badge>}
+                          </span>
+                          <small>{target.detail || target.id}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="two-pane-empty">
+                  {selectedMethod.targets.length ? "No targets match this search." : "No targets are available for this method."}
+                </div>
+              )}
+            </div>
+          ) : activeMethods.length ? (
+            <div className="two-pane-card-grid action-method-grid">
+              {activeMethods.map((method) => {
+                const Icon = method.icon;
                 return (
-                  <button className="notification-add-option" key={actionType} onClick={() => onSelect(actionType)} type="button">
-                    <span><strong>{meta.label}</strong><small>{meta.description}</small></span>
+                  <button
+                    className={method.unavailableReason ? "two-pane-item-card unavailable" : "two-pane-item-card"}
+                    key={method.id}
+                    onClick={() => chooseMethod(method)}
+                    type="button"
+                  >
                     <Icon size={18} />
+                    <span>
+                      <strong>{method.label}</strong>
+                      <small>{method.detail}</small>
+                    </span>
+                    <Badge tone={method.unavailableReason ? "gray" : method.tone}>{method.provider}</Badge>
                   </button>
                 );
               })}
             </div>
-          </section>
-        </div>
-      </div>
-    </div>
+          ) : (
+            <div className="two-pane-empty">
+              {query ? "No action methods match this search." : "No methods are configured for this notification channel."}
+            </div>
+          )}
+        </motion.div>
+      </AnimatePresence>
+    </TwoPaneSelectionModal>
   );
+}
+
+function normalizeTriggerGroups(groups: NotificationTriggerGroup[], selected: string): NotificationTriggerGroup[] {
+  const normalized = groups
+    .map((group) => ({
+      ...group,
+      events: group.events
+        .filter((event) => event.value !== "integration_test" || selected === "integration_test")
+        .slice()
+        .sort((a, b) => a.label.localeCompare(b.label))
+    }))
+    .filter((group) => group.events.length > 0)
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  if (selected === "integration_test" && !normalized.some((group) => group.events.some((event) => event.value === selected))) {
+    normalized.push({
+      id: "integration_test",
+      label: "Integration Test",
+      events: [
+        {
+          value: "integration_test",
+          label: "Integration Test",
+          severity: "info",
+          description: "A user-triggered test message retained for this existing workflow.",
+        },
+      ],
+    });
+  }
+
+  return normalized.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function notificationTriggerGroupIcon(groupId: string) {
+  if (groupId === "ai_agents") return Bot;
+  if (groupId === "compliance") return ShieldCheck;
+  if (groupId === "gate_actions") return DoorOpen;
+  if (groupId === "gate_malfunctions") return AlertTriangle;
+  if (groupId === "leaderboard") return Trophy;
+  if (groupId === "maintenance_mode") return Construction;
+  if (groupId === "vehicle_detections") return Car;
+  return Bell;
+}
+
+function notificationActionCategories(): TwoPaneCategory[] {
+  return (["mobile", "voice", "in_app"] as NotificationActionType[])
+    .map((id) => {
+      const meta = notificationChannelMeta[id];
+      return { id, label: meta.label, count: 0, icon: meta.icon };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function buildNotificationActionMethods(
+  integrations: NotificationIntegration[],
+  currentUserPerson: Person | null
+): Record<NotificationActionType, NotificationActionMethod[]> {
+  const integrationById = new Map(integrations.map((integration) => [integration.id, integration]));
+  const mobileIntegration = integrationById.get("mobile");
+  const voiceIntegration = integrationById.get("voice");
+  const inAppIntegration = integrationById.get("in_app");
+  const mobileEndpoints = concreteNotificationEndpoints(mobileIntegration?.endpoints ?? []);
+  const homeAssistantMobileTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("home_assistant_mobile:"));
+  const appriseTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("apprise:"));
+  const currentUserTarget = currentUserPerson?.home_assistant_mobile_app_notify_service
+    ? `home_assistant_mobile:${currentUserPerson.home_assistant_mobile_app_notify_service}`
+    : "";
+  const mobileMethods: NotificationActionMethod[] = [];
+
+  if (homeAssistantMobileTargets.length) {
+    mobileMethods.push({
+      id: "home_assistant_mobile",
+      actionType: "mobile",
+      label: "Home Assistant",
+      provider: "Home Assistant",
+      detail: homeAssistantMobileTargets.length
+        ? `${homeAssistantMobileTargets.length} mobile app target${homeAssistantMobileTargets.length === 1 ? "" : "s"}`
+        : "No mobile app notify services discovered",
+      icon: Home,
+      tone: "blue",
+      targets: homeAssistantMobileTargets,
+      targetMode: "selected",
+      requiresTarget: true,
+      defaultTargetIds: homeAssistantMobileTargets.some((target) => target.id === currentUserTarget) ? [currentUserTarget] : [],
+    });
+  }
+
+  for (const endpoint of appriseTargets) {
+    mobileMethods.push({
+      id: endpoint.id,
+      actionType: "mobile",
+      label: endpoint.label,
+      provider: "Apprise",
+      detail: endpoint.detail || "Configured Apprise destination",
+      icon: Smartphone,
+      tone: "blue",
+      targets: [endpoint],
+      targetMode: "selected",
+      requiresTarget: true,
+      defaultTargetIds: [endpoint.id],
+    });
+  }
+
+  const voiceTargets = concreteNotificationEndpoints(voiceIntegration?.endpoints ?? []);
+  const voiceMethods: NotificationActionMethod[] = [];
+  if (voiceTargets.length || voiceIntegration?.configured) {
+    voiceMethods.push({
+      id: "home_assistant_tts",
+      actionType: "voice",
+      label: "Home Assistant",
+      provider: "Home Assistant TTS",
+      detail: voiceTargets.length
+        ? `${voiceTargets.length} media player target${voiceTargets.length === 1 ? "" : "s"}`
+        : "No media players discovered",
+      icon: Volume2,
+      tone: "amber",
+      targets: voiceTargets,
+      targetMode: "selected",
+      requiresTarget: true,
+      defaultTargetIds: [],
+      unavailableReason: voiceTargets.length ? undefined : "Home Assistant TTS is configured, but no media_player targets are available.",
+    });
+  }
+
+  const dashboardEndpoint = inAppIntegration?.endpoints[0] ?? {
+    id: "dashboard",
+    provider: "Dashboard",
+    label: "All signed-in dashboards",
+    detail: "Realtime in-app notification stream",
+  };
+  const inAppMethods: NotificationActionMethod[] = [
+    {
+      id: "dashboard",
+      actionType: "in_app",
+      label: "Dashboard",
+      provider: "Dashboard",
+      detail: dashboardEndpoint.detail || "Realtime in-app notification stream",
+      icon: Monitor,
+      tone: "green",
+      targets: [dashboardEndpoint],
+      targetMode: "all",
+      requiresTarget: false,
+      defaultTargetIds: [dashboardEndpoint.id],
+    },
+  ];
+
+  return {
+    in_app: inAppMethods.sort(sortNotificationMethods),
+    mobile: mobileMethods.sort(sortNotificationMethods),
+    voice: voiceMethods.sort(sortNotificationMethods),
+  };
+}
+
+function sortNotificationMethods(a: NotificationActionMethod, b: NotificationActionMethod) {
+  return `${a.label} ${a.detail}`.localeCompare(`${b.label} ${b.detail}`);
+}
+
+function concreteNotificationEndpoints(endpoints: NotificationEndpoint[]) {
+  return endpoints.filter((endpoint) => !endpoint.id.endsWith(":*"));
+}
+
+function findCurrentUserPerson(people: Person[], currentUser: UserAccount): Person | null {
+  const eligible = people.filter((person) => person.is_active && person.home_assistant_mobile_app_notify_service);
+  const userFirstLast = normalizeIdentityName(`${currentUser.first_name} ${currentUser.last_name}`);
+  if (userFirstLast) {
+    const primary = eligible.filter((person) => normalizeIdentityName(`${person.first_name} ${person.last_name}`) === userFirstLast);
+    if (primary.length === 1) return primary[0];
+    if (primary.length > 1) return null;
+  }
+
+  const userDisplay = normalizeIdentityName(currentUser.full_name || displayUserName(currentUser));
+  if (!userDisplay) return null;
+  const fallback = eligible.filter((person) => normalizeIdentityName(person.display_name) === userDisplay);
+  return fallback.length === 1 ? fallback[0] : null;
+}
+
+function normalizeIdentityName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function matchesSearchText(value: string, query: string) {
+  if (!query) return true;
+  return value.toLowerCase().includes(query);
+}
+
+function notificationActionTargetChips(action: NotificationAction, integration?: NotificationIntegration) {
+  if (action.target_mode === "all") {
+    const aggregate = integration?.endpoints.find((endpoint) => endpoint.id.endsWith(":*")) ?? integration?.endpoints[0];
+    return [
+      {
+        id: `${action.id}:all`,
+        provider: aggregate?.provider ?? notificationChannelMeta[action.type].label,
+        label: aggregate?.label ?? (action.type === "in_app" ? "All signed-in dashboards" : "All configured endpoints"),
+        unavailable: !integration?.configured && action.type !== "in_app",
+      },
+    ];
+  }
+
+  if (!action.target_ids.length) {
+    return [
+      {
+        id: `${action.id}:none`,
+        provider: notificationChannelMeta[action.type].label,
+        label: "No targets selected",
+        unavailable: true,
+      },
+    ];
+  }
+
+  return action.target_ids.map((targetId) => {
+    const endpoint = integration?.endpoints.find((item) => item.id === targetId);
+    if (endpoint) {
+      return { id: targetId, provider: endpoint.provider, label: endpoint.label, unavailable: false };
+    }
+    return {
+      id: targetId,
+      provider: providerLabelForNotificationTarget(targetId, integration),
+      label: unavailableNotificationTargetLabel(targetId),
+      unavailable: true,
+    };
+  });
+}
+
+function providerLabelForNotificationTarget(targetId: string, integration?: NotificationIntegration) {
+  if (targetId.startsWith("apprise:")) return "Apprise";
+  if (targetId.startsWith("home_assistant_mobile:") || targetId.startsWith("home_assistant_tts:")) return "Home Assistant";
+  if (targetId === "dashboard") return "Dashboard";
+  return integration?.provider ?? "Target";
+}
+
+function unavailableNotificationTargetLabel(targetId: string) {
+  const raw = targetId.includes(":") ? targetId.split(":").slice(1).join(":") : targetId;
+  return `${raw || "Unknown target"} unavailable`;
 }
 
 function createWorkflowDraft(): NotificationRule {
@@ -8865,13 +10597,16 @@ function createWorkflowDraft(): NotificationRule {
   };
 }
 
-function createWorkflowAction(type: NotificationActionType): NotificationAction {
+function createWorkflowAction(
+  type: NotificationActionType,
+  overrides: Partial<Pick<NotificationAction, "target_mode" | "target_ids">> = {}
+): NotificationAction {
   const templates = defaultWorkflowActionTemplates[type];
   return {
     id: draftId("action"),
     type,
-    target_mode: "all",
-    target_ids: [],
+    target_mode: overrides.target_mode ?? "all",
+    target_ids: overrides.target_ids ?? [],
     title_template: templates.title_template,
     message_template: templates.message_template,
     media: { attach_camera_snapshot: false, camera_id: "" }
@@ -8896,6 +10631,43 @@ function notificationEventLabel(value: string, triggerByValue?: Map<string, Noti
   return triggerByValue?.get(value)?.label ?? titleCase(value);
 }
 
+const notificationTriggerSummaryOverrides: Record<string, string> = {
+  agent_anomaly_alert: "Triggers when the AI agent raises an anomaly.",
+  authorized_entry: "Triggers when a known vehicle arrives.",
+  duplicate_entry: "Triggers when a person already home is detected entering again.",
+  duplicate_exit: "Triggers when a person already away is detected exiting again.",
+  expired_mot_detected: "Triggers when DVLA reports an expired MOT on arrival.",
+  expired_tax_detected: "Triggers when DVLA reports expired tax on arrival.",
+  garage_door_open_failed: "Triggers when a linked garage door command fails.",
+  gate_malfunction_2hrs: "Triggers when a gate malfunction reaches two hours.",
+  gate_malfunction_30m: "Triggers when a gate malfunction reaches 30 minutes.",
+  gate_malfunction_60m: "Triggers when a gate malfunction reaches 60 minutes.",
+  gate_malfunction_fubar: "Triggers when automated gate recovery is exhausted.",
+  gate_malfunction_initial: "Triggers when the primary gate stays open too long.",
+  gate_open_failed: "Triggers when a granted access event cannot open the gate.",
+  leaderboard_overtake: "Triggers when a known vehicle takes the leaderboard top spot.",
+  maintenance_mode_disabled: "Triggers when maintenance mode is disabled.",
+  maintenance_mode_enabled: "Triggers when maintenance mode is enabled.",
+  outside_schedule: "Triggers when a known vehicle is denied by schedule.",
+  unauthorized_plate: "Triggers when an unknown or inactive plate is denied.",
+};
+
+function notificationRuleSummary(rule: NotificationRule, triggerByValue?: Map<string, NotificationTriggerOption>) {
+  const trigger = triggerByValue?.get(rule.trigger_event);
+  const triggerSummary = notificationTriggerSummaryOverrides[rule.trigger_event] ?? sentenceWithPeriod(trigger?.description || `Triggers on ${notificationEventLabel(rule.trigger_event, triggerByValue).toLowerCase()}.`);
+  return `${triggerSummary} ${rule.conditions.length} ${pluralize("condition", rule.conditions.length)}. Executes ${rule.actions.length} ${pluralize("action", rule.actions.length)}.`;
+}
+
+function sentenceWithPeriod(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function pluralize(word: string, count: number) {
+  return count === 1 ? word : `${word}s`;
+}
+
 function notificationSeverityTone(value: string): BadgeTone {
   if (value === "critical") return "red";
   if (value === "warning") return "amber";
@@ -8904,15 +10676,24 @@ function notificationSeverityTone(value: string): BadgeTone {
 }
 
 function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>) {
-  return actions.map((action) => ({
-    ...action,
-    title: renderWorkflowTemplate(action.title_template, context),
-    message: renderWorkflowTemplate(action.message_template, context)
-  }));
+  return actions.map((action) => {
+    const title = renderWorkflowTemplate(action.title_template, context);
+    const message = renderWorkflowTemplate(action.message_template, context);
+    return {
+      ...action,
+      title,
+      message,
+      phoneticsApplied: action.type === "voice" && hasVehicleTtsPhoneticMatch(message),
+    };
+  });
 }
 
 function renderWorkflowTemplate(template: string, context: Record<string, string>) {
   return template.replace(/@([A-Za-z][A-Za-z0-9_]*)/g, (_, token: string) => context[token] ?? "").trim();
+}
+
+function hasVehicleTtsPhoneticMatch(message: string) {
+  return vehicleTtsPhoneticPattern.test(message);
 }
 
 function draftId(prefix: string) {
@@ -8967,11 +10748,15 @@ function SettingsView({
 function DynamicSettingsView({
   category,
   title,
-  icon: Icon
+  icon: Icon,
+  maintenanceStatus,
+  onMaintenanceStatusChanged
 }: {
   category: "general" | "auth" | "lpr";
   title: string;
   icon: React.ElementType;
+  maintenanceStatus?: MaintenanceStatus | null;
+  onMaintenanceStatusChanged?: (status: MaintenanceStatus) => void;
 }) {
   const { values, loading, error, save } = useSettings(category);
   const [form, setForm] = React.useState<Record<string, string>>({});
@@ -8999,6 +10784,12 @@ function DynamicSettingsView({
       <form className="dashboard-grid settings-grid" onSubmit={submit}>
         <div className="card span-2">
           <CardHeader icon={Icon} title={title} action={<Badge tone={loading ? "gray" : "green"}>{loading ? "loading" : "database"}</Badge>} />
+          {category === "general" ? (
+            <MaintenanceModeSettings
+              status={maintenanceStatus ?? null}
+              onStatusChanged={onMaintenanceStatusChanged}
+            />
+          ) : null}
           <div className="settings-form-grid">
             {fields.map((field) => (
               <SettingField
@@ -9025,6 +10816,53 @@ function DynamicSettingsView({
         </div>
       </form>
     </section>
+  );
+}
+
+function MaintenanceModeSettings({
+  status,
+  onStatusChanged
+}: {
+  status: MaintenanceStatus | null;
+  onStatusChanged?: (status: MaintenanceStatus) => void;
+}) {
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const active = status?.is_active === true;
+  const toggle = async () => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const path = active ? "/api/v1/maintenance/disable" : "/api/v1/maintenance/enable";
+      const next = await api.post<MaintenanceStatus>(path, {
+        reason: active ? "Disabled from Settings General" : "Enabled from Settings General"
+      });
+      onStatusChanged?.(next);
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "Unable to update Maintenance Mode.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className={active ? "maintenance-settings active" : "maintenance-settings"}>
+      <div className="maintenance-settings-copy">
+        <span className="maintenance-settings-icon">
+          <Construction size={20} strokeWidth={1} />
+        </span>
+        <div>
+          <strong>Maintenance Mode</strong>
+          <span>{active ? "All automated actions are disabled" : "Automated actions are available"}</span>
+          {active && status?.enabled_by ? <small>Enabled by {status.enabled_by}{status.duration_label ? ` for ${status.duration_label}` : ""}</small> : null}
+        </div>
+      </div>
+      <label className={active ? "maintenance-switch active" : "maintenance-switch"}>
+        <input checked={active} disabled={saving || !status} onChange={toggle} type="checkbox" />
+        <span>{saving ? "Updating" : active ? "Enabled" : "Disabled"}</span>
+      </label>
+      {error ? <div className="auth-error inline-error maintenance-settings-error">{error}</div> : null}
+    </div>
   );
 }
 
@@ -9805,7 +11643,7 @@ const chatMessageVariants = {
   exit: { opacity: 0, y: 8, scale: 0.98 }
 };
 
-function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
+function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccount; maintenanceStatus: MaintenanceStatus | null }) {
   const llmSettings = useSettings("llm");
   const [open, setOpen] = React.useState(false);
   const teaserStorageKey = `iacs-chat-teaser-dismissed:${currentUser.id}`;
@@ -9837,6 +11675,7 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
   const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
   const activeLlmProvider = normalizeLlmProvider(llmSettings.values.llm_provider);
+  const maintenanceActive = maintenanceStatus?.is_active === true;
   const uploading = pendingAttachments.some((attachment) => attachment.uploadState === "uploading");
   const readyAttachments = pendingAttachments.filter((attachment) => attachment.uploadState === "ready");
   const canSend = Boolean((draft.trim() || readyAttachments.length) && connected && !uploading);
@@ -10283,9 +12122,10 @@ function ChatWidget({ currentUser }: { currentUser: UserAccount }) {
               <div className="alfred-identity">
                 <span className="alfred-avatar">
                   <Bot size={18} aria-hidden="true" />
+                  {maintenanceActive ? <HardHat className="alfred-maintenance-icon" size={14} strokeWidth={1} aria-hidden="true" /> : null}
                 </span>
                 <span>
-                  <strong>Alfred</strong>
+                  <strong>Alfred {maintenanceActive ? <HardHat className="alfred-header-maintenance" size={15} strokeWidth={1} aria-label="Maintenance Mode active" /> : null}</strong>
                   <small><span className={connected ? "alfred-status online" : "alfred-status"} />{connected ? "Online" : "Connecting"}</small>
                 </span>
               </div>
@@ -10825,6 +12665,33 @@ function formatDate(value: string) {
     day: "2-digit",
     month: "short"
   }).format(new Date(value));
+}
+
+function formatLastFired(value?: string | null) {
+  if (!value) return "Last fired: never";
+  return `Last fired: ${formatRelativeTime(value)}`;
+}
+
+function formatRelativeTime(value: string) {
+  const date = new Date(value);
+  const timestamp = date.getTime();
+  if (Number.isNaN(timestamp)) return formatDate(value);
+  const diffSeconds = Math.round((timestamp - Date.now()) / 1000);
+  const absSeconds = Math.abs(diffSeconds);
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 60 * 60 * 24 * 365],
+    ["month", 60 * 60 * 24 * 30],
+    ["week", 60 * 60 * 24 * 7],
+    ["day", 60 * 60 * 24],
+    ["hour", 60 * 60],
+    ["minute", 60],
+  ];
+  for (const [unit, seconds] of units) {
+    if (absSeconds >= seconds) {
+      return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(Math.round(diffSeconds / seconds), unit);
+    }
+  }
+  return "just now";
 }
 
 function formatDateOnly(value: string) {

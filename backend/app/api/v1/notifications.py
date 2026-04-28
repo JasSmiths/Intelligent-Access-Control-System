@@ -259,6 +259,7 @@ async def get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> Notifica
 
 
 def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
+    last_fired_at = getattr(rule, "last_fired_at", None)
     return {
         "id": str(rule.id),
         "name": rule.name,
@@ -266,6 +267,7 @@ def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
         "conditions": normalize_conditions(rule.conditions),
         "actions": normalize_actions(rule.actions),
         "is_active": rule.is_active,
+        "last_fired_at": last_fired_at.isoformat() if last_fired_at else None,
         "created_at": rule.created_at.isoformat(),
         "updated_at": rule.updated_at.isoformat(),
     }

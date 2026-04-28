@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -33,6 +34,8 @@ from app.modules.notifications.base import (
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.schedules import schedule_allows_at
 from app.services.settings import get_runtime_config
+from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
+from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
@@ -40,28 +43,148 @@ logger = get_logger(__name__)
 AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 LEGACY_TOKEN_PATTERN = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
 
+
+@dataclass
+class NotificationWorkflowResult:
+    notification: ComposedNotification
+    delivered_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    failures: list[str] = field(default_factory=list)
+    skipped_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def status(self) -> str:
+        if self.delivered_count > 0:
+            return "sent"
+        if self.failed_count > 0 or self.failures:
+            return "failed"
+        return "skipped"
+
 TRIGGER_CATALOG: list[dict[str, Any]] = [
     {
-        "id": "events",
-        "label": "Events",
+        "id": "ai_agents",
+        "label": "AI Agents",
+        "events": [
+            {
+                "value": "agent_anomaly_alert",
+                "label": "AI Anomaly Alert",
+                "severity": "critical",
+                "description": "The AI agent raises an explicit anomaly alert.",
+            },
+        ],
+    },
+    {
+        "id": "compliance",
+        "label": "Compliance",
+        "events": [
+            {
+                "value": "expired_mot_detected",
+                "label": "Expired MOT Detected",
+                "severity": "warning",
+                "description": "DVLA reports a vehicle MOT status other than Valid or Not Required on arrival.",
+            },
+            {
+                "value": "expired_tax_detected",
+                "label": "Expired Tax Detected",
+                "severity": "warning",
+                "description": "DVLA reports a vehicle tax status other than Taxed or SORN on arrival.",
+            },
+        ],
+    },
+    {
+        "id": "gate_actions",
+        "label": "Gate Actions",
+        "events": [
+            {
+                "value": "garage_door_open_failed",
+                "label": "Garage Door Failed",
+                "severity": "critical",
+                "description": "A linked garage door command failed.",
+            },
+            {
+                "value": "gate_open_failed",
+                "label": "Gate Open Failed",
+                "severity": "critical",
+                "description": "The access decision was granted but the gate command failed.",
+            },
+        ],
+    },
+    {
+        "id": "gate_malfunctions",
+        "label": "Gate Malfunctions",
+        "events": [
+            {
+                "value": "gate_malfunction_2hrs",
+                "label": "Gate Malfunction - 2hrs",
+                "severity": "critical",
+                "description": "The primary gate malfunction has been active for at least two hours.",
+            },
+            {
+                "value": "gate_malfunction_30m",
+                "label": "Gate Malfunction - 30m",
+                "severity": "warning",
+                "description": "The primary gate malfunction has been active for at least 30 minutes.",
+            },
+            {
+                "value": "gate_malfunction_60m",
+                "label": "Gate Malfunction - 60m",
+                "severity": "critical",
+                "description": "The primary gate malfunction has been active for at least 60 minutes.",
+            },
+            {
+                "value": "gate_malfunction_fubar",
+                "label": "Gate Malfunction - FUBAR",
+                "severity": "critical",
+                "description": "Automated gate malfunction recovery attempts have been exhausted.",
+            },
+            {
+                "value": "gate_malfunction_initial",
+                "label": "Gate Malfunction - Initial",
+                "severity": "warning",
+                "description": "The primary gate has remained open for more than five minutes.",
+            },
+        ],
+    },
+    {
+        "id": "leaderboard",
+        "label": "Leaderboard",
+        "events": [
+            {
+                "value": "leaderboard_overtake",
+                "label": "Leaderboard Overtake",
+                "severity": "info",
+                "description": "A known vehicle takes the top spot on Top Charts.",
+            },
+        ],
+    },
+    {
+        "id": "maintenance_mode",
+        "label": "Maintenance Mode",
+        "events": [
+            {
+                "value": "maintenance_mode_disabled",
+                "label": "Maintenance Mode Disabled",
+                "severity": "info",
+                "description": "The global automation kill-switch was disabled.",
+            },
+            {
+                "value": "maintenance_mode_enabled",
+                "label": "Maintenance Mode Enabled",
+                "severity": "warning",
+                "description": "The global automation kill-switch was enabled.",
+            },
+        ],
+    },
+    {
+        "id": "vehicle_detections",
+        "label": "Vehicle Detections",
         "events": [
             {
                 "value": "authorized_entry",
                 "label": "Authorised Vehicle Detected",
                 "severity": "info",
                 "description": "A known vehicle is granted entry inside its access policy.",
-            },
-            {
-                "value": "unauthorized_plate",
-                "label": "Unauthorised Vehicle Detected",
-                "severity": "warning",
-                "description": "A plate is denied because it is unknown or inactive.",
-            },
-            {
-                "value": "outside_schedule",
-                "label": "Outside Schedule",
-                "severity": "warning",
-                "description": "A known vehicle is denied by schedule or access policy.",
             },
             {
                 "value": "duplicate_entry",
@@ -76,49 +199,19 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "description": "A person already marked away is detected exiting again.",
             },
             {
-                "value": "expired_mot_detected",
-                "label": "Expired MOT Detected",
+                "value": "outside_schedule",
+                "label": "Outside Schedule",
                 "severity": "warning",
-                "description": "DVLA reports a vehicle MOT status other than Valid on arrival.",
+                "description": "A known vehicle is denied by schedule or access policy.",
             },
             {
-                "value": "expired_tax_detected",
-                "label": "Expired Tax Detected",
+                "value": "unauthorized_plate",
+                "label": "Unauthorised Vehicle Detected",
                 "severity": "warning",
-                "description": "DVLA reports a vehicle tax status other than Taxed or SORN on arrival.",
-            },
-            {
-                "value": "gate_open_failed",
-                "label": "Gate Open Failed",
-                "severity": "critical",
-                "description": "The access decision was granted but the gate command failed.",
-            },
-            {
-                "value": "garage_door_open_failed",
-                "label": "Garage Door Failed",
-                "severity": "critical",
-                "description": "A linked garage door command failed.",
-            },
-            {
-                "value": "leaderboard_overtake",
-                "label": "Leaderboard Overtake",
-                "severity": "info",
-                "description": "A known vehicle takes the top spot on Top Charts.",
-            },
-            {
-                "value": "agent_anomaly_alert",
-                "label": "AI Anomaly Alert",
-                "severity": "critical",
-                "description": "The AI agent raises an explicit anomaly alert.",
-            },
-            {
-                "value": "integration_test",
-                "label": "Integration Test",
-                "severity": "info",
-                "description": "A user-triggered test message.",
+                "description": "A plate is denied because it is unknown or inactive.",
             },
         ],
-    }
+    },
 ]
 
 VARIABLE_GROUPS: list[dict[str, Any]] = [
@@ -165,6 +258,7 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
             {"name": "EventType", "token": "@EventType", "label": "Event type"},
             {"name": "Subject", "token": "@Subject", "label": "Subject"},
             {"name": "Message", "token": "@Message", "label": "Message"},
+            {"name": "MaintenanceModeReason", "token": "@MaintenanceModeReason", "label": "Maintenance mode reason"},
         ],
     },
     {
@@ -172,6 +266,17 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
         "items": [
             {"name": "GarageDoor", "token": "@GarageDoor", "label": "Garage door"},
             {"name": "EntityId", "token": "@EntityId", "label": "Entity ID"},
+        ],
+    },
+    {
+        "group": "Malfunction",
+        "items": [
+            {"name": "MalfunctionDuration", "token": "@MalfunctionDuration", "label": "Malfunction duration"},
+            {"name": "MalfunctionOpenedTime", "token": "@MalfunctionOpenedTime", "label": "Gate opened time"},
+            {"name": "MalfunctionFixAttemptTime", "token": "@MalfunctionFixAttemptTime", "label": "Latest fix attempt time"},
+            {"name": "MalfunctionFixAttempts", "token": "@MalfunctionFixAttempts", "label": "Fix attempt count"},
+            {"name": "MalfunctionResolutionTime", "token": "@MalfunctionResolutionTime", "label": "Resolution time"},
+            {"name": "LastKnownVehicle", "token": "@LastKnownVehicle", "label": "Last known vehicle"},
         ],
     },
     {
@@ -215,6 +320,14 @@ MOCK_FACTS = {
     "new_winner_name": "Steph Smith",
     "overtaken_name": "Jason Smith",
     "read_count": "42",
+    "maintenance_mode_reason": "Enabled by Jason from UI",
+    "maintenance_mode_duration": "2 hours and 14 minutes",
+    "malfunction_duration": "30 minutes",
+    "malfunction_opened_time": "2026-04-26T07:30:00+01:00",
+    "malfunction_fix_attempt_time": "2026-04-26T07:35:45+01:00",
+    "malfunction_fix_attempts": "2",
+    "malfunction_resolution_time": "",
+    "last_known_vehicle": "Steph Smith exited in 2026 Tesla Model Y",
 }
 
 
@@ -339,6 +452,20 @@ class NotificationService:
         raise_on_failure: bool = False,
         rules_override: list[dict[str, Any]] | None = None,
     ) -> ComposedNotification:
+        result = await self.process_context_with_result(
+            context,
+            raise_on_failure=raise_on_failure,
+            rules_override=rules_override,
+        )
+        return result.notification
+
+    async def process_context_with_result(
+        self,
+        context: NotificationContext,
+        *,
+        raise_on_failure: bool = False,
+        rules_override: list[dict[str, Any]] | None = None,
+    ) -> NotificationWorkflowResult:
         rules: list[NotificationRule | dict[str, Any]]
         if rules_override is None:
             async with AsyncSessionLocal() as session:
@@ -356,6 +483,17 @@ class NotificationService:
             rules = [normalize_rule_payload(rule) for rule in rules_override]
 
         if not rules:
+            self._record_notification_span(
+                "Notification Workflow Skipped",
+                context,
+                output_payload={
+                    "event_type": context.event_type,
+                    "severity": context.severity,
+                    "subject": context.subject,
+                    "reason": "no_matching_workflow",
+                    "delivered": False,
+                },
+            )
             await event_bus.publish(
                 "notification.skipped",
                 {
@@ -363,20 +501,43 @@ class NotificationService:
                     "severity": context.severity,
                     "subject": context.subject,
                     "reason": "no_matching_workflow",
+                    "malfunction_id": context.facts.get("malfunction_id"),
+                    "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
                 },
             )
             if raise_on_failure:
                 raise NotificationDeliveryError("No active notification workflow matched this event.")
-            return composed_from_context(context)
+            return NotificationWorkflowResult(
+                notification=composed_from_context(context),
+                skipped_count=1,
+                skipped_reasons=["no_matching_workflow"],
+            )
 
         first_notification: ComposedNotification | None = None
         failures: list[str] = []
-        delivered_any = False
+        delivered_count = 0
+        failed_count = 0
+        skipped_count = 0
+        skipped_reasons: list[str] = []
 
         for rule in rules:
             try:
                 condition_passed = await self.conditions_match(rule, context)
                 if not condition_passed:
+                    skipped_count += 1
+                    skipped_reasons.append("conditions_not_met")
+                    self._record_notification_span(
+                        "Notification Workflow Skipped",
+                        context,
+                        output_payload={
+                            "rule_id": rule_id(rule),
+                            "rule_name": rule_name(rule),
+                            "event_type": context.event_type,
+                            "severity": context.severity,
+                            "reason": "conditions_not_met",
+                            "delivered": False,
+                        },
+                    )
                     await event_bus.publish(
                         "notification.skipped",
                         {
@@ -385,13 +546,24 @@ class NotificationService:
                             "event_type": context.event_type,
                             "severity": context.severity,
                             "reason": "conditions_not_met",
+                            "malfunction_id": context.facts.get("malfunction_id"),
+                            "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
                         },
                     )
                     continue
-                notification = await self.execute_rule(rule, context, raise_on_failure=raise_on_failure)
-                first_notification = first_notification or notification
-                delivered_any = True
+                result = await self.execute_rule_with_result(
+                    rule,
+                    context,
+                    raise_on_failure=raise_on_failure,
+                )
+                first_notification = first_notification or result.notification
+                delivered_count += result.delivered_count
+                failed_count += result.failed_count
+                failures.extend(result.failures)
+                if result.delivered_count > 0:
+                    await self._mark_rule_fired(rule)
             except NotificationDeliveryError as exc:
+                failed_count += 1
                 failures.append(f"{rule_name(rule)}: {exc}")
                 logger.warning(
                     "notification_workflow_failed",
@@ -400,13 +572,73 @@ class NotificationService:
                 if raise_on_failure:
                     raise
 
-        if delivered_any and first_notification:
-            return first_notification
+        if delivered_count > 0 and first_notification:
+            return NotificationWorkflowResult(
+                notification=first_notification,
+                delivered_count=delivered_count,
+                failed_count=failed_count,
+                skipped_count=skipped_count,
+                failures=failures,
+                skipped_reasons=skipped_reasons,
+            )
+        if not failures:
+            self._record_notification_span(
+                "Notification Workflow Skipped",
+                context,
+                output_payload={
+                    "event_type": context.event_type,
+                    "severity": context.severity,
+                    "subject": context.subject,
+                    "reason": "no_workflow_actions_delivered",
+                    "delivered": False,
+                },
+            )
+            await event_bus.publish(
+                "notification.skipped",
+                {
+                    "event_type": context.event_type,
+                    "severity": context.severity,
+                    "subject": context.subject,
+                    "reason": "no_workflow_actions_delivered",
+                    "malfunction_id": context.facts.get("malfunction_id"),
+                    "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
+                },
+            )
+            skipped_count += 1
+            skipped_reasons.append("no_workflow_actions_delivered")
         if failures and raise_on_failure:
             raise NotificationDeliveryError("; ".join(failures))
         if raise_on_failure:
             raise NotificationDeliveryError("No notification workflow actions were delivered.")
-        return composed_from_context(context)
+        return NotificationWorkflowResult(
+            notification=first_notification or composed_from_context(context),
+            delivered_count=delivered_count,
+            failed_count=failed_count,
+            skipped_count=skipped_count,
+            failures=failures,
+            skipped_reasons=skipped_reasons,
+        )
+
+    async def _mark_rule_fired(self, rule: NotificationRule | dict[str, Any]) -> None:
+        if isinstance(rule, dict):
+            return
+        rule_id_value = getattr(rule, "id", None)
+        if not rule_id_value:
+            return
+        fired_at = datetime.now(UTC)
+        try:
+            async with AsyncSessionLocal() as session:
+                stored = await session.get(NotificationRule, rule_id_value)
+                if not stored:
+                    return
+                stored.last_fired_at = fired_at
+                await session.commit()
+            rule.last_fired_at = fired_at
+        except Exception as exc:
+            logger.warning(
+                "notification_last_fired_update_failed",
+                extra={"rule_id": str(rule_id_value), "error": str(exc)},
+            )
 
     async def conditions_match(
         self,
@@ -431,10 +663,27 @@ class NotificationService:
         *,
         raise_on_failure: bool = False,
     ) -> ComposedNotification:
+        return (
+            await self.execute_rule_with_result(
+                rule,
+                context,
+                raise_on_failure=raise_on_failure,
+            )
+        ).notification
+
+    async def execute_rule_with_result(
+        self,
+        rule: NotificationRule | dict[str, Any],
+        context: NotificationContext,
+        *,
+        raise_on_failure: bool = False,
+    ) -> NotificationWorkflowResult:
         rendered = self.render_rule(rule, context)
         config = await get_runtime_config()
         first_notification: ComposedNotification | None = None
         failures: list[str] = []
+        delivered_count = 0
+        failed_count = 0
 
         for action in rendered["actions"]:
             if first_notification is None:
@@ -445,7 +694,18 @@ class NotificationService:
             try:
                 await self._deliver_action(action, context, config, rendered)
             except NotificationDeliveryError as exc:
+                failed_count += 1
                 failures.append(f"{action.get('type')}: {exc}")
+                self._record_notification_span(
+                    "Notification Action Failed",
+                    context,
+                    status="error",
+                    error=str(exc),
+                    output_payload={
+                        **self._event_payload(rendered, action, context, False, str(exc)),
+                        "reason": "delivery_failed",
+                    },
+                )
                 await event_bus.publish(
                     "notification.failed",
                     self._event_payload(rendered, action, context, False, str(exc)),
@@ -453,18 +713,32 @@ class NotificationService:
                 if raise_on_failure:
                     raise
                 continue
+            self._record_notification_span(
+                "Notification Action Sent",
+                context,
+                output_payload={
+                    **self._event_payload(rendered, action, context, True, ""),
+                    "reason": "delivered",
+                },
+            )
             await event_bus.publish(
                 "notification.sent",
                 self._event_payload(rendered, action, context, True, ""),
             )
+            delivered_count += 1
 
         if failures and raise_on_failure:
             raise NotificationDeliveryError("; ".join(failures))
         if not first_notification:
             if raise_on_failure:
                 raise NotificationDeliveryError("Workflow has no notification actions.")
-            return composed_from_context(context)
-        return first_notification
+            first_notification = composed_from_context(context)
+        return NotificationWorkflowResult(
+            notification=first_notification,
+            delivered_count=delivered_count,
+            failed_count=failed_count,
+            failures=failures,
+        )
 
     def render_rule(
         self,
@@ -630,9 +904,10 @@ class NotificationService:
         if not targets:
             raise NotificationDeliveryError("No Home Assistant media player is configured or selected.")
         announcer = HomeAssistantTtsAnnouncer()
+        spoken_message = apply_vehicle_tts_phonetics(str(action.get("message") or ""))
         for target in targets:
             try:
-                await announcer.announce(AnnouncementTarget(target), str(action.get("message") or ""))
+                await announcer.announce(AnnouncementTarget(target), spoken_message)
             except Exception as exc:
                 raise NotificationDeliveryError(str(exc)) from exc
 
@@ -825,6 +1100,33 @@ class NotificationService:
         finally:
             handle.close()
 
+    def _record_notification_span(
+        self,
+        name: str,
+        context: NotificationContext,
+        *,
+        output_payload: dict[str, Any],
+        status: str = "ok",
+        error: str | Exception | None = None,
+    ) -> None:
+        trace_id = str(context.facts.get("telemetry_trace_id") or "").strip()
+        if not trace_id:
+            return
+        telemetry.record_span(
+            name,
+            trace_id=trace_id,
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            status=status,
+            attributes={
+                "event_type": context.event_type,
+                "subject": context.subject,
+                "severity": context.severity,
+                "access_event_id": context.facts.get("access_event_id"),
+            },
+            output_payload=output_payload,
+            error=error,
+        )
+
     def _event_payload(
         self,
         rule: dict[str, Any],
@@ -844,6 +1146,8 @@ class NotificationService:
             "configured": True,
             "delivered": delivered,
             "error": error,
+            "malfunction_id": context.facts.get("malfunction_id"),
+            "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
         }
 
 
@@ -951,6 +1255,13 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "NewWinnerName": pick("new_winner_name", "winner_name"),
         "OvertakenName": pick("overtaken_name", "previous_winner_name"),
         "ReadCount": pick("read_count", "leaderboard_read_count"),
+        "MaintenanceModeReason": pick("maintenance_mode_reason", "maintenance_reason", "reason"),
+        "MalfunctionDuration": pick("malfunction_duration"),
+        "MalfunctionOpenedTime": pick("malfunction_opened_time"),
+        "MalfunctionFixAttemptTime": pick("malfunction_fix_attempt_time"),
+        "MalfunctionFixAttempts": pick("malfunction_fix_attempts"),
+        "MalfunctionResolutionTime": pick("malfunction_resolution_time"),
+        "LastKnownVehicle": pick("last_known_vehicle"),
     }
 
 

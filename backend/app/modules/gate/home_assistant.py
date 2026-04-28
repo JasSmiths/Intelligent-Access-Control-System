@@ -14,7 +14,7 @@ class HomeAssistantGateController(GateController):
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
         self._client = client or HomeAssistantClient()
 
-    async def open_gate(self, reason: str) -> GateCommandResult:
+    async def open_gate(self, reason: str, *, bypass_schedule: bool = False) -> GateCommandResult:
         config = await get_runtime_config()
         configured_gate_entities = normalize_cover_entities(
             config.home_assistant_gate_entities,
@@ -28,26 +28,27 @@ class HomeAssistantGateController(GateController):
         if not gate_entities:
             return GateCommandResult(False, GateState.UNKNOWN, "Gate entity is not configured.")
 
-        now = datetime.now(tz=UTC)
-        async with AsyncSessionLocal() as session:
-            schedule_evaluations = [
-                await evaluate_schedule_id(
-                    session,
-                    entity.get("schedule_id"),
-                    now,
-                    timezone_name=config.site_timezone,
-                    default_policy=config.schedule_default_policy,
-                    source="gate",
-                )
-                for entity in gate_entities
+        if not bypass_schedule:
+            now = datetime.now(tz=UTC)
+            async with AsyncSessionLocal() as session:
+                schedule_evaluations = [
+                    await evaluate_schedule_id(
+                        session,
+                        entity.get("schedule_id"),
+                        now,
+                        timezone_name=config.site_timezone,
+                        default_policy=config.schedule_default_policy,
+                        source="gate",
+                    )
+                    for entity in gate_entities
+                ]
+            denied = [
+                f"{entity.get('name') or entity['entity_id']}: {evaluation.reason or 'outside schedule'}"
+                for entity, evaluation in zip(gate_entities, schedule_evaluations, strict=False)
+                if not evaluation.allowed
             ]
-        denied = [
-            f"{entity.get('name') or entity['entity_id']}: {evaluation.reason or 'outside schedule'}"
-            for entity, evaluation in zip(gate_entities, schedule_evaluations, strict=False)
-            if not evaluation.allowed
-        ]
-        if denied:
-            return GateCommandResult(False, GateState.FAULT, "; ".join(denied))
+            if denied:
+                return GateCommandResult(False, GateState.FAULT, "; ".join(denied))
 
         outcomes = [await command_cover(self._client, entity, "open", reason) for entity in gate_entities]
         failed = [outcome for outcome in outcomes if not outcome.accepted]

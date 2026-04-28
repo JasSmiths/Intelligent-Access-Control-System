@@ -103,6 +103,7 @@ async def get_trace(
 @router.get("/audit")
 async def list_audit_logs(
     category: str | None = None,
+    action_prefix: str | None = None,
     actor: str | None = None,
     target_entity: str | None = None,
     q: str | None = None,
@@ -116,6 +117,8 @@ async def list_audit_logs(
     query = select(AuditLog).order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
     if category:
         query = query.where(AuditLog.category == category)
+    if action_prefix:
+        query = query.where(AuditLog.action.ilike(f"{action_prefix.strip()}%"))
     if actor:
         query = query.where(AuditLog.actor.ilike(f"%{actor.strip()}%"))
     if target_entity:

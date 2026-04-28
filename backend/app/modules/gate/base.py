@@ -22,7 +22,7 @@ class GateCommandResult:
 class GateController(Protocol):
     """Contract implemented by physical or smart-home gate controllers."""
 
-    async def open_gate(self, reason: str) -> GateCommandResult:
+    async def open_gate(self, reason: str, *, bypass_schedule: bool = False) -> GateCommandResult:
         """Open the gate for an audited reason."""
 
     async def current_state(self) -> GateState:

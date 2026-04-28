@@ -438,6 +438,8 @@ class LocalProvider:
                 summaries.append(self._summarize_device_states(output))
             elif tool_name == "open_device":
                 summaries.append(self._summarize_device_open(output))
+            elif tool_name in {"get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode"}:
+                summaries.append(self._summarize_maintenance_tool(tool_name, output))
             elif tool_name == "query_anomalies":
                 summaries.append(self._summarize_anomalies(output))
             elif tool_name == "calculate_visit_duration":
@@ -458,6 +460,12 @@ class LocalProvider:
                 summaries.append(self._summarize_generated_file(output))
             elif tool_name == "get_camera_snapshot":
                 summaries.append(self._summarize_camera_attachment(output))
+            elif tool_name == "diagnose_access_event":
+                summaries.append(self._summarize_access_diagnostic(output))
+            elif tool_name == "query_lpr_timing":
+                summaries.append(self._summarize_lpr_timing(output))
+            elif tool_name == "query_vehicle_detection_history":
+                summaries.append(self._summarize_detection_history(output))
             elif tool_name in {
                 "query_schedules",
                 "get_schedule",
@@ -496,6 +504,54 @@ class LocalProvider:
             return f"{person} had a denied access event at {occurred_at}."
         return f"{person} had a {direction} event at {occurred_at}."
 
+    def _summarize_access_diagnostic(self, output: dict[str, Any]) -> str:
+        if not output.get("found"):
+            return f"Access diagnostic: {output.get('error') or 'no matching event found'}"
+        event = output.get("event") if isinstance(output.get("event"), dict) else {}
+        recognition = output.get("recognition") if isinstance(output.get("recognition"), dict) else {}
+        gate = output.get("gate") if isinstance(output.get("gate"), dict) else {}
+        notifications = output.get("notifications") if isinstance(output.get("notifications"), dict) else {}
+        subject = event.get("person") or event.get("registration_number") or "matched event"
+        parts = [
+            f"Access diagnostic for {subject} at {event.get('occurred_at_display') or event.get('occurred_at')}.",
+        ]
+        if recognition.get("total_pipeline_ms") is not None:
+            parts.append(f"Total pipeline: {recognition.get('total_pipeline_ms')}ms.")
+        if recognition.get("debounce_or_recognition_ms") is not None:
+            parts.append(f"Debounce/recognition: {recognition.get('debounce_or_recognition_ms')}ms.")
+        if recognition.get("likely_delay_reason"):
+            parts.append(str(recognition["likely_delay_reason"]))
+        if gate.get("outcome_reason"):
+            parts.append(str(gate["outcome_reason"]))
+        if notifications.get("summary"):
+            parts.append(f"Notifications: {notifications['summary']}")
+        return " ".join(parts)
+
+    def _summarize_lpr_timing(self, output: dict[str, Any]) -> str:
+        observations = output.get("observations") if isinstance(output.get("observations"), list) else []
+        if not observations:
+            return "No recent raw LPR timing observations matched."
+        latest = observations[0]
+        delay = latest.get("captured_to_received_ms")
+        if delay is not None:
+            return (
+                f"Latest raw LPR timing for {latest.get('registration_number')}: "
+                f"{delay}ms captured-to-received from {latest.get('source_detail') or latest.get('source')}."
+            )
+        return f"I found {len(observations)} recent LPR timing observation(s), but no captured-to-received delay was available."
+
+    def _summarize_detection_history(self, output: dict[str, Any]) -> str:
+        if not output.get("found"):
+            return f"Detection history: {output.get('error') or 'no matching events found'}"
+        registration_number = output.get("registration_number") or "That vehicle"
+        count = output.get("total_count")
+        first_seen = output.get("first_seen_at_display") or output.get("first_seen_at")
+        last_seen = output.get("last_seen_at_display") or output.get("last_seen_at")
+        return (
+            f"{registration_number} has been detected {count} time{'s' if count != 1 else ''}. "
+            f"First seen: {first_seen}; last seen: {last_seen}."
+        )
+
     def _summarize_presence(self, output: dict[str, Any]) -> str:
         records = output.get("presence", [])
         if not records:
@@ -528,6 +584,26 @@ class LocalProvider:
         if output.get("opened"):
             return f"Opened {name}. This was logged as an Alfred agent action."
         return f"I could not open {name}: {output.get('detail') or output.get('error') or 'command failed'}"
+
+    def _summarize_maintenance_tool(self, tool_name: str, output: dict[str, Any]) -> str:
+        if output.get("requires_confirmation"):
+            return str(output.get("detail") or "Please use the confirmation button first.")
+        status = output.get("maintenance_mode") if isinstance(output.get("maintenance_mode"), dict) else output
+        active = bool(status.get("is_active"))
+        if tool_name == "enable_maintenance_mode":
+            return "Maintenance Mode is now enabled. Automated actions are disabled." if active else "Maintenance Mode was not enabled."
+        if tool_name == "disable_maintenance_mode":
+            duration = status.get("duration_label")
+            return (
+                f"Maintenance Mode is now disabled. It had been active for {duration}."
+                if duration
+                else "Maintenance Mode is now disabled. Automated actions have resumed."
+            )
+        if active:
+            duration = status.get("duration_label") or "less than a minute"
+            actor = status.get("enabled_by") or "System"
+            return f"Maintenance Mode is enabled by {actor}; active for {duration}."
+        return "Maintenance Mode is disabled. Automated actions are available."
 
     def _summarize_anomalies(self, output: dict[str, Any]) -> str:
         anomalies = output.get("anomalies", [])
@@ -586,16 +662,19 @@ class LocalProvider:
         vehicle = output.get("display_vehicle") or output.get("vehicle")
         if not isinstance(vehicle, dict):
             return "DVLA returned no vehicle details for that registration."
+        normalized_vehicle = output.get("normalized_vehicle")
+        if not isinstance(normalized_vehicle, dict):
+            normalized_vehicle = {}
 
         registration_number = output.get("registration_number") or vehicle.get("registrationNumber")
         details = [
             ("Registration", registration_number),
             ("Make", vehicle.get("make")),
             ("Colour", vehicle.get("colour")),
-            ("Tax status", vehicle.get("taxStatus")),
-            ("Tax due date", vehicle.get("taxDueDate")),
-            ("MOT status", vehicle.get("motStatus")),
-            ("MOT expiry", vehicle.get("motExpiryDate")),
+            ("Tax status", normalized_vehicle.get("tax_status") or vehicle.get("taxStatus")),
+            ("Tax due date", normalized_vehicle.get("tax_expiry") or vehicle.get("taxDueDate")),
+            ("MOT status", normalized_vehicle.get("mot_status") or vehicle.get("motStatus")),
+            ("MOT expiry", normalized_vehicle.get("mot_expiry") or vehicle.get("motExpiryDate")),
             ("Year of manufacture", vehicle.get("yearOfManufacture")),
             ("Fuel type", vehicle.get("fuelType")),
             ("Engine capacity", _format_engine_capacity(vehicle.get("engineCapacity"))),

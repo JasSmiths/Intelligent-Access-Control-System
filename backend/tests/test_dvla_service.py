@@ -31,6 +31,44 @@ def test_normalize_vehicle_enquiry_response_maps_compliance_fields() -> None:
     assert normalized.as_payload()["mot_expiry"] == "2026-10-14"
 
 
+def test_normalize_vehicle_enquiry_response_marks_new_vehicle_mot_not_required() -> None:
+    normalized = normalize_vehicle_enquiry_response(
+        {
+            "registrationNumber": "NEW26",
+            "make": "TESLA",
+            "colour": "WHITE",
+            "dateOfFirstRegistration": "2026-05-05",
+            "motStatus": "No details held by DVLA",
+            "taxStatus": "TAXED",
+        },
+        "NEW26",
+        today=date(2026, 4, 28),
+    )
+
+    assert normalized.mot_status == "Not Required"
+    assert normalized.mot_expiry == date(2029, 5, 1)
+    assert normalized.as_payload()["mot_expiry"] == "2029-05-01"
+
+
+def test_normalize_vehicle_enquiry_response_keeps_mot_status_after_first_due_date() -> None:
+    normalized = normalize_vehicle_enquiry_response(
+        {
+            "registrationNumber": "OLD23",
+            "make": "FORD",
+            "colour": "BLUE",
+            "monthOfFirstRegistration": "2023-04",
+            "motStatus": "EXPIRED",
+            "motExpiryDate": "2026-04-01",
+            "taxStatus": "TAXED",
+        },
+        "OLD23",
+        today=date(2026, 4, 28),
+    )
+
+    assert normalized.mot_status == "Expired"
+    assert normalized.mot_expiry == date(2026, 4, 1)
+
+
 @pytest.mark.asyncio
 async def test_manual_dvla_lookup_preserves_response_shape_and_adds_normalized_view(monkeypatch) -> None:
     async def fake_lookup(registration_number):

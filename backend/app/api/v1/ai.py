@@ -80,6 +80,7 @@ async def chat(
         provider_name=request.provider,
         attachments=[attachment.model_dump() for attachment in request.attachments],
         user_id=str(current_user.id),
+        user_role=current_user.role.value,
     )
     return ChatResponse(
         session_id=result.session_id,
@@ -177,6 +178,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     arguments=arguments,
                     session_id=payload.get("session_id"),
                     user_id=str(user.id),
+                    user_role=user.role.value,
                     status_callback=publish_status,
                 )
             else:
@@ -186,6 +188,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     provider_name=payload.get("provider"),
                     attachments=attachments,
                     user_id=str(user.id),
+                    user_role=user.role.value,
                     status_callback=publish_status,
                 )
             remaining_typing = MIN_CHAT_TYPING_SECONDS - (time.monotonic() - thinking_started_at)

@@ -693,14 +693,15 @@ async def refresh_vehicle_dvla(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
 
     before = vehicle_audit_snapshot(vehicle)
+    config = await get_runtime_config()
+    lookup_date = local_today(config.site_timezone)
     try:
-        normalized = await lookup_normalized_vehicle_registration(vehicle.registration_number)
+        normalized = await lookup_normalized_vehicle_registration(vehicle.registration_number, today=lookup_date)
     except DvlaVehicleEnquiryError as exc:
         status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else status.HTTP_503_SERVICE_UNAVAILABLE
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
-    config = await get_runtime_config()
-    apply_dvla_vehicle_details(vehicle, normalized, lookup_date=local_today(config.site_timezone))
+    apply_dvla_vehicle_details(vehicle, normalized, lookup_date=lookup_date)
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_CRUD,

@@ -7,6 +7,7 @@ from app.core.logging import get_logger
 from app.modules.lpr.ubiquiti import UbiquitiLprAdapter, UbiquitiLprPayload
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
+from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
 
 router = APIRouter()
@@ -86,6 +87,7 @@ async def receive_ubiquiti_lpr(
         ) from exc
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
+    await get_lpr_timing_recorder().record_webhook_plate(read)
     telemetry.record_span(
         "Webhook payload normalized to PlateRead",
         category=TELEMETRY_CATEGORY_WEBHOOKS_API,

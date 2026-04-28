@@ -8,13 +8,24 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, Anomaly, NotificationRule, Person, Presence, Schedule, User, Vehicle
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    NotificationRule,
+    Person,
+    Presence,
+    Schedule,
+    TelemetrySpan,
+    TelemetryTrace,
+    User,
+    Vehicle,
+)
 from app.models.enums import AccessDecision, AccessDirection
 from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
 from app.modules.home_assistant.client import HomeAssistantClient
@@ -25,8 +36,15 @@ from app.modules.notifications.base import NotificationContext, NotificationDeli
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
+from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.leaderboard import get_leaderboard_service
+from app.services.lpr_timing import get_lpr_timing_recorder
+from app.services.maintenance import (
+    get_status as get_maintenance_mode_status,
+    is_maintenance_mode_active,
+    set_mode as set_maintenance_mode,
+)
 from app.services.notifications import (
     get_notification_service,
     normalize_actions,
@@ -44,11 +62,14 @@ from app.services.schedules import (
 )
 from app.services.settings import get_runtime_config, update_settings
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.telemetry import telemetry
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context", default={})
 logger = get_logger(__name__)
 DEFAULT_AGENT_TIMEZONE = "Europe/London"
+GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
+KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 
 SCHEDULE_TIME_BLOCKS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -208,6 +229,88 @@ def build_agent_tools() -> dict[str, AgentTool]:
             handler=query_device_states,
         ),
         AgentTool(
+            name="get_maintenance_status",
+            description="Return whether global Maintenance Mode is active, who enabled it, when it started, and how long it has been active.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=get_maintenance_status,
+        ),
+        AgentTool(
+            name="get_active_malfunctions",
+            description="Return active or FUBAR gate malfunctions, including attempt counts, next retry times, status, and optional timeline.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "include_timeline": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+            handler=get_active_malfunctions,
+        ),
+        AgentTool(
+            name="get_malfunction_history",
+            description="Return historical gate malfunctions, optionally filtered by active, resolved, or fubar status.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["active", "resolved", "fubar"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "include_timeline": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+            handler=get_malfunction_history,
+        ),
+        AgentTool(
+            name="trigger_manual_malfunction_override",
+            description="Manually recheck, run a recovery attempt now, mark resolved, or mark FUBAR for a gate malfunction. State-changing actions require confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "malfunction_id": {"type": "string"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["recheck_live_state", "run_attempt_now", "mark_resolved", "mark_fubar"],
+                    },
+                    "reason": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["malfunction_id", "action", "confirm"],
+                "additionalProperties": False,
+            },
+            handler=trigger_manual_malfunction_override,
+        ),
+        AgentTool(
+            name="enable_maintenance_mode",
+            description="Enable global Maintenance Mode. This disables automated actions and requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "Human-readable reason to audit and use in notifications."},
+                    "confirm": {"type": "boolean", "description": "Must be true before Maintenance Mode is enabled."},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=enable_maintenance_mode,
+        ),
+        AgentTool(
+            name="disable_maintenance_mode",
+            description="Disable global Maintenance Mode and resume automated actions. Requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "confirm": {"type": "boolean", "description": "Must be true before Maintenance Mode is disabled."},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=disable_maintenance_mode,
+        ),
+        AgentTool(
             name="open_device",
             description="Open a configured gate or garage door. This is a real-world side effect and requires confirm=true.",
             parameters={
@@ -249,6 +352,71 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=query_access_events,
+        ),
+        AgentTool(
+            name="diagnose_access_event",
+            description=(
+                "Explain a specific or latest gate/LPR access event by joining the access event, "
+                "telemetry trace spans, gate action outcome, notification workflow diagnostics, "
+                "nearby LPR timing observations, and same-plate history."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "access_event_id": {"type": "string", "description": "Access event UUID when already known."},
+                    "person": {"type": "string", "description": "Person name, for example Steph."},
+                    "group": {"type": "string", "description": "Group/category name."},
+                    "registration_number": {"type": "string", "description": "Plate/VRN to inspect."},
+                    "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
+                    "unknown_only": {
+                        "type": "boolean",
+                        "description": "When true, resolve the latest event for an unknown/unmatched plate.",
+                    },
+                    "decision": {"type": "string", "enum": ["granted", "denied"]},
+                    "direction": {"type": "string", "enum": ["entry", "exit", "denied"]},
+                },
+                "additionalProperties": False,
+            },
+            handler=diagnose_access_event,
+        ),
+        AgentTool(
+            name="query_lpr_timing",
+            description=(
+                "Return recent raw LPR timing observations from webhooks and UniFi Protect, "
+                "including captured-to-received delay where available."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "registration_number": {"type": "string", "description": "Optional plate/VRN filter."},
+                    "source": {"type": "string", "description": "Optional source filter, for example webhook or uiprotect_track."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "include_possible_fields": {
+                        "type": "boolean",
+                        "description": "Include candidate fields that looked like LPR payloads but did not normalize to a plate.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=query_lpr_timing,
+        ),
+        AgentTool(
+            name="query_vehicle_detection_history",
+            description=(
+                "Count how many times a plate has appeared at the gate. Set latest_unknown=true "
+                "to resolve the latest unknown/unmatched vehicle first."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "registration_number": {"type": "string", "description": "Plate/VRN to count."},
+                    "latest_unknown": {"type": "boolean", "description": "Resolve and count the latest unknown vehicle."},
+                    "period": {"type": "string", "enum": ["all", "today", "yesterday", "recent"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                },
+                "additionalProperties": False,
+            },
+            handler=query_vehicle_detection_history,
         ),
         AgentTool(
             name="query_leaderboard",
@@ -780,6 +948,95 @@ async def query_device_states(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def get_maintenance_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    status = await get_maintenance_mode_status()
+    return {"maintenance_mode": status, **status}
+
+
+async def get_active_malfunctions(arguments: dict[str, Any]) -> dict[str, Any]:
+    include_timeline = bool(arguments.get("include_timeline"))
+    items = await get_gate_malfunction_service().active(include_timeline=include_timeline)
+    return {"count": len(items), "malfunctions": items}
+
+
+async def get_malfunction_history(arguments: dict[str, Any]) -> dict[str, Any]:
+    status = str(arguments.get("status") or "").strip().lower() or None
+    limit = max(1, min(int(arguments.get("limit") or 25), 100))
+    include_timeline = bool(arguments.get("include_timeline"))
+    items = await get_gate_malfunction_service().history(
+        status=status,
+        limit=limit,
+        include_timeline=include_timeline,
+    )
+    return {"count": len(items), "malfunctions": items}
+
+
+async def trigger_manual_malfunction_override(arguments: dict[str, Any]) -> dict[str, Any]:
+    context = get_chat_tool_context()
+    if str(context.get("user_role") or "").lower() != "admin":
+        return {
+            "changed": False,
+            "error": "Admin access is required for gate malfunction overrides.",
+        }
+    malfunction_id = str(arguments.get("malfunction_id") or "").strip()
+    action = str(arguments.get("action") or "").strip()
+    reason = str(arguments.get("reason") or "Manual Alfred gate malfunction override").strip()
+    confirm = bool(arguments.get("confirm"))
+    if not malfunction_id:
+        return {"changed": False, "error": "malfunction_id is required."}
+    if action not in {"recheck_live_state", "run_attempt_now", "mark_resolved", "mark_fubar"}:
+        return {"changed": False, "error": "action must be recheck_live_state, run_attempt_now, mark_resolved, or mark_fubar."}
+    return await get_gate_malfunction_service().override(
+        malfunction_id,
+        action=action,
+        reason=reason,
+        actor="Alfred",
+        confirm=confirm,
+    )
+
+
+async def enable_maintenance_mode(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "enabled": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": "Maintenance Mode",
+            "detail": "Maintenance Mode disables automated access actions until it is turned off.",
+        }
+    context = get_chat_tool_context()
+    status = await set_maintenance_mode(
+        True,
+        actor="Alfred",
+        actor_user_id=str(context.get("user_id") or "") or None,
+        source="Alfred",
+        reason=str(arguments.get("reason") or "Enabled by Alfred").strip(),
+        sync_ha=True,
+    )
+    return {"enabled": bool(status.get("is_active")), "maintenance_mode": status, **status}
+
+
+async def disable_maintenance_mode(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "disabled": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": "Maintenance Mode",
+            "detail": "Disabling Maintenance Mode resumes automated access actions.",
+        }
+    context = get_chat_tool_context()
+    status = await set_maintenance_mode(
+        False,
+        actor="Alfred",
+        actor_user_id=str(context.get("user_id") or "") or None,
+        source="Alfred",
+        reason="Disabled by Alfred",
+        sync_ha=True,
+    )
+    return {"disabled": not bool(status.get("is_active")), "maintenance_mode": status, **status}
+
+
 async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
     context = get_chat_tool_context()
     user_id = str(context.get("user_id") or "")
@@ -814,6 +1071,16 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
                 "Opening gates and garage doors is a real-world action. "
                 "Use the chat confirmation action before I open it."
             ),
+        }
+
+    if await is_maintenance_mode_active():
+        return {
+            "opened": False,
+            "accepted": False,
+            "device": _agent_device_payload(target),
+            "state": "maintenance_mode",
+            "detail": "Maintenance Mode is active. Automated actions are disabled.",
+            "opened_by": "agent",
         }
 
     config = await get_runtime_config()
@@ -933,6 +1200,140 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
         )
 
     return {"events": records, "count": len(records), "timezone": config.site_timezone}
+
+
+async def diagnose_access_event(arguments: dict[str, Any]) -> dict[str, Any]:
+    config = await get_runtime_config()
+    await telemetry.flush()
+    async with AsyncSessionLocal() as session:
+        person_map = await _person_map(session)
+        event = await _resolve_access_event_for_diagnostics(session, arguments, person_map, config.site_timezone)
+        if not event:
+            return {
+                "found": False,
+                "error": "No matching access event was found.",
+                "timezone": config.site_timezone,
+            }
+
+        person = person_map.get(str(event.person_id)) if event.person_id else None
+        trace, spans = await _telemetry_for_access_event(session, event)
+        history = await _registration_history_summary(
+            session,
+            event.registration_number,
+            timezone_name=config.site_timezone,
+            period="all",
+            limit=8,
+        )
+        notifications = await _notification_diagnostics_for_event(
+            session,
+            event,
+            person,
+            trace.trace_id if trace else _trace_id_from_access_event(event),
+            spans,
+            config.site_timezone,
+        )
+
+    lpr_timing = await _lpr_timing_near_event(event, config.site_timezone)
+    recognition = _recognition_diagnostics(event, trace, spans)
+    gate = _gate_diagnostics(event, spans, config.site_timezone)
+
+    return {
+        "found": True,
+        "timezone": config.site_timezone,
+        "event": _access_event_diagnostic_payload(event, person, config.site_timezone),
+        "recognition": recognition,
+        "gate": gate,
+        "notifications": notifications,
+        "history": history,
+        "lpr_timing_observations": lpr_timing,
+        "trace": _trace_diagnostic_payload(trace, spans, config.site_timezone),
+        "answer_hints": _diagnostic_answer_hints(recognition, gate, notifications),
+    }
+
+
+async def query_lpr_timing(arguments: dict[str, Any]) -> dict[str, Any]:
+    limit = _bounded_int(arguments.get("limit"), default=50, minimum=1, maximum=200)
+    config = await get_runtime_config()
+    plate_filter = normalize_registration_number(str(arguments.get("registration_number") or ""))
+    source_filter = _normalize(arguments.get("source"))
+    include_possible_fields = bool(arguments.get("include_possible_fields"))
+    raw_observations = await get_lpr_timing_recorder().recent(limit=max(limit, 200))
+
+    observations: list[dict[str, Any]] = []
+    for observation in raw_observations:
+        if not include_possible_fields and observation.get("candidate_kind") == "possible_lpr_field":
+            continue
+        registration_number = normalize_registration_number(
+            str(observation.get("registration_number") or observation.get("raw_value") or "")
+        )
+        if plate_filter and plate_filter not in registration_number:
+            continue
+        source_text = f"{observation.get('source') or ''} {observation.get('source_detail') or ''}".lower()
+        if source_filter and source_filter not in source_text:
+            continue
+        observations.append(_serialize_lpr_timing_observation(observation, config.site_timezone))
+        if len(observations) >= limit:
+            break
+
+    slowest = sorted(
+        [row for row in observations if row.get("captured_to_received_ms") is not None],
+        key=lambda row: float(row["captured_to_received_ms"]),
+        reverse=True,
+    )[:5]
+    return {
+        "observations": observations,
+        "count": len(observations),
+        "timezone": config.site_timezone,
+        "filters": {
+            "registration_number": plate_filter or None,
+            "source": source_filter or None,
+            "include_possible_fields": include_possible_fields,
+        },
+        "slowest_observations": slowest,
+        "latest_observation": observations[0] if observations else None,
+    }
+
+
+async def query_vehicle_detection_history(arguments: dict[str, Any]) -> dict[str, Any]:
+    config = await get_runtime_config()
+    period = str(arguments.get("period") or "all")
+    if period not in {"all", "today", "yesterday", "recent"}:
+        period = "all"
+    limit = _bounded_int(arguments.get("limit"), default=10, minimum=1, maximum=50)
+    latest_unknown = bool(arguments.get("latest_unknown"))
+    registration_number = normalize_registration_number(str(arguments.get("registration_number") or ""))
+
+    async with AsyncSessionLocal() as session:
+        if not registration_number:
+            query = select(AccessEvent).order_by(AccessEvent.occurred_at.desc())
+            if latest_unknown:
+                query = query.where(AccessEvent.vehicle_id.is_(None))
+            latest = await session.scalar(query.limit(1))
+            if not latest:
+                return {
+                    "found": False,
+                    "error": "No access events were found.",
+                    "timezone": config.site_timezone,
+                }
+            registration_number = latest.registration_number
+            latest_unknown = latest.vehicle_id is None
+
+        history = await _registration_history_summary(
+            session,
+            registration_number,
+            timezone_name=config.site_timezone,
+            period=period,
+            limit=limit,
+        )
+
+    return {
+        "found": bool(history.get("total_count")),
+        "registration_number": registration_number,
+        "resolved_from_latest_unknown": latest_unknown and not arguments.get("registration_number"),
+        "period": period,
+        "timezone": config.site_timezone,
+        **history,
+    }
 
 
 async def query_leaderboard(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1987,6 +2388,8 @@ def _serialize_notification_rule_for_agent(rule: NotificationRule) -> dict[str, 
         "conditions": normalize_conditions(rule.conditions),
         "actions": normalize_actions(rule.actions),
         "is_active": rule.is_active,
+        "last_fired_at": _agent_datetime_iso(rule.last_fired_at) if rule.last_fired_at else None,
+        "last_fired_at_display": _agent_datetime_display(rule.last_fired_at) if rule.last_fired_at else None,
         "created_at": _agent_datetime_iso(rule.created_at) if rule.created_at else None,
         "created_at_display": _agent_datetime_display(rule.created_at) if rule.created_at else None,
         "updated_at": _agent_datetime_iso(rule.updated_at) if rule.updated_at else None,
@@ -2007,6 +2410,662 @@ def _notification_context_for_agent(value: Any, trigger_event: str) -> Notificat
             }
         return notification_context_from_payload(payload)
     return sample_notification_context(trigger_event or "integration_test")
+
+
+def _access_event_load_options() -> tuple[Any, ...]:
+    return (
+        selectinload(AccessEvent.vehicle).selectinload(Vehicle.owner).selectinload(Person.group),
+        selectinload(AccessEvent.anomalies),
+    )
+
+
+async def _resolve_access_event_for_diagnostics(
+    session,
+    arguments: dict[str, Any],
+    person_map: dict[str, dict[str, str]],
+    timezone_name: str,
+) -> AccessEvent | None:
+    event_id = _uuid_from_value(arguments.get("access_event_id") or arguments.get("event_id"))
+    query_options = _access_event_load_options()
+    if event_id:
+        return await session.scalar(
+            select(AccessEvent)
+            .options(*query_options)
+            .where(AccessEvent.id == event_id)
+        )
+
+    start, end = _period_bounds(str(arguments.get("day") or "recent"), timezone_name)
+    query = (
+        select(AccessEvent)
+        .options(*query_options)
+        .where(AccessEvent.occurred_at >= start, AccessEvent.occurred_at <= end)
+        .order_by(AccessEvent.occurred_at.desc())
+        .limit(250)
+    )
+    registration_number = normalize_registration_number(str(arguments.get("registration_number") or ""))
+    if registration_number:
+        query = query.where(AccessEvent.registration_number == registration_number)
+    if bool(arguments.get("unknown_only")):
+        query = query.where(AccessEvent.vehicle_id.is_(None))
+
+    events = (await session.scalars(query)).all()
+    person_filter = _normalize(arguments.get("person"))
+    group_filter = _normalize(arguments.get("group"))
+    decision_filter = _normalize(arguments.get("decision"))
+    direction_filter = _normalize(arguments.get("direction"))
+    for event in events:
+        person = person_map.get(str(event.person_id)) if event.person_id else None
+        if person_filter and (not person or not _person_record_matches(person, person_filter)):
+            continue
+        if group_filter and (not person or group_filter not in person.get("group", "").lower()):
+            continue
+        if decision_filter and event.decision.value != decision_filter:
+            continue
+        if direction_filter and event.direction.value != direction_filter:
+            continue
+        return event
+    return None
+
+
+async def _telemetry_for_access_event(session, event: AccessEvent) -> tuple[TelemetryTrace | None, list[TelemetrySpan]]:
+    trace_id = _trace_id_from_access_event(event)
+    trace: TelemetryTrace | None = None
+    if trace_id:
+        trace = await session.get(TelemetryTrace, trace_id)
+    if not trace:
+        trace = await session.scalar(
+            select(TelemetryTrace)
+            .where(TelemetryTrace.access_event_id == event.id)
+            .order_by(TelemetryTrace.started_at.desc())
+            .limit(1)
+        )
+    if not trace:
+        return None, []
+    spans = (
+        await session.scalars(
+            select(TelemetrySpan)
+            .where(TelemetrySpan.trace_id == trace.trace_id)
+            .order_by(TelemetrySpan.step_order, TelemetrySpan.started_at)
+        )
+    ).all()
+    return trace, list(spans)
+
+
+def _trace_id_from_access_event(event: AccessEvent) -> str | None:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    telemetry_payload = raw_payload.get("telemetry") if isinstance(raw_payload.get("telemetry"), dict) else {}
+    trace_id = str(telemetry_payload.get("trace_id") or "").strip()
+    return trace_id or None
+
+
+def _access_event_diagnostic_payload(
+    event: AccessEvent,
+    person: dict[str, str] | None,
+    timezone_name: str,
+) -> dict[str, Any]:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    schedule = raw_payload.get("schedule") if isinstance(raw_payload.get("schedule"), dict) else {}
+    direction_resolution = (
+        raw_payload.get("direction_resolution")
+        if isinstance(raw_payload.get("direction_resolution"), dict)
+        else {}
+    )
+    debounce = raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
+    return {
+        "id": str(event.id),
+        "registration_number": event.registration_number,
+        "person": person.get("display_name") if person else None,
+        "group": person.get("group") if person else None,
+        "vehicle": _vehicle_agent_payload(event.vehicle),
+        "direction": event.direction.value,
+        "decision": event.decision.value,
+        "confidence": event.confidence,
+        "source": event.source,
+        "occurred_at": _agent_datetime_iso(event.occurred_at, timezone_name),
+        "occurred_at_display": _agent_datetime_display(event.occurred_at, timezone_name),
+        "timing_classification": event.timing_classification.value,
+        "schedule": schedule,
+        "direction_resolution": direction_resolution,
+        "gate_observation": _gate_observation_from_event(event),
+        "debounce": {
+            "candidate_count": debounce.get("candidate_count"),
+            "candidates": debounce.get("candidates") or [],
+        },
+        "anomalies": [
+            {
+                "id": str(anomaly.id),
+                "type": anomaly.anomaly_type.value,
+                "severity": anomaly.severity.value,
+                "message": anomaly.message,
+                "resolved": bool(anomaly.resolved_at),
+            }
+            for anomaly in event.anomalies
+        ],
+        "telemetry_trace_id": _trace_id_from_access_event(event),
+    }
+
+
+def _vehicle_agent_payload(vehicle: Vehicle | None) -> dict[str, Any] | None:
+    if not vehicle:
+        return None
+    owner = vehicle.owner
+    return {
+        "id": str(vehicle.id),
+        "registration_number": vehicle.registration_number,
+        "make": vehicle.make,
+        "model": vehicle.model,
+        "color": vehicle.color,
+        "description": vehicle.description,
+        "is_active": vehicle.is_active,
+        "owner": owner.display_name if owner else None,
+        "owner_id": str(owner.id) if owner else None,
+    }
+
+
+def _trace_diagnostic_payload(
+    trace: TelemetryTrace | None,
+    spans: list[TelemetrySpan],
+    timezone_name: str,
+) -> dict[str, Any] | None:
+    if not trace:
+        return None
+    return {
+        "trace_id": trace.trace_id,
+        "name": trace.name,
+        "category": trace.category,
+        "status": trace.status,
+        "level": trace.level,
+        "started_at": _agent_datetime_iso(trace.started_at, timezone_name),
+        "ended_at": _agent_datetime_iso(trace.ended_at, timezone_name) if trace.ended_at else None,
+        "duration_ms": trace.duration_ms,
+        "summary": trace.summary,
+        "error": trace.error,
+        "context": trace.context or {},
+        "spans": [_span_diagnostic_payload(span, timezone_name) for span in spans],
+    }
+
+
+def _span_diagnostic_payload(span: TelemetrySpan, timezone_name: str) -> dict[str, Any]:
+    return {
+        "span_id": span.span_id,
+        "name": span.name,
+        "category": span.category,
+        "step_order": span.step_order,
+        "started_at": _agent_datetime_iso(span.started_at, timezone_name),
+        "duration_ms": span.duration_ms,
+        "status": span.status,
+        "attributes": span.attributes or {},
+        "output_payload": span.output_payload or {},
+        "error": span.error,
+    }
+
+
+def _recognition_diagnostics(
+    event: AccessEvent,
+    trace: TelemetryTrace | None,
+    spans: list[TelemetrySpan],
+) -> dict[str, Any]:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    debounce_payload = raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
+    candidates = debounce_payload.get("candidates") if isinstance(debounce_payload.get("candidates"), list) else []
+    debounce_span = _find_span(spans, "Debounce & Confidence Aggregation")
+    slowest_spans = sorted(
+        [span for span in spans if span.duration_ms is not None],
+        key=lambda span: float(span.duration_ms or 0),
+        reverse=True,
+    )[:5]
+    total_ms = trace.duration_ms if trace else None
+    debounce_ms = debounce_span.duration_ms if debounce_span else None
+    processing_after_debounce_ms = (
+        max(0.0, float(total_ms) - float(debounce_ms))
+        if total_ms is not None and debounce_ms is not None
+        else None
+    )
+    exact_known_match = any(
+        isinstance(candidate, dict)
+        and isinstance(candidate.get("known_vehicle_plate_match"), dict)
+        and candidate["known_vehicle_plate_match"].get("exact") is True
+        for candidate in candidates
+    )
+    likely_reason = "Telemetry for this access event was not found."
+    if trace:
+        slowest = slowest_spans[0] if slowest_spans else None
+        if debounce_span and slowest and slowest.span_id == debounce_span.span_id and float(debounce_ms or 0) >= 500:
+            likely_reason = "Most of the time was spent waiting in the LPR debounce/confidence window."
+            if exact_known_match:
+                likely_reason += " An exact known-plate match was present, so the burst should have short-circuited once that read arrived."
+            elif len(candidates) > 1:
+                likely_reason += " Multiple candidate reads were grouped before the final plate was selected."
+            else:
+                likely_reason += " Only one candidate was present, so this usually means the quiet-period timer had not expired yet."
+        elif slowest:
+            likely_reason = f"The slowest recorded step was {slowest.name}."
+        else:
+            likely_reason = "The trace did not contain any timed spans."
+
+    return {
+        "total_pipeline_ms": total_ms,
+        "debounce_or_recognition_ms": debounce_ms,
+        "processing_after_debounce_ms": processing_after_debounce_ms,
+        "candidate_count": debounce_payload.get("candidate_count") or len(candidates),
+        "selected_registration_number": event.registration_number,
+        "exact_known_plate_match_seen": exact_known_match,
+        "slowest_steps": [
+            {
+                "name": span.name,
+                "duration_ms": span.duration_ms,
+                "status": span.status,
+                "error": span.error,
+            }
+            for span in slowest_spans
+        ],
+        "likely_delay_reason": likely_reason,
+    }
+
+
+def _gate_diagnostics(event: AccessEvent, spans: list[TelemetrySpan], timezone_name: str) -> dict[str, Any]:
+    gate_observation = _gate_observation_from_event(event)
+    gate_span = _find_span(spans, "Home Assistant Gate Open Command Sent")
+    garage_spans = [span for span in spans if "Garage Door Command" in span.name]
+    automatic_open_considered = (
+        event.decision == AccessDecision.GRANTED and event.direction == AccessDirection.ENTRY
+    )
+
+    if not automatic_open_considered:
+        reason = (
+            "The gate was not opened because this event was not a granted entry."
+            if event.decision != AccessDecision.GRANTED
+            else "The gate was not opened because this event was classified as an exit/departure."
+        )
+    elif str(gate_observation.get("state") or "unknown") != "closed":
+        reason = (
+            "Automatic gate and garage-door commands are skipped unless the top gate "
+            "was closed at plate-read time."
+        )
+    elif gate_span is None:
+        reason = "The event qualified for an automatic gate open, but no gate command span was recorded."
+    elif gate_span.status == "ok" and (gate_span.output_payload or {}).get("accepted") is not False:
+        reason = "The automatic gate open command was accepted."
+    else:
+        output = gate_span.output_payload or {}
+        reason = str(gate_span.error or output.get("detail") or "The gate open command failed.")
+
+    return {
+        "automatic_open_considered": automatic_open_considered,
+        "gate_observation": gate_observation,
+        "gate_command": _span_diagnostic_payload(gate_span, timezone_name) if gate_span else None,
+        "garage_commands": [
+            _span_diagnostic_payload(span, timezone_name)
+            for span in garage_spans
+        ],
+        "outcome_reason": reason,
+    }
+
+
+async def _notification_diagnostics_for_event(
+    session,
+    event: AccessEvent,
+    person: dict[str, str] | None,
+    trace_id: str | None,
+    spans: list[TelemetrySpan],
+    timezone_name: str,
+) -> dict[str, Any]:
+    triggers = _expected_notification_triggers(event, spans)
+    if not triggers:
+        return {
+            "expected_triggers": [],
+            "trigger_diagnostics": [],
+            "delivery_records": [],
+            "summary": "No notification trigger was expected for this event.",
+        }
+
+    rules = (
+        await session.scalars(
+            select(NotificationRule)
+            .where(NotificationRule.trigger_event.in_([trigger["event_type"] for trigger in triggers]))
+            .order_by(NotificationRule.trigger_event, NotificationRule.created_at)
+        )
+    ).all()
+    notification_service = get_notification_service()
+    delivery_records = _notification_delivery_records(spans, timezone_name)
+    trigger_rows: list[dict[str, Any]] = []
+    for trigger in triggers:
+        trigger_rules = [rule for rule in rules if rule.trigger_event == trigger["event_type"]]
+        active_rules = [rule for rule in trigger_rules if rule.is_active]
+        context = _notification_context_for_access_event(event, person, trigger, trace_id, timezone_name)
+        rule_rows: list[dict[str, Any]] = []
+        for rule in trigger_rules:
+            conditions_matched = None
+            condition_error = None
+            if rule.is_active:
+                try:
+                    conditions_matched = await notification_service.conditions_match(rule, context)
+                except Exception as exc:
+                    conditions_matched = False
+                    condition_error = str(exc)
+            rule_rows.append(
+                {
+                    "id": str(rule.id),
+                    "name": rule.name,
+                    "is_active": rule.is_active,
+                    "conditions": rule.conditions or [],
+                    "conditions_matched": conditions_matched,
+                    "condition_error": condition_error,
+                    "action_count": len(rule.actions or []),
+                }
+            )
+
+        matching_delivery_records = [
+            record for record in delivery_records if record.get("event_type") == trigger["event_type"]
+        ]
+        if matching_delivery_records:
+            conclusion = "A persisted notification delivery record exists for this trigger."
+        elif not active_rules:
+            conclusion = "No active notification workflow currently matches this trigger."
+        elif not any(row.get("conditions_matched") for row in rule_rows if row.get("is_active")):
+            conclusion = "Active workflows exist, but their conditions do not currently match this event context."
+        else:
+            conclusion = (
+                "An active workflow appears eligible, but no persisted delivery span was found. "
+                "Older events may predate notification delivery telemetry, or delivery may have only appeared in realtime logs."
+            )
+        trigger_rows.append(
+            {
+                **trigger,
+                "workflow_count": len(trigger_rules),
+                "active_workflow_count": len(active_rules),
+                "workflows": rule_rows,
+                "delivery_records": matching_delivery_records,
+                "conclusion": conclusion,
+            }
+        )
+
+    return {
+        "expected_triggers": triggers,
+        "trigger_diagnostics": trigger_rows,
+        "delivery_records": delivery_records,
+        "summary": "; ".join(row["conclusion"] for row in trigger_rows),
+    }
+
+
+def _expected_notification_triggers(event: AccessEvent, spans: list[TelemetrySpan]) -> list[dict[str, Any]]:
+    triggers: list[dict[str, Any]] = []
+    for anomaly in event.anomalies:
+        triggers.append(
+            {
+                "event_type": anomaly.anomaly_type.value,
+                "severity": anomaly.severity.value,
+                "subject": event.registration_number,
+                "reason": anomaly.message,
+            }
+        )
+
+    gate_span = _find_span(spans, "Home Assistant Gate Open Command Sent")
+    if gate_span and gate_span.status == "error":
+        triggers.append(
+            {
+                "event_type": "gate_open_failed",
+                "severity": "critical",
+                "subject": event.registration_number,
+                "reason": str(gate_span.error or (gate_span.output_payload or {}).get("detail") or "Gate command failed."),
+            }
+        )
+    if (
+        event.decision == AccessDecision.GRANTED
+        and event.direction == AccessDirection.ENTRY
+        and gate_span
+        and gate_span.status == "ok"
+        and (gate_span.output_payload or {}).get("accepted") is not False
+    ):
+        triggers.append(
+            {
+                "event_type": "authorized_entry",
+                "severity": "info",
+                "subject": event.registration_number,
+                "reason": "Granted entry and automatic gate open was accepted.",
+            }
+        )
+    return triggers
+
+
+def _notification_context_for_access_event(
+    event: AccessEvent,
+    person: dict[str, str] | None,
+    trigger: dict[str, Any],
+    trace_id: str | None,
+    timezone_name: str,
+) -> NotificationContext:
+    facts = {
+        "message": str(trigger.get("reason") or ""),
+        "display_name": person.get("display_name") if person else "",
+        "group_name": person.get("group") if person else "",
+        "registration_number": event.registration_number,
+        "vehicle_registration_number": event.registration_number,
+        "direction": event.direction.value,
+        "decision": event.decision.value,
+        "source": event.source,
+        "timing_classification": event.timing_classification.value,
+        "occurred_at": _agent_datetime_iso(event.occurred_at, timezone_name),
+        "access_event_id": str(event.id),
+        "telemetry_trace_id": trace_id or "",
+    }
+    return NotificationContext(
+        event_type=str(trigger["event_type"]),
+        subject=str(trigger.get("subject") or event.registration_number),
+        severity=str(trigger.get("severity") or "info"),
+        facts={key: "" if value is None else str(value) for key, value in facts.items()},
+    )
+
+
+def _notification_delivery_records(spans: list[TelemetrySpan], timezone_name: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for span in spans:
+        if not span.name.startswith("Notification "):
+            continue
+        output = span.output_payload or {}
+        records.append(
+            {
+                "name": span.name,
+                "status": span.status,
+                "event_type": output.get("event_type"),
+                "rule_id": output.get("rule_id"),
+                "rule_name": output.get("rule_name"),
+                "channel": output.get("channel"),
+                "reason": output.get("reason"),
+                "delivered": output.get("delivered"),
+                "error": span.error or output.get("error"),
+                "occurred_at": _agent_datetime_iso(span.started_at, timezone_name),
+            }
+        )
+    return records
+
+
+async def _registration_history_summary(
+    session,
+    registration_number: str,
+    *,
+    timezone_name: str,
+    period: str,
+    limit: int,
+) -> dict[str, Any]:
+    normalized = normalize_registration_number(registration_number)
+    conditions: list[Any] = [AccessEvent.registration_number == normalized]
+    if period != "all":
+        start, end = _period_bounds(period, timezone_name)
+        conditions.extend([AccessEvent.occurred_at >= start, AccessEvent.occurred_at <= end])
+
+    total_count = int(
+        await session.scalar(select(func.count()).select_from(AccessEvent).where(*conditions))
+        or 0
+    )
+    granted_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AccessEvent)
+            .where(*conditions, AccessEvent.decision == AccessDecision.GRANTED)
+        )
+        or 0
+    )
+    denied_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AccessEvent)
+            .where(*conditions, AccessEvent.decision == AccessDecision.DENIED)
+        )
+        or 0
+    )
+    bounds = (
+        await session.execute(
+            select(func.min(AccessEvent.occurred_at), func.max(AccessEvent.occurred_at))
+            .where(*conditions)
+        )
+    ).one()
+    recent_events = (
+        await session.scalars(
+            select(AccessEvent)
+            .options(selectinload(AccessEvent.anomalies))
+            .where(*conditions)
+            .order_by(AccessEvent.occurred_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "registration_number": normalized,
+        "total_count": total_count,
+        "granted_count": granted_count,
+        "denied_count": denied_count,
+        "first_seen_at": _agent_datetime_iso(bounds[0], timezone_name) if bounds[0] else None,
+        "first_seen_at_display": _agent_datetime_display(bounds[0], timezone_name) if bounds[0] else None,
+        "last_seen_at": _agent_datetime_iso(bounds[1], timezone_name) if bounds[1] else None,
+        "last_seen_at_display": _agent_datetime_display(bounds[1], timezone_name) if bounds[1] else None,
+        "recent_events": [
+            {
+                "id": str(row.id),
+                "direction": row.direction.value,
+                "decision": row.decision.value,
+                "occurred_at": _agent_datetime_iso(row.occurred_at, timezone_name),
+                "occurred_at_display": _agent_datetime_display(row.occurred_at, timezone_name),
+                "anomaly_count": len(row.anomalies),
+            }
+            for row in recent_events
+        ],
+    }
+
+
+async def _lpr_timing_near_event(event: AccessEvent, timezone_name: str) -> dict[str, Any]:
+    observations = await get_lpr_timing_recorder().recent(limit=300)
+    event_at = event.occurred_at if event.occurred_at.tzinfo else event.occurred_at.replace(tzinfo=UTC)
+    event_at = event_at.astimezone(UTC)
+    registration_number = normalize_registration_number(event.registration_number)
+    nearby: list[dict[str, Any]] = []
+    for observation in observations:
+        observed_plate = normalize_registration_number(
+            str(observation.get("registration_number") or observation.get("raw_value") or "")
+        )
+        if observed_plate != registration_number:
+            continue
+        received_at = _datetime_from_agent_value(observation.get("received_at"))
+        captured_at = _datetime_from_agent_value(observation.get("captured_at"))
+        comparison_at = captured_at or received_at
+        if comparison_at and abs((comparison_at - event_at).total_seconds()) > 120:
+            continue
+        serialized = _serialize_lpr_timing_observation(observation, timezone_name)
+        serialized["ms_from_access_event_time"] = (
+            round((received_at - event_at).total_seconds() * 1000, 1) if received_at else None
+        )
+        nearby.append(serialized)
+    return {
+        "observations": nearby[:20],
+        "count": len(nearby),
+        "note": "This feed is in-memory and only covers recent observations since the backend started.",
+    }
+
+
+def _serialize_lpr_timing_observation(observation: dict[str, Any], timezone_name: str) -> dict[str, Any]:
+    received_at = _datetime_from_agent_value(observation.get("received_at"))
+    captured_at = _datetime_from_agent_value(observation.get("captured_at"))
+    delay_ms = (
+        round((received_at - captured_at).total_seconds() * 1000, 1)
+        if received_at and captured_at
+        else None
+    )
+    return {
+        "id": observation.get("id"),
+        "source": observation.get("source"),
+        "source_detail": observation.get("source_detail"),
+        "registration_number": observation.get("registration_number"),
+        "raw_value": observation.get("raw_value"),
+        "candidate_kind": observation.get("candidate_kind"),
+        "received_at": _agent_datetime_iso(received_at, timezone_name) if received_at else observation.get("received_at"),
+        "captured_at": _agent_datetime_iso(captured_at, timezone_name) if captured_at else observation.get("captured_at"),
+        "captured_to_received_ms": delay_ms,
+        "event_id": observation.get("event_id"),
+        "camera_id": observation.get("camera_id"),
+        "camera_name": observation.get("camera_name"),
+        "confidence": observation.get("confidence"),
+        "confidence_scale": observation.get("confidence_scale"),
+        "protect_action": observation.get("protect_action"),
+        "protect_model": observation.get("protect_model"),
+        "payload_path": observation.get("payload_path"),
+    }
+
+
+def _gate_observation_from_event(event: AccessEvent) -> dict[str, Any]:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    direction_resolution = (
+        raw_payload.get("direction_resolution")
+        if isinstance(raw_payload.get("direction_resolution"), dict)
+        else {}
+    )
+    gate_observation = direction_resolution.get("gate_observation")
+    if isinstance(gate_observation, dict):
+        return gate_observation
+    best_payload = raw_payload.get("best") if isinstance(raw_payload.get("best"), dict) else {}
+    value = best_payload.get(GATE_OBSERVATION_PAYLOAD_KEY)
+    return value if isinstance(value, dict) else {}
+
+
+def _find_span(spans: list[TelemetrySpan], name: str) -> TelemetrySpan | None:
+    return next((span for span in spans if span.name == name), None)
+
+
+def _diagnostic_answer_hints(
+    recognition: dict[str, Any],
+    gate: dict[str, Any],
+    notifications: dict[str, Any],
+) -> list[str]:
+    hints = [str(recognition.get("likely_delay_reason") or "").strip()]
+    gate_reason = str(gate.get("outcome_reason") or "").strip()
+    if gate_reason:
+        hints.append(gate_reason)
+    notification_summary = str(notifications.get("summary") or "").strip()
+    if notification_summary:
+        hints.append(notification_summary)
+    return [hint for hint in hints if hint]
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
+
+def _datetime_from_agent_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 async def _person_map(session) -> dict[str, dict[str, str]]:

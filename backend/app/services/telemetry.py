@@ -27,6 +27,8 @@ TELEMETRY_CATEGORY_LPR = "lpr_telemetry"
 TELEMETRY_CATEGORY_CRUD = "entity_management"
 TELEMETRY_CATEGORY_INTEGRATIONS = "integrations"
 TELEMETRY_CATEGORY_ALFRED = "alfred_ai"
+TELEMETRY_CATEGORY_MAINTENANCE = "maintenance_mode"
+TELEMETRY_CATEGORY_GATE_MALFUNCTION = "gate_malfunction"
 
 TELEMETRY_CATEGORIES = [
     {
@@ -53,6 +55,16 @@ TELEMETRY_CATEGORIES = [
         "id": TELEMETRY_CATEGORY_INTEGRATIONS,
         "label": "Integrations",
         "description": "Home Assistant, Apprise, DVLA, UniFi Protect, and provider connectivity.",
+    },
+    {
+        "id": TELEMETRY_CATEGORY_GATE_MALFUNCTION,
+        "label": "Gate Events",
+        "description": "Gate malfunction declarations, recovery attempts, notifications, and resolution.",
+    },
+    {
+        "id": TELEMETRY_CATEGORY_MAINTENANCE,
+        "label": "Maintenance Mode",
+        "description": "Global automation kill-switch changes, duration, actor, and HA sync outcome.",
     },
     {
         "id": TELEMETRY_CATEGORY_ACCESS,
@@ -244,6 +256,37 @@ async def write_audit_log(
     if isinstance(session, AsyncSession):
         session.add(row)
     return row
+
+
+def audit_log_event_payload(row: AuditLog) -> dict[str, Any]:
+    log = {
+        "id": str(row.id),
+        "timestamp": row.timestamp.isoformat() if row.timestamp else datetime.now(tz=UTC).isoformat(),
+        "category": row.category,
+        "action": row.action,
+        "actor": row.actor,
+        "actor_user_id": str(row.actor_user_id) if row.actor_user_id else None,
+        "target_entity": row.target_entity,
+        "target_id": row.target_id,
+        "target_label": row.target_label,
+        "diff": row.diff or {},
+        "metadata": row.metadata_ or {},
+        "outcome": row.outcome,
+        "level": row.level,
+        "trace_id": row.trace_id,
+        "request_id": row.request_id,
+    }
+    return {
+        "id": log["id"],
+        "category": row.category,
+        "action": row.action,
+        "actor": row.actor,
+        "target_entity": row.target_entity,
+        "target_id": row.target_id,
+        "level": row.level,
+        "outcome": row.outcome,
+        "log": log,
+    }
 
 
 def emit_audit_log(**kwargs: Any) -> None:
@@ -538,19 +581,8 @@ class TelemetryService:
         async with AsyncSessionLocal() as session:
             row = await write_audit_log(session, **kwargs)
             await session.commit()
-            await event_bus.publish(
-                "audit.log.created",
-                {
-                    "id": str(row.id),
-                    "category": row.category,
-                    "action": row.action,
-                    "actor": row.actor,
-                    "target_entity": row.target_entity,
-                    "target_id": row.target_id,
-                    "level": row.level,
-                    "outcome": row.outcome,
-                },
-            )
+            await session.refresh(row)
+            await event_bus.publish("audit.log.created", audit_log_event_payload(row))
 
     def _write_artifact(
         self,

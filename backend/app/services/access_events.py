@@ -34,8 +34,9 @@ from app.models.enums import (
 from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import capture_alert_snapshot
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
-from app.services.event_bus import event_bus
+from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.leaderboard import get_leaderboard_service
+from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
@@ -52,7 +53,8 @@ DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
-    return bool(mot_status and mot_status.strip().casefold() != "valid")
+    normalized = (mot_status or "").strip().casefold().replace("_", " ")
+    return bool(normalized and normalized not in {"valid", "not required"})
 
 
 def dvla_tax_alert_required(tax_status: str | None) -> bool:
@@ -125,6 +127,7 @@ class AccessEventService:
             return
         self._stop_event.clear()
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
+        event_bus.subscribe(self._handle_realtime_event)
         logger.info("access_event_service_started")
 
     async def stop(self) -> None:
@@ -132,9 +135,12 @@ class AccessEventService:
         if self._worker:
             await self._worker
         await self._flush_all_pending()
+        event_bus.unsubscribe(self._handle_realtime_event)
         logger.info("access_event_service_stopped")
 
     async def enqueue_plate_read(self, read: PlateRead) -> None:
+        if await is_maintenance_mode_active():
+            return
         read = await self._read_with_gate_observation(read)
         gate_observation = self._gate_observation_from_read(read)
         logger.info(
@@ -199,6 +205,9 @@ class AccessEventService:
             self._timezone = ZoneInfo(self._runtime.site_timezone)
             try:
                 read = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+                if await is_maintenance_mode_active():
+                    self._clear_pending_reads()
+                    continue
                 await self._handle_queued_read(read)
             except asyncio.TimeoutError:
                 pass
@@ -214,6 +223,14 @@ class AccessEventService:
         if _is_exact_known_vehicle_plate_match(read):
             window = self._pop_exact_known_plate_window(window)
             await self._finalize_exact_known_plate_window(window)
+
+    async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
+        if event.type == "maintenance_mode.changed" and event.payload.get("is_active") is True:
+            self._clear_pending_reads()
+
+    def _clear_pending_reads(self) -> None:
+        self._pending = []
+        self._recent_exact_resolutions = []
 
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
@@ -425,6 +442,9 @@ class AccessEventService:
         return SequenceMatcher(a=left, b=right).ratio() >= threshold
 
     async def _flush_expired_windows(self) -> None:
+        if await is_maintenance_mode_active():
+            self._clear_pending_reads()
+            return
         now = datetime.now(tz=UTC)
         ready: list[DebounceWindow] = []
         waiting: list[DebounceWindow] = []
@@ -461,6 +481,9 @@ class AccessEventService:
                 )
 
     async def _flush_all_pending(self) -> None:
+        if await is_maintenance_mode_active():
+            self._clear_pending_reads()
+            return
         pending = self._pending
         self._pending = []
         for window in pending:
@@ -476,6 +499,9 @@ class AccessEventService:
                 )
 
     async def _finalize_window(self, window: DebounceWindow) -> None:
+        if await is_maintenance_mode_active():
+            self._clear_pending_reads()
+            return
         read = window.best_read
         direction_read = window.first_read
         finalize_started_at = datetime.now(tz=UTC)
@@ -811,7 +837,7 @@ class AccessEventService:
             return payload
 
         try:
-            normalized = await lookup_normalized_vehicle_registration(registration_number)
+            normalized = await lookup_normalized_vehicle_registration(registration_number, today=today)
         except DvlaVehicleEnquiryError as exc:
             detail = self._sanitize_dvla_error(exc)
             if span:
@@ -1289,6 +1315,8 @@ class AccessEventService:
         vehicle_colour = self._fact_text(dvla.get("colour")) or (vehicle.color if vehicle else "") or ""
         facts = {
             "message": message,
+            "access_event_id": str(event.id),
+            "telemetry_trace_id": str(((event.raw_payload or {}).get("telemetry") or {}).get("trace_id") or ""),
             "first_name": person.first_name if person else "",
             "last_name": person.last_name if person else "",
             "display_name": person.display_name if person else "",

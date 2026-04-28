@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -13,6 +13,7 @@ from app.models.enums import (
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
+    GateMalfunctionStatus,
     GroupCategory,
     PresenceState,
     TimingClassification,
@@ -117,6 +118,17 @@ class SystemSetting(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
 
 
+class MaintenanceModeState(Base, TimestampMixin):
+    __tablename__ = "maintenance_mode_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    is_active: Mapped[bool] = mapped_column("is_maintenance_mode_active", Boolean, default=False, nullable=False)
+    enabled_by: Mapped[str | None] = mapped_column("maintenance_enabled_by", String(160))
+    enabled_at: Mapped[datetime | None] = mapped_column("maintenance_enabled_at", DateTime(timezone=True))
+    source: Mapped[str | None] = mapped_column(String(80))
+    reason: Mapped[str | None] = mapped_column(Text)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -183,6 +195,110 @@ class TelemetrySpan(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class GateMalfunctionState(Base, TimestampMixin):
+    __tablename__ = "gate_malfunction_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    gate_entity_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    gate_name: Mapped[str | None] = mapped_column(String(160))
+    status: Mapped[GateMalfunctionStatus] = mapped_column(
+        Enum(GateMalfunctionStatus), default=GateMalfunctionStatus.ACTIVE, nullable=False, index=True
+    )
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    declared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    fubar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    fix_attempts_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    attempt_claim_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    attempt_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_known_vehicle_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"), index=True
+    )
+    telemetry_trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    last_gate_state: Mapped[str | None] = mapped_column(String(40))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    last_known_vehicle_event: Mapped["AccessEvent | None"] = relationship()
+    timeline_events: Mapped[list["GateMalfunctionTimelineEvent"]] = relationship(
+        back_populates="malfunction",
+        cascade="all, delete-orphan",
+        order_by="GateMalfunctionTimelineEvent.occurred_at",
+    )
+    notification_outbox: Mapped[list["GateMalfunctionNotificationOutbox"]] = relationship(
+        back_populates="malfunction",
+        cascade="all, delete-orphan",
+        order_by="GateMalfunctionNotificationOutbox.occurred_at",
+    )
+
+
+Index(
+    "ux_gate_malfunction_unresolved_gate",
+    GateMalfunctionState.gate_entity_id,
+    unique=True,
+    postgresql_where=GateMalfunctionState.status.in_(
+        [GateMalfunctionStatus.ACTIVE, GateMalfunctionStatus.FUBAR]
+    ),
+)
+
+
+class GateMalfunctionTimelineEvent(Base, TimestampMixin):
+    __tablename__ = "gate_malfunction_timeline_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    malfunction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("gate_malfunction_states.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    attempt_number: Mapped[int | None] = mapped_column(Integer)
+    notification_trigger: Mapped[str | None] = mapped_column(String(120), index=True)
+    notification_channel: Mapped[str | None] = mapped_column(String(80))
+    telemetry_span_id: Mapped[str | None] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="ok", nullable=False, index=True)
+
+    malfunction: Mapped[GateMalfunctionState] = relationship(back_populates="timeline_events")
+
+
+class GateMalfunctionNotificationOutbox(Base, TimestampMixin):
+    __tablename__ = "gate_malfunction_notification_outbox"
+    __table_args__ = (
+        UniqueConstraint("malfunction_id", "trigger", name="uq_gate_malfunction_notification_trigger"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    malfunction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("gate_malfunction_states.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trigger: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(String(240), nullable=False)
+    severity: Mapped[str] = mapped_column(String(40), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
+    attempts_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    malfunction: Mapped[GateMalfunctionState] = relationship(back_populates="notification_outbox")
+
+
+class GateStateObservation(Base, TimestampMixin):
+    __tablename__ = "gate_state_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    gate_entity_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    gate_name: Mapped[str | None] = mapped_column(String(160))
+    state: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    raw_state: Mapped[str | None] = mapped_column(String(80))
+    previous_state: Mapped[str | None] = mapped_column(String(40), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    state_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(80), default="home_assistant", nullable=False, index=True)
+
+
 class NotificationRule(Base, TimestampMixin):
     __tablename__ = "notification_rules"
 
@@ -192,6 +308,7 @@ class NotificationRule(Base, TimestampMixin):
     conditions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class LeaderboardState(Base, TimestampMixin):

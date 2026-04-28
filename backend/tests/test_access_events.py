@@ -236,7 +236,7 @@ async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
         last_dvla_lookup_date=date(2026, 4, 27),
     )
 
-    async def fail_lookup(_registration_number):
+    async def fail_lookup(_registration_number, **_kwargs):
         raise AssertionError("same-day cache should skip DVLA")
 
     monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
@@ -277,7 +277,7 @@ async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
     )
     calls = []
 
-    async def fake_lookup(registration_number):
+    async def fake_lookup(registration_number, **_kwargs):
         calls.append(registration_number)
         return NormalizedDvlaVehicle(
             registration_number=registration_number,
@@ -313,7 +313,7 @@ async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
 async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypatch) -> None:
     service = AccessEventService()
 
-    async def fake_lookup(registration_number):
+    async def fake_lookup(registration_number, **_kwargs):
         return NormalizedDvlaVehicle(
             registration_number=registration_number,
             make="Ford",
@@ -343,7 +343,7 @@ async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypat
 async def test_exit_events_skip_dvla_lookup(monkeypatch) -> None:
     service = AccessEventService()
 
-    async def fail_lookup(_registration_number):
+    async def fail_lookup(_registration_number, **_kwargs):
         raise AssertionError("exits should not call DVLA")
 
     monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fail_lookup)
@@ -364,7 +364,7 @@ async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None
     service = AccessEventService()
     published = []
 
-    async def fake_lookup(_registration_number):
+    async def fake_lookup(_registration_number, **_kwargs):
         raise DvlaVehicleEnquiryError("DVLA API key is not configured.", status_code=400)
 
     async def fake_publish(event_type, payload):
@@ -396,6 +396,7 @@ async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None
 
 def test_dvla_compliance_alert_helpers() -> None:
     assert not dvla_mot_alert_required("Valid")
+    assert not dvla_mot_alert_required("Not Required")
     assert dvla_mot_alert_required("Expired")
     assert not dvla_tax_alert_required("Taxed")
     assert not dvla_tax_alert_required("SORN")

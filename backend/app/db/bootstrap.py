@@ -99,6 +99,8 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_last_fired_at ON notification_rules (last_fired_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_category ON audit_logs (category)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)"))
@@ -129,6 +131,46 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_step_order ON telemetry_spans (step_order)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_started_at ON telemetry_spans (started_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_status ON telemetry_spans (status)"))
+            await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claim_token VARCHAR(64)"))
+            await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claimed_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claim_token ON gate_malfunction_states (attempt_claim_token)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claimed_at ON gate_malfunction_states (attempt_claimed_at)"))
+            await conn.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            id,
+                            row_number() OVER (
+                                PARTITION BY gate_entity_id
+                                ORDER BY opened_at DESC, created_at DESC
+                            ) AS row_number
+                        FROM gate_malfunction_states
+                        WHERE status IN ('ACTIVE', 'FUBAR')
+                    )
+                    UPDATE gate_malfunction_states AS state
+                    SET
+                        status = 'RESOLVED',
+                        resolved_at = COALESCE(state.resolved_at, now()),
+                        next_attempt_scheduled_at = NULL,
+                        last_checked_at = now()
+                    FROM ranked
+                    WHERE state.id = ranked.id
+                    AND ranked.row_number > 1
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_gate_malfunction_unresolved_gate
+                    ON gate_malfunction_states (gate_entity_id)
+                    WHERE status IN ('ACTIVE', 'FUBAR')
+                    """
+                )
+            )
+            await conn.execute(text("ALTER TABLE gate_malfunction_timeline_events ADD COLUMN IF NOT EXISTS status VARCHAR(40) NOT NULL DEFAULT 'ok'"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_timeline_events_status ON gate_malfunction_timeline_events (status)"))
             await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolved_by_user_id UUID"))
             await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolution_note TEXT"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_resolved_at ON anomalies (resolved_at)"))

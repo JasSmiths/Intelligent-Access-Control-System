@@ -20,6 +20,8 @@ from app.services.auth import authenticate_request, count_users
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.home_assistant import get_home_assistant_service
+from app.services.gate_malfunctions import get_gate_malfunction_service
+from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
@@ -52,11 +54,13 @@ async def lifespan(app: FastAPI):
     await get_notification_service().start()
     await get_access_event_service().start()
     await get_home_assistant_service().start()
+    await get_gate_malfunction_service().start()
     await get_unifi_protect_service().start()
     try:
         yield
     finally:
         await get_unifi_protect_service().stop()
+        await get_gate_malfunction_service().stop()
         await get_home_assistant_service().stop()
         await get_access_event_service().stop()
         await get_notification_service().stop()
@@ -99,6 +103,10 @@ ALWAYS_TRACE_API_PREFIXES = (
     "/api/v1/webhooks/",
     "/api/webhooks/",
 )
+MAINTENANCE_IGNORED_WEBHOOK_PATHS = {
+    "/api/v1/webhooks/ubiquiti/lpr",
+    "/api/webhooks/ubiquiti/lpr",
+}
 
 
 def _requires_auth(path: str) -> bool:
@@ -115,6 +123,20 @@ def _should_trace_api_request(method: str, path: str) -> bool:
     if path.startswith(ALWAYS_TRACE_API_PREFIXES):
         return True
     return method.upper() not in READ_ONLY_METHODS
+
+
+@app.middleware("http")
+async def maintenance_webhook_guard(request: Request, call_next):
+    if (
+        request.method.upper() == "POST"
+        and request.url.path in MAINTENANCE_IGNORED_WEBHOOK_PATHS
+        and await is_maintenance_mode_active()
+    ):
+        return JSONResponse(
+            status_code=202,
+            content={"status": "ignored", "reason": "maintenance_mode"},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")

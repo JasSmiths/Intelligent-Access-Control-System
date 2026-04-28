@@ -1,9 +1,18 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.modules.lpr.base import PlateRead, now_utc
+from app.services.maintenance import is_maintenance_mode_active
 from app.services.access_events import AccessEventService, get_access_event_service
 
 router = APIRouter()
+
+
+async def _raise_if_maintenance_active() -> None:
+    if await is_maintenance_mode_active():
+        raise HTTPException(
+            status_code=423,
+            detail="Maintenance Mode is active. Automated actions are disabled.",
+        )
 
 
 @router.post("/arrival/{registration_number}")
@@ -13,6 +22,7 @@ async def simulate_arrival(
 ) -> dict[str, str]:
     """Inject a synthetic plate read for local demos and automated tests."""
 
+    await _raise_if_maintenance_active()
     plate = registration_number.strip().upper().replace(" ", "")
     await service.enqueue_plate_read(
         PlateRead(
@@ -33,6 +43,7 @@ async def simulate_misread_sequence(
 ) -> dict[str, str]:
     """Inject a rapid sequence of near-matches to exercise debounce logic."""
 
+    await _raise_if_maintenance_active()
     plate = registration_number.strip().upper().replace(" ", "")
     candidates = [
         (plate.replace("0", "O") if "0" in plate else f"{plate[:-1]}8", 0.62),

@@ -3,7 +3,11 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
 
+from sqlalchemy import select
+
 from app.core.logging import get_logger
+from app.db.session import AsyncSessionLocal
+from app.models import GateStateObservation
 from app.modules.gate.base import GateState
 from app.modules.gate.home_assistant import map_home_assistant_gate_state
 from app.modules.home_assistant.client import HomeAssistantClient
@@ -14,6 +18,7 @@ from app.modules.home_assistant.covers import (
     normalize_cover_state,
 )
 from app.services.event_bus import event_bus
+from app.services.maintenance import MAINTENANCE_HA_ENTITY_ID, set_mode
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log
 
@@ -88,6 +93,8 @@ class HomeAssistantIntegrationService:
             "gate_entities": [cover_entity_state_payload(entity) for entity in gate_entities],
             "garage_door_entities": [cover_entity_state_payload(entity) for entity in garage_door_entities],
             "default_media_player": config.home_assistant_default_media_player,
+            "maintenance_mode_entity_id": MAINTENANCE_HA_ENTITY_ID,
+            "maintenance_mode_state": self._state_cache.get(MAINTENANCE_HA_ENTITY_ID, {}).get("state"),
             "last_gate_state": self._last_gate_state.value,
             "state_source": "home_assistant_websocket_cache",
         }
@@ -101,19 +108,29 @@ class HomeAssistantIntegrationService:
                 )
 
             first_gate_state: str | None = None
+            first_gate_state_changed_at: str | None = None
             for index, entity in enumerate(gate_entities):
-                entity_state = self._cached_cover_state(str(entity["entity_id"]))
+                entity_id = str(entity["entity_id"])
+                entity_state = self._cached_cover_state(entity_id)
+                entity_state_changed_at = self._state_cache.get(entity_id, {}).get("last_changed") or None
                 if index == 0:
                     first_gate_state = entity_state
+                    first_gate_state_changed_at = entity_state_changed_at
                 status["gate_entities"] = [
                     {
                         **row,
                         "state": entity_state if row["entity_id"] == entity["entity_id"] else row.get("state"),
+                        "state_changed_at": (
+                            entity_state_changed_at
+                            if row["entity_id"] == entity["entity_id"]
+                            else row.get("state_changed_at")
+                        ),
                     }
                     for row in status["gate_entities"]
                 ]
             if gate_entities:
                 status["current_gate_state"] = first_gate_state or GateState.UNKNOWN.value
+                status["current_gate_state_changed_at"] = first_gate_state_changed_at
             status["front_door_state"] = self._cached_gate_state(FRONT_DOOR_ENTITY_ID)
             status["back_door_state"] = self._cached_gate_state(BACK_DOOR_ENTITY_ID)
             for entity in garage_door_entities:
@@ -143,7 +160,15 @@ class HomeAssistantIntegrationService:
             if not entity_id or state_value is None:
                 continue
 
-            self._remember_state(str(entity_id), str(state_value))
+            previous_gate_state = self._cached_gate_state(str(entity_id))
+            last_changed = str(new_state.get("last_changed") or "") or None
+            last_updated = str(new_state.get("last_updated") or "") or None
+            self._remember_state(
+                str(entity_id),
+                str(state_value),
+                last_changed=last_changed,
+                last_updated=last_updated,
+            )
             config = await get_runtime_config()
             gate_entities = normalize_cover_entities(
                 config.home_assistant_gate_entities,
@@ -158,7 +183,14 @@ class HomeAssistantIntegrationService:
                 )
             }
             if entity_id in gate_entity_map:
-                await self._sync_gate_state(state_value, entity_id, str(gate_entity_map[entity_id].get("name") or entity_id))
+                await self._sync_gate_state(
+                    state_value,
+                    entity_id,
+                    str(gate_entity_map[entity_id].get("name") or entity_id),
+                    previous_state=previous_gate_state,
+                    last_changed=last_changed,
+                    source="home_assistant_websocket",
+                )
             if entity_id in garage_entity_map:
                 await self._sync_cover_state(
                     state_value,
@@ -168,12 +200,31 @@ class HomeAssistantIntegrationService:
                 )
             if entity_id in DOOR_ENTITY_IDS:
                 await self._sync_door_state(state_value, entity_id)
+            if entity_id == MAINTENANCE_HA_ENTITY_ID:
+                await self._sync_maintenance_mode_state(state_value)
 
-    async def _sync_gate_state(self, state_value: str, entity_id: str, name: str | None = None) -> None:
-        self._remember_state(entity_id, state_value)
-        previous_state = self._last_gate_state.value
+    async def _sync_gate_state(
+        self,
+        state_value: str,
+        entity_id: str,
+        name: str | None = None,
+        *,
+        previous_state: str | None = None,
+        last_changed: str | None = None,
+        source: str = "home_assistant",
+    ) -> None:
+        self._remember_state(entity_id, state_value, last_changed=last_changed)
+        previous_state = previous_state or self._last_gate_state.value
         self._last_gate_state = map_home_assistant_gate_state(state_value)
         if previous_state != self._last_gate_state.value:
+            await self._record_gate_state_observation(
+                entity_id,
+                name,
+                state_value,
+                previous_state=previous_state,
+                last_changed=last_changed,
+                source=source,
+            )
             emit_audit_log(
                 category=TELEMETRY_CATEGORY_INTEGRATIONS,
                 action="gate.state_changed",
@@ -192,6 +243,8 @@ class HomeAssistantIntegrationService:
                 "name": name,
                 "state": self._last_gate_state.value,
                 "raw_state": state_value,
+                "previous_state": previous_state,
+                "state_changed_at": last_changed,
             },
         )
 
@@ -222,6 +275,19 @@ class HomeAssistantIntegrationService:
                 "state": cover_state,
                 "raw_state": state_value,
             },
+        )
+
+    async def _sync_maintenance_mode_state(self, state_value: str) -> None:
+        self._remember_state(MAINTENANCE_HA_ENTITY_ID, state_value)
+        normalized = state_value.strip().lower()
+        if normalized not in {"on", "off"}:
+            return
+        await set_mode(
+            normalized == "on",
+            actor="Home Assistant Sync",
+            source="Home Assistant Sync",
+            reason="Synced from Home Assistant",
+            sync_ha=False,
         )
 
     async def _refresh_configured_states(
@@ -257,6 +323,21 @@ class HomeAssistantIntegrationService:
                 first_gate_state = self._state_cache.get(str(gate_entities[0]["entity_id"]), {}).get("state")
                 if first_gate_state:
                     self._last_gate_state = map_home_assistant_gate_state(first_gate_state)
+                for entity in gate_entities:
+                    entity_id = str(entity["entity_id"])
+                    cached = self._state_cache.get(entity_id, {})
+                    if cached.get("state"):
+                        await self._record_gate_state_observation(
+                            entity_id,
+                            str(entity.get("name") or entity_id),
+                            str(cached["state"]),
+                            previous_state=None,
+                            last_changed=cached.get("last_changed") or None,
+                            source="home_assistant_refresh",
+                        )
+            maintenance_state = self._state_cache.get(MAINTENANCE_HA_ENTITY_ID, {}).get("state")
+            if maintenance_state:
+                await self._sync_maintenance_mode_state(maintenance_state)
             self._last_state_refresh_at = now
 
     async def _refresh_entity_state(self, entity_id: str) -> None:
@@ -265,7 +346,12 @@ class HomeAssistantIntegrationService:
         except Exception as exc:
             logger.warning("home_assistant_state_refresh_failed", extra={"entity_id": entity_id, "error": str(exc)})
             return
-        self._remember_state(entity_id, state.state)
+        self._remember_state(
+            entity_id,
+            state.state,
+            last_changed=state.last_changed,
+            last_updated=state.last_updated,
+        )
 
     def _configured_state_entity_ids(
         self,
@@ -276,14 +362,25 @@ class HomeAssistantIntegrationService:
             *(str(entity["entity_id"]) for entity in gate_entities if entity.get("entity_id")),
             FRONT_DOOR_ENTITY_ID,
             BACK_DOOR_ENTITY_ID,
+            MAINTENANCE_HA_ENTITY_ID,
             *(str(entity["entity_id"]) for entity in garage_door_entities if entity.get("entity_id")),
         ]
         return list(dict.fromkeys(entity_ids))
 
-    def _remember_state(self, entity_id: str, state: str) -> None:
+    def _remember_state(
+        self,
+        entity_id: str,
+        state: str,
+        *,
+        last_changed: str | None = None,
+        last_updated: str | None = None,
+    ) -> None:
+        previous = self._state_cache.get(entity_id, {})
         self._state_cache[entity_id] = {
             "state": state,
             "updated_at": datetime.now(tz=UTC).isoformat(),
+            "last_changed": last_changed or previous.get("last_changed") or "",
+            "last_updated": last_updated or previous.get("last_updated") or "",
         }
 
     def _cached_cover_state(self, entity_id: str) -> str:
@@ -301,6 +398,61 @@ class HomeAssistantIntegrationService:
             if (cached := self._state_cache.get(entity_id)) and cached.get("updated_at")
         ]
         return max(timestamps) if timestamps else None
+
+    async def _record_gate_state_observation(
+        self,
+        entity_id: str,
+        name: str | None,
+        raw_state: str,
+        *,
+        previous_state: str | None,
+        last_changed: str | None,
+        source: str,
+    ) -> None:
+        state = map_home_assistant_gate_state(raw_state).value
+        changed_at = self._parse_datetime(last_changed)
+        async with AsyncSessionLocal() as session:
+            if changed_at:
+                existing = await session.scalar(
+                    select(GateStateObservation.id).where(
+                        GateStateObservation.gate_entity_id == entity_id,
+                        GateStateObservation.state == state,
+                        GateStateObservation.state_changed_at == changed_at,
+                    )
+                )
+                if existing:
+                    return
+            else:
+                latest = await session.scalar(
+                    select(GateStateObservation)
+                    .where(GateStateObservation.gate_entity_id == entity_id)
+                    .order_by(GateStateObservation.observed_at.desc())
+                    .limit(1)
+                )
+                if latest and latest.state == state and latest.previous_state == previous_state:
+                    return
+            session.add(
+                GateStateObservation(
+                    gate_entity_id=entity_id,
+                    gate_name=name,
+                    state=state,
+                    raw_state=raw_state,
+                    previous_state=previous_state,
+                    observed_at=datetime.now(tz=UTC),
+                    state_changed_at=changed_at,
+                    source=source,
+                )
+            )
+            await session.commit()
+
+    def _parse_datetime(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @lru_cache

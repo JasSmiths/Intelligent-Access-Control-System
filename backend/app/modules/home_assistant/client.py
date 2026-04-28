@@ -23,6 +23,8 @@ class HomeAssistantState:
     entity_id: str
     state: str
     attributes: dict[str, Any]
+    last_changed: str | None = None
+    last_updated: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ class HomeAssistantClient:
             entity_id=data["entity_id"],
             state=data["state"],
             attributes=data.get("attributes", {}),
+            last_changed=data.get("last_changed"),
+            last_updated=data.get("last_updated"),
         )
 
     async def list_states(self) -> list[HomeAssistantState]:
@@ -66,6 +70,8 @@ class HomeAssistantClient:
                 entity_id=item["entity_id"],
                 state=item.get("state", "unknown"),
                 attributes=item.get("attributes", {}),
+                last_changed=item.get("last_changed"),
+                last_updated=item.get("last_updated"),
             )
             for item in data
             if isinstance(item, dict) and item.get("entity_id")

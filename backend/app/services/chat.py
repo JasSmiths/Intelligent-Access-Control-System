@@ -42,6 +42,9 @@ DEFAULT_AGENT_TOOL_NAMES = (
 EVENT_TOOL_NAMES = (
     "query_presence",
     "query_access_events",
+    "diagnose_access_event",
+    "query_lpr_timing",
+    "query_vehicle_detection_history",
     "query_anomalies",
     "summarize_access_rhythm",
     "calculate_visit_duration",
@@ -69,6 +72,12 @@ NOTIFICATION_TOOL_NAMES = (
 )
 LEADERBOARD_TOOL_NAMES = ("query_leaderboard",)
 DEVICE_TOOL_NAMES = ("query_device_states", "open_device")
+MAINTENANCE_TOOL_NAMES = ("get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode")
+MALFUNCTION_TOOL_NAMES = (
+    "get_active_malfunctions",
+    "get_malfunction_history",
+    "trigger_manual_malfunction_override",
+)
 CAMERA_TOOL_NAMES = ("analyze_camera_snapshot", "get_camera_snapshot")
 FILE_TOOL_NAMES = (
     "read_chat_attachment",
@@ -81,7 +90,10 @@ STATE_CHANGING_TOOL_NAMES = {
     "create_schedule",
     "delete_notification_workflow",
     "delete_schedule",
+    "disable_maintenance_mode",
+    "enable_maintenance_mode",
     "open_device",
+    "trigger_manual_malfunction_override",
     "test_notification_workflow",
     "trigger_anomaly_alert",
     "update_notification_workflow",
@@ -92,7 +104,7 @@ STATE_CHANGING_TOOL_NAMES = {
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
 Answer concisely and use tool results as the source of truth for presence,
 events, anomalies, schedules, access rhythm, leaderboards, device states, DVLA
-vehicle lookups, and camera snapshot analysis. If the
+vehicle lookups, LPR/access diagnostics, gate malfunctions, and camera snapshot analysis. If the
 user asks a follow-up with pronouns like they, he, she, or it, use the session
 memory context. Never invent access events, people, or DVLA vehicle records
 that are not present in tool results. When a DVLA vehicle lookup succeeds,
@@ -102,11 +114,20 @@ ask the user to type a confirmation phrase; tell them to use the on-screen
 confirmation button. For any state-changing workflow tool that requires
 confirmation, call the tool with the proposed arguments and confirm=false so the
 UI can render a confirmation button; never merely claim a button exists. For
+questions about why an access event was slow, why the gate did or did not open,
+or why a notification did or did not send, use diagnose_access_event and include
+the slowest telemetry spans or workflow conclusion in the answer. For questions
+about how long plate recognition took, distinguish raw LPR captured-to-received
+timing from total access-event pipeline duration when both are available. For
 device opens, use the user's natural device name as target, for example "main
 garage door"; never ask the user for internal integration names or entity IDs.
 Do not mention Home Assistant, entity IDs, cover IDs, or internal integration
 implementation details unless the user explicitly asks about integration
-configuration. For
+configuration. For gate malfunctions, explain that attempt counts follow the
+fixed schedule T+5m, T+5m45s, T+10m45s, T+70m45s, and T+190m45s from the gate
+open time. Maintenance Mode pauses automated attempts without clearing the due
+timestamp. FUBAR means automated recovery has stopped until manual intervention
+or the gate is physically resolved. For
 schedule creation or edits, understand natural language day/time descriptions,
 ask concise follow-up questions for missing name or allowed time blocks, and
 only call schedule mutation tools once the required details are known. Schedule
@@ -127,7 +148,8 @@ AGENT_TOOL_PROTOCOL = """Agent tool protocol:
 IACS_TOOL_CALLS:
 {"tool_calls":[{"id":"call_1","name":"tool_name","arguments":{}}]}
 - You may request multiple independent tools in one tool_calls array.
-- After tool results are provided, answer the user naturally and concisely. Call another tool only if the result proves more tool work is required.
+- After tool results are provided, answer the user naturally and concisely. If diagnose_access_event is present, base causality answers on its recognition, gate, notifications, lpr_timing_observations, history, and trace fields before considering shallower access event summaries. Do not say latency or notification diagnostics are unavailable until diagnose_access_event and query_lpr_timing have been checked.
+- Call another tool only if the result proves more tool work is required.
 - If a tool returns requires_confirmation, do not repeat the tool call as confirmed. Ask the user to use the confirmation button or otherwise confirm in chat.
 - For schedule tools, prefer time_description for natural language day/time requests unless you are certain of strict time_blocks JSON.
 - Never expose this protocol or raw tool JSON to the user unless explicitly asked for diagnostics.
@@ -193,6 +215,7 @@ class ChatService:
         provider_name: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
         user_id: str | None = None,
+        user_role: str | None = None,
         status_callback: StatusCallback | None = None,
     ) -> ChatTurnResult:
         session_uuid = await self._ensure_session(session_id)
@@ -222,6 +245,7 @@ class ChatService:
         context_token = set_chat_tool_context(
             {
                 "user_id": user_id,
+                "user_role": user_role,
                 "session_id": str(session_uuid),
                 "provider": provider.name,
                 "model": self._model_for_provider(runtime, provider.name),
@@ -282,6 +306,13 @@ class ChatService:
                     provider="guided",
                 )
 
+            if not use_local_router:
+                preplanned_calls = self._preplanned_context_calls(message, memory, attachment_refs)
+                tool_results = [
+                    await self._execute_tool_call(session_uuid, call, status_callback=status_callback)
+                    for call in preplanned_calls
+                ]
+
             if use_local_router:
                 planned_calls = self._plan_tool_calls(message, memory, attachment_refs)
                 tool_results = [
@@ -325,7 +356,10 @@ class ChatService:
             set_chat_tool_context({}, token=context_token)
 
         response_attachments = self._attachments_from_tool_results(tool_results)
-        text = self._clean_assistant_text(result.text or self._fallback_text(tool_results), response_attachments)
+        raw_text = result.text or self._fallback_text(tool_results)
+        if self._should_replace_with_diagnostic_answer(message, raw_text, tool_results):
+            raw_text = self._access_diagnostic_direct_text(self._diagnostic_output(tool_results) or {})
+        text = self._clean_assistant_text(raw_text, response_attachments)
         await self._append_message(session_uuid, "assistant", text)
         await self._update_memory(session_uuid, message, tool_results)
         await event_bus.publish(
@@ -352,12 +386,14 @@ class ChatService:
         arguments: dict[str, Any],
         session_id: str | None = None,
         user_id: str | None = None,
+        user_role: str | None = None,
         status_callback: StatusCallback | None = None,
     ) -> ChatTurnResult:
         session_uuid = await self._ensure_session(session_id)
         context_token = set_chat_tool_context(
             {
                 "user_id": user_id,
+                "user_role": user_role,
                 "session_id": str(session_uuid),
                 "provider": "tool_confirmation",
                 "model": None,
@@ -1141,6 +1177,12 @@ class ChatService:
                     memory["last_subject"] = event["person"]
                 if event.get("group"):
                     memory["last_group"] = event["group"]
+            event = output.get("event") if isinstance(output.get("event"), dict) else {}
+            if event.get("person"):
+                memory["last_person"] = event["person"]
+                memory["last_subject"] = event["person"]
+            if event.get("group"):
+                memory["last_group"] = event["group"]
             for presence in output.get("presence", []):
                 if presence.get("person"):
                     memory["last_person"] = presence["person"]
@@ -1170,11 +1212,26 @@ class ChatService:
         if any(word in lower for word in ["gate", "garage", "door", "cover", "device"]):
             names.add("query_device_states")
 
+        if any(word in lower for word in ["malfunction", "fubar", "stuck", "recovery", "retry", "attempt"]):
+            names.update(MALFUNCTION_TOOL_NAMES)
+
+        if "what is the gate doing" in lower or "gate doing right now" in lower:
+            names.update(("query_device_states", "get_active_malfunctions"))
+
+        if any(word in lower for word in ["maintenance", "kill-switch", "kill switch", "disable automation", "resume automation"]):
+            names.update(MAINTENANCE_TOOL_NAMES)
+
         if not leaderboard_request and any(word in lower for word in ["present", "presence", "onsite", "on site", "here", "who is", "who's"]):
             names.add("query_presence")
 
         if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "leave", "left", "exit", "exited", "event", "denied", "access log"]):
             names.update(("query_access_events", "query_anomalies"))
+
+        if self._looks_like_access_diagnostic_request(lower):
+            names.update(("diagnose_access_event", "query_access_events", "query_lpr_timing"))
+
+        if self._looks_like_vehicle_detection_count_request(lower):
+            names.update(("query_vehicle_detection_history", "query_access_events", "query_leaderboard"))
 
         if any(phrase in lower for phrase in ["how long", "duration", "stay", "stayed"]):
             names.update(("calculate_visit_duration", "query_access_events"))
@@ -1217,6 +1274,10 @@ class ChatService:
             if isinstance(output, dict) and output.get("requires_confirmation"):
                 if name == "open_device":
                     names.update(DEVICE_TOOL_NAMES)
+                elif name == "trigger_manual_malfunction_override":
+                    names.update(MALFUNCTION_TOOL_NAMES)
+                elif name in MAINTENANCE_TOOL_NAMES:
+                    names.update(MAINTENANCE_TOOL_NAMES)
                 elif name in SCHEDULE_TOOL_NAMES:
                     names.update(SCHEDULE_TOOL_NAMES)
                 elif name in NOTIFICATION_TOOL_NAMES:
@@ -1272,6 +1333,61 @@ class ChatService:
                     {"target": self._device_target_from_message(lower) or "", "kind": "all"},
                 )
             )
+
+        if any(word in lower for word in ["maintenance", "kill-switch", "kill switch", "disable automation", "resume automation"]):
+            if any(word in lower for word in ["enable", "turn on", "activate", "start", "disable automation"]):
+                calls.append(
+                    ToolCall(
+                        "planned-enable-maintenance",
+                        "enable_maintenance_mode",
+                        {"reason": message, "confirm": self._is_confirmation_message(lower)},
+                    )
+                )
+            elif any(word in lower for word in ["disable", "turn off", "deactivate", "stop", "resume automation"]):
+                calls.append(
+                    ToolCall(
+                        "planned-disable-maintenance",
+                        "disable_maintenance_mode",
+                        {"confirm": self._is_confirmation_message(lower)},
+                    )
+                )
+            else:
+                calls.append(ToolCall("planned-maintenance-status", "get_maintenance_status", {}))
+
+        if any(word in lower for word in ["malfunction", "fubar", "stuck", "recovery", "retry", "attempt"]) or "gate doing right now" in lower:
+            calls.append(
+                ToolCall(
+                    "planned-active-malfunctions",
+                    "get_active_malfunctions",
+                    {"include_timeline": any(word in lower for word in ["timeline", "history", "trace", "why"])},
+                )
+            )
+
+        if self._looks_like_access_diagnostic_request(lower):
+            diagnostic_args = self._access_diagnostic_args_from_message(message, memory)
+            calls.append(ToolCall("planned-access-diagnostics", "diagnose_access_event", diagnostic_args))
+            if self._looks_like_lpr_timing_request(lower):
+                lpr_args = {
+                    key: value
+                    for key, value in {
+                        "registration_number": diagnostic_args.get("registration_number"),
+                        "limit": 50,
+                    }.items()
+                    if value
+                }
+                calls.append(ToolCall("planned-lpr-timing", "query_lpr_timing", lpr_args))
+
+        if self._looks_like_vehicle_detection_count_request(lower):
+            args: dict[str, Any] = {
+                "period": "all",
+                "limit": 10,
+            }
+            registration_number = self._registration_from_message(message)
+            if registration_number:
+                args["registration_number"] = registration_number
+            else:
+                args["latest_unknown"] = self._refers_to_latest_unknown_vehicle(lower)
+            calls.append(ToolCall("planned-detection-history", "query_vehicle_detection_history", args))
 
         if self._looks_like_schedule_delete_request(lower):
             calls.append(self._planned_schedule_delete_call(message))
@@ -1376,6 +1492,47 @@ class ChatService:
 
         if not calls:
             calls.append(ToolCall("planned-query-presence", "query_presence", {}))
+        return calls
+
+    def _preplanned_context_calls(
+        self,
+        message: str,
+        memory: dict[str, Any],
+        _attachments: list[dict[str, Any]],
+    ) -> list[ToolCall]:
+        """Run safe read-only context tools before hosted providers answer.
+
+        Native function calling is still available, but questions that are
+        clearly about access-event causality need the deep diagnostic record
+        loaded deterministically. This avoids a provider taking the shallow
+        access-log path and claiming latency or notification data is missing.
+        """
+
+        lower = message.lower()
+        calls: list[ToolCall] = []
+        if self._looks_like_access_diagnostic_request(lower):
+            diagnostic_args = self._access_diagnostic_args_from_message(message, memory)
+            calls.append(ToolCall("preplanned-access-diagnostics", "diagnose_access_event", diagnostic_args))
+            if self._looks_like_lpr_timing_request(lower):
+                lpr_args = {
+                    key: value
+                    for key, value in {
+                        "registration_number": diagnostic_args.get("registration_number"),
+                        "limit": 50,
+                    }.items()
+                    if value
+                }
+                calls.append(ToolCall("preplanned-lpr-timing", "query_lpr_timing", lpr_args))
+
+        if self._looks_like_vehicle_detection_count_request(lower):
+            args: dict[str, Any] = {"period": "all", "limit": 10}
+            registration_number = self._registration_from_message(message)
+            if registration_number:
+                args["registration_number"] = registration_number
+            else:
+                args["latest_unknown"] = self._refers_to_latest_unknown_vehicle(lower)
+            calls.append(ToolCall("preplanned-detection-history", "query_vehicle_detection_history", args))
+
         return calls
 
     def _planned_device_open_call(self, message: str) -> ToolCall:
@@ -1515,6 +1672,8 @@ class ChatService:
     def _registration_from_message(self, message: str) -> str | None:
         for match in re.finditer(r"\b[A-Z0-9][A-Z0-9 -]{1,10}[A-Z0-9]\b", message.upper()):
             candidate = re.sub(r"[^A-Z0-9]", "", match.group(0))
+            if re.fullmatch(r"\d+(?:MS|S|SEC|SECS|SECOND|SECONDS|MILLISECOND|MILLISECONDS)", candidate):
+                continue
             if 2 <= len(candidate) <= 8 and any(char.isalpha() for char in candidate) and any(char.isdigit() for char in candidate):
                 return candidate
         return None
@@ -1727,7 +1886,16 @@ class ChatService:
             "query_presence": "Checking presence logs...",
             "query_device_states": "Checking device states...",
             "open_device": "Preparing device open command...",
+            "get_maintenance_status": "Checking Maintenance Mode...",
+            "enable_maintenance_mode": "Preparing Maintenance Mode...",
+            "disable_maintenance_mode": "Preparing Maintenance Mode...",
+            "get_active_malfunctions": "Checking gate malfunction state...",
+            "get_malfunction_history": "Reviewing gate malfunction history...",
+            "trigger_manual_malfunction_override": "Preparing gate malfunction override...",
             "query_access_events": "Reviewing access events...",
+            "diagnose_access_event": "Diagnosing access event...",
+            "query_lpr_timing": "Checking LPR timing...",
+            "query_vehicle_detection_history": "Counting vehicle detections...",
             "query_anomalies": "Checking anomaly records...",
             "summarize_access_rhythm": "Summarizing site rhythm...",
             "calculate_visit_duration": "Calculating visit duration...",
@@ -1954,6 +2122,160 @@ class ChatService:
             or re.search(r"\b(?:can|could|would)\s+you\s+open\s+(?:the\s+|my\s+)?", lower)
         )
 
+    def _looks_like_access_diagnostic_request(self, lower: str) -> bool:
+        diagnostic_terms = [
+            "why",
+            "why didn't",
+            "why didnt",
+            "did not",
+            "didn't",
+            "didnt",
+            "slow",
+            "slower",
+            "longer",
+            "latency",
+            "timing",
+            "took",
+            "recognise",
+            "recognize",
+            "debug",
+            "diagnose",
+            "diagnostic",
+            "notification",
+            "notify",
+            "notified",
+            "alert",
+            "failed",
+            "failure",
+            "problem",
+            "issue",
+            "reason",
+            "cause",
+            "explain",
+        ]
+        access_terms = [
+            "lpr",
+            "number plate",
+            "numberplate",
+            "plate",
+            "scan",
+            "read",
+            "recognition",
+            "process",
+            "processing",
+            "detection",
+            "detected",
+            "arrival",
+            "arrivals",
+            "entry",
+            "entries",
+            "event",
+            "gate open",
+            "gate",
+            "vehicle",
+            "car",
+            "unknown",
+            "stranger",
+            "visitor",
+            "access event",
+            "access log",
+        ]
+        return any(term in lower for term in diagnostic_terms) and any(
+            term in lower for term in access_terms
+        )
+
+    def _looks_like_vehicle_detection_count_request(self, lower: str) -> bool:
+        if not any(phrase in lower for phrase in ["how many times", "how often", "count"]):
+            return False
+        return any(word in lower for word in ["car", "vehicle", "plate", "gate", "detected", "detection"])
+
+    def _looks_like_lpr_timing_request(self, lower: str) -> bool:
+        return any(
+            term in lower
+            for term in [
+                "lpr",
+                "plate",
+                "number plate",
+                "scan",
+                "recognise",
+                "recognize",
+                "recognition",
+                "process",
+                "processing",
+                "slow",
+                "slower",
+                "longer",
+                "latency",
+                "timing",
+                "took",
+                "ms",
+                "millisecond",
+                "milliseconds",
+            ]
+        )
+
+    def _refers_to_latest_unknown_vehicle(self, lower: str) -> bool:
+        return any(
+            phrase in lower
+            for phrase in [
+                "unknown",
+                "mystery",
+                "stranger",
+                "that car",
+                "that vehicle",
+                "that plate",
+                "the car",
+                "the vehicle",
+                "last car",
+                "latest car",
+                "last vehicle",
+                "latest vehicle",
+                "last detection",
+                "latest detection",
+            ]
+        )
+
+    def _access_diagnostic_args_from_message(self, message: str, memory: dict[str, Any]) -> dict[str, Any]:
+        lower = message.lower()
+        args: dict[str, Any] = {"day": self._day_from_message(lower)}
+        registration_number = self._registration_from_message(message)
+        if registration_number:
+            args["registration_number"] = registration_number
+        person_name = self._person_name_from_diagnostic_message(lower)
+        if person_name:
+            args["person"] = person_name
+        elif any(token in lower.split() for token in ["they", "them", "he", "she", "their"]) and memory.get("last_person"):
+            args["person"] = memory["last_person"]
+        if any(word in lower for word in ["unknown", "mystery", "stranger", "unauthorized", "unauthorised"]):
+            args["unknown_only"] = True
+            args["decision"] = "denied"
+        if any(word in lower for word in ["exit", "exited", "leave", "left", "leaving"]):
+            args["direction"] = "exit"
+        elif any(word in lower for word in ["entry", "entries", "enter", "arrival", "arrivals", "arrive", "arrived", "arriving"]):
+            args["direction"] = "entry"
+        return args
+
+    def _person_name_from_diagnostic_message(self, lower: str) -> str | None:
+        patterns = [
+            r"\b(?:why\s+(?:did|does)\s+)?([a-z][a-z .'-]{1,40}?)(?:'s|s)\s+(?:latest|last)\s+(?:lpr|plate|detection|event|arrival|entry|scan|read)\b",
+            r"\bwhy\s+(?:didn'?t|did not)\s+(?:the\s+)?gate\s+open\s+for\s+([a-z][a-z .'-]{1,40})",
+            r"\bfor\s+([a-z][a-z .'-]{1,40})\b",
+            r"\b([a-z][a-z .'-]{1,40}?)(?:'s|s)\s+(?:latest|last)\s+(?:lpr|plate|detection|event|arrival|entry|scan|read)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, lower)
+            if not match:
+                continue
+            name = re.sub(
+                r"\b(why|did|does|the|a|an|latest|last|unknown|vehicle|car|gate|notification|detection|plate|lpr)\b",
+                "",
+                match.group(1),
+            )
+            name = re.sub(r"\s+", " ", name).strip(" ?.'")
+            if name:
+                return name
+        return None
+
     def _looks_like_access_event_time_request(self, lower: str) -> bool:
         return bool(
             re.search(
@@ -2038,6 +2360,16 @@ class ChatService:
         output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
         if tool_name == "get_camera_snapshot":
             return self._camera_snapshot_direct_text(output)
+        diagnostic_result = next(
+            (
+                result.get("output")
+                for result in tool_results
+                if result.get("name") == "diagnose_access_event" and isinstance(result.get("output"), dict)
+            ),
+            None,
+        )
+        if isinstance(diagnostic_result, dict):
+            return self._access_diagnostic_direct_text(diagnostic_result)
         if tool_name == "query_access_events":
             events = output.get("events") if isinstance(output.get("events"), list) else []
             if not events:
@@ -2047,6 +2379,17 @@ class ChatService:
             verb = "left" if event.get("direction") == "exit" else "arrived"
             occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
             return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
+        if tool_name == "diagnose_access_event":
+            if not output.get("found"):
+                return str(output.get("error") or "I could not find a matching access event to diagnose.")
+            hints = output.get("answer_hints") if isinstance(output.get("answer_hints"), list) else []
+            return " ".join(str(hint) for hint in hints[:3] if hint) or "I found the diagnostic record."
+        if tool_name == "query_vehicle_detection_history":
+            if not output.get("found"):
+                return str(output.get("error") or "I could not find that vehicle in the access events.")
+            registration_number = output.get("registration_number") or "That vehicle"
+            count = output.get("total_count")
+            return f"{registration_number} has been detected at the gate {count} time{'s' if count != 1 else ''}."
         if tool_name == "query_device_states":
             devices = output.get("devices") if isinstance(output.get("devices"), list) else []
             if not devices:
@@ -2076,6 +2419,85 @@ class ChatService:
         if tool_name == "delete_schedule":
             return self._schedule_delete_direct_text(output)
         return json.dumps([result["output"] for result in tool_results], default=str)
+
+    def _access_diagnostic_direct_text(self, output: dict[str, Any]) -> str:
+        if not output.get("found"):
+            return str(output.get("error") or "I could not find a matching access event to diagnose.")
+        event = output.get("event") if isinstance(output.get("event"), dict) else {}
+        recognition = output.get("recognition") if isinstance(output.get("recognition"), dict) else {}
+        gate = output.get("gate") if isinstance(output.get("gate"), dict) else {}
+        notifications = output.get("notifications") if isinstance(output.get("notifications"), dict) else {}
+        subject = event.get("person") or event.get("registration_number") or "That event"
+        occurred_at = event.get("occurred_at_display") or event.get("occurred_at") or "the matched time"
+        total_ms = recognition.get("total_pipeline_ms")
+        debounce_ms = recognition.get("debounce_or_recognition_ms")
+        slowest = recognition.get("slowest_steps") if isinstance(recognition.get("slowest_steps"), list) else []
+        slowest_text = ""
+        if slowest:
+            step = slowest[0]
+            slowest_text = f" Slowest step: {step.get('name')} at {step.get('duration_ms')}ms."
+        timing_text = ""
+        if total_ms is not None:
+            timing_text = f" Total pipeline time was {round(float(total_ms), 1)}ms."
+        if debounce_ms is not None:
+            timing_text += f" Debounce/recognition accounted for {round(float(debounce_ms), 1)}ms."
+        return (
+            f"{subject}'s matched event was at {occurred_at}."
+            f"{timing_text}{slowest_text} "
+            f"{recognition.get('likely_delay_reason') or ''} "
+            f"{gate.get('outcome_reason') or ''} "
+            f"{notifications.get('summary') or ''}"
+        ).strip()
+
+    def _diagnostic_output(self, tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for result in tool_results:
+            if result.get("name") != "diagnose_access_event":
+                continue
+            output = result.get("output")
+            if isinstance(output, dict):
+                return output
+        return None
+
+    def _should_replace_with_diagnostic_answer(
+        self,
+        message: str,
+        text: str,
+        tool_results: list[dict[str, Any]],
+    ) -> bool:
+        diagnostic = self._diagnostic_output(tool_results)
+        if not diagnostic or not diagnostic.get("found"):
+            return False
+        lower_message = message.lower()
+        if not self._looks_like_access_diagnostic_request(lower_message):
+            return False
+        lower_text = text.lower()
+        unhelpful_markers = [
+            "doesn't include",
+            "doesn’t include",
+            "does not include",
+            "not include",
+            "can't determine",
+            "can’t determine",
+            "cannot determine",
+            "couldn't determine",
+            "could not determine",
+            "share the timestamp",
+            "specific timestamp",
+            "per-scan",
+            "per scan",
+            "latency metrics",
+            "processing/latency metrics",
+            "underlying signals",
+        ]
+        if any(marker in lower_text for marker in unhelpful_markers):
+            return True
+        recognition = diagnostic.get("recognition") if isinstance(diagnostic.get("recognition"), dict) else {}
+        has_timing = (
+            recognition.get("total_pipeline_ms") is not None
+            or recognition.get("debounce_or_recognition_ms") is not None
+        )
+        timing_question = self._looks_like_lpr_timing_request(lower_message)
+        return bool(timing_question and has_timing and "ms" not in lower_text and "millisecond" not in lower_text)
 
     def _normalize_attachments(
         self,

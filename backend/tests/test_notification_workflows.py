@@ -8,9 +8,10 @@ from fastapi import HTTPException
 
 from app.api.v1 import notifications as notification_api
 from app.ai import tools as ai_tools
-from app.modules.notifications.base import NotificationContext
+from app.modules.notifications.base import ComposedNotification, NotificationContext
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notifications import (
+    NotificationWorkflowResult,
     NotificationService,
     TRIGGER_CATALOG,
     context_variables,
@@ -22,6 +23,7 @@ from app.services.notifications import (
 from app.services.event_bus import event_bus
 from app.services.schedules import schedule_allows_at
 from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, seed_dynamic_settings_for_session
+from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 
 
 class ScalarResult:
@@ -88,6 +90,24 @@ class FakeSettingsSession:
         self.committed = True
 
 
+class FakeContextRuleSession:
+    def __init__(self, rule) -> None:
+        self.rule = rule
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+    async def get(self, _model, _rule_id):
+        return self.rule
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
 def test_render_template_supports_at_mentions_and_legacy_tokens() -> None:
     rendered = render_template(
         "@FirstName arrived in [VehicleName] at @Time",
@@ -99,6 +119,92 @@ def test_render_template_supports_at_mentions_and_legacy_tokens() -> None:
     )
 
     assert rendered == "Steph arrived in 2026 Tesla Model Y Dual Motor Long Range at 18:42"
+
+
+def test_vehicle_tts_phonetics_use_strict_acronym_boundaries() -> None:
+    rendered = apply_vehicle_tts_phonetics(
+        "MG, VW, BMW, BYD, GMC and DS arrived. smug mg MGB VWs BMWs stay unchanged."
+    )
+
+    assert rendered == (
+        "em gee, vee double you, bee em double you, bee why dee, gee em see and dee ess arrived. "
+        "smug mg MGB VWs BMWs stay unchanged."
+    )
+
+
+def test_notification_workflow_result_status_reflects_delivery_outcome() -> None:
+    notification = ComposedNotification(title="Gate", body="Malfunction")
+
+    assert NotificationWorkflowResult(notification=notification).status == "skipped"
+    assert NotificationWorkflowResult(notification=notification, failed_count=1).status == "failed"
+    assert NotificationWorkflowResult(notification=notification, delivered_count=1, failed_count=1).status == "sent"
+
+
+def test_notification_span_records_access_trace(monkeypatch) -> None:
+    captured = []
+    monkeypatch.setattr(
+        "app.services.notifications.telemetry.record_span",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    NotificationService()._record_notification_span(
+        "Notification Workflow Skipped",
+        NotificationContext(
+            event_type="unauthorized_plate",
+            subject="PE70DHX",
+            severity="warning",
+            facts={
+                "telemetry_trace_id": "0" * 32,
+                "access_event_id": "event-1",
+            },
+        ),
+        output_payload={"event_type": "unauthorized_plate", "reason": "no_matching_workflow"},
+    )
+
+    assert captured[0][0] == ("Notification Workflow Skipped",)
+    assert captured[0][1]["trace_id"] == "0" * 32
+    assert captured[0][1]["output_payload"]["reason"] == "no_matching_workflow"
+    assert captured[0][1]["attributes"]["access_event_id"] == "event-1"
+
+
+def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
+    labels = [group["label"] for group in TRIGGER_CATALOG]
+    assert labels == [
+        "AI Agents",
+        "Compliance",
+        "Gate Actions",
+        "Gate Malfunctions",
+        "Leaderboard",
+        "Maintenance Mode",
+        "Vehicle Detections",
+    ]
+
+    for group in TRIGGER_CATALOG:
+        event_labels = [event["label"] for event in group["events"]]
+        assert event_labels == sorted(event_labels)
+
+    events = [event["value"] for group in TRIGGER_CATALOG for event in group["events"]]
+    assert "integration_test" not in events
+    assert {
+        "agent_anomaly_alert",
+        "authorized_entry",
+        "duplicate_entry",
+        "duplicate_exit",
+        "expired_mot_detected",
+        "expired_tax_detected",
+        "garage_door_open_failed",
+        "gate_malfunction_2hrs",
+        "gate_malfunction_30m",
+        "gate_malfunction_60m",
+        "gate_malfunction_fubar",
+        "gate_malfunction_initial",
+        "gate_open_failed",
+        "leaderboard_overtake",
+        "maintenance_mode_disabled",
+        "maintenance_mode_enabled",
+        "outside_schedule",
+        "unauthorized_plate",
+    }.issubset(set(events))
 
 
 def test_context_variables_include_vehicle_aliases_and_time() -> None:
@@ -174,6 +280,41 @@ def test_dvla_compliance_triggers_and_variables_are_available() -> None:
     assert variables["MotExpiry"] == "2026-10-14"
     assert variables["TaxStatus"] == "Taxed"
     assert variables["TaxExpiry"] == "2027-01-01"
+
+
+def test_gate_malfunction_triggers_and_variables_are_available() -> None:
+    events = [event for group in TRIGGER_CATALOG for event in group["events"]]
+    for trigger in [
+        "gate_malfunction_initial",
+        "gate_malfunction_30m",
+        "gate_malfunction_60m",
+        "gate_malfunction_2hrs",
+        "gate_malfunction_fubar",
+    ]:
+        assert any(event["value"] == trigger for event in events)
+
+    variables = context_variables(
+        NotificationContext(
+            event_type="gate_malfunction_initial",
+            subject="Gate malfunction detected",
+            severity="warning",
+            facts={
+                "malfunction_duration": "5m 0s",
+                "malfunction_opened_time": "2026-04-26T07:30:00+01:00",
+                "malfunction_fix_attempt_time": "2026-04-26T07:35:00+01:00",
+                "malfunction_fix_attempts": "1",
+                "malfunction_resolution_time": "2026-04-26T07:45:00+01:00",
+                "last_known_vehicle": "Steph Smith exited in Tesla Model Y",
+            },
+        )
+    )
+
+    assert variables["MalfunctionDuration"] == "5m 0s"
+    assert variables["MalfunctionOpenedTime"] == "2026-04-26T07:30:00+01:00"
+    assert variables["MalfunctionFixAttemptTime"] == "2026-04-26T07:35:00+01:00"
+    assert variables["MalfunctionFixAttempts"] == "1"
+    assert variables["MalfunctionResolutionTime"] == "2026-04-26T07:45:00+01:00"
+    assert variables["LastKnownVehicle"] == "Steph Smith exited in Tesla Model Y"
 
 
 def test_normalizers_keep_workflow_shape_strict() -> None:
@@ -525,6 +666,83 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     assert len(in_app_events) == 1
     assert in_app_events[0].payload["title"] == "Steph arrived"
     assert in_app_events[0].payload["body"] == "Gate opened"
+
+
+async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch) -> None:
+    calls = []
+
+    class FakeTtsAnnouncer:
+        async def announce(self, target, message: str) -> None:
+            calls.append((target.entity_id, message))
+
+    service = NotificationService()
+    original_message = "MG BMW and DS arrived. smug mg MGB stays unchanged."
+    action = {"message": original_message}
+
+    async def fake_select_voice_targets(_config, _action):
+        return ["media_player.kitchen"]
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+
+    await service._send_voice(action, SimpleNamespace(home_assistant_default_media_player=""))
+
+    assert calls == [
+        (
+            "media_player.kitchen",
+            "em gee bee em double you and dee ess arrived. smug mg MGB stays unchanged.",
+        )
+    ]
+    assert action["message"] == original_message
+
+
+async def test_process_context_with_result_reports_delivery_status(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+
+    result = await NotificationService().process_context_with_result(
+        NotificationContext(
+            event_type="authorized_entry",
+            subject="Steph arrived",
+            severity="info",
+            facts={"first_name": "Steph", "message": "Gate opened"},
+        ),
+        rules_override=[
+            {
+                "id": "rule-1",
+                "name": "Dashboard alert",
+                "trigger_event": "authorized_entry",
+                "conditions": [],
+                "actions": [
+                    {
+                        "type": "in_app",
+                        "title_template": "@FirstName arrived",
+                        "message_template": "@Message",
+                    }
+                ],
+                "is_active": True,
+            }
+        ],
+    )
+
+    assert result.status == "sent"
+    assert result.delivered_count == 1
+    assert result.failed_count == 0
+
+
+async def test_notification_rule_last_fired_timestamp_is_persisted(monkeypatch) -> None:
+    rule = SimpleNamespace(id=uuid.uuid4(), last_fired_at=None)
+    session = FakeContextRuleSession(rule)
+
+    monkeypatch.setattr("app.services.notifications.AsyncSessionLocal", lambda: session)
+
+    await NotificationService()._mark_rule_fired(rule)
+
+    assert session.commits == 1
+    assert rule.last_fired_at is not None
+    assert rule.last_fired_at.tzinfo is not None
 
 
 async def test_startup_seed_prunes_legacy_notification_rules() -> None:

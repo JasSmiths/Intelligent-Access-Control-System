@@ -41,6 +41,7 @@ from app.modules.notifications.home_assistant_mobile import (
 )
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
+from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config, update_settings
@@ -56,6 +57,14 @@ GARAGE_COVER_ENTITIES = {
     "main_garage_door": "cover.main_garage_door",
     "mums_garage_door": "cover.mums_garage_door",
 }
+
+
+async def _raise_if_maintenance_active() -> None:
+    if await is_maintenance_mode_active():
+        raise HTTPException(
+            status_code=423,
+            detail="Maintenance Mode is active. Automated actions are disabled.",
+        )
 
 
 class GateOpenRequest(BaseModel):
@@ -263,6 +272,7 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
 
 @router.post("/gate/open")
 async def open_gate(request: GateOpenRequest, user: User = Depends(current_user)) -> dict:
+    await _raise_if_maintenance_active()
     result = await HomeAssistantGateController().open_gate(request.reason)
     if not result.accepted:
         emit_audit_log(
@@ -299,6 +309,7 @@ async def cover_command(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    await _raise_if_maintenance_active()
     entity_id = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
     if not entity_id:
         raise HTTPException(status_code=400, detail="A configured garage door entity is required.")
@@ -368,6 +379,7 @@ async def cover_command(
 
 @router.post("/announcements/say")
 async def say_announcement(request: AnnouncementRequest, user: User = Depends(current_user)) -> dict[str, str]:
+    await _raise_if_maintenance_active()
     config = await get_runtime_config()
     target = request.entity_id or config.home_assistant_default_media_player
     if not target:

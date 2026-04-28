@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
 from typing import Any, Callable
@@ -22,11 +23,13 @@ from app.modules.unifi_protect.client import (
     websocket_message_payload,
 )
 from app.services.event_bus import event_bus
+from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.settings import get_runtime_config
 
 logger = get_logger(__name__)
 
 PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS = 5.0
+LPR_TRACK_PROBE_DELAYS_SECONDS = (0.0, 0.5, 0.5, 1.0, 2.0, 4.0, 4.0, 6.0, 7.0)
 
 
 class UnifiProtectIntegrationService:
@@ -40,6 +43,8 @@ class UnifiProtectIntegrationService:
         self._last_error: str | None = None
         self._connected = False
         self._last_update_publish_at: dict[str, float] = {}
+        self._lpr_track_probe_event_ids: set[str] = set()
+        self._lpr_track_probe_finished_event_ids: set[str] = set()
 
     async def configured(self) -> bool:
         return is_unifi_protect_configured(await get_runtime_config())
@@ -185,6 +190,24 @@ class UnifiProtectIntegrationService:
         self._connected = False
 
     def _handle_websocket_message(self, message: Any) -> None:
+        loop: asyncio.AbstractEventLoop | None = None
+        try:
+            received_at = datetime.now(tz=UTC)
+            loop = asyncio.get_running_loop()
+            loop.create_task(get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at))
+            event_id = self._lpr_track_probe_event_id(message)
+            if (
+                event_id
+                and event_id not in self._lpr_track_probe_event_ids
+                and event_id not in self._lpr_track_probe_finished_event_ids
+            ):
+                self._lpr_track_probe_event_ids.add(event_id)
+                loop.create_task(self._probe_lpr_track(event_id, getattr(message, "new_obj", None)))
+        except RuntimeError:
+            logger.debug("unifi_protect_lpr_timing_without_loop")
+        except Exception as exc:
+            logger.debug("unifi_protect_lpr_timing_failed", extra={"error": str(exc)})
+
         try:
             payload = websocket_message_payload(message)
         except Exception as exc:
@@ -199,7 +222,7 @@ class UnifiProtectIntegrationService:
         if event_type in {"protect.updated", "protect.camera.updated"} and not self._should_publish_update(event_type, payload):
             return
         try:
-            asyncio.get_running_loop().create_task(event_bus.publish(event_type, payload))
+            (loop or asyncio.get_running_loop()).create_task(event_bus.publish(event_type, payload))
         except RuntimeError:
             logger.debug("unifi_protect_ws_without_loop")
 
@@ -226,6 +249,83 @@ class UnifiProtectIntegrationService:
         self._last_update_publish_at[key] = now
         return True
 
+    async def _probe_lpr_track(self, event_id: str, event: Any) -> None:
+        try:
+            api = await self._ensure_api(subscribe=True)
+            for attempt, delay in enumerate(LPR_TRACK_PROBE_DELAYS_SECONDS, start=1):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
+                except Exception as exc:
+                    logger.debug(
+                        "unifi_protect_lpr_track_probe_failed",
+                        extra={"event_id": event_id, "attempt": attempt, "error": str(exc)},
+                    )
+                    continue
+
+                count = await get_lpr_timing_recorder().record_unifi_protect_track(
+                    track,
+                    event=event,
+                    event_id=event_id,
+                    received_at=datetime.now(tz=UTC),
+                    probe_attempt=attempt,
+                )
+                if count:
+                    self._lpr_track_probe_finished_event_ids.add(event_id)
+                    return
+        finally:
+            self._lpr_track_probe_event_ids.discard(event_id)
+
+    def _lpr_track_probe_event_id(self, message: Any) -> str | None:
+        new_obj = getattr(message, "new_obj", None)
+        changed_data = getattr(message, "changed_data", {}) or {}
+        model = str(
+            _dict_get(changed_data, "modelKey")
+            or _enum_value(getattr(new_obj, "model", None))
+            or ""
+        ).lower()
+        if model and model != "event":
+            return None
+        if new_obj is None and model != "event":
+            return None
+
+        event_id = str(getattr(new_obj, "id", "") or _dict_get(changed_data, "id") or "") or None
+        if not event_id:
+            return None
+        if self._looks_like_lpr_event(new_obj, changed_data):
+            return event_id
+        return None
+
+    def _looks_like_lpr_event(self, event: Any, changed_data: dict[str, Any]) -> bool:
+        smart_types = [
+            str(_enum_value(item) or "").lower()
+            for item in (
+                getattr(event, "smart_detect_types", None)
+                or _dict_get(changed_data, "smartDetectTypes")
+                or _dict_get(changed_data, "smart_detect_types")
+                or []
+            )
+        ]
+        if any(item == "licenseplate" for item in smart_types):
+            return True
+
+        event_type = str(_enum_value(getattr(event, "type", None)) or _dict_get(changed_data, "type") or "").lower()
+        if event_type == "smartdetectzone":
+            return True
+
+        camera = getattr(event, "camera", None)
+        camera_name = str(
+            getattr(camera, "display_name", "")
+            or getattr(camera, "name", "")
+            or ""
+        ).lower()
+        if "lpr" in camera_name or "license" in camera_name:
+            return True
+
+        changed_text = str(changed_data).lower()
+        return "licenseplate" in changed_text or "detectedthumbnails" in changed_text or "detected_thumbnails" in changed_text
+
 
 def _runtime_with_overrides(runtime, values: dict[str, Any]):
     fields = {field: getattr(runtime, field) for field in runtime.__dataclass_fields__}
@@ -243,6 +343,16 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dict_get(value: Any, key: str) -> Any:
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
 
 
 @lru_cache
