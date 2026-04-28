@@ -1,4 +1,6 @@
+import asyncio
 from datetime import UTC, datetime
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -6,7 +8,7 @@ import pytest
 
 from app.ai import tools as ai_tools
 from app.ai.providers import ChatMessageInput, LlmResult
-from app.services.chat import ChatService
+from app.services.chat import ChatService, IntentRoute
 
 
 class ProtocolProvider:
@@ -25,6 +27,65 @@ class ProtocolProvider:
                 )
             )
         return LlmResult(text="Alfred found two people present.")
+
+
+class JsonFinalProvider:
+    name = "json-final-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(text='{"final":"Done."}')
+
+
+class UnknownToolProvider:
+    name = "unknown-tool-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(text='{"thought":"check","tool_name":"delete_everything","arguments":{}}')
+
+
+class CountingToolProvider:
+    name = "counting-tool-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        self.calls += 1
+        return LlmResult(
+            text=(
+                '{"thought":"check","tool_name":"query_presence",'
+                f'"arguments":{{"person":"Person {self.calls}"}}}}'
+            )
+        )
+
+
+class ParallelToolProvider:
+    name = "parallel-tool-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LlmResult(
+                text=(
+                    '{"tool_calls":['
+                    '{"id":"presence","name":"query_presence","arguments":{}},'
+                    '{"id":"schedules","name":"query_schedules","arguments":{}}'
+                    ']}'
+                )
+            )
+        return LlmResult(text='{"final":"Checked both."}')
+
+
+class ActionToolProvider:
+    name = "action-tool-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(
+            text='{"thought":"open","tool_name":"open_gate","arguments":{"target":"Top Gate","confirm":true}}'
+        )
 
 
 @pytest.mark.asyncio
@@ -72,6 +133,262 @@ async def test_provider_neutral_tool_protocol_runs_tools(monkeypatch) -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_semantic_router_scopes_gate_failure_tools() -> None:
+    service = ChatService()
+    route = service._deterministic_intent_route(
+        "Why didn't the gate open for Steph's car?",
+        {},
+        [],
+    )
+    selected = service._select_tools_for_route(route, [])
+    names = {tool.name for tool in selected}
+
+    assert "Gate_Hardware" in route.intents
+    assert "Access_Diagnostics" in route.intents
+    assert "resolve_human_entity" in names
+    assert "diagnose_access_event" in names
+    assert "get_maintenance_status" in names
+    assert "verify_schedule_access" in names
+    assert "query_notification_workflows" not in names
+
+
+@pytest.mark.asyncio
+async def test_react_loop_accepts_json_final() -> None:
+    service = ChatService()
+    result = await service._run_provider_agent_loop(
+        JsonFinalProvider(),
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["query_presence"]],
+        {},
+        route=IntentRoute(("General",), 0.5, False, "test"),
+        user_message="hello",
+        status_callback=None,
+    )
+
+    assert result.text == "Done."
+
+
+@pytest.mark.asyncio
+async def test_react_loop_rejects_out_of_scope_tool() -> None:
+    service = ChatService()
+    result = await service._run_provider_agent_loop(
+        UnknownToolProvider(),
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["query_presence"]],
+        {},
+        route=IntentRoute(("General",), 0.5, False, "test"),
+        user_message="hello",
+        status_callback=None,
+    )
+
+    assert "could not safely use delete_everything" in result.text
+
+
+@pytest.mark.asyncio
+async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
+    service = ChatService()
+    provider = CountingToolProvider()
+    executed = []
+
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None):
+        executed.append(call)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {"presence": [{"person": call.arguments["person"], "state": "present"}]},
+        }
+
+    async def no_schedule_conflict(session_id, memory, tool_results):
+        return None
+
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+    async def fake_build_messages(session_id, tool_results, selected_tools, route=None):
+        return [ChatMessageInput("system", "test")]
+
+    monkeypatch.setattr(service, "_build_messages", fake_build_messages)
+
+    result = await service._run_provider_agent_loop(
+        provider,
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["query_presence"]],
+        {},
+        route=IntentRoute(("Access_Logs",), 0.8, False, "test"),
+        user_message="who is present?",
+        status_callback=None,
+    )
+
+    assert len(executed) == 5
+    assert "five-step safety limit" in result.text
+
+
+def test_actor_context_prevents_my_car_entity_resolution() -> None:
+    service = ChatService()
+    actor_context = {
+        "person": {"id": "person-1", "display_name": "Jason Smith"},
+        "vehicles": [{"id": "vehicle-1", "registration_number": "VIP123"}],
+    }
+
+    route = service._deterministic_intent_route(
+        "Why did my car get denied?",
+        {},
+        [],
+        actor_context=actor_context,
+    )
+    args = service._access_diagnostic_args_from_message(
+        "Why did my car get denied?",
+        {},
+        actor_context=actor_context,
+    )
+
+    assert route.requires_entity_resolution is False
+    assert args["vehicle_id"] == "vehicle-1"
+
+
+def test_unlinked_actor_context_does_not_guess_me() -> None:
+    service = ChatService()
+
+    route = service._deterministic_intent_route("When did my car arrive?", {}, [], actor_context={})
+
+    assert route.requires_entity_resolution is True
+
+
+def test_pending_confirmation_uses_stored_arguments() -> None:
+    service = ChatService()
+    pending = {
+        "arguments": {"target": "Top Gate", "confirm": False},
+        "preview_output": {"confirmation_field": "confirm"},
+    }
+
+    confirmed = service._confirmed_arguments_for_pending(pending)
+
+    assert confirmed == {"target": "Top Gate", "confirm": True}
+
+
+def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
+    tools = ai_tools.build_agent_tools()
+
+    assert tools["open_gate"].requires_confirmation is True
+    assert tools["command_device"].requires_confirmation is True
+    assert tools["toggle_maintenance_mode"].requires_confirmation is True
+    assert tools["override_schedule"].requires_confirmation is True
+    assert "Schedules" in tools["override_schedule"].categories
+
+
+@pytest.mark.asyncio
+async def test_react_loop_executes_read_tools_in_parallel(monkeypatch) -> None:
+    service = ChatService()
+    provider = ParallelToolProvider()
+    started: list[float] = []
+    statuses: list[dict] = []
+
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
+        started.append(time.perf_counter())
+        await asyncio.sleep(0.05)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {"ok": call.name},
+        }
+
+    async def fake_build_messages(session_id, tool_results, selected_tools, route=None, actor_context=None):
+        return [ChatMessageInput("system", "test")]
+
+    async def no_schedule_conflict(session_id, memory, tool_results):
+        return None
+
+    async def status_callback(status):
+        statuses.append(status)
+
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_build_messages", fake_build_messages)
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+
+    before = time.perf_counter()
+    result = await service._run_provider_agent_loop(
+        provider,
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["query_presence"], service._tools["query_schedules"]],
+        {},
+        route=IntentRoute(("Access_Logs", "Schedules"), 0.8, False, "test"),
+        user_message="check presence and schedules",
+        status_callback=status_callback,
+    )
+    elapsed = time.perf_counter() - before
+
+    assert result.text == "Checked both."
+    assert len(started) == 2
+    assert abs(started[0] - started[1]) < 0.03
+    assert elapsed < 0.09
+    assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
+
+
+@pytest.mark.asyncio
+async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
+    service = ChatService()
+    memory: dict[str, object] = {}
+    executed = []
+
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
+        executed.append(call)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "target": "Top Gate",
+                "detail": "Open Top Gate?",
+            },
+        }
+
+    async def fake_load_memory(session_id):
+        return dict(memory)
+
+    async def fake_save_memory(session_id, next_memory):
+        memory.clear()
+        memory.update(next_memory)
+
+    async def no_schedule_conflict(session_id, memory, tool_results):
+        return None
+
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_load_memory", fake_load_memory)
+    monkeypatch.setattr(service, "_save_memory", fake_save_memory)
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+
+    result = await service._run_provider_agent_loop(
+        ActionToolProvider(),
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["open_gate"]],
+        {},
+        route=IntentRoute(("Gate_Hardware",), 0.9, False, "test"),
+        user_message="open the gate",
+        actor_context={"user": {"id": "user-1"}},
+        status_callback=None,
+    )
+
+    pending = memory["pending_agent_action"]
+    assert executed[0].arguments["confirm"] is False
+    assert pending["tool_name"] == "open_gate"
+    assert pending["arguments"]["confirm"] is False
+    assert "confirm before I open Top Gate" in result.text
+
+
 def test_natural_schedule_time_description_normalizes_to_time_blocks() -> None:
     blocks = ai_tools._time_blocks_from_agent_arguments(
         {
@@ -112,7 +429,7 @@ def test_schedule_delete_direct_text_prompts_for_confirmation() -> None:
 def test_assistant_text_cleanup_hides_file_urls_and_markdown() -> None:
     service = ChatService()
     text = (
-        "Here is **Top Gate** and [camera-snapshot-back-garden.jpg](/api/chat/files/file-1). "
+        "Here is **Top Gate** and [camera-snapshot-back-garden.jpg](/api/v1/ai/chat/files/file-1). "
         "Please provide the Home Assistant cover entity ID."
     )
 
@@ -128,7 +445,7 @@ def test_assistant_text_cleanup_hides_file_urls_and_markdown() -> None:
     )
 
     assert cleaned == "Here is Top Gate and the snapshot. Please provide the device name."
-    assert "/api/chat/files" not in cleaned
+    assert "/api/v1/ai/chat/files" not in cleaned
     assert "**" not in cleaned
     assert "Home Assistant" not in cleaned
     assert "entity ID" not in cleaned
@@ -140,6 +457,17 @@ def test_device_open_planner_extracts_main_garage_door() -> None:
 
     assert call.name == "open_device"
     assert call.arguments["target"] == "main garage door"
+    assert call.arguments["action"] == "open"
+    assert call.arguments["confirm"] is False
+
+
+def test_device_close_planner_extracts_close_action() -> None:
+    service = ChatService()
+    call = service._planned_device_action_call("close the main garage door")
+
+    assert call.name == "command_device"
+    assert call.arguments["target"] == "main garage door"
+    assert call.arguments["action"] == "close"
     assert call.arguments["confirm"] is False
 
 
@@ -149,6 +477,15 @@ def test_device_status_question_is_not_treated_as_open_request() -> None:
 
     assert service._looks_like_device_state_request(lower)
     assert not service._looks_like_device_open_request(lower)
+    assert [tool.name for tool in service._select_tools_for_request(lower, {}, [], [])] == ["query_device_states"]
+
+
+def test_device_closed_status_question_is_not_treated_as_close_request() -> None:
+    service = ChatService()
+    lower = "is the main garage door closed?"
+
+    assert service._looks_like_device_state_request(lower)
+    assert not service._looks_like_device_close_request(lower)
     assert [tool.name for tool in service._select_tools_for_request(lower, {}, [], [])] == ["query_device_states"]
 
 
@@ -416,6 +753,101 @@ def test_person_record_match_accepts_first_name_and_punctuation() -> None:
     assert ai_tools._person_record_matches({"display_name": "Steph Smith", "group": "Family"}, "steph?")
 
 
+@pytest.mark.asyncio
+async def test_resolve_human_entity_resolves_fuzzy_vehicle(monkeypatch) -> None:
+    class ScalarResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    owner = SimpleNamespace(id=uuid.uuid4(), display_name="Steph Smith")
+    vehicle = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="PE70DHX",
+        make="Tesla",
+        model="Model Y",
+        color="Blue",
+        description="Steph's daily car",
+        owner=owner,
+        person_id=owner.id,
+        schedule_id=None,
+        schedule=None,
+        is_active=True,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def scalars(self, _query):
+            return ScalarResult([vehicle])
+
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+
+    result = await ai_tools.resolve_human_entity({"query": "the Tesla", "entity_types": ["vehicle"]})
+
+    assert result["status"] == "unique"
+    assert result["match"]["type"] == "vehicle"
+    assert result["match"]["registration_number"] == "PE70DHX"
+
+
+@pytest.mark.asyncio
+async def test_resolve_human_entity_resolves_friendly_device(monkeypatch) -> None:
+    class ScalarResult:
+        def all(self):
+            return []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def scalars(self, _query):
+            return ScalarResult()
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_gate_entities=[],
+            home_assistant_garage_door_entities=[
+                {"entity_id": "cover.main_garage", "name": "Main Garage", "enabled": True}
+            ],
+        )
+
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+
+    result = await ai_tools.resolve_human_entity({"query": "main garage", "entity_types": ["device"]})
+
+    assert result["status"] == "unique"
+    assert result["match"]["type"] == "device"
+    assert result["match"]["name"] == "Main Garage"
+
+
+def test_compact_observation_redacts_and_summarizes_payloads() -> None:
+    compacted = ai_tools._compact_observation(
+        {
+            "token": "secret-token",
+            "snapshot_image": "x" * 1000,
+            "empty": None,
+            "events": [{"id": index, "value": "ok"} for index in range(15)],
+            "nested": {"a": {"b": {"c": {"d": {"e": "too deep"}}}}},
+        }
+    )
+
+    assert compacted["token"] == "[redacted]"
+    assert compacted["snapshot_image"] == "[omitted_large_media]"
+    assert "empty" not in compacted
+    assert compacted["events"][-1]["omitted_items"] == 5
+    assert compacted["nested"]["a"]["b"]["c"]["type"] == "object"
+
+
 def test_chat_time_from_iso_converts_utc_to_london() -> None:
     service = ChatService()
 
@@ -451,3 +883,91 @@ async def test_open_device_resolves_friendly_garage_name_before_confirmation(mon
     assert result["target"] == "Main Garage"
     assert result["device"]["name"] == "Main Garage"
     assert "entity" not in result["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_close_device_preview_uses_close_action(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_gate_entities=[],
+            home_assistant_garage_door_entities=[
+                {
+                    "entity_id": "cover.internal_main_garage",
+                    "name": "Main Garage",
+                    "enabled": True,
+                }
+            ],
+        )
+
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+
+    result = await ai_tools.open_device(
+        {"target": "main garage door", "kind": "all", "action": "close", "confirm": False}
+    )
+
+    assert result["requires_confirmation"] is True
+    assert result["action"] == "close"
+    assert result["target"] == "Main Garage"
+    assert "Closing garage doors" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_close_device_executes_close_cover_command(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_gate_entities=[],
+            home_assistant_garage_door_entities=[
+                {
+                    "entity_id": "cover.internal_main_garage",
+                    "name": "Main Garage",
+                    "enabled": True,
+                }
+            ],
+        )
+
+    async def fake_command_cover(_client, _entity, action, reason):
+        calls.append(action)
+        return SimpleNamespace(accepted=True, state="closed", detail=reason)
+
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(ai_tools, "HomeAssistantClient", lambda: object())
+    monkeypatch.setattr(ai_tools, "command_cover", fake_command_cover)
+
+    result = await ai_tools.open_device(
+        {"target": "main garage door", "kind": "all", "action": "close", "confirm": True}
+    )
+
+    assert calls == ["close"]
+    assert result["closed"] is True
+    assert result["opened"] is False
+    assert result["audit_event"] == "agent.device_close_requested"
+
+
+def test_close_device_confirmation_card_uses_close_language() -> None:
+    service = ChatService()
+    payload = service._pending_action_public_payload(
+        {
+            "id": "confirm-1",
+            "session_id": "session-1",
+            "tool_name": "command_device",
+            "preview_output": {
+                "action": "close",
+                "target": "Main Garage",
+                "detail": "Closing garage doors is a real-world action.",
+            },
+            "expires_at": "2026-04-28T22:00:00+00:00",
+        }
+    )
+
+    assert payload["title"] == "Close Main Garage?"
+    assert payload["confirm_label"] == "Close"
+
+
+def test_agent_device_log_extra_does_not_overwrite_log_record_name() -> None:
+    extra = ai_tools._log_extra({"name": "Main Garage", "kind": "garage_door"})
+
+    assert "name" not in extra
+    assert extra["device_name"] == "Main Garage"
+    assert extra["kind"] == "garage_door"

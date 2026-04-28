@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
-from app.models import User
+from app.models import Person, User
 from app.models.enums import UserRole
 from app.services.auth import (
     compose_full_name,
@@ -38,6 +38,7 @@ def user_audit_snapshot(user: User) -> dict[str, Any]:
         "last_name": user.last_name,
         "full_name": user.full_name,
         "email": user.email,
+        "person_id": str(user.person_id) if user.person_id else None,
         "role": user.role.value,
         "is_active": user.is_active,
         "preferences": user.preferences or {},
@@ -55,6 +56,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     last_login_at: str | None
+    person_id: str | None = None
     preferences: dict[str, Any]
     created_at: str
     updated_at: str
@@ -66,6 +68,7 @@ class CreateUserRequest(BaseModel):
     last_name: str = Field(min_length=1, max_length=80)
     email: EmailStr | None = None
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
+    person_id: uuid.UUID | None = None
     role: UserRole = UserRole.STANDARD
     is_active: bool = True
     temporary_password: str | None = Field(default=None, min_length=10, max_length=256)
@@ -83,6 +86,7 @@ class UpdateUserRequest(BaseModel):
     last_name: str | None = Field(default=None, min_length=1, max_length=80)
     email: EmailStr | None = None
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
+    person_id: uuid.UUID | None = None
     role: UserRole | None = None
     is_active: bool | None = None
     preferences: dict[str, Any] | None = None
@@ -118,6 +122,8 @@ async def add_user(
         else request.temporary_password
     )
     try:
+        if request.person_id and not await session.get(Person, request.person_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found")
         user = await create_user(
             session,
             username=request.username,
@@ -129,6 +135,7 @@ async def add_user(
             password=temporary_password,
             role=request.role,
             is_active=request.is_active,
+            person_id=request.person_id,
         )
         await session.flush()
         await write_audit_log(
@@ -192,6 +199,10 @@ async def update_user(
         user.profile_photo_data_url = request.profile_photo_data_url
     if "email" in request.model_fields_set:
         user.email = request.email.strip().lower() if request.email else None
+    if "person_id" in request.model_fields_set:
+        if request.person_id and not await session.get(Person, request.person_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found")
+        user.person_id = request.person_id
     if request.preferences is not None:
         user.preferences = {**(user.preferences or {}), **request.preferences}
 

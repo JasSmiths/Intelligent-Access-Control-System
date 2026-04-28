@@ -77,6 +77,7 @@ def serialize_user(user: User) -> dict[str, Any]:
         "role": user.role.value,
         "is_active": user.is_active,
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "person_id": str(user.person_id) if user.person_id else None,
         "preferences": user.preferences or {},
         "created_at": user.created_at.isoformat(),
         "updated_at": user.updated_at.isoformat(),
@@ -109,6 +110,7 @@ async def create_user(
     role: UserRole = UserRole.STANDARD,
     email: str | None = None,
     is_active: bool = True,
+    person_id: uuid.UUID | None = None,
     preferences: dict[str, Any] | None = None,
 ) -> User:
     if full_name and (not first_name and not last_name):
@@ -126,6 +128,7 @@ async def create_user(
         password_hash=hash_password(password),
         role=role,
         is_active=is_active,
+        person_id=person_id,
         preferences=preferences or {"sidebarCollapsed": False},
     )
     session.add(user)

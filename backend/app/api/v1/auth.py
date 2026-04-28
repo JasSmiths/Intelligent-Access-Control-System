@@ -53,6 +53,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     last_login_at: str | None
+    person_id: str | None = None
     preferences: dict[str, Any]
     created_at: str
     updated_at: str

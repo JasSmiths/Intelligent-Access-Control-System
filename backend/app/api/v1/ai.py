@@ -37,6 +37,14 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     provider: str | None = None
     attachments: list[ChatAttachmentRef] = Field(default_factory=list)
+    client_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatConfirmationRequest(BaseModel):
+    session_id: str
+    confirmation_id: str
+    decision: str = "confirm"
+    client_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatResponse(BaseModel):
@@ -45,6 +53,7 @@ class ChatResponse(BaseModel):
     text: str
     tool_results: list[dict[str, Any]]
     attachments: list[ChatAttachmentRef] = Field(default_factory=list)
+    pending_action: dict[str, Any] | None = None
 
 
 @router.get("/providers")
@@ -81,6 +90,7 @@ async def chat(
         attachments=[attachment.model_dump() for attachment in request.attachments],
         user_id=str(current_user.id),
         user_role=current_user.role.value,
+        client_context=request.client_context,
     )
     return ChatResponse(
         session_id=result.session_id,
@@ -88,6 +98,30 @@ async def chat(
         text=result.text,
         tool_results=result.tool_results,
         attachments=[ChatAttachmentRef(**attachment) for attachment in result.attachments],
+        pending_action=result.pending_action,
+    )
+
+
+@router.post("/chat/confirm", response_model=ChatResponse)
+async def confirm_chat_action(
+    request: ChatConfirmationRequest,
+    current_user: User = Depends(require_current_user),
+) -> ChatResponse:
+    result = await chat_service.handle_tool_confirmation(
+        confirmation_id=request.confirmation_id,
+        decision=request.decision,
+        session_id=request.session_id,
+        user_id=str(current_user.id),
+        user_role=current_user.role.value,
+        client_context=request.client_context,
+    )
+    return ChatResponse(
+        session_id=result.session_id,
+        provider=result.provider,
+        text=result.text,
+        tool_results=result.tool_results,
+        attachments=[ChatAttachmentRef(**attachment) for attachment in result.attachments],
+        pending_action=result.pending_action,
     )
 
 
@@ -153,6 +187,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
             message = str(payload.get("message") or "").strip()
             attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
             tool_confirmation = payload.get("tool_confirmation")
+            client_context = payload.get("client_context") if isinstance(payload.get("client_context"), dict) else {}
             if not message and not attachments and not isinstance(tool_confirmation, dict):
                 await websocket.send_json(
                     {"type": "chat.error", "payload": {"message": "Message or attachment is required."}}
@@ -163,22 +198,24 @@ async def chat_websocket(websocket: WebSocket) -> None:
             thinking_started_at = time.monotonic()
 
             async def publish_status(status: dict[str, Any]) -> None:
-                await websocket.send_json({"type": "chat.tool_status", "payload": status})
+                event_type = str(status.pop("event", "chat.tool_status"))
+                await websocket.send_json({"type": event_type, "payload": status})
 
             if isinstance(tool_confirmation, dict):
-                tool_name = str(tool_confirmation.get("name") or "").strip()
-                arguments = tool_confirmation.get("arguments") if isinstance(tool_confirmation.get("arguments"), dict) else {}
-                if not tool_name:
+                confirmation_id = str(tool_confirmation.get("id") or tool_confirmation.get("confirmation_id") or "").strip()
+                decision = str(tool_confirmation.get("decision") or "confirm").strip() or "confirm"
+                if not confirmation_id:
                     await websocket.send_json(
-                        {"type": "chat.error", "payload": {"message": "Confirmation action is missing its tool name."}}
+                        {"type": "chat.error", "payload": {"message": "Confirmation action is missing its ID."}}
                     )
                     continue
                 result = await chat_service.handle_tool_confirmation(
-                    tool_name=tool_name,
-                    arguments=arguments,
+                    confirmation_id=confirmation_id,
+                    decision=decision,
                     session_id=payload.get("session_id"),
                     user_id=str(user.id),
                     user_role=user.role.value,
+                    client_context=client_context,
                     status_callback=publish_status,
                 )
             else:
@@ -189,6 +226,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     attachments=attachments,
                     user_id=str(user.id),
                     user_role=user.role.value,
+                    client_context=client_context,
                     status_callback=publish_status,
                 )
             remaining_typing = MIN_CHAT_TYPING_SECONDS - (time.monotonic() - thinking_started_at)
@@ -215,6 +253,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                         "text": result.text,
                         "tool_results": result.tool_results,
                         "attachments": result.attachments,
+                        "pending_action": result.pending_action,
                     },
                 }
             )

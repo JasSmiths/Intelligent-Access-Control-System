@@ -430,16 +430,27 @@ class LocalProvider:
         for result in tool_results:
             output = result.get("output", {})
             tool_name = result.get("name", "tool")
-            if tool_name == "query_access_events":
+            if tool_name == "resolve_human_entity":
+                summaries.append(self._summarize_entity_resolution(output))
+            elif tool_name == "query_access_events":
                 summaries.append(self._summarize_events(output))
             elif tool_name == "query_presence":
                 summaries.append(self._summarize_presence(output))
             elif tool_name == "query_device_states":
                 summaries.append(self._summarize_device_states(output))
-            elif tool_name == "open_device":
+            elif tool_name in {"open_device", "command_device", "open_gate"}:
                 summaries.append(self._summarize_device_open(output))
-            elif tool_name in {"get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode"}:
+            elif tool_name in {"get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode", "toggle_maintenance_mode"}:
                 summaries.append(self._summarize_maintenance_tool(tool_name, output))
+            elif tool_name == "override_schedule":
+                if output.get("requires_confirmation"):
+                    summaries.append(str(output.get("detail") or "Please confirm the schedule override."))
+                elif output.get("created"):
+                    summaries.append(
+                        f"Created a temporary access override for {output.get('person')} until {output.get('ends_at_display')}."
+                    )
+                else:
+                    summaries.append(str(output.get("error") or output.get("detail") or "Schedule override was not created."))
             elif tool_name == "query_anomalies":
                 summaries.append(self._summarize_anomalies(output))
             elif tool_name == "calculate_visit_duration":
@@ -466,6 +477,8 @@ class LocalProvider:
                 summaries.append(self._summarize_lpr_timing(output))
             elif tool_name == "query_vehicle_detection_history":
                 summaries.append(self._summarize_detection_history(output))
+            elif tool_name == "get_telemetry_trace":
+                summaries.append(self._summarize_telemetry_trace(output))
             elif tool_name in {
                 "query_schedules",
                 "get_schedule",
@@ -490,6 +503,31 @@ class LocalProvider:
             else:
                 summaries.append(f"{tool_name}: {json.dumps(output, default=str)}")
         return "\n".join(summaries)
+
+    def _summarize_entity_resolution(self, output: dict[str, Any]) -> str:
+        status = output.get("status")
+        if status == "unique" and isinstance(output.get("match"), dict):
+            match = output["match"]
+            label = match.get("display_name") or match.get("name") or match.get("registration_number")
+            return f"Resolved {output.get('query')} to {match.get('type')} {label}."
+        if status == "ambiguous":
+            matches = output.get("matches") if isinstance(output.get("matches"), list) else []
+            labels = [
+                str(match.get("display_name") or match.get("name") or match.get("registration_number") or match.get("entity_id"))
+                for match in matches[:4]
+                if isinstance(match, dict)
+            ]
+            return f"That reference is ambiguous: {', '.join(labels)}."
+        return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity."
+
+    def _summarize_telemetry_trace(self, output: dict[str, Any]) -> str:
+        if not output.get("found"):
+            return f"Telemetry trace: {output.get('error') or 'not found'}"
+        trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+        return (
+            f"Telemetry trace {trace.get('trace_id')} was {trace.get('status')} "
+            f"and took {trace.get('duration_ms')}ms."
+        )
 
     def _summarize_events(self, output: dict[str, Any]) -> str:
         events = output.get("events", [])
@@ -573,26 +611,28 @@ class LocalProvider:
         )
 
     def _summarize_device_open(self, output: dict[str, Any]) -> str:
+        action = str(output.get("action") or "open")
         if output.get("requires_details"):
-            return str(output.get("detail") or "Which gate or garage door should I open?")
+            return str(output.get("detail") or f"Which gate or garage door should I {action}?")
         if output.get("requires_confirmation"):
             device = output.get("device") if isinstance(output.get("device"), dict) else {}
             target = device.get("name") or output.get("target") or "that device"
-            return f"Please use the confirmation button before I open {target}."
+            return f"Please use the confirmation button before I {action} {target}."
         device = output.get("device") if isinstance(output.get("device"), dict) else {}
         name = device.get("name") or output.get("target") or "the device"
-        if output.get("opened"):
-            return f"Opened {name}. This was logged as an Alfred agent action."
-        return f"I could not open {name}: {output.get('detail') or output.get('error') or 'command failed'}"
+        success = bool(output.get("opened") if action == "open" else output.get("closed"))
+        if success:
+            return f"{'Opened' if action == 'open' else 'Closed'} {name}. This was logged as an Alfred agent action."
+        return f"I could not {action} {name}: {output.get('detail') or output.get('error') or 'command failed'}"
 
     def _summarize_maintenance_tool(self, tool_name: str, output: dict[str, Any]) -> str:
         if output.get("requires_confirmation"):
             return str(output.get("detail") or "Please use the confirmation button first.")
         status = output.get("maintenance_mode") if isinstance(output.get("maintenance_mode"), dict) else output
         active = bool(status.get("is_active"))
-        if tool_name == "enable_maintenance_mode":
+        if tool_name in {"enable_maintenance_mode", "toggle_maintenance_mode"} and output.get("state") == "enabled":
             return "Maintenance Mode is now enabled. Automated actions are disabled." if active else "Maintenance Mode was not enabled."
-        if tool_name == "disable_maintenance_mode":
+        if tool_name in {"disable_maintenance_mode", "toggle_maintenance_mode"} and output.get("state") == "disabled":
             duration = status.get("duration_label")
             return (
                 f"Maintenance Mode is now disabled. It had been active for {duration}."

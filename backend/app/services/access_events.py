@@ -606,6 +606,8 @@ class AccessEventService:
                     "source": schedule_evaluation.source if schedule_evaluation else "none",
                     "schedule_id": str(schedule_evaluation.schedule_id) if schedule_evaluation and schedule_evaluation.schedule_id else None,
                     "schedule_name": schedule_evaluation.schedule_name if schedule_evaluation else None,
+                    "override_id": str(schedule_evaluation.override_id) if schedule_evaluation and schedule_evaluation.override_id else None,
+                    "override_ends_at": schedule_evaluation.override_ends_at.isoformat() if schedule_evaluation and schedule_evaluation.override_ends_at else None,
                     "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
                 }
             )

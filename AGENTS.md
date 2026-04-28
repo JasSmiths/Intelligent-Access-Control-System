@@ -275,8 +275,9 @@ Current behavior:
   active Admin.
 - Sidebar collapse preference is persisted to `users.preferences`.
 
-Route aliases exist under both `/api/v1/auth` and `/api/auth`, and both
-`/api/v1/users` and `/api/users`, so older clients can use the shorter path.
+All dashboard/API clients must use the versioned `/api/v1` prefix. Do not add
+or rely on legacy `/api/auth`, `/api/users`, `/api/schedules`, `/api/webhooks`,
+`/api/chat`, or other non-versioned API aliases.
 
 Relevant bootstrap/dynamic keys:
 
@@ -658,8 +659,8 @@ Base API prefix:
 
 Health:
 
-- `GET /`
-- `GET /health`
+- `GET /` (service identification only; excluded from OpenAPI)
+- `GET /health` (container/LAN health only; excluded from OpenAPI)
 - `GET /api/v1/health`
 
 Auth:
@@ -781,12 +782,8 @@ AI:
 
 Frontend Nginx proxies these under the same host at `:8089`.
 
-Compatibility aliases:
-
-- `/api/auth/*` mirrors `/api/v1/auth/*`.
-- `/api/users/*` mirrors `/api/v1/users/*`.
-- `/api/schedules/*` mirrors `/api/v1/schedules/*`.
-- `/api/webhooks/*` mirrors `/api/v1/webhooks/*`.
+Legacy non-versioned API aliases have been removed. New routes and clients must
+use `/api/v1/...` so OpenAPI and runtime routing have a single source of truth.
 
 ## Frontend Architecture
 

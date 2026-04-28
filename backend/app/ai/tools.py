@@ -17,10 +17,12 @@ from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
     Anomaly,
+    Group,
     NotificationRule,
     Person,
     Presence,
     Schedule,
+    ScheduleOverride,
     TelemetrySpan,
     TelemetryTrace,
     User,
@@ -55,6 +57,7 @@ from app.services.notifications import (
 )
 from app.services.schedules import (
     evaluate_schedule_id,
+    evaluate_person_schedule,
     evaluate_vehicle_schedule,
     normalize_time_blocks,
     schedule_dependencies,
@@ -187,6 +190,10 @@ class AgentTool:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    categories: tuple[str, ...] = ("General",)
+    read_only: bool = True
+    requires_confirmation: bool = False
+    default_limit: int | None = None
 
     def as_llm_tool(self) -> dict[str, Any]:
         return {
@@ -198,6 +205,29 @@ class AgentTool:
 
 def build_agent_tools() -> dict[str, AgentTool]:
     tools = [
+        AgentTool(
+            name="resolve_human_entity",
+            description=(
+                "Resolve fuzzy human text such as a person name, vehicle description, plate, group, "
+                "or friendly gate/garage name to exact IACS IDs before technical tool calls."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language entity reference, for example Steph, the Tesla, PE70, or main garage."},
+                    "entity_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["person", "vehicle", "group", "device"]},
+                        "description": "Optional entity types to search. Defaults to all.",
+                    },
+                    "include_inactive": {"type": "boolean"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=resolve_human_entity,
+            categories=("General",),
+        ),
         AgentTool(
             name="query_presence",
             description="Return current presence state for everyone or a named person.",
@@ -312,7 +342,10 @@ def build_agent_tools() -> dict[str, AgentTool]:
         ),
         AgentTool(
             name="open_device",
-            description="Open a configured gate or garage door. This is a real-world side effect and requires confirm=true.",
+            description=(
+                "Open or close a configured gate or garage door. "
+                "Opening gates and garage doors requires confirm=true; closing is supported for configured garage doors."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -321,6 +354,7 @@ def build_agent_tools() -> dict[str, AgentTool]:
                         "description": "Friendly device name, for example Top Gate or Main Garage Door.",
                     },
                     "entity_id": {"type": "string", "description": "Optional internal device identifier when already known."},
+                    "action": {"type": "string", "enum": ["open", "close"], "description": "Device action. Defaults to open."},
                     "kind": {
                         "type": "string",
                         "enum": ["all", "gate", "garage_door"],
@@ -338,16 +372,103 @@ def build_agent_tools() -> dict[str, AgentTool]:
             handler=open_device,
         ),
         AgentTool(
+            name="command_device",
+            description=(
+                "Open or close a configured gate or garage door. Use action=close for garage door close requests. "
+                "This is a real-world side effect and requires confirm=true."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Friendly device name, for example Top Gate or Main Garage Door.",
+                    },
+                    "entity_id": {"type": "string", "description": "Optional internal device identifier when already known."},
+                    "action": {"type": "string", "enum": ["open", "close"], "description": "Device action to perform."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "gate", "garage_door"],
+                        "description": "Optional device kind filter.",
+                    },
+                    "reason": {"type": "string", "description": "Human-readable audit reason."},
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true before the device command will be executed.",
+                    },
+                },
+                "required": ["action", "confirm"],
+                "additionalProperties": False,
+            },
+            handler=open_device,
+        ),
+        AgentTool(
+            name="open_gate",
+            description="Open a configured gate. This is a real-world side effect and requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Optional friendly gate name. If omitted, the only configured gate is used.",
+                    },
+                    "reason": {"type": "string", "description": "Human-readable audit reason."},
+                    "confirm": {"type": "boolean", "description": "Must be true before the gate will be opened."},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=open_gate,
+        ),
+        AgentTool(
+            name="toggle_maintenance_mode",
+            description="Enable or disable global Maintenance Mode. This is state-changing and requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "enum": ["enabled", "disabled", "on", "off", "true", "false"]},
+                    "reason": {"type": "string", "description": "Human-readable reason for enabling Maintenance Mode."},
+                    "confirm": {"type": "boolean", "description": "Must be true before Maintenance Mode changes."},
+                },
+                "required": ["state", "confirm"],
+                "additionalProperties": False,
+            },
+            handler=toggle_maintenance_mode,
+        ),
+        AgentTool(
+            name="override_schedule",
+            description=(
+                "Create a temporary one-off access allowance for a person. "
+                "Default duration is 60 minutes and the action requires confirm=true."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "person_id": {"type": "string", "description": "Exact person UUID from actor context or resolve_human_entity."},
+                    "time": {"type": "string", "description": "Override start datetime or empty for now."},
+                    "duration_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+                    "reason": {"type": "string"},
+                    "confirm": {"type": "boolean", "description": "Must be true before the override is created."},
+                },
+                "required": ["person_id", "confirm"],
+                "additionalProperties": False,
+            },
+            handler=override_schedule,
+        ),
+        AgentTool(
             name="query_access_events",
             description="Return recent access events, optionally filtered by person, group/category, plate, or day.",
             parameters={
                 "type": "object",
                 "properties": {
                     "person": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "vehicle_id": {"type": "string"},
                     "group": {"type": "string"},
                     "registration_number": {"type": "string"},
                     "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "summarize_payload": {"type": "boolean", "description": "Default true. Return compact schedule/gate payload summaries instead of raw payloads."},
                 },
                 "additionalProperties": False,
             },
@@ -365,6 +486,8 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "properties": {
                     "access_event_id": {"type": "string", "description": "Access event UUID when already known."},
                     "person": {"type": "string", "description": "Person name, for example Steph."},
+                    "person_id": {"type": "string", "description": "Exact person UUID when already known."},
+                    "vehicle_id": {"type": "string", "description": "Exact vehicle UUID when already known."},
                     "group": {"type": "string", "description": "Group/category name."},
                     "registration_number": {"type": "string", "description": "Plate/VRN to inspect."},
                     "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
@@ -374,6 +497,9 @@ def build_agent_tools() -> dict[str, AgentTool]:
                     },
                     "decision": {"type": "string", "enum": ["granted", "denied"]},
                     "direction": {"type": "string", "enum": ["entry", "exit", "denied"]},
+                    "span_limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "include_trace_payloads": {"type": "boolean"},
+                    "summarize_payload": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
@@ -394,6 +520,10 @@ def build_agent_tools() -> dict[str, AgentTool]:
                     "include_possible_fields": {
                         "type": "boolean",
                         "description": "Include candidate fields that looked like LPR payloads but did not normalize to a plate.",
+                    },
+                    "include_payload_path": {
+                        "type": "boolean",
+                        "description": "Include payload path diagnostics. Defaults false to keep observations compact.",
                     },
                 },
                 "additionalProperties": False,
@@ -417,6 +547,21 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=query_vehicle_detection_history,
+        ),
+        AgentTool(
+            name="get_telemetry_trace",
+            description="Fetch a compact telemetry trace and bounded span list by trace ID or access event ID.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "trace_id": {"type": "string"},
+                    "access_event_id": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "summarize_payload": {"type": "boolean", "description": "Default true. Summarize nested payloads instead of returning raw payloads."},
+                },
+                "additionalProperties": False,
+            },
+            handler=get_telemetry_trace,
         ),
         AgentTool(
             name="query_leaderboard",
@@ -475,6 +620,7 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "type": "object",
                 "properties": {
                     "person": {"type": "string"},
+                    "person_id": {"type": "string"},
                     "group": {"type": "string"},
                     "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
                 },
@@ -484,13 +630,14 @@ def build_agent_tools() -> dict[str, AgentTool]:
         ),
         AgentTool(
             name="trigger_anomaly_alert",
-            description="Send a contextual anomaly alert notification.",
+            description="Send a contextual anomaly alert notification. Requires confirm=true because this sends real notifications.",
             parameters={
                 "type": "object",
                 "properties": {
                     "subject": {"type": "string"},
                     "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
                     "message": {"type": "string"},
+                    "confirm": {"type": "boolean"},
                 },
                 "required": ["subject", "severity", "message"],
                 "additionalProperties": False,
@@ -622,6 +769,8 @@ def build_agent_tools() -> dict[str, AgentTool]:
                     "is_active": {"type": "boolean"},
                     "search": {"type": "string"},
                     "include_preview": {"type": "boolean"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "summarize_payload": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
@@ -815,6 +964,7 @@ def build_agent_tools() -> dict[str, AgentTool]:
                         "enum": ["all", "person", "vehicle", "gate", "garage_door", "door"],
                     },
                     "search": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 },
                 "additionalProperties": False,
             },
@@ -864,7 +1014,100 @@ def build_agent_tools() -> dict[str, AgentTool]:
             handler=verify_schedule_access,
         ),
     ]
-    return {tool.name: tool for tool in tools}
+    return _with_tool_metadata(tools)
+
+
+def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
+    categories: dict[str, tuple[str, ...]] = {
+        "resolve_human_entity": ("General",),
+        "query_presence": ("Access_Logs", "General"),
+        "query_access_events": ("Access_Logs", "Access_Diagnostics", "General"),
+        "diagnose_access_event": ("Access_Diagnostics",),
+        "query_lpr_timing": ("Access_Diagnostics", "Access_Logs"),
+        "query_vehicle_detection_history": ("Access_Logs", "Access_Diagnostics", "Compliance_DVLA"),
+        "get_telemetry_trace": ("Access_Diagnostics", "Users_Settings"),
+        "query_anomalies": ("Access_Logs", "Access_Diagnostics", "General"),
+        "summarize_access_rhythm": ("Access_Logs", "General"),
+        "calculate_visit_duration": ("Access_Logs",),
+        "trigger_anomaly_alert": ("Access_Logs", "Notifications"),
+        "query_device_states": ("Gate_Hardware", "General"),
+        "open_device": ("Gate_Hardware",),
+        "command_device": ("Gate_Hardware",),
+        "open_gate": ("Gate_Hardware",),
+        "get_active_malfunctions": ("Gate_Hardware", "Access_Diagnostics"),
+        "get_malfunction_history": ("Gate_Hardware", "Access_Diagnostics"),
+        "trigger_manual_malfunction_override": ("Gate_Hardware",),
+        "get_maintenance_status": ("Maintenance", "Gate_Hardware", "Access_Diagnostics"),
+        "enable_maintenance_mode": ("Maintenance",),
+        "disable_maintenance_mode": ("Maintenance",),
+        "toggle_maintenance_mode": ("Maintenance",),
+        "lookup_dvla_vehicle": ("Compliance_DVLA",),
+        "query_leaderboard": ("Access_Logs", "Compliance_DVLA"),
+        "analyze_camera_snapshot": ("Cameras", "Access_Diagnostics"),
+        "get_camera_snapshot": ("Cameras",),
+        "read_chat_attachment": ("Reports_Files", "General"),
+        "export_presence_report_csv": ("Reports_Files", "Access_Logs"),
+        "generate_contractor_invoice_pdf": ("Reports_Files", "Access_Logs"),
+        "query_notification_catalog": ("Notifications",),
+        "query_notification_workflows": ("Notifications",),
+        "get_notification_workflow": ("Notifications",),
+        "create_notification_workflow": ("Notifications",),
+        "update_notification_workflow": ("Notifications",),
+        "delete_notification_workflow": ("Notifications",),
+        "preview_notification_workflow": ("Notifications",),
+        "test_notification_workflow": ("Notifications",),
+        "query_schedules": ("Schedules", "Access_Diagnostics"),
+        "get_schedule": ("Schedules", "Access_Diagnostics"),
+        "create_schedule": ("Schedules",),
+        "update_schedule": ("Schedules",),
+        "delete_schedule": ("Schedules",),
+        "query_schedule_targets": ("Schedules",),
+        "assign_schedule_to_entity": ("Schedules",),
+        "override_schedule": ("Schedules",),
+        "verify_schedule_access": ("Schedules", "Access_Diagnostics"),
+        "get_system_users": ("Users_Settings",),
+    }
+    state_changing = {
+        "assign_schedule_to_entity",
+        "create_notification_workflow",
+        "create_schedule",
+        "delete_notification_workflow",
+        "delete_schedule",
+        "disable_maintenance_mode",
+        "enable_maintenance_mode",
+        "command_device",
+        "open_gate",
+        "open_device",
+        "override_schedule",
+        "trigger_anomaly_alert",
+        "trigger_manual_malfunction_override",
+        "test_notification_workflow",
+        "toggle_maintenance_mode",
+        "update_notification_workflow",
+        "update_schedule",
+    }
+    defaults = {
+        "query_access_events": 10,
+        "query_anomalies": 10,
+        "query_leaderboard": 10,
+        "query_lpr_timing": 25,
+        "query_notification_workflows": 20,
+        "query_schedule_targets": 25,
+        "get_telemetry_trace": 20,
+    }
+    return {
+        tool.name: AgentTool(
+            name=tool.name,
+            description=tool.description,
+            parameters=tool.parameters,
+            handler=tool.handler,
+            categories=categories.get(tool.name, tool.categories),
+            read_only=tool.name not in state_changing,
+            requires_confirmation=tool.name in state_changing,
+            default_limit=defaults.get(tool.name, tool.default_limit),
+        )
+        for tool in tools
+    }
 
 
 def set_chat_tool_context(
@@ -880,6 +1123,189 @@ def set_chat_tool_context(
 
 def get_chat_tool_context() -> dict[str, Any]:
     return CHAT_TOOL_CONTEXT.get({})
+
+
+async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
+    query_text = str(arguments.get("query") or "").strip()
+    if not query_text:
+        return {"status": "not_found", "query": query_text, "matches": [], "error": "query is required."}
+
+    requested_types = arguments.get("entity_types")
+    if isinstance(requested_types, list) and requested_types:
+        entity_types = {
+            str(item).strip().lower()
+            for item in requested_types
+            if str(item).strip().lower() in {"person", "vehicle", "group", "device"}
+        }
+    else:
+        entity_types = {"person", "vehicle", "group", "device"}
+    include_inactive = bool(arguments.get("include_inactive"))
+    query_key = _entity_match_key(query_text)
+    matches: list[dict[str, Any]] = []
+
+    async with AsyncSessionLocal() as session:
+        if "person" in entity_types:
+            people = (
+                await session.scalars(
+                    select(Person)
+                    .options(selectinload(Person.group), selectinload(Person.vehicles))
+                    .order_by(Person.display_name)
+                )
+            ).all()
+            for person in people:
+                if not include_inactive and not person.is_active:
+                    continue
+                haystack = " ".join(
+                    str(value or "")
+                    for value in [
+                        person.display_name,
+                        person.first_name,
+                        person.last_name,
+                        person.notes,
+                        person.group.name if person.group else "",
+                        " ".join(vehicle.registration_number for vehicle in person.vehicles),
+                        " ".join(str(vehicle.make or "") for vehicle in person.vehicles),
+                        " ".join(str(vehicle.model or "") for vehicle in person.vehicles),
+                        " ".join(str(vehicle.color or "") for vehicle in person.vehicles),
+                    ]
+                )
+                score = _entity_match_score(query_key, haystack, exact_value=person.display_name)
+                if score:
+                    matches.append(
+                        _compact_observation(
+                            {
+                                "type": "person",
+                                "score": score,
+                                "id": str(person.id),
+                                "display_name": person.display_name,
+                                "group": person.group.name if person.group else None,
+                                "is_active": person.is_active,
+                                "vehicle_ids": [str(vehicle.id) for vehicle in person.vehicles],
+                                "registration_numbers": [vehicle.registration_number for vehicle in person.vehicles],
+                            }
+                        )
+                    )
+
+        if "vehicle" in entity_types:
+            vehicles = (
+                await session.scalars(
+                    select(Vehicle)
+                    .options(selectinload(Vehicle.owner), selectinload(Vehicle.schedule))
+                    .order_by(Vehicle.registration_number)
+                )
+            ).all()
+            plate_query = normalize_registration_number(query_text)
+            for vehicle in vehicles:
+                if not include_inactive and not vehicle.is_active:
+                    continue
+                haystack = " ".join(
+                    str(value or "")
+                    for value in [
+                        vehicle.registration_number,
+                        vehicle.make,
+                        vehicle.model,
+                        vehicle.color,
+                        vehicle.description,
+                        vehicle.owner.display_name if vehicle.owner else "",
+                    ]
+                )
+                score = _entity_match_score(query_key, haystack, exact_value=vehicle.registration_number)
+                if plate_query and plate_query == vehicle.registration_number:
+                    score = max(score, 100)
+                elif plate_query and plate_query in vehicle.registration_number:
+                    score = max(score, 90)
+                if score:
+                    matches.append(
+                        _compact_observation(
+                            {
+                                "type": "vehicle",
+                                "score": score,
+                                "id": str(vehicle.id),
+                                "registration_number": vehicle.registration_number,
+                                "make": vehicle.make,
+                                "model": vehicle.model,
+                                "color": vehicle.color,
+                                "owner_id": str(vehicle.person_id) if vehicle.person_id else None,
+                                "owner": vehicle.owner.display_name if vehicle.owner else None,
+                                "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
+                                "schedule_name": vehicle.schedule.name if vehicle.schedule else None,
+                                "is_active": vehicle.is_active,
+                            }
+                        )
+                    )
+
+        if "group" in entity_types:
+            groups = (await session.scalars(select(Group).order_by(Group.name))).all()
+            for group in groups:
+                haystack = " ".join(str(value or "") for value in [group.name, group.category.value, group.subtype, group.description])
+                score = _entity_match_score(query_key, haystack, exact_value=group.name)
+                if score:
+                    matches.append(
+                        _compact_observation(
+                            {
+                                "type": "group",
+                                "score": score,
+                                "id": str(group.id),
+                                "name": group.name,
+                                "category": group.category.value,
+                                "subtype": group.subtype,
+                            }
+                        )
+                    )
+
+    if "device" in entity_types:
+        config = await get_runtime_config()
+        device_rows = [
+            ("gate", entity)
+            for entity in list(getattr(config, "home_assistant_gate_entities", None) or [])
+            if isinstance(entity, dict)
+        ] + [
+            ("garage_door", entity)
+            for entity in list(getattr(config, "home_assistant_garage_door_entities", None) or [])
+            if isinstance(entity, dict)
+        ]
+        for kind, entity in device_rows:
+            if not include_inactive and entity.get("enabled") is False:
+                continue
+            name = str(entity.get("name") or entity.get("entity_id") or "")
+            haystack = f"{name} {entity.get('entity_id') or ''} {kind.replace('_', ' ')}"
+            score = _entity_match_score(query_key, haystack, exact_value=name)
+            if score:
+                matches.append(
+                    _compact_observation(
+                        {
+                            "type": "device",
+                            "score": score,
+                            "kind": kind,
+                            "entity_id": str(entity.get("entity_id") or ""),
+                            "name": name,
+                            "enabled": bool(entity.get("enabled", True)),
+                            "schedule_id": entity.get("schedule_id"),
+                        }
+                    )
+                )
+
+    matches = sorted(
+        matches,
+        key=lambda item: (
+            -int(item.get("score") or 0),
+            str(item.get("type") or ""),
+            str(item.get("display_name") or item.get("name") or item.get("registration_number") or ""),
+        ),
+    )
+    if not matches:
+        return {"status": "not_found", "query": query_text, "entity_types": sorted(entity_types), "matches": []}
+
+    top_score = int(matches[0].get("score") or 0)
+    top_matches = [match for match in matches if int(match.get("score") or 0) >= top_score - 5]
+    status = "unique" if len(top_matches) == 1 and top_score >= 70 else "ambiguous"
+    return {
+        "status": status,
+        "query": query_text,
+        "entity_types": sorted(entity_types),
+        "match": matches[0] if status == "unique" else None,
+        "matches": matches[:10],
+    }
 
 
 async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1042,41 +1468,66 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
     user_id = str(context.get("user_id") or "")
     session_id = str(context.get("session_id") or "")
     target_text = str(arguments.get("target") or arguments.get("entity_id") or "").strip()
+    action = _normalize(arguments.get("action") or "open")
+    if action not in {"open", "close"}:
+        return {"accepted": False, "error": "action must be open or close."}
     kind_filter = _normalize(arguments.get("kind") or "all")
     if kind_filter not in {"", "all", "gate", "garage_door"}:
-        return {"opened": False, "error": "kind must be all, gate, or garage_door."}
+        return {"accepted": False, "error": "kind must be all, gate, or garage_door."}
+    if action == "close" and kind_filter == "gate":
+        return {
+            "closed": False,
+            "accepted": False,
+            "action": action,
+            "error": "Alfred can close configured garage doors, not gates.",
+        }
     if not target_text:
         return {
-            "opened": False,
+            "accepted": False,
+            "action": action,
             "requires_details": True,
-            "detail": "Which gate or garage door should I open?",
+            "detail": f"Which gate or garage door should I {action}?",
         }
 
     target = await _resolve_openable_device(arguments, kind_filter=kind_filter or "all")
     if not target:
         return {
-            "opened": False,
+            "accepted": False,
+            "action": action,
             "target": target_text,
             "error": f"I could not find a configured gate or garage door called {target_text}.",
+        }
+    if action == "close" and target["kind"] != "garage_door":
+        return {
+            "closed": False,
+            "accepted": False,
+            "action": action,
+            "device": _agent_device_payload(target),
+            "detail": "Alfred can close configured garage doors. Gate close commands are not enabled.",
         }
 
     if not bool(arguments.get("confirm")):
         device = _agent_device_payload(target)
         return {
             "opened": False,
+            "closed": False,
+            "accepted": False,
+            "action": action,
             "requires_confirmation": True,
             "target": device["name"],
             "device": device,
+            "confirmation_field": "confirm",
             "detail": (
-                "Opening gates and garage doors is a real-world action. "
-                "Use the chat confirmation action before I open it."
+                f"{'Opening gates and garage doors' if action == 'open' else 'Closing garage doors'} "
+                "is a real-world action. Use the chat confirmation action before I continue."
             ),
         }
 
-    if await is_maintenance_mode_active():
+    if action == "open" and await is_maintenance_mode_active():
         return {
             "opened": False,
             "accepted": False,
+            "action": action,
             "device": _agent_device_payload(target),
             "state": "maintenance_mode",
             "detail": "Maintenance Mode is active. Automated actions are disabled.",
@@ -1085,19 +1536,23 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
 
     config = await get_runtime_config()
     now = datetime.now(tz=UTC)
-    async with AsyncSessionLocal() as session:
-        schedule_evaluation = await evaluate_schedule_id(
-            session,
-            target["entity"].get("schedule_id"),
-            now,
-            timezone_name=config.site_timezone,
-            default_policy=config.schedule_default_policy,
-            source=str(target["kind"]),
-        )
-    if not schedule_evaluation.allowed:
+    if action == "open":
+        async with AsyncSessionLocal() as session:
+            schedule_evaluation = await evaluate_schedule_id(
+                session,
+                target["entity"].get("schedule_id"),
+                now,
+                timezone_name=config.site_timezone,
+                default_policy=config.schedule_default_policy,
+                source=str(target["kind"]),
+            )
+    else:
+        schedule_evaluation = None
+    if schedule_evaluation and not schedule_evaluation.allowed:
         detail = schedule_evaluation.reason or "Device is outside its assigned schedule."
         payload = _agent_device_audit_payload(
             target,
+            action=action,
             accepted=False,
             state="schedule_denied",
             detail=detail,
@@ -1105,21 +1560,24 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
             session_id=session_id,
         )
         await event_bus.publish("agent.device_open_failed", payload)
-        logger.warning("agent_device_open_schedule_denied", extra=payload)
+        logger.warning("agent_device_open_schedule_denied", extra=_log_extra(payload))
         return {
             "opened": False,
             "accepted": False,
             "device": _agent_device_payload(target),
+            "action": action,
             "state": "schedule_denied",
             "detail": detail,
             "opened_by": "agent",
         }
 
     reason = str(arguments.get("reason") or "").strip()
-    audit_reason = reason or f"Alfred agent requested opening {target['entity'].get('name') or target['entity']['entity_id']}"
-    outcome = await command_cover(HomeAssistantClient(), target["entity"], "open", f"Alfred agent: {audit_reason}")
+    action_label = "opening" if action == "open" else "closing"
+    audit_reason = reason or f"Alfred agent requested {action_label} {target['entity'].get('name') or target['entity']['entity_id']}"
+    outcome = await command_cover(HomeAssistantClient(), target["entity"], action, f"Alfred agent: {audit_reason}")
     audit_payload = _agent_device_audit_payload(
         target,
+        action=action,
         accepted=outcome.accepted,
         state=outcome.state,
         detail=outcome.detail,
@@ -1127,48 +1585,193 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
         session_id=session_id,
     )
     audit_payload["reason"] = audit_reason
+    agent_event = f"agent.device_{action}_requested" if outcome.accepted else f"agent.device_{action}_failed"
+    device_event = f"{target['kind']}.{action}_requested" if outcome.accepted else f"{target['kind']}.{action}_failed"
     await event_bus.publish(
-        "agent.device_open_requested" if outcome.accepted else "agent.device_open_failed",
+        agent_event,
         audit_payload,
     )
     await event_bus.publish(
-        f"{target['kind']}.open_requested" if outcome.accepted else f"{target['kind']}.open_failed",
+        device_event,
         {
             **audit_payload,
-            "opened_by": "agent",
             "source": "alfred",
         },
     )
     if outcome.accepted:
-        logger.info("agent_device_open_requested", extra=audit_payload)
+        logger.info(f"agent_device_{action}_requested", extra=_log_extra(audit_payload))
     else:
-        logger.error("agent_device_open_failed", extra=audit_payload)
+        logger.error(f"agent_device_{action}_failed", extra=_log_extra(audit_payload))
 
     return {
-        "opened": outcome.accepted,
+        "opened": outcome.accepted if action == "open" else False,
+        "closed": outcome.accepted if action == "close" else False,
         "accepted": outcome.accepted,
         "device": _agent_device_payload(target),
-        "action": "open",
+        "action": action,
         "state": outcome.state,
         "detail": outcome.detail,
-        "opened_by": "agent",
-        "audit_event": "agent.device_open_requested" if outcome.accepted else "agent.device_open_failed",
+        f"{'opened' if action == 'open' else 'closed'}_by": "agent",
+        "audit_event": agent_event,
+    }
+
+
+async def open_gate(arguments: dict[str, Any]) -> dict[str, Any]:
+    target = str(arguments.get("target") or "").strip()
+    if not target:
+        config = await get_runtime_config()
+        gates = [entity for entity in _cover_entities_by_kind(config).get("gate", []) if entity.get("enabled", True)]
+        if len(gates) == 1:
+            target = str(gates[0].get("name") or gates[0].get("entity_id") or "")
+    if not target:
+        return {
+            "opened": False,
+            "requires_details": True,
+            "detail": "Which gate should I open?",
+        }
+    output = await open_device(
+        {
+            "target": target,
+            "kind": "gate",
+            "reason": arguments.get("reason"),
+            "confirm": bool(arguments.get("confirm")),
+        }
+    )
+    output.setdefault("target", target)
+    output["tool_alias"] = "open_gate"
+    return output
+
+
+async def toggle_maintenance_mode(arguments: dict[str, Any]) -> dict[str, Any]:
+    state = _normalize(arguments.get("state"))
+    enable = state in {"enabled", "enable", "on", "true", "yes", "active"}
+    disable = state in {"disabled", "disable", "off", "false", "no", "inactive"}
+    if not enable and not disable:
+        return {
+            "changed": False,
+            "error": "state must be enabled or disabled.",
+        }
+    if not bool(arguments.get("confirm")):
+        return {
+            "changed": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": "Maintenance Mode",
+            "state": "enabled" if enable else "disabled",
+            "detail": (
+                "Enable Maintenance Mode and stop automated access actions?"
+                if enable
+                else "Disable Maintenance Mode and resume automated access actions?"
+            ),
+        }
+    if enable:
+        result = await enable_maintenance_mode(
+            {"reason": arguments.get("reason") or "Enabled by Alfred", "confirm": True}
+        )
+        return {"changed": bool(result.get("enabled")), "state": "enabled", **result}
+    result = await disable_maintenance_mode({"confirm": True})
+    return {"changed": bool(result.get("disabled")), "state": "disabled", **result}
+
+
+async def override_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
+    person_id = _uuid_from_value(arguments.get("person_id"))
+    if not person_id:
+        return {
+            "created": False,
+            "requires_details": True,
+            "detail": "A person_id from actor context or resolve_human_entity is required.",
+        }
+    config = await get_runtime_config()
+    try:
+        starts_at = _parse_agent_datetime(arguments.get("time"), config.site_timezone)
+    except (TypeError, ValueError) as exc:
+        return {"created": False, "error": f"Invalid override time: {exc}"}
+    duration_minutes = _bounded_int(arguments.get("duration_minutes"), default=60, minimum=1, maximum=1440)
+    ends_at = starts_at + timedelta(minutes=duration_minutes)
+    reason = str(arguments.get("reason") or "Temporary access override from Alfred").strip()
+
+    async with AsyncSessionLocal() as session:
+        person = await _load_person_with_schedule(session, person_id)
+        if not person:
+            return {"created": False, "error": "Person not found."}
+        if not bool(arguments.get("confirm")):
+            return {
+                "created": False,
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "target": person.display_name,
+                "person_id": str(person.id),
+                "starts_at": _agent_datetime_iso(starts_at, config.site_timezone),
+                "starts_at_display": _agent_datetime_display(starts_at, config.site_timezone),
+                "ends_at": _agent_datetime_iso(ends_at, config.site_timezone),
+                "ends_at_display": _agent_datetime_display(ends_at, config.site_timezone),
+                "duration_minutes": duration_minutes,
+                "detail": f"Create a temporary access override for {person.display_name}?",
+            }
+
+        context = get_chat_tool_context()
+        override = ScheduleOverride(
+            person_id=person.id,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            reason=reason,
+            created_by_user_id=_uuid_from_value(context.get("user_id")),
+            source="alfred",
+            is_active=True,
+        )
+        session.add(override)
+        await session.commit()
+        await session.refresh(override)
+
+    await event_bus.publish(
+        "schedule.override_created",
+        {
+            "override_id": str(override.id),
+            "person_id": str(person.id),
+            "person": person.display_name,
+            "starts_at": _agent_datetime_iso(starts_at, config.site_timezone),
+            "ends_at": _agent_datetime_iso(ends_at, config.site_timezone),
+            "source": "alfred",
+        },
+    )
+    return {
+        "created": True,
+        "override_id": str(override.id),
+        "person_id": str(person.id),
+        "person": person.display_name,
+        "starts_at": _agent_datetime_iso(starts_at, config.site_timezone),
+        "starts_at_display": _agent_datetime_display(starts_at, config.site_timezone),
+        "ends_at": _agent_datetime_iso(ends_at, config.site_timezone),
+        "ends_at_display": _agent_datetime_display(ends_at, config.site_timezone),
+        "duration_minutes": duration_minutes,
+        "reason": reason,
     }
 
 
 async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
-    limit = int(arguments.get("limit") or 25)
+    limit = _bounded_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
+    summarize_payload = arguments.get("summarize_payload")
+    summarize_payload = True if summarize_payload is None else bool(summarize_payload)
     config = await get_runtime_config()
     start, end = _period_bounds(arguments.get("day") or "recent", config.site_timezone)
 
     async with AsyncSessionLocal() as session:
         query = (
             select(AccessEvent)
-            .options(selectinload(AccessEvent.vehicle), selectinload(AccessEvent.anomalies))
+            .options(
+                selectinload(AccessEvent.vehicle).selectinload(Vehicle.owner),
+                selectinload(AccessEvent.anomalies),
+            )
             .where(AccessEvent.occurred_at >= start, AccessEvent.occurred_at <= end)
             .order_by(AccessEvent.occurred_at.desc())
             .limit(limit)
         )
+        person_id_filter = _uuid_from_value(arguments.get("person_id"))
+        if person_id_filter:
+            query = query.where(AccessEvent.person_id == person_id_filter)
+        vehicle_id_filter = _uuid_from_value(arguments.get("vehicle_id"))
+        if vehicle_id_filter:
+            query = query.where(AccessEvent.vehicle_id == vehicle_id_filter)
         events = (await session.scalars(query)).all()
 
         person_filter = _normalize(arguments.get("person"))
@@ -1185,18 +1788,32 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
         plate_filter = _normalize(arguments.get("registration_number"))
         if plate_filter and plate_filter not in event.registration_number.lower():
             continue
+        raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        schedule_payload = raw_payload.get("schedule") if isinstance(raw_payload.get("schedule"), dict) else None
         records.append(
-            {
-                "person": person["display_name"] if person else None,
-                "group": person.get("group") if person else None,
-                "registration_number": event.registration_number,
-                "direction": event.direction.value,
-                "decision": event.decision.value,
-                "confidence": event.confidence,
-                "occurred_at": _agent_datetime_iso(event.occurred_at, config.site_timezone),
-                "occurred_at_display": _agent_datetime_display(event.occurred_at, config.site_timezone),
-                "anomaly_count": len(event.anomalies),
-            }
+            _compact_observation(
+                {
+                    "id": str(event.id),
+                    "person_id": str(event.person_id) if event.person_id else None,
+                    "vehicle_id": str(event.vehicle_id) if event.vehicle_id else None,
+                    "person": person["display_name"] if person else None,
+                    "group": person.get("group") if person else None,
+                    "vehicle": _vehicle_agent_payload(event.vehicle),
+                    "registration_number": event.registration_number,
+                    "direction": event.direction.value,
+                    "decision": event.decision.value,
+                    "confidence": event.confidence,
+                    "source": event.source,
+                    "occurred_at": _agent_datetime_iso(event.occurred_at, config.site_timezone),
+                    "occurred_at_display": _agent_datetime_display(event.occurred_at, config.site_timezone),
+                    "timing_classification": event.timing_classification.value,
+                    "anomaly_count": len(event.anomalies),
+                    "schedule_summary": _payload_summary(schedule_payload) if summarize_payload else schedule_payload,
+                    "gate_observation": _gate_observation_from_event(event),
+                    "payload_summary": _payload_summary(raw_payload) if summarize_payload else None,
+                    "raw_payload": raw_payload if not summarize_payload else None,
+                }
+            )
         )
 
     return {"events": records, "count": len(records), "timezone": config.site_timezone}
@@ -1204,6 +1821,10 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
 
 async def diagnose_access_event(arguments: dict[str, Any]) -> dict[str, Any]:
     config = await get_runtime_config()
+    span_limit = _bounded_int(arguments.get("span_limit"), default=20, minimum=1, maximum=50)
+    include_trace_payloads = bool(arguments.get("include_trace_payloads"))
+    summarize_payload = arguments.get("summarize_payload")
+    summarize_payload = True if summarize_payload is None else bool(summarize_payload)
     await telemetry.flush()
     async with AsyncSessionLocal() as session:
         person_map = await _person_map(session)
@@ -1236,19 +1857,33 @@ async def diagnose_access_event(arguments: dict[str, Any]) -> dict[str, Any]:
     lpr_timing = await _lpr_timing_near_event(event, config.site_timezone)
     recognition = _recognition_diagnostics(event, trace, spans)
     gate = _gate_diagnostics(event, spans, config.site_timezone)
+    maintenance = await get_maintenance_mode_status()
 
-    return {
+    return _compact_observation({
         "found": True,
         "timezone": config.site_timezone,
-        "event": _access_event_diagnostic_payload(event, person, config.site_timezone),
+        "event": _access_event_diagnostic_payload(
+            event,
+            person,
+            config.site_timezone,
+            summarize_payload=summarize_payload,
+        ),
         "recognition": recognition,
         "gate": gate,
+        "maintenance_mode": maintenance,
         "notifications": notifications,
         "history": history,
         "lpr_timing_observations": lpr_timing,
-        "trace": _trace_diagnostic_payload(trace, spans, config.site_timezone),
+        "trace": _trace_diagnostic_payload(
+            trace,
+            spans,
+            config.site_timezone,
+            span_limit=span_limit,
+            include_payloads=include_trace_payloads,
+            summarize_payload=summarize_payload,
+        ),
         "answer_hints": _diagnostic_answer_hints(recognition, gate, notifications),
-    }
+    })
 
 
 async def query_lpr_timing(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1257,6 +1892,7 @@ async def query_lpr_timing(arguments: dict[str, Any]) -> dict[str, Any]:
     plate_filter = normalize_registration_number(str(arguments.get("registration_number") or ""))
     source_filter = _normalize(arguments.get("source"))
     include_possible_fields = bool(arguments.get("include_possible_fields"))
+    include_payload_path = bool(arguments.get("include_payload_path"))
     raw_observations = await get_lpr_timing_recorder().recent(limit=max(limit, 200))
 
     observations: list[dict[str, Any]] = []
@@ -1271,7 +1907,13 @@ async def query_lpr_timing(arguments: dict[str, Any]) -> dict[str, Any]:
         source_text = f"{observation.get('source') or ''} {observation.get('source_detail') or ''}".lower()
         if source_filter and source_filter not in source_text:
             continue
-        observations.append(_serialize_lpr_timing_observation(observation, config.site_timezone))
+        observations.append(
+            _serialize_lpr_timing_observation(
+                observation,
+                config.site_timezone,
+                include_payload_path=include_payload_path,
+            )
+        )
         if len(observations) >= limit:
             break
 
@@ -1336,16 +1978,61 @@ async def query_vehicle_detection_history(arguments: dict[str, Any]) -> dict[str
     }
 
 
+async def get_telemetry_trace(arguments: dict[str, Any]) -> dict[str, Any]:
+    limit = _bounded_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    summarize_payload = arguments.get("summarize_payload")
+    summarize_payload = True if summarize_payload is None else bool(summarize_payload)
+    config = await get_runtime_config()
+    trace_id = str(arguments.get("trace_id") or "").strip()
+    access_event_id = _uuid_from_value(arguments.get("access_event_id"))
+    await telemetry.flush()
+    async with AsyncSessionLocal() as session:
+        trace: TelemetryTrace | None = None
+        if trace_id:
+            trace = await session.get(TelemetryTrace, trace_id)
+        elif access_event_id:
+            trace = await session.scalar(
+                select(TelemetryTrace)
+                .where(TelemetryTrace.access_event_id == access_event_id)
+                .order_by(TelemetryTrace.started_at.desc())
+                .limit(1)
+            )
+        if not trace:
+            return {
+                "found": False,
+                "error": "Telemetry trace not found.",
+                "trace_id": trace_id or None,
+                "access_event_id": str(access_event_id) if access_event_id else None,
+            }
+        spans = (
+            await session.scalars(
+                select(TelemetrySpan)
+                .where(TelemetrySpan.trace_id == trace.trace_id)
+                .order_by(TelemetrySpan.step_order, TelemetrySpan.started_at)
+                .limit(limit)
+            )
+        ).all()
+    return {
+        "found": True,
+        "timezone": config.site_timezone,
+        "trace": _trace_diagnostic_payload(
+            trace,
+            list(spans),
+            config.site_timezone,
+            span_limit=limit,
+            include_payloads=not summarize_payload,
+            summarize_payload=summarize_payload,
+        ),
+    }
+
+
 async def query_leaderboard(arguments: dict[str, Any]) -> dict[str, Any]:
     scope = _normalize(arguments.get("scope") or "all")
     if scope not in {"", "all", "known", "unknown", "top_known"}:
         return {"error": "scope must be all, known, unknown, or top_known."}
     scope = scope or "all"
 
-    try:
-        limit = int(arguments.get("limit") or 25)
-    except (TypeError, ValueError):
-        limit = 25
+    limit = _bounded_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
     enrich_unknowns = arguments.get("enrich_unknowns")
     if enrich_unknowns is None:
         enrich_unknowns = scope in {"all", "unknown"}
@@ -1389,7 +2076,7 @@ async def query_leaderboard(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
-    limit = int(arguments.get("limit") or 25)
+    limit = _bounded_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
     severity = _normalize(arguments.get("severity"))
     config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
@@ -1434,6 +2121,7 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
     result = await query_access_events(
         {
             "person": arguments.get("person"),
+            "person_id": arguments.get("person_id"),
             "group": arguments.get("group"),
             "day": arguments.get("day") or "today",
             "limit": 100,
@@ -1488,6 +2176,15 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def trigger_anomaly_alert(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        subject = str(arguments.get("subject") or "anomaly alert").strip()
+        return {
+            "sent": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": subject,
+            "detail": "Send this anomaly alert notification?",
+        }
     try:
         notification = await get_notification_service().notify(
             NotificationContext(
@@ -1811,6 +2508,9 @@ async def query_notification_workflows(arguments: dict[str, Any]) -> dict[str, A
     active_filter = arguments.get("is_active")
     search = _normalize(arguments.get("search"))
     include_preview = bool(arguments.get("include_preview"))
+    limit = _bounded_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    summarize_payload = arguments.get("summarize_payload")
+    summarize_payload = True if summarize_payload is None else bool(summarize_payload)
 
     async with AsyncSessionLocal() as session:
         rules = (
@@ -1829,9 +2529,13 @@ async def query_notification_workflows(arguments: dict[str, Any]) -> dict[str, A
         if search and search not in haystack:
             continue
         workflow = _serialize_notification_rule_for_agent(rule)
+        if summarize_payload:
+            workflow = _compact_notification_workflow(workflow)
         if include_preview:
             workflow["preview"] = await get_notification_service().preview_rule(workflow)
         workflows.append(workflow)
+        if len(workflows) >= limit:
+            break
     return {"workflows": workflows, "count": len(workflows)}
 
 
@@ -2145,6 +2849,7 @@ async def delete_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
 async def query_schedule_targets(arguments: dict[str, Any]) -> dict[str, Any]:
     entity_type = _normalize(arguments.get("entity_type") or "all")
     search = _normalize(arguments.get("search"))
+    limit = _bounded_int(arguments.get("limit"), default=25, minimum=1, maximum=100)
     include_people = entity_type in {"", "all", "person"}
     include_vehicles = entity_type in {"", "all", "vehicle"}
     include_doors = entity_type in {"", "all", "gate", "garage_door", "door"}
@@ -2164,7 +2869,7 @@ async def query_schedule_targets(arguments: dict[str, Any]) -> dict[str, Any]:
                 _serialize_person_schedule_target(person)
                 for person in person_rows
                 if not search or search in f"{person.display_name} {person.group.name if person.group else ''}".lower()
-            ]
+            ][:limit]
         if include_vehicles:
             vehicle_rows = (
                 await session.scalars(
@@ -2180,9 +2885,9 @@ async def query_schedule_targets(arguments: dict[str, Any]) -> dict[str, Any]:
                 _serialize_vehicle_schedule_target(vehicle)
                 for vehicle in vehicle_rows
                 if not search or search in f"{vehicle.registration_number} {vehicle.owner.display_name if vehicle.owner else ''}".lower()
-            ]
+            ][:limit]
 
-    doors = await _schedule_door_targets(entity_type=entity_type, search=search) if include_doors else []
+    doors = (await _schedule_door_targets(entity_type=entity_type, search=search))[:limit] if include_doors else []
     return {
         "people": people,
         "vehicles": vehicles,
@@ -2266,13 +2971,12 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             person = await _resolve_person(session, arguments)
             if not person:
                 return {"verified": False, "error": "Person not found."}
-            evaluation = await evaluate_schedule_id(
+            evaluation = await evaluate_person_schedule(
                 session,
-                person.schedule_id,
+                person,
                 occurred_at,
                 timezone_name=config.site_timezone,
                 default_policy=config.schedule_default_policy,
-                source="person",
             )
             return {
                 "verified": True,
@@ -2282,6 +2986,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "source": evaluation.source,
                 "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
                 "schedule_name": evaluation.schedule_name,
+                "override_id": str(evaluation.override_id) if evaluation.override_id else None,
+                "override_ends_at": _agent_datetime_iso(evaluation.override_ends_at, config.site_timezone) if evaluation.override_ends_at else None,
                 "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
                 "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
                 "timezone": config.site_timezone,
@@ -2308,6 +3014,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "source": evaluation.source,
                 "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
                 "schedule_name": evaluation.schedule_name,
+                "override_id": str(evaluation.override_id) if evaluation.override_id else None,
+                "override_ends_at": _agent_datetime_iso(evaluation.override_ends_at, config.site_timezone) if evaluation.override_ends_at else None,
                 "checked_at": _agent_datetime_iso(occurred_at, config.site_timezone),
                 "checked_at_display": _agent_datetime_display(occurred_at, config.site_timezone),
                 "timezone": config.site_timezone,
@@ -2445,6 +3153,12 @@ async def _resolve_access_event_for_diagnostics(
     registration_number = normalize_registration_number(str(arguments.get("registration_number") or ""))
     if registration_number:
         query = query.where(AccessEvent.registration_number == registration_number)
+    person_id = _uuid_from_value(arguments.get("person_id"))
+    if person_id:
+        query = query.where(AccessEvent.person_id == person_id)
+    vehicle_id = _uuid_from_value(arguments.get("vehicle_id"))
+    if vehicle_id:
+        query = query.where(AccessEvent.vehicle_id == vehicle_id)
     if bool(arguments.get("unknown_only")):
         query = query.where(AccessEvent.vehicle_id.is_(None))
 
@@ -2502,6 +3216,8 @@ def _access_event_diagnostic_payload(
     event: AccessEvent,
     person: dict[str, str] | None,
     timezone_name: str,
+    *,
+    summarize_payload: bool = True,
 ) -> dict[str, Any]:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     schedule = raw_payload.get("schedule") if isinstance(raw_payload.get("schedule"), dict) else {}
@@ -2524,12 +3240,14 @@ def _access_event_diagnostic_payload(
         "occurred_at": _agent_datetime_iso(event.occurred_at, timezone_name),
         "occurred_at_display": _agent_datetime_display(event.occurred_at, timezone_name),
         "timing_classification": event.timing_classification.value,
-        "schedule": schedule,
-        "direction_resolution": direction_resolution,
+        "schedule": _payload_summary(schedule) if summarize_payload else schedule,
+        "direction_resolution": _payload_summary(direction_resolution) if summarize_payload else direction_resolution,
         "gate_observation": _gate_observation_from_event(event),
         "debounce": {
             "candidate_count": debounce.get("candidate_count"),
-            "candidates": debounce.get("candidates") or [],
+            "candidates": _compact_value(debounce.get("candidates") or [], max_list_items=6)
+            if summarize_payload
+            else debounce.get("candidates") or [],
         },
         "anomalies": [
             {
@@ -2542,6 +3260,8 @@ def _access_event_diagnostic_payload(
             for anomaly in event.anomalies
         ],
         "telemetry_trace_id": _trace_id_from_access_event(event),
+        "payload_summary": _payload_summary(raw_payload) if summarize_payload else None,
+        "raw_payload": raw_payload if not summarize_payload else None,
     }
 
 
@@ -2566,9 +3286,14 @@ def _trace_diagnostic_payload(
     trace: TelemetryTrace | None,
     spans: list[TelemetrySpan],
     timezone_name: str,
+    *,
+    span_limit: int = 20,
+    include_payloads: bool = False,
+    summarize_payload: bool = True,
 ) -> dict[str, Any] | None:
     if not trace:
         return None
+    limited_spans = spans[:span_limit]
     return {
         "trace_id": trace.trace_id,
         "name": trace.name,
@@ -2580,13 +3305,28 @@ def _trace_diagnostic_payload(
         "duration_ms": trace.duration_ms,
         "summary": trace.summary,
         "error": trace.error,
-        "context": trace.context or {},
-        "spans": [_span_diagnostic_payload(span, timezone_name) for span in spans],
+        "context": _payload_summary(trace.context or {}) if summarize_payload else trace.context or {},
+        "span_count": len(spans),
+        "spans": [
+            _span_diagnostic_payload(
+                span,
+                timezone_name,
+                include_payloads=include_payloads,
+                summarize_payload=summarize_payload,
+            )
+            for span in limited_spans
+        ],
     }
 
 
-def _span_diagnostic_payload(span: TelemetrySpan, timezone_name: str) -> dict[str, Any]:
-    return {
+def _span_diagnostic_payload(
+    span: TelemetrySpan,
+    timezone_name: str,
+    *,
+    include_payloads: bool = False,
+    summarize_payload: bool = True,
+) -> dict[str, Any]:
+    payload = {
         "span_id": span.span_id,
         "name": span.name,
         "category": span.category,
@@ -2594,10 +3334,16 @@ def _span_diagnostic_payload(span: TelemetrySpan, timezone_name: str) -> dict[st
         "started_at": _agent_datetime_iso(span.started_at, timezone_name),
         "duration_ms": span.duration_ms,
         "status": span.status,
-        "attributes": span.attributes or {},
-        "output_payload": span.output_payload or {},
+        "attributes": _payload_summary(span.attributes or {}) if summarize_payload else span.attributes or {},
         "error": span.error,
     }
+    if include_payloads:
+        payload["input_payload"] = span.input_payload or {}
+        payload["output_payload"] = span.output_payload or {}
+    else:
+        payload["input_payload_summary"] = _payload_summary(span.input_payload or {})
+        payload["output_payload_summary"] = _payload_summary(span.output_payload or {})
+    return _compact_observation(payload)
 
 
 def _recognition_diagnostics(
@@ -2981,7 +3727,12 @@ async def _lpr_timing_near_event(event: AccessEvent, timezone_name: str) -> dict
     }
 
 
-def _serialize_lpr_timing_observation(observation: dict[str, Any], timezone_name: str) -> dict[str, Any]:
+def _serialize_lpr_timing_observation(
+    observation: dict[str, Any],
+    timezone_name: str,
+    *,
+    include_payload_path: bool = False,
+) -> dict[str, Any]:
     received_at = _datetime_from_agent_value(observation.get("received_at"))
     captured_at = _datetime_from_agent_value(observation.get("captured_at"))
     delay_ms = (
@@ -2989,7 +3740,7 @@ def _serialize_lpr_timing_observation(observation: dict[str, Any], timezone_name
         if received_at and captured_at
         else None
     )
-    return {
+    payload = {
         "id": observation.get("id"),
         "source": observation.get("source"),
         "source_detail": observation.get("source_detail"),
@@ -3006,8 +3757,10 @@ def _serialize_lpr_timing_observation(observation: dict[str, Any], timezone_name
         "confidence_scale": observation.get("confidence_scale"),
         "protect_action": observation.get("protect_action"),
         "protect_model": observation.get("protect_model"),
-        "payload_path": observation.get("payload_path"),
     }
+    if include_payload_path:
+        payload["payload_path"] = observation.get("payload_path")
+    return _compact_observation(payload)
 
 
 def _gate_observation_from_event(event: AccessEvent) -> dict[str, Any]:
@@ -3158,6 +3911,160 @@ def _leaderboard_unknown_matches(row: dict[str, Any], requested: str) -> bool:
 
 def _person_match_key(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _entity_match_key(value: str) -> str:
+    cleaned = _person_match_key(value)
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token not in {"a", "an", "my", "of", "please", "the", "that", "this", "their", "vehicle", "car"}
+    ]
+    return " ".join(tokens)
+
+
+def _entity_match_score(query_key: str, candidate_text: str, *, exact_value: str | None = None) -> int:
+    candidate_key = _entity_match_key(candidate_text)
+    exact_key = _entity_match_key(exact_value or "")
+    if not query_key or not candidate_key:
+        return 0
+    if query_key == exact_key:
+        return 100
+    if query_key == candidate_key:
+        return 95
+    if query_key in candidate_key:
+        return 80
+    query_tokens = set(query_key.split())
+    candidate_tokens = set(candidate_key.split())
+    if query_tokens and query_tokens <= candidate_tokens:
+        return 75
+    overlap = query_tokens & candidate_tokens
+    if overlap:
+        return 50 + min(20, len(overlap) * 5)
+    return 0
+
+
+SECRET_OR_INTERNAL_KEY_MARKERS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "session",
+    "token",
+    "x-api-key",
+)
+LARGE_PAYLOAD_KEY_MARKERS = (
+    "image",
+    "photo",
+    "profile_photo_data_url",
+    "snapshot",
+    "thumbnail",
+    "video",
+    "vehicle_photo_data_url",
+)
+
+
+def _compact_observation(value: Any) -> Any:
+    return _strip_empty(_compact_value(value))
+
+
+def _compact_value(
+    value: Any,
+    *,
+    key: str | None = None,
+    depth: int = 0,
+    max_depth: int = 4,
+    max_list_items: int = 10,
+    max_dict_keys: int = 40,
+) -> Any:
+    key_lower = (key or "").lower()
+    if any(marker in key_lower for marker in SECRET_OR_INTERNAL_KEY_MARKERS):
+        return "[redacted]"
+    if any(marker in key_lower for marker in LARGE_PAYLOAD_KEY_MARKERS):
+        return "[omitted_large_media]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, str):
+        return value if len(value) <= 800 else f"{value[:800]}... [truncated {len(value) - 800} chars]"
+    if isinstance(value, list):
+        if depth >= max_depth:
+            return {"type": "list", "count": len(value)}
+        compacted = [
+            _compact_value(item, key=key, depth=depth + 1, max_depth=max_depth, max_list_items=max_list_items)
+            for item in value[:max_list_items]
+        ]
+        if len(value) > max_list_items:
+            compacted.append({"omitted_items": len(value) - max_list_items})
+        return compacted
+    if isinstance(value, dict):
+        if depth >= max_depth:
+            return {"type": "object", "key_count": len(value), "keys": list(map(str, value.keys()))[:20]}
+        items = list(value.items())
+        compacted = {
+            str(item_key): _compact_value(
+                item_value,
+                key=str(item_key),
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_list_items=max_list_items,
+            )
+            for item_key, item_value in items[:max_dict_keys]
+        }
+        if len(items) > max_dict_keys:
+            compacted["omitted_keys"] = len(items) - max_dict_keys
+        return compacted
+    return str(value)
+
+
+def _strip_empty(value: Any) -> Any:
+    if isinstance(value, list):
+        return [
+            stripped
+            for item in value
+            if (stripped := _strip_empty(item)) not in (None, "", [], {})
+        ]
+    if isinstance(value, dict):
+        return {
+            key: stripped
+            for key, item in value.items()
+            if (stripped := _strip_empty(item)) not in (None, "", [], {})
+        }
+    return value
+
+
+def _payload_summary(value: Any) -> Any:
+    if value in (None, "", [], {}):
+        return None
+    return _compact_value(value, max_depth=2, max_list_items=6, max_dict_keys=24)
+
+
+def _compact_notification_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
+    actions = workflow.get("actions") if isinstance(workflow.get("actions"), list) else []
+    conditions = workflow.get("conditions") if isinstance(workflow.get("conditions"), list) else []
+    return _compact_observation(
+        {
+            "id": workflow.get("id"),
+            "name": workflow.get("name"),
+            "trigger_event": workflow.get("trigger_event"),
+            "is_active": workflow.get("is_active"),
+            "condition_count": len(conditions),
+            "action_count": len(actions),
+            "channels": [
+                action.get("channel") or action.get("type")
+                for action in actions
+                if isinstance(action, dict)
+            ],
+            "last_fired_at": workflow.get("last_fired_at"),
+            "title_template": workflow.get("title_template"),
+            "message_template": workflow.get("message_template"),
+        }
+    )
 
 
 async def _resolve_schedule(session, arguments: dict[str, Any]) -> Schedule | None:
@@ -3652,6 +4559,7 @@ def _agent_device_payload(target: dict[str, Any]) -> dict[str, Any]:
 def _agent_device_audit_payload(
     target: dict[str, Any],
     *,
+    action: str,
     accepted: bool,
     state: str,
     detail: str | None,
@@ -3659,19 +4567,31 @@ def _agent_device_audit_payload(
     session_id: str,
 ) -> dict[str, Any]:
     device = _agent_device_payload(target)
-    return {
+    payload = {
         "source": "alfred",
-        "opened_by": "agent",
+        "requested_by": "agent",
         "user_id": user_id or None,
         "session_id": session_id or None,
         "kind": device["kind"],
         "entity_id": device["entity_id"],
         "name": device["name"],
-        "action": "open",
+        "action": action,
         "accepted": accepted,
         "state": state,
         "detail": detail,
     }
+    if action == "open":
+        payload["opened_by"] = "agent"
+    elif action == "close":
+        payload["closed_by"] = "agent"
+    return payload
+
+
+def _log_extra(payload: dict[str, Any]) -> dict[str, Any]:
+    extra = dict(payload)
+    if "name" in extra:
+        extra["device_name"] = extra.pop("name")
+    return extra
 
 
 def _filename_slug(value: str) -> str:

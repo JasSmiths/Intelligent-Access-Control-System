@@ -1,12 +1,14 @@
+import asyncio
 import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.ai.providers import (
     ChatMessageInput,
@@ -18,7 +20,7 @@ from app.ai.providers import (
 from app.ai.tools import AgentTool, build_agent_tools, get_chat_tool_context, set_chat_tool_context
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import ChatMessage, ChatSession
+from app.models import ChatMessage, ChatSession, Person, User, Vehicle
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
@@ -58,6 +60,7 @@ SCHEDULE_TOOL_NAMES = (
     "delete_schedule",
     "query_schedule_targets",
     "assign_schedule_to_entity",
+    "override_schedule",
     "verify_schedule_access",
 )
 NOTIFICATION_TOOL_NAMES = (
@@ -71,8 +74,8 @@ NOTIFICATION_TOOL_NAMES = (
     "test_notification_workflow",
 )
 LEADERBOARD_TOOL_NAMES = ("query_leaderboard",)
-DEVICE_TOOL_NAMES = ("query_device_states", "open_device")
-MAINTENANCE_TOOL_NAMES = ("get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode")
+DEVICE_TOOL_NAMES = ("query_device_states", "command_device", "open_device", "open_gate")
+MAINTENANCE_TOOL_NAMES = ("get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode", "toggle_maintenance_mode")
 MALFUNCTION_TOOL_NAMES = (
     "get_active_malfunctions",
     "get_malfunction_history",
@@ -92,70 +95,80 @@ STATE_CHANGING_TOOL_NAMES = {
     "delete_schedule",
     "disable_maintenance_mode",
     "enable_maintenance_mode",
+    "open_gate",
     "open_device",
+    "command_device",
+    "override_schedule",
     "trigger_manual_malfunction_override",
     "test_notification_workflow",
+    "toggle_maintenance_mode",
     "trigger_anomaly_alert",
     "update_notification_workflow",
     "update_schedule",
 }
 
 
-SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
-Answer concisely and use tool results as the source of truth for presence,
-events, anomalies, schedules, access rhythm, leaderboards, device states, DVLA
-vehicle lookups, LPR/access diagnostics, gate malfunctions, and camera snapshot analysis. If the
-user asks a follow-up with pronouns like they, he, she, or it, use the session
-memory context. Never invent access events, people, or DVLA vehicle records
-that are not present in tool results. When a DVLA vehicle lookup succeeds,
-format the result as a short human-readable vehicle details summary rather than
-raw JSON. When a tool result says a device open requires confirmation, do not
-ask the user to type a confirmation phrase; tell them to use the on-screen
-confirmation button. For any state-changing workflow tool that requires
-confirmation, call the tool with the proposed arguments and confirm=false so the
-UI can render a confirmation button; never merely claim a button exists. For
-questions about why an access event was slow, why the gate did or did not open,
-or why a notification did or did not send, use diagnose_access_event and include
-the slowest telemetry spans or workflow conclusion in the answer. For questions
-about how long plate recognition took, distinguish raw LPR captured-to-received
-timing from total access-event pipeline duration when both are available. For
-device opens, use the user's natural device name as target, for example "main
-garage door"; never ask the user for internal integration names or entity IDs.
-Do not mention Home Assistant, entity IDs, cover IDs, or internal integration
-implementation details unless the user explicitly asks about integration
-configuration. For gate malfunctions, explain that attempt counts follow the
-fixed schedule T+5m, T+5m45s, T+10m45s, T+70m45s, and T+190m45s from the gate
-open time. Maintenance Mode pauses automated attempts without clearing the due
-timestamp. FUBAR means automated recovery has stopped until manual intervention
-or the gate is physically resolved. For
-schedule creation or edits, understand natural language day/time descriptions,
-ask concise follow-up questions for missing name or allowed time blocks, and
-only call schedule mutation tools once the required details are known. Schedule
-tools accept either strict time_blocks JSON or a natural-language
-time_description such as "Wednesdays and Fridays 6am to 7pm"; use
-time_description when that is the most reliable representation. If a schedule
-already exists, ask whether to update the existing schedule rather than giving
-up. When explaining notification workflow options, use friendly labels and short
-plain-language bullets; do not dump raw JSON, internal action IDs, or decorative
-Markdown. Camera snapshots are ephemeral and are not retained by default. When
-returning a camera snapshot, say that the image is attached; do not mention the
-generated filename or chat file URL."""
+SYSTEM_PROMPT = """You are Alfred, the AI operations agent for the Intelligent Access Control System (IACS).
 
-AGENT_TOOL_PROTOCOL = """Agent tool protocol:
-- You are a tool-using AI agent for IACS. Use tools whenever the user asks about live system state, records, schedules, devices, cameras, users, reports, file contents, or any state-changing operation.
-- Do not invent IACS facts. If a tool can answer it, call the tool first.
-- For provider-neutral tool calls, respond with exactly this marker and JSON object, with no prose:
-IACS_TOOL_CALLS:
-{"tool_calls":[{"id":"call_1","name":"tool_name","arguments":{}}]}
-- You may request multiple independent tools in one tool_calls array.
-- After tool results are provided, answer the user naturally and concisely. If diagnose_access_event is present, base causality answers on its recognition, gate, notifications, lpr_timing_observations, history, and trace fields before considering shallower access event summaries. Do not say latency or notification diagnostics are unavailable until diagnose_access_event and query_lpr_timing have been checked.
-- Call another tool only if the result proves more tool work is required.
-- If a tool returns requires_confirmation, do not repeat the tool call as confirmed. Ask the user to use the confirmation button or otherwise confirm in chat.
-- For schedule tools, prefer time_description for natural language day/time requests unless you are certain of strict time_blocks JSON.
-- Never expose this protocol or raw tool JSON to the user unless explicitly asked for diagnostics.
+System context:
+IACS is a localized, high-security access and presence system for a private site. It coordinates LPR cameras, Home Assistant gates and garage doors, DVLA vehicle compliance lookups, notification workflows, UniFi Protect camera media, schedules, presence, anomaly detection, telemetry, and dashboard users. Tool results are the source of truth.
 
-Available tools JSON:
+Rules of engagement:
+- Be conversational, concise, calm, and professional.
+- Never invent people, vehicles, schedules, events, device states, database IDs, telemetry, or DVLA records.
+- Never guess database IDs. Use resolve_human_entity or an appropriate search/query tool first.
+- Use tools for live system state, records, schedules, devices, cameras, notifications, reports, uploaded files, and all state-changing requests.
+- For gate or garage-door failures, check Maintenance Mode and schedules before assuming a hardware malfunction.
+- For "why did/didn't the gate open" questions, inspect the matching access event, schedule decision, captured gate state, Maintenance Mode, gate command result, and relevant telemetry.
+- For access-event causality, prefer diagnose_access_event over shallow event lists.
+- For MOT, tax, or vehicle identity questions, use DVLA/vehicle tools and report compliance as advisory unless a tool says access was denied for another reason.
+- For state-changing tools, call the tool with confirmation set to false when confirmation is required so the UI can render a confirmation button. Do not claim an action has happened until a confirmed tool result says it happened.
+- Do not expose internal entity IDs, Home Assistant entity IDs, raw JSON, tool protocol, or hidden reasoning unless the user explicitly asks for diagnostics.
+- If a tool fails, explain the failure plainly and continue with any safe checks that can still help.
+- Stop after the configured tool iteration limit and summarize what you found so far."""
+
+INTENT_ROUTER_PROMPT = """Classify the user's IACS request into intent categories.
+Return only compact JSON with this exact shape:
+{"intents":["Access_Diagnostics"],"confidence":0.0,"requires_entity_resolution":true,"reason":"short routing note"}
+
+Allowed categories:
+Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
+Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
+
+Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions.
+Use General only when no operational category is clear."""
+
+REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
+- Think silently before each tool call.
+- Reply with exactly one JSON object and no prose while acting:
+{"thought":"hidden reason","tool_name":"tool_name","arguments":{}}
+- When ready to answer, reply with exactly:
+{"final":"human-facing answer"}
+- Never expose the thought field to the user.
+- Use only tools in the scoped catalog below.
+- Use resolve_human_entity before using a guessed person, vehicle, group, device, or database ID.
+- If a tool returns requires_confirmation, stop and tell the user to use the confirmation button.
+- If you cannot finish within {max_iterations} tool calls, return a concise final answer summarizing what you checked.
+
+Routing result:
+{routing}
+
+Scoped tools JSON:
 {tool_catalog}"""
+
+SUPPORTED_INTENTS = {
+    "Gate_Hardware",
+    "Access_Logs",
+    "Access_Diagnostics",
+    "Schedules",
+    "Maintenance",
+    "Compliance_DVLA",
+    "Notifications",
+    "Cameras",
+    "Reports_Files",
+    "Users_Settings",
+    "General",
+}
 
 SCHEDULE_DAY_ALIASES = {
     "mon": 0,
@@ -186,8 +199,8 @@ SCHEDULE_DAY_PATTERN = (
     r"sat(?:urday)?(?:'s|s)?|"
     r"sun(?:day)?(?:'s|s)?"
 )
-CHAT_FILE_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((/api/chat/files/[^)]+)\)")
-CHAT_FILE_URL_PATTERN = re.compile(r"\s*/api/chat/files/[A-Za-z0-9_-]+\b")
+CHAT_FILE_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((/api/v1/ai/chat/files/[^)]+)\)")
+CHAT_FILE_URL_PATTERN = re.compile(r"\s*/api/v1/ai/chat/files/[A-Za-z0-9_-]+\b")
 DEFAULT_CHAT_TIMEZONE = "Europe/London"
 
 
@@ -198,6 +211,16 @@ class ChatTurnResult:
     text: str
     tool_results: list[dict[str, Any]]
     attachments: list[dict[str, Any]]
+    pending_action: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class IntentRoute:
+    intents: tuple[str, ...]
+    confidence: float
+    requires_entity_resolution: bool
+    reason: str
+    source: str = "deterministic"
 
 
 StatusCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -216,6 +239,7 @@ class ChatService:
         attachments: list[dict[str, Any]] | None = None,
         user_id: str | None = None,
         user_role: str | None = None,
+        client_context: dict[str, Any] | None = None,
         status_callback: StatusCallback | None = None,
     ) -> ChatTurnResult:
         session_uuid = await self._ensure_session(session_id)
@@ -230,22 +254,17 @@ class ChatService:
         memory = await self._load_memory(session_uuid)
         runtime = await get_runtime_config()
         provider = get_llm_provider(provider_name or runtime.llm_provider)
-        use_local_router = provider.name == "local"
-
-        if use_local_router:
-            guided_result = await self._handle_guided_schedule_flow(
-                session_uuid,
-                message,
-                memory,
-                status_callback=status_callback,
-            )
-            if guided_result:
-                return guided_result
+        actor_context = await self._build_actor_context(
+            user_id=user_id,
+            user_role=user_role,
+            client_context=client_context or {},
+        )
 
         context_token = set_chat_tool_context(
             {
                 "user_id": user_id,
                 "user_role": user_role,
+                "actor_context": actor_context,
                 "session_id": str(session_uuid),
                 "provider": provider.name,
                 "model": self._model_for_provider(runtime, provider.name),
@@ -254,79 +273,15 @@ class ChatService:
         )
         try:
             tool_results: list[dict[str, Any]] = []
-            if self._looks_like_schedule_delete_request(message.lower()):
-                tool_result = await self._execute_tool_call(
-                    session_uuid,
-                    self._planned_schedule_delete_call(message),
-                    status_callback=status_callback,
-                )
-                return await self._direct_response(
-                    session_uuid,
-                    self._schedule_delete_direct_text(tool_result.get("output", {})),
-                    tool_results=[tool_result],
-                    provider="guided",
-                )
-
-            if self._looks_like_device_open_request(message.lower()):
-                tool_result = await self._execute_tool_call(
-                    session_uuid,
-                    self._planned_device_open_call(message),
-                    status_callback=status_callback,
-                )
-                return await self._direct_response(
-                    session_uuid,
-                    self._device_open_direct_text(tool_result.get("output", {})),
-                    tool_results=[tool_result],
-                    provider="guided",
-                )
-
-            if self._looks_like_camera_snapshot_request(message.lower()):
-                tool_result = await self._execute_tool_call(
-                    session_uuid,
-                    self._planned_camera_snapshot_call(message),
-                    status_callback=status_callback,
-                )
-                return await self._direct_response(
-                    session_uuid,
-                    self._camera_snapshot_direct_text(tool_result.get("output", {})),
-                    tool_results=[tool_result],
-                    provider="guided",
-                )
-
-            if self._looks_like_access_event_time_request(message.lower()):
-                tool_result = await self._execute_tool_call(
-                    session_uuid,
-                    self._planned_access_event_time_call(message, memory),
-                    status_callback=status_callback,
-                )
-                return await self._direct_response(
-                    session_uuid,
-                    self._access_event_time_direct_text(message, tool_result.get("output", {})),
-                    tool_results=[tool_result],
-                    provider="guided",
-                )
-
-            if not use_local_router:
-                preplanned_calls = self._preplanned_context_calls(message, memory, attachment_refs)
-                tool_results = [
-                    await self._execute_tool_call(session_uuid, call, status_callback=status_callback)
-                    for call in preplanned_calls
-                ]
-
-            if use_local_router:
-                planned_calls = self._plan_tool_calls(message, memory, attachment_refs)
-                tool_results = [
-                    await self._execute_tool_call(session_uuid, call, status_callback=status_callback)
-                    for call in planned_calls
-                ]
-
-            selected_tools = self._select_tools_for_request(
-                message,
-                memory,
-                attachment_refs,
+            route = await self._classify_intent(provider, message, memory, attachment_refs, actor_context=actor_context)
+            selected_tools = self._select_tools_for_route(route, attachment_refs)
+            messages = await self._build_agent_messages(
+                session_uuid,
                 tool_results,
+                selected_tools,
+                route,
+                actor_context=actor_context,
             )
-            messages = await self._build_messages(session_uuid, tool_results, selected_tools)
 
             try:
                 result = await self._run_provider_agent_loop(
@@ -336,6 +291,10 @@ class ChatService:
                     tool_results,
                     selected_tools,
                     memory,
+                    route=route,
+                    user_message=message,
+                    attachments=attachment_refs,
+                    actor_context=actor_context,
                     status_callback=status_callback,
                 )
                 if isinstance(result, ChatTurnResult):
@@ -377,30 +336,89 @@ class ChatService:
             text,
             tool_results,
             response_attachments,
+            await self._pending_action_for_response(session_uuid, user_id=user_id),
         )
 
     async def handle_tool_confirmation(
         self,
         *,
-        tool_name: str,
-        arguments: dict[str, Any],
+        tool_name: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        confirmation_id: str | None = None,
+        decision: str = "confirm",
         session_id: str | None = None,
         user_id: str | None = None,
         user_role: str | None = None,
+        client_context: dict[str, Any] | None = None,
         status_callback: StatusCallback | None = None,
     ) -> ChatTurnResult:
         session_uuid = await self._ensure_session(session_id)
+        if confirmation_id:
+            return await self._handle_pending_action_decision(
+                session_uuid,
+                confirmation_id=confirmation_id,
+                decision=decision,
+                user_id=user_id,
+                user_role=user_role,
+                client_context=client_context or {},
+                status_callback=status_callback,
+            )
+
+        return await self._direct_response(
+            session_uuid,
+            "That confirmation is no longer available. Please ask Alfred to prepare the action again.",
+        )
+
+    async def _handle_pending_action_decision(
+        self,
+        session_uuid: uuid.UUID,
+        *,
+        confirmation_id: str,
+        decision: str,
+        user_id: str | None,
+        user_role: str | None,
+        client_context: dict[str, Any],
+        status_callback: StatusCallback | None,
+    ) -> ChatTurnResult:
+        pending = await self._load_pending_agent_action(
+            session_uuid,
+            confirmation_id=confirmation_id,
+            user_id=user_id,
+        )
+        if not pending:
+            return await self._direct_response(
+                session_uuid,
+                "That confirmation has expired or was already handled. Please ask me to prepare it again.",
+            )
+
+        tool_name = str(pending.get("tool_name") or "")
+        if decision.strip().lower() != "confirm":
+            await self._clear_pending_agent_action(session_uuid)
+            await self._append_message(session_uuid, "user", f"Cancelled action {confirmation_id}")
+            return await self._direct_response(session_uuid, "Okay, I cancelled that action. Nothing was changed.")
+
+        runtime = await get_runtime_config()
+        provider = get_llm_provider(str(pending.get("provider") or runtime.llm_provider))
+        actor_context = pending.get("actor_context") if isinstance(pending.get("actor_context"), dict) else await self._build_actor_context(
+            user_id=user_id,
+            user_role=user_role,
+            client_context=client_context,
+        )
+        tool_results: list[dict[str, Any]] = []
         context_token = set_chat_tool_context(
             {
                 "user_id": user_id,
                 "user_role": user_role,
                 "session_id": str(session_uuid),
-                "provider": "tool_confirmation",
-                "model": None,
+                "actor_context": actor_context,
+                "provider": provider.name,
+                "model": self._model_for_provider(runtime, provider.name),
                 "trigger": "user_confirmed",
             }
         )
         try:
+            result_text = ""
+            arguments = self._confirmed_arguments_for_pending(pending)
             call = ToolCall(
                 id=f"confirmed-{tool_name}-{uuid.uuid4().hex[:8]}",
                 name=tool_name,
@@ -409,42 +427,351 @@ class ChatService:
             await self._append_message(
                 session_uuid,
                 "user",
-                self._confirmation_user_message(tool_name, arguments),
+                self._confirmation_user_message(tool_name, {"confirmation_id": confirmation_id}),
             )
-            tool_result = await self._execute_tool_call(
+            try:
+                tool_result = await self._execute_tool_call(
+                    session_uuid,
+                    call,
+                    status_callback=status_callback,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "agent_confirmation_execution_failed",
+                    extra={"tool": tool_name, "error": str(exc)[:240]},
+                )
+                tool_result = {
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "output": {"error": str(exc)[:500], "status": "failed"},
+                }
+            finally:
+                await self._clear_pending_agent_action(session_uuid)
+
+            tool_results = list(pending.get("tool_results") if isinstance(pending.get("tool_results"), list) else [])
+            tool_results.append(tool_result)
+            route = self._route_from_pending(pending)
+            selected_tools = [
+                self._tools[name]
+                for name in pending.get("selected_tools", [])
+                if isinstance(name, str) and name in self._tools
+            ] or self._select_tools_for_route(route, [])
+            memory = await self._load_memory(session_uuid)
+            messages = await self._build_agent_messages(
                 session_uuid,
-                call,
-                status_callback=status_callback,
+                tool_results,
+                selected_tools,
+                route,
+                actor_context=actor_context,
             )
+            try:
+                resumed = await self._run_provider_agent_loop(
+                    provider,
+                    session_uuid,
+                    messages,
+                    tool_results,
+                    selected_tools,
+                    memory,
+                    route=route,
+                    user_message=str(pending.get("user_message") or ""),
+                    attachments=[],
+                    actor_context=actor_context,
+                    status_callback=status_callback,
+                )
+                result_text = resumed.text if isinstance(resumed, LlmResult) else resumed.text
+            except Exception as exc:
+                logger.info("agent_confirmation_resume_failed", extra={"tool": tool_name, "error": str(exc)[:240]})
+                result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
         finally:
             set_chat_tool_context({}, token=context_token)
 
-        attachments = self._attachments_from_tool_results([tool_result])
+        attachments = self._attachments_from_tool_results(tool_results)
         text = self._clean_assistant_text(
-            self._confirmation_result_text(tool_name, tool_result.get("output", {})),
+            result_text or self._confirmation_result_text(tool_name, tool_result.get("output", {})),
             attachments,
         )
         await self._append_message(session_uuid, "assistant", text)
-        await self._update_memory(session_uuid, text, [tool_result])
+        await self._update_memory(session_uuid, text, tool_results)
         await event_bus.publish(
             "chat.message",
             {
                 "session_id": str(session_uuid),
-                "provider": "tool_confirmation",
+                "provider": provider.name,
                 "text": text,
                 "attachments": attachments,
             },
         )
         return ChatTurnResult(
             str(session_uuid),
-            "tool_confirmation",
+            provider.name,
             text,
-            [tool_result],
+            tool_results,
             attachments,
         )
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
+
+    async def _build_actor_context(
+        self,
+        *,
+        user_id: str | None,
+        user_role: str | None,
+        client_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime = await get_runtime_config()
+        site_timezone = runtime.site_timezone or DEFAULT_CHAT_TIMEZONE
+        now = datetime.now(tz=ZoneInfo(site_timezone))
+        context: dict[str, Any] = {
+            "site": {
+                "timezone": site_timezone,
+                "local_time": now.isoformat(),
+                "location": "IACS private site",
+            },
+            "client": {
+                key: value
+                for key, value in {
+                    "timezone": client_context.get("timezone"),
+                    "locale": client_context.get("locale"),
+                }.items()
+                if value
+            },
+            "user": {
+                "id": user_id,
+                "role": user_role,
+            },
+            "person": None,
+            "vehicles": [],
+        }
+        if not user_id:
+            return context
+        try:
+            parsed_user_id = uuid.UUID(str(user_id))
+        except (TypeError, ValueError):
+            return context
+
+        async with AsyncSessionLocal() as session:
+            user = await session.get(User, parsed_user_id)
+            if not user:
+                return context
+            first_name = user.first_name or ""
+            last_name = user.last_name or ""
+            display_name = " ".join(part for part in [first_name, last_name] if part).strip() or user.full_name
+            context["user"] = {
+                "id": str(user.id),
+                "role": user.role.value,
+                "username": user.username,
+                "display_name": display_name,
+                "person_id": str(user.person_id) if user.person_id else None,
+            }
+            if not user.person_id:
+                return context
+            person = await session.scalar(
+                select(Person)
+                .options(
+                    selectinload(Person.group),
+                    selectinload(Person.schedule),
+                    selectinload(Person.presence),
+                    selectinload(Person.vehicles).selectinload(Vehicle.schedule),
+                )
+                .where(Person.id == user.person_id)
+            )
+            if not person:
+                return context
+            presence = person.presence
+            context["person"] = {
+                "id": str(person.id),
+                "display_name": person.display_name,
+                "first_name": person.first_name,
+                "last_name": person.last_name,
+                "group_id": str(person.group_id) if person.group_id else None,
+                "group": person.group.name if person.group else None,
+                "schedule_id": str(person.schedule_id) if person.schedule_id else None,
+                "schedule": person.schedule.name if person.schedule else None,
+                "presence": presence.state.value if presence else None,
+                "presence_last_changed_at": (
+                    presence.last_changed_at.isoformat() if presence and presence.last_changed_at else None
+                ),
+                "is_active": person.is_active,
+            }
+            context["vehicles"] = [
+                {
+                    "id": str(vehicle.id),
+                    "registration_number": vehicle.registration_number,
+                    "make": vehicle.make,
+                    "model": vehicle.model,
+                    "color": vehicle.color,
+                    "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
+                    "schedule": vehicle.schedule.name if vehicle.schedule else None,
+                    "is_active": vehicle.is_active,
+                }
+                for vehicle in person.vehicles
+                if vehicle.is_active
+            ]
+        return context
+
+    async def _classify_intent(
+        self,
+        provider: Any,
+        message: str,
+        memory: dict[str, Any],
+        attachments: list[dict[str, Any]],
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> IntentRoute:
+        fallback = self._deterministic_intent_route(message, memory, attachments, actor_context=actor_context)
+        if provider.name == "local":
+            return fallback
+
+        try:
+            result = await provider.complete(
+                [
+                    ChatMessageInput("system", INTENT_ROUTER_PROMPT),
+                    ChatMessageInput(
+                        "user",
+                        json.dumps(
+                            {
+                                "message": message,
+                                "has_attachments": bool(attachments),
+                                "session_memory": memory,
+                                "actor_context": actor_context or {},
+                            },
+                            default=str,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                ]
+            )
+        except Exception as exc:
+            logger.info(
+                "intent_router_fallback",
+                extra={"provider": getattr(provider, "name", "unknown"), "error": str(exc)[:240]},
+            )
+            return fallback
+
+        payload = self._extract_tool_call_payload(result.text)
+        if not isinstance(payload, dict):
+            return fallback
+        raw_intents = payload.get("intents")
+        intents = tuple(
+            intent
+            for intent in (str(item).strip() for item in raw_intents or [])
+            if intent in SUPPORTED_INTENTS
+        )
+        if not intents:
+            intents = fallback.intents
+        try:
+            confidence = max(0.0, min(1.0, float(payload.get("confidence"))))
+        except (TypeError, ValueError):
+            confidence = fallback.confidence
+        return IntentRoute(
+            intents=intents,
+            confidence=confidence,
+            requires_entity_resolution=bool(
+                payload.get("requires_entity_resolution", fallback.requires_entity_resolution)
+            ),
+            reason=str(payload.get("reason") or fallback.reason)[:240],
+            source=f"{provider.name}_classifier",
+        )
+
+    def _deterministic_intent_route(
+        self,
+        message: str,
+        memory: dict[str, Any],
+        attachments: list[dict[str, Any]],
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> IntentRoute:
+        lower = message.lower()
+        intents: list[str] = []
+        if attachments or any(word in lower for word in ["file", "attachment", "download", "csv", "pdf", "export", "invoice"]):
+            intents.append("Reports_Files")
+        if any(word in lower for word in ["camera", "snapshot", "image", "photo", "picture", "visible", "see"]):
+            intents.append("Cameras")
+        if any(word in lower for word in ["notification", "notifications", "workflow", "workflows", "template", "apprise"]):
+            intents.append("Notifications")
+        if any(word in lower for word in ["maintenance", "kill-switch", "kill switch", "disable automation", "resume automation"]):
+            intents.append("Maintenance")
+        if any(word in lower for word in ["schedule", "schedules", "timeframe", "allowed", "access window"]):
+            intents.append("Schedules")
+        if any(word in lower for word in ["dvla", "mot", "tax", "compliance", "registration", "plate", "vehicle", "tesla", "car"]):
+            intents.append("Compliance_DVLA")
+        if any(word in lower for word in ["gate", "garage", "door", "cover", "device", "malfunction", "fubar", "stuck", "open"]):
+            intents.append("Gate_Hardware")
+        if self._looks_like_access_diagnostic_request(lower) or any(
+            word in lower for word in ["why", "failed", "failure", "didn't", "didnt", "slow", "latency", "delay", "malfunction"]
+        ):
+            intents.append("Access_Diagnostics")
+        if any(
+            word in lower
+            for word in ["present", "presence", "onsite", "on site", "arrive", "arrival", "arrived", "left", "leave", "exit", "event", "denied", "anomaly", "how long", "duration", "leaderboard", "top charts"]
+        ):
+            intents.append("Access_Logs")
+        if any(word in lower for word in ["user", "users", "account", "accounts", "admin", "setting", "settings", "telemetry", "trace"]):
+            intents.append("Users_Settings")
+        if memory.get("pending_schedule_create"):
+            intents.append("Schedules")
+        if not intents:
+            intents.append("General")
+        deduped = tuple(dict.fromkeys(intent for intent in intents if intent in SUPPORTED_INTENTS))
+        actor_has_vehicle = bool(((actor_context or {}).get("vehicles") or []))
+        actor_has_person = bool(((actor_context or {}).get("person") or {}).get("id"))
+        pronoun_reference = bool(re.search(r"\b(he|she|they|them|their|it|that|steph|wife|husband|tesla|car|vehicle)\b", lower))
+        exact_actor_reference = bool(
+            actor_has_person
+            and re.search(r"\b(me|myself|mine)\b", lower)
+            or actor_has_vehicle
+            and re.search(r"\b(my car|my vehicle|my tesla)\b", lower)
+        )
+        needs_entity = bool(
+            pronoun_reference and not exact_actor_reference
+            or self._person_name_from_event_time_message(lower)
+            or self._registration_from_message(message)
+        )
+        return IntentRoute(
+            intents=deduped,
+            confidence=0.72 if deduped != ("General",) else 0.45,
+            requires_entity_resolution=needs_entity,
+            reason="deterministic keyword and session-memory route",
+            source="deterministic",
+        )
+
+    def _select_tools_for_route(
+        self,
+        route: IntentRoute,
+        attachments: list[dict[str, Any]],
+    ) -> list[AgentTool]:
+        intents = set(route.intents or ("General",))
+        names: set[str] = {"resolve_human_entity"}
+        if attachments:
+            names.add("read_chat_attachment")
+        for name, tool in self._tools.items():
+            if intents.intersection(tool.categories):
+                if intents == {"General"} and not tool.read_only:
+                    continue
+                names.add(name)
+        if "Access_Diagnostics" in intents:
+            names.update(
+                {
+                    "diagnose_access_event",
+                    "get_maintenance_status",
+                    "get_telemetry_trace",
+                    "query_access_events",
+                    "query_lpr_timing",
+                    "resolve_human_entity",
+                    "verify_schedule_access",
+                }
+            )
+        if "Gate_Hardware" in intents:
+            names.update({"get_maintenance_status", "query_device_states"})
+        if "Compliance_DVLA" in intents:
+            names.update({"lookup_dvla_vehicle", "query_vehicle_detection_history"})
+        if "Schedules" in intents:
+            names.update({"query_schedules", "query_schedule_targets", "verify_schedule_access"})
+        if "Reports_Files" in intents and attachments:
+            names.add("read_chat_attachment")
+        return [tool for name, tool in self._tools.items() if name in names]
 
     async def _run_provider_agent_loop(
         self,
@@ -455,24 +782,53 @@ class ChatService:
         selected_tools: list[AgentTool],
         memory: dict[str, Any],
         *,
+        route: IntentRoute | None = None,
+        user_message: str = "",
+        attachments: list[dict[str, Any]] | None = None,
+        actor_context: dict[str, Any] | None = None,
         status_callback: StatusCallback | None,
     ) -> LlmResult | ChatTurnResult:
         tool_schemas = [tool.as_llm_tool() for tool in selected_tools]
+        allowed_tool_names = {tool.name for tool in selected_tools}
         executed: set[str] = set()
         result = LlmResult(text="")
+        route = route or IntentRoute(("General",), 0.5, True, "default route")
 
         for iteration in range(MAX_AGENT_TOOL_ITERATIONS):
-            result = await provider.complete(
-                messages,
-                tools=tool_schemas,
-                tool_results=tool_results if provider.name == "local" else None,
-            )
-            calls = self._tool_calls_from_result(result, iteration=iteration)
+            if provider.name == "local":
+                calls = self._deterministic_react_calls(
+                    user_message,
+                    route,
+                    memory,
+                    attachments or [],
+                    tool_results,
+                    selected_tools,
+                    iteration=iteration,
+                    actor_context=actor_context,
+                )
+                if not calls:
+                    result = await provider.complete(messages, tools=tool_schemas, tool_results=tool_results)
+                    return LlmResult(text=self._clean_agent_text(result.text), raw=result.raw)
+            else:
+                result = await provider.complete(messages, tools=tool_schemas)
+                final_text = self._react_final_from_result(result)
+                if final_text:
+                    return LlmResult(text=final_text, raw=result.raw)
+                calls = self._tool_calls_from_result(result, iteration=iteration)
             if not calls:
                 return LlmResult(text=self._clean_agent_text(result.text), raw=result.raw)
 
             fresh_calls: list[ToolCall] = []
             for call in calls:
+                if call.name not in allowed_tool_names:
+                    return LlmResult(
+                        text=(
+                            f"I could not safely use {call.name or 'that tool'} for this request. "
+                            "Please rephrase the request or specify the system area you want me to inspect."
+                        ),
+                        raw=result.raw,
+                    )
+                call = self._safe_state_changing_call(call)
                 fingerprint = self._tool_call_fingerprint(call)
                 if fingerprint not in executed:
                     executed.add(fingerprint)
@@ -483,24 +839,68 @@ class ChatService:
                     raw=result.raw,
                 )
 
-            native_results = [
-                await self._execute_tool_call(
-                    session_id,
-                    call,
-                    status_callback=status_callback,
+            tool_by_name = {tool.name: tool for tool in selected_tools}
+            read_calls = [call for call in fresh_calls if tool_by_name.get(call.name) and tool_by_name[call.name].read_only]
+            action_calls = [call for call in fresh_calls if call not in read_calls]
+            native_results: list[dict[str, Any]] = []
+            if read_calls:
+                native_results.extend(
+                    await self._execute_tool_batch(
+                        session_id,
+                        read_calls,
+                        selected_tools,
+                        status_callback=status_callback,
+                    )
                 )
-                for call in fresh_calls
-            ]
+            if action_calls:
+                native_results.extend(
+                    await self._execute_tool_batch(
+                        session_id,
+                        action_calls[:1],
+                        selected_tools,
+                        status_callback=status_callback,
+                    )
+                )
             tool_results.extend(native_results)
             conflict_result = await self._schedule_conflict_response(session_id, memory, tool_results)
             if conflict_result:
                 return conflict_result
-            messages = await self._build_messages(session_id, tool_results, selected_tools)
+            if any(
+                isinstance(result.get("output"), dict) and result["output"].get("requires_confirmation")
+                for result in native_results
+            ):
+                pending_result = next(
+                    result
+                    for result in native_results
+                    if isinstance(result.get("output"), dict) and result["output"].get("requires_confirmation")
+                )
+                pending_action = await self._store_pending_agent_action(
+                    session_id,
+                    pending_result,
+                    tool_results,
+                    route,
+                    selected_tools,
+                    provider_name=provider.name,
+                    user_message=user_message,
+                    user_id=str((actor_context or {}).get("user", {}).get("id") or ""),
+                    actor_context=actor_context or {},
+                    iteration=iteration,
+                )
+                if status_callback:
+                    await status_callback({"event": "chat.confirmation_required", **pending_action})
+                return LlmResult(text=self._fallback_text(tool_results), raw=result.raw)
+            messages = await self._build_agent_messages(
+                session_id,
+                tool_results,
+                selected_tools,
+                route,
+                actor_context=actor_context,
+            )
 
         return LlmResult(
             text=(
-                "I ran several system checks but still need a clearer next step. "
-                "Please narrow the request or confirm the specific action."
+                "I hit my five-step safety limit while checking this. "
+                f"{self._fallback_text(tool_results)}"
             ),
             raw=result.raw,
         )
@@ -509,6 +909,14 @@ class ChatService:
         if result.tool_calls:
             return result.tool_calls
         return self._tool_calls_from_text(result.text, iteration=iteration)
+
+    def _react_final_from_result(self, result: LlmResult) -> str | None:
+        if result.tool_calls:
+            return None
+        payload = self._extract_tool_call_payload(result.text)
+        if isinstance(payload, dict) and isinstance(payload.get("final"), str):
+            return payload["final"].strip()
+        return None
 
     def _tool_calls_from_text(self, text: str, *, iteration: int) -> list[ToolCall]:
         payload = self._extract_tool_call_payload(text)
@@ -520,6 +928,14 @@ class ChatService:
             raw_calls = payload.get("tool_calls") or payload.get("tools") or payload.get("calls")
             if raw_calls is None and (payload.get("name") or payload.get("tool")):
                 raw_calls = [payload]
+            if raw_calls is None and payload.get("tool_name"):
+                raw_calls = [
+                    {
+                        "id": payload.get("id") or f"react-{iteration}",
+                        "name": payload.get("tool_name"),
+                        "arguments": payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {},
+                    }
+                ]
         elif isinstance(payload, list):
             raw_calls = payload
         else:
@@ -604,12 +1020,275 @@ class ChatService:
         cleaned = text.strip()
         if "IACS_TOOL_CALLS:" in cleaned:
             return "I could not safely interpret the tool request. Please rephrase that and I will try again."
+        payload = self._extract_tool_call_payload(cleaned)
+        if isinstance(payload, dict):
+            if isinstance(payload.get("final"), str):
+                return payload["final"].strip()
+            if payload.get("thought") or payload.get("tool_name"):
+                return "I could not safely complete that tool step. Please rephrase that and I will try again."
         if cleaned.startswith("IACS_FINAL:"):
             return cleaned.removeprefix("IACS_FINAL:").strip()
         return cleaned
 
     def _tool_call_fingerprint(self, call: ToolCall) -> str:
         return f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
+
+    def _safe_state_changing_call(self, call: ToolCall) -> ToolCall:
+        if call.name not in STATE_CHANGING_TOOL_NAMES:
+            return call
+        arguments = dict(call.arguments)
+        if "confirm" in arguments or call.name != "test_notification_workflow":
+            arguments["confirm"] = False
+        if "confirm_send" in arguments or call.name == "test_notification_workflow":
+            arguments["confirm_send"] = False
+        return ToolCall(call.id, call.name, arguments)
+
+    def _deterministic_react_calls(
+        self,
+        message: str,
+        route: IntentRoute,
+        memory: dict[str, Any],
+        attachments: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+        selected_tools: list[AgentTool],
+        *,
+        iteration: int,
+        actor_context: dict[str, Any] | None = None,
+    ) -> list[ToolCall]:
+        allowed = {tool.name for tool in selected_tools}
+        intents = set(route.intents)
+        lower = message.lower()
+        calls: list[ToolCall] = []
+
+        if iteration == 0 and route.requires_entity_resolution and "resolve_human_entity" in allowed:
+            entity_types = self._entity_types_for_route(route)
+            query = self._entity_query_from_message(message, memory)
+            if query:
+                calls.append(
+                    ToolCall(
+                        "react-resolve-entity",
+                        "resolve_human_entity",
+                        {"query": query, "entity_types": entity_types},
+                    )
+                )
+
+        if iteration == 0:
+            for index, attachment in enumerate(attachments[:4]):
+                if "read_chat_attachment" in allowed:
+                    calls.append(
+                        ToolCall(
+                            f"react-read-attachment-{index}",
+                            "read_chat_attachment",
+                            {
+                                "file_id": attachment["id"],
+                                "prompt": message or "Summarize this attachment for the user.",
+                            },
+                        )
+                    )
+
+        if iteration > 0 or not calls:
+            if "Access_Diagnostics" in intents and "diagnose_access_event" in allowed:
+                args = self._access_diagnostic_args_from_message(message, memory, actor_context=actor_context)
+                args.setdefault("summarize_payload", True)
+                args.setdefault("span_limit", 20)
+                calls.append(ToolCall("react-diagnose-access", "diagnose_access_event", args))
+                if self._looks_like_lpr_timing_request(lower) and "query_lpr_timing" in allowed:
+                    lpr_args = {
+                        key: value
+                        for key, value in {
+                            "registration_number": args.get("registration_number"),
+                            "limit": 25,
+                        }.items()
+                        if value
+                    }
+                    calls.append(ToolCall("react-lpr-timing", "query_lpr_timing", lpr_args))
+            elif "Gate_Hardware" in intents:
+                if self._looks_like_device_action_request(lower):
+                    action = self._device_action_from_message(lower)
+                    if action == "open" and "garage" not in lower and "open_gate" in allowed:
+                        calls.append(
+                            ToolCall(
+                                "react-open-gate",
+                                "open_gate",
+                                {
+                                    "target": self._device_target_from_message(lower) or "",
+                                    "reason": message,
+                                    "confirm": self._explicitly_confirmed_device_action(lower),
+                                },
+                            )
+                        )
+                    elif action == "close" and "command_device" in allowed:
+                        calls.append(self._planned_device_action_call(message))
+                    elif "command_device" in allowed:
+                        calls.append(self._planned_device_action_call(message))
+                    elif "open_device" in allowed:
+                        calls.append(self._planned_device_open_call(message))
+                elif "query_device_states" in allowed:
+                    calls.append(
+                        ToolCall(
+                            "react-query-device-states",
+                            "query_device_states",
+                            {"target": self._device_target_from_message(lower) or "", "kind": "all"},
+                        )
+                    )
+                if any(word in lower for word in ["malfunction", "fubar", "stuck", "recovery", "attempt"]) and "get_active_malfunctions" in allowed:
+                    calls.append(ToolCall("react-active-malfunctions", "get_active_malfunctions", {"include_timeline": True}))
+            elif "Maintenance" in intents:
+                if "toggle_maintenance_mode" in allowed and any(word in lower for word in ["enable", "turn on", "activate", "start", "disable automation"]):
+                    calls.append(
+                        ToolCall(
+                            "react-enable-maintenance",
+                            "toggle_maintenance_mode",
+                            {"state": "enabled", "reason": message, "confirm": self._is_confirmation_message(lower)},
+                        )
+                    )
+                elif "toggle_maintenance_mode" in allowed and any(word in lower for word in ["disable", "turn off", "deactivate", "stop", "resume automation"]):
+                    calls.append(
+                        ToolCall(
+                            "react-disable-maintenance",
+                            "toggle_maintenance_mode",
+                            {"state": "disabled", "confirm": self._is_confirmation_message(lower)},
+                        )
+                    )
+                elif "get_maintenance_status" in allowed:
+                    calls.append(ToolCall("react-maintenance-status", "get_maintenance_status", {}))
+            elif "Compliance_DVLA" in intents:
+                registration_number = self._registration_from_message(message)
+                if registration_number and "lookup_dvla_vehicle" in allowed:
+                    calls.append(ToolCall("react-dvla", "lookup_dvla_vehicle", {"registration_number": registration_number}))
+                elif "query_vehicle_detection_history" in allowed:
+                    calls.append(ToolCall("react-vehicle-history", "query_vehicle_detection_history", {"period": "recent", "limit": 10}))
+            elif "Access_Logs" in intents:
+                if any(phrase in lower for phrase in ["how long", "duration", "stay", "stayed"]) and "calculate_visit_duration" in allowed:
+                    args = self._subject_args(self._subject_from_message(lower, memory, actor_context=actor_context))
+                    args["day"] = "today" if "today" in lower else "recent"
+                    calls.append(ToolCall("react-duration", "calculate_visit_duration", args))
+                elif "query_access_events" in allowed:
+                    args = self._subject_args(self._subject_from_message(lower, memory, actor_context=actor_context))
+                    args["day"] = "today" if "today" in lower else "recent"
+                    args["limit"] = 10
+                    args["summarize_payload"] = True
+                    calls.append(ToolCall("react-query-events", "query_access_events", args))
+            elif "Schedules" in intents and "query_schedules" in allowed:
+                calls.append(ToolCall("react-query-schedules", "query_schedules", {"include_dependencies": True}))
+            elif "Notifications" in intents and "query_notification_workflows" in allowed:
+                calls.append(ToolCall("react-query-notifications", "query_notification_workflows", {"limit": 20}))
+            elif "Cameras" in intents and "get_camera_snapshot" in allowed and self._looks_like_camera_snapshot_request(lower):
+                calls.append(self._planned_camera_snapshot_call(message))
+            elif "Users_Settings" in intents:
+                if "get_telemetry_trace" in allowed and "trace" in lower:
+                    calls.append(ToolCall("react-telemetry", "get_telemetry_trace", {"limit": 20}))
+                elif "get_system_users" in allowed:
+                    calls.append(ToolCall("react-users", "get_system_users", {}))
+            elif "query_presence" in allowed:
+                calls.append(ToolCall("react-presence", "query_presence", {}))
+
+        fresh: list[ToolCall] = []
+        seen = {
+            self._tool_call_fingerprint(
+                ToolCall(str(result.get("call_id") or ""), str(result.get("name") or ""), result.get("arguments") if isinstance(result.get("arguments"), dict) else {})
+            )
+            for result in tool_results
+        }
+        for call in calls:
+            if call.name not in allowed:
+                continue
+            fingerprint = self._tool_call_fingerprint(call)
+            if fingerprint in seen:
+                continue
+            fresh.append(call)
+        return fresh[:2]
+
+    def _entity_types_for_route(self, route: IntentRoute) -> list[str]:
+        intents = set(route.intents)
+        if "Gate_Hardware" in intents:
+            return ["device", "person", "vehicle"]
+        if "Compliance_DVLA" in intents:
+            return ["vehicle", "person"]
+        if "Schedules" in intents:
+            return ["person", "vehicle", "group", "device"]
+        if "Access_Logs" in intents or "Access_Diagnostics" in intents:
+            return ["person", "vehicle", "group"]
+        return ["person", "vehicle", "group", "device"]
+
+    def _entity_query_from_message(self, message: str, memory: dict[str, Any]) -> str:
+        registration = self._registration_from_message(message)
+        if registration:
+            return registration
+        person_name = self._person_name_from_event_time_message(message.lower())
+        if person_name:
+            return person_name
+        subject = self._subject_from_message(message.lower(), memory)
+        if subject.get("person"):
+            return subject["person"]
+        if subject.get("group"):
+            return subject["group"]
+        match = re.search(r"\b(?:for|did|didn't|didnt|was|is|has|about)\s+([A-Za-z][A-Za-z' -]{1,40})", message)
+        if match:
+            return match.group(1).strip(" ?.!'")
+        return message.strip()[:80]
+
+    def _tool_results_for_prompt(self, tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "call_id": result.get("call_id"),
+                "name": result.get("name"),
+                "arguments": self._compact_prompt_value(result.get("arguments") if isinstance(result.get("arguments"), dict) else {}),
+                "output": self._compact_prompt_value(result.get("output") if isinstance(result.get("output"), dict) else result.get("output")),
+            }
+            for result in tool_results
+        ]
+
+    def _compact_prompt_value(self, value: Any, *, depth: int = 0) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value if len(value) <= 1000 else f"{value[:1000]}... [truncated]"
+        if isinstance(value, list):
+            if depth >= 4:
+                return {"type": "list", "count": len(value)}
+            items = [self._compact_prompt_value(item, depth=depth + 1) for item in value[:12]]
+            if len(value) > 12:
+                items.append({"omitted_items": len(value) - 12})
+            return items
+        if isinstance(value, dict):
+            if depth >= 4:
+                return {"type": "object", "keys": list(value.keys())[:20], "key_count": len(value)}
+            compacted = {}
+            for key, item in list(value.items())[:50]:
+                key_text = str(key)
+                if any(secret in key_text.lower() for secret in ("api_key", "password", "secret", "token")):
+                    compacted[key_text] = "[redacted]"
+                elif any(media in key_text.lower() for media in ("image", "photo", "snapshot", "thumbnail", "video")):
+                    compacted[key_text] = "[omitted_large_media]"
+                else:
+                    compacted[key_text] = self._compact_prompt_value(item, depth=depth + 1)
+            if len(value) > 50:
+                compacted["omitted_keys"] = len(value) - 50
+            return {key: item for key, item in compacted.items() if item not in (None, "", [], {})}
+        return str(value)
+
+    async def _build_agent_messages(
+        self,
+        session_id: uuid.UUID,
+        tool_results: list[dict[str, Any]],
+        selected_tools: list[AgentTool],
+        route: IntentRoute,
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> list[ChatMessageInput]:
+        try:
+            return await self._build_messages(
+                session_id,
+                tool_results,
+                selected_tools,
+                route=route,
+                actor_context=actor_context,
+            )
+        except TypeError as exc:
+            if "route" not in str(exc) and "actor_context" not in str(exc):
+                raise
+            return await self._build_messages(session_id, tool_results, selected_tools)
 
     async def _handle_guided_schedule_flow(
         self,
@@ -974,10 +1653,22 @@ class ChatService:
     def _confirmation_result_text(self, tool_name: str, output: dict[str, Any]) -> str:
         if output.get("error"):
             return str(output.get("detail") or output.get("error") or "I could not complete that action.")
-        if tool_name == "open_device":
+        if tool_name in {"open_device", "command_device", "open_gate"}:
             device = output.get("device") if isinstance(output.get("device"), dict) else {}
-            name = device.get("name") or output.get("target") or "the device"
-            return f"Opened {name}. This was logged as an Alfred action." if output.get("opened") else f"I could not open {name}."
+            name = device.get("name") or output.get("target") or "the gate"
+            action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
+            past = "Opened" if action == "open" else "Closed"
+            success = bool(output.get("opened") if action == "open" else output.get("closed"))
+            return f"{past} {name}. This was logged as an Alfred action." if success else f"I could not {action} {name}."
+        if tool_name == "override_schedule":
+            if output.get("created"):
+                return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
+            return str(output.get("detail") or "I did not create the schedule override.")
+        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
+            if output.get("changed") or output.get("enabled") or output.get("disabled"):
+                state = output.get("state") or ("enabled" if output.get("enabled") else "disabled")
+                return f"Maintenance Mode is now {state}."
+            return str(output.get("detail") or output.get("error") or "I did not change Maintenance Mode.")
         if tool_name == "update_schedule":
             schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
             name = schedule.get("name") or output.get("schedule_name") or "the schedule"
@@ -1000,6 +1691,10 @@ class ChatService:
             if output.get("sent"):
                 return "Sent the notification workflow test."
             return str(output.get("detail") or "I did not send the notification workflow test.")
+        if tool_name == "trigger_anomaly_alert":
+            if output.get("sent"):
+                return f"Sent the anomaly alert: {output.get('title') or 'Alert'}."
+            return str(output.get("detail") or output.get("error") or "I did not send the anomaly alert.")
         return str(output.get("detail") or "Action completed.")
 
     async def _ensure_session(self, session_id: str | None) -> uuid.UUID:
@@ -1043,6 +1738,9 @@ class ChatService:
         session_id: uuid.UUID,
         tool_results: list[dict[str, Any]],
         selected_tools: list[AgentTool],
+        *,
+        route: IntentRoute | None = None,
+        actor_context: dict[str, Any] | None = None,
     ) -> list[ChatMessageInput]:
         async with AsyncSessionLocal() as session:
             rows = (
@@ -1060,12 +1758,24 @@ class ChatService:
         runtime = await get_runtime_config()
         site_timezone = runtime.site_timezone or DEFAULT_CHAT_TIMEZONE
         history_rows = self._select_relevant_history(list(reversed(rows)), memory)
-        tool_protocol = AGENT_TOOL_PROTOCOL.replace(
-            "{tool_catalog}",
-            json.dumps(
-                [tool.as_llm_tool() for tool in selected_tools],
-                separators=(",", ":"),
-            ),
+        route_payload = {
+            "intents": list(route.intents) if route else ["General"],
+            "confidence": route.confidence if route else 0.5,
+            "requires_entity_resolution": route.requires_entity_resolution if route else True,
+            "reason": route.reason if route else "default route",
+            "source": route.source if route else "default",
+        }
+        tool_protocol = (
+            REACT_TOOL_PROTOCOL
+            .replace("{max_iterations}", str(MAX_AGENT_TOOL_ITERATIONS))
+            .replace("{routing}", json.dumps(route_payload, separators=(",", ":"), default=str))
+            .replace(
+                "{tool_catalog}",
+                json.dumps(
+                    [tool.as_llm_tool() for tool in selected_tools],
+                    separators=(",", ":"),
+                ),
+            )
         )
         messages = [
             ChatMessageInput(
@@ -1074,6 +1784,7 @@ class ChatService:
                     f"{SYSTEM_PROMPT}\nSite timezone: {site_timezone}. "
                     "All user-facing dates and times must use this timezone; "
                     "do not present UTC timestamps unless the user explicitly asks for UTC.\n"
+                    f"Current authenticated user context: {json.dumps(actor_context or {}, default=str, separators=(',', ':'))}\n"
                     f"Session memory: {json.dumps(memory, default=str)}\n\n{tool_protocol}"
                 ),
             )
@@ -1084,8 +1795,8 @@ class ChatService:
             messages.append(
                 ChatMessageInput(
                     "user",
-                    "Tool results for the current user request: "
-                    f"{json.dumps(tool_results, default=str)}",
+                    "Observations for the current user request: "
+                    f"{json.dumps(self._tool_results_for_prompt(tool_results), default=str, separators=(',', ':'))}",
                 )
             )
         return messages
@@ -1204,7 +1915,7 @@ class ChatService:
         if attachments:
             names.add("read_chat_attachment")
 
-        if self._looks_like_device_open_request(lower):
+        if self._looks_like_device_action_request(lower):
             names.update(DEVICE_TOOL_NAMES)
         elif self._looks_like_device_state_request(lower):
             names.add("query_device_states")
@@ -1272,7 +1983,7 @@ class ChatService:
                 names.add(name)
             output = result.get("output")
             if isinstance(output, dict) and output.get("requires_confirmation"):
-                if name == "open_device":
+                if name in {"open_device", "command_device"}:
                     names.update(DEVICE_TOOL_NAMES)
                 elif name == "trigger_manual_malfunction_override":
                     names.update(MALFUNCTION_TOOL_NAMES)
@@ -1311,19 +2022,36 @@ class ChatService:
                 )
             )
 
-        if self._looks_like_device_open_request(lower):
-            calls.append(
-                ToolCall(
-                    "planned-open-device",
-                    "open_device",
-                    {
-                        "target": self._device_target_from_message(lower) or "",
-                        "kind": "all",
-                        "reason": message,
-                        "confirm": self._explicitly_confirmed_device_open(lower),
-                    },
+        if self._looks_like_device_action_request(lower):
+            action = self._device_action_from_message(lower)
+            if action == "open" and "garage" not in lower and "open_gate" in self._tools:
+                calls.append(
+                    ToolCall(
+                        "planned-open-gate",
+                        "open_gate",
+                        {
+                            "target": self._device_target_from_message(lower) or "",
+                            "reason": message,
+                            "confirm": self._explicitly_confirmed_device_action(lower),
+                        },
+                    )
                 )
-            )
+            elif action == "close" and "command_device" in self._tools:
+                calls.append(self._planned_device_action_call(message))
+            else:
+                calls.append(
+                    ToolCall(
+                        "planned-open-device",
+                        "open_device",
+                        {
+                            "target": self._device_target_from_message(lower) or "",
+                            "action": action,
+                            "kind": "all",
+                            "reason": message,
+                            "confirm": self._explicitly_confirmed_device_action(lower),
+                        },
+                    )
+                )
 
         if self._looks_like_device_state_request(lower):
             calls.append(
@@ -1339,16 +2067,16 @@ class ChatService:
                 calls.append(
                     ToolCall(
                         "planned-enable-maintenance",
-                        "enable_maintenance_mode",
-                        {"reason": message, "confirm": self._is_confirmation_message(lower)},
+                        "toggle_maintenance_mode",
+                        {"state": "enabled", "reason": message, "confirm": self._is_confirmation_message(lower)},
                     )
                 )
             elif any(word in lower for word in ["disable", "turn off", "deactivate", "stop", "resume automation"]):
                 calls.append(
                     ToolCall(
                         "planned-disable-maintenance",
-                        "disable_maintenance_mode",
-                        {"confirm": self._is_confirmation_message(lower)},
+                        "toggle_maintenance_mode",
+                        {"state": "disabled", "confirm": self._is_confirmation_message(lower)},
                     )
                 )
             else:
@@ -1543,9 +2271,27 @@ class ChatService:
             "open_device",
             {
                 "target": target,
+                "action": "open",
                 "kind": "all",
                 "reason": message,
                 "confirm": self._explicitly_confirmed_device_open(lower),
+            },
+        )
+
+    def _planned_device_action_call(self, message: str) -> ToolCall:
+        lower = message.lower()
+        action = self._device_action_from_message(lower)
+        target = self._device_target_from_message(lower) or ""
+        tool_name = "command_device" if "command_device" in self._tools else "open_device"
+        return ToolCall(
+            f"planned-{action}-device",
+            tool_name,
+            {
+                "target": target,
+                "action": action,
+                "kind": "all",
+                "reason": message,
+                "confirm": self._explicitly_confirmed_device_action(lower),
             },
         )
 
@@ -1599,13 +2345,15 @@ class ChatService:
     def _device_open_direct_text(self, output: dict[str, Any]) -> str:
         device = output.get("device") if isinstance(output.get("device"), dict) else {}
         name = str(device.get("name") or output.get("target") or "that device").strip()
+        action = str(output.get("action") or "open")
         if output.get("requires_details"):
-            return str(output.get("detail") or "Which gate or garage door should I open?")
+            return str(output.get("detail") or f"Which gate or garage door should I {action}?")
         if output.get("requires_confirmation"):
-            return f"Please confirm before I open {name}."
-        if output.get("opened"):
-            return f"Opened {name}. This was logged as an Alfred action."
-        return str(output.get("detail") or output.get("error") or f"I could not open {name}.")
+            return f"Please confirm before I {action} {name}."
+        success = bool(output.get("opened") if action == "open" else output.get("closed"))
+        if success:
+            return f"{'Opened' if action == 'open' else 'Closed'} {name}. This was logged as an Alfred action."
+        return str(output.get("detail") or output.get("error") or f"I could not {action} {name}.")
 
     def _schedule_delete_direct_text(self, output: dict[str, Any]) -> str:
         schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
@@ -1650,7 +2398,16 @@ class ChatService:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(ZoneInfo(DEFAULT_CHAT_TIMEZONE)).strftime("%H:%M")
 
-    def _subject_from_message(self, lower: str, memory: dict[str, Any]) -> dict[str, str]:
+    def _subject_from_message(
+        self,
+        lower: str,
+        memory: dict[str, Any],
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        actor_subject = self._actor_subject_from_message(lower, actor_context or {})
+        if actor_subject:
+            return actor_subject
         if "gardener" in lower:
             return {"group": "gardener"}
         if "contractor" in lower:
@@ -1662,7 +2419,26 @@ class ChatService:
                 return {"person": memory["last_person"]}
         return {}
 
+    def _actor_subject_from_message(self, lower: str, actor_context: dict[str, Any]) -> dict[str, str]:
+        person = actor_context.get("person") if isinstance(actor_context.get("person"), dict) else {}
+        vehicles = actor_context.get("vehicles") if isinstance(actor_context.get("vehicles"), list) else []
+        if re.search(r"\b(my car|my vehicle|my tesla)\b", lower) and vehicles:
+            vehicle = next((item for item in vehicles if isinstance(item, dict)), None)
+            if vehicle and vehicle.get("id"):
+                return {"vehicle_id": str(vehicle["id"])}
+            if vehicle and vehicle.get("registration_number"):
+                return {"registration_number": str(vehicle["registration_number"])}
+        if re.search(r"\b(me|myself|mine)\b", lower) and person.get("id"):
+            return {"person_id": str(person["id"]), "person": str(person.get("display_name") or "")}
+        return {}
+
     def _subject_args(self, subject: dict[str, str]) -> dict[str, str]:
+        if "vehicle_id" in subject:
+            return {"vehicle_id": subject["vehicle_id"]}
+        if "person_id" in subject:
+            return {"person_id": subject["person_id"]}
+        if "registration_number" in subject:
+            return {"registration_number": subject["registration_number"]}
         if "group" in subject:
             return {"group": subject["group"]}
         if "person" in subject:
@@ -1804,12 +2580,101 @@ class ChatService:
             return max(1, min(int(match.group(1)), 100))
         return 25
 
+    async def _execute_tool_batch(
+        self,
+        session_id: uuid.UUID,
+        calls: list[ToolCall],
+        selected_tools: list[AgentTool],
+        *,
+        status_callback: StatusCallback | None = None,
+    ) -> list[dict[str, Any]]:
+        tool_by_name = {tool.name: tool for tool in selected_tools}
+        batch_id = f"batch-{uuid.uuid4().hex[:10]}"
+        parallel = len(calls) > 1 and all(tool_by_name.get(call.name) and tool_by_name[call.name].read_only for call in calls)
+        tools_payload = [
+            {
+                "call_id": call.id,
+                "tool": call.name,
+                "label": self._tool_status(call.name).get("label"),
+            }
+            for call in calls
+        ]
+        if status_callback:
+            await status_callback(
+                {
+                    "event": "chat.tool_batch",
+                    "batch_id": batch_id,
+                    "status": "started",
+                    "parallel": parallel,
+                    "tools": tools_payload,
+                }
+            )
+            for item in tools_payload:
+                await status_callback({**item, "batch_id": batch_id, "status": "queued"})
+
+        async def run(call: ToolCall) -> dict[str, Any]:
+            try:
+                try:
+                    return await self._execute_tool_call(
+                        session_id,
+                        call,
+                        status_callback=status_callback,
+                        batch_id=batch_id,
+                    )
+                except TypeError as exc:
+                    if "batch_id" not in str(exc):
+                        raise
+                    return await self._execute_tool_call(
+                        session_id,
+                        call,
+                        status_callback=status_callback,
+                    )
+            except Exception as exc:
+                logger.warning("agent_tool_failed", extra={"tool": call.name, "error": str(exc)[:240]})
+                if status_callback:
+                    await status_callback(
+                        {
+                            "batch_id": batch_id,
+                            "call_id": call.id,
+                            "tool": call.name,
+                            "label": self._tool_status(call.name).get("label"),
+                            "status": "failed",
+                            "error": str(exc)[:240],
+                        }
+                    )
+                return {
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "output": {"error": str(exc)[:500]},
+                }
+
+        if parallel:
+            results = await asyncio.gather(*(run(call) for call in calls))
+        else:
+            results = []
+            for call in calls:
+                results.append(await run(call))
+
+        if status_callback:
+            await status_callback(
+                {
+                    "event": "chat.tool_batch",
+                    "batch_id": batch_id,
+                    "status": "completed",
+                    "parallel": parallel,
+                    "tools": tools_payload,
+                }
+            )
+        return results
+
     async def _execute_tool_call(
         self,
         session_id: uuid.UUID,
         call: ToolCall,
         *,
         status_callback: StatusCallback | None = None,
+        batch_id: str | None = None,
     ) -> dict[str, Any]:
         tool = self._tools.get(call.name)
         if not tool:
@@ -1819,11 +2684,195 @@ class ChatService:
                 "output": {"error": f"Unknown tool: {call.name}"},
             }
         if status_callback:
-            await status_callback(self._tool_status(call.name))
+            await status_callback(
+                {
+                    **self._tool_status(call.name),
+                    "batch_id": batch_id,
+                    "call_id": call.id,
+                    "status": "running",
+                }
+            )
         output = await tool.handler(call.arguments)
         await self._append_tool_message(session_id, call, output)
         self._audit_agent_tool_call(call, output)
+        if status_callback:
+            await status_callback(
+                {
+                    **self._tool_status(call.name),
+                    "batch_id": batch_id,
+                    "call_id": call.id,
+                    "status": "requires_confirmation" if output.get("requires_confirmation") else "succeeded",
+                }
+            )
         return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output}
+
+    async def _store_pending_agent_action(
+        self,
+        session_id: uuid.UUID,
+        pending_result: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+        route: IntentRoute,
+        selected_tools: list[AgentTool],
+        *,
+        provider_name: str,
+        user_message: str,
+        user_id: str,
+        actor_context: dict[str, Any],
+        iteration: int,
+    ) -> dict[str, Any]:
+        confirmation_id = f"confirm-{uuid.uuid4().hex}"
+        now = datetime.now(tz=UTC)
+        pending = {
+            "id": confirmation_id,
+            "session_id": str(session_id),
+            "tool_name": str(pending_result.get("name") or ""),
+            "arguments": pending_result.get("arguments") if isinstance(pending_result.get("arguments"), dict) else {},
+            "preview_output": pending_result.get("output") if isinstance(pending_result.get("output"), dict) else {},
+            "tool_results": self._tool_results_for_prompt(tool_results),
+            "route": {
+                "intents": list(route.intents),
+                "confidence": route.confidence,
+                "requires_entity_resolution": route.requires_entity_resolution,
+                "reason": route.reason,
+                "source": route.source,
+            },
+            "selected_tools": [tool.name for tool in selected_tools],
+            "provider": provider_name,
+            "user_message": user_message,
+            "user_id": user_id or None,
+            "actor_context": actor_context,
+            "iteration": iteration,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=10)).isoformat(),
+        }
+        memory = await self._load_memory(session_id)
+        memory["pending_agent_action"] = pending
+        await self._save_memory(session_id, memory)
+        return self._pending_action_public_payload(pending)
+
+    async def _pending_action_for_response(
+        self,
+        session_id: uuid.UUID,
+        *,
+        user_id: str | None,
+    ) -> dict[str, Any] | None:
+        memory = await self._load_memory(session_id)
+        pending = memory.get("pending_agent_action")
+        if not isinstance(pending, dict):
+            return None
+        if user_id and pending.get("user_id") and str(pending.get("user_id")) != str(user_id):
+            return None
+        if self._pending_action_expired(pending):
+            memory.pop("pending_agent_action", None)
+            await self._save_memory(session_id, memory)
+            return None
+        return self._pending_action_public_payload(pending)
+
+    async def _load_pending_agent_action(
+        self,
+        session_id: uuid.UUID,
+        *,
+        confirmation_id: str,
+        user_id: str | None,
+    ) -> dict[str, Any] | None:
+        memory = await self._load_memory(session_id)
+        pending = memory.get("pending_agent_action")
+        if not isinstance(pending, dict) or pending.get("id") != confirmation_id:
+            return None
+        if user_id and pending.get("user_id") and str(pending.get("user_id")) != str(user_id):
+            return None
+        if self._pending_action_expired(pending):
+            memory.pop("pending_agent_action", None)
+            await self._save_memory(session_id, memory)
+            return None
+        return pending
+
+    async def _clear_pending_agent_action(self, session_id: uuid.UUID) -> None:
+        memory = await self._load_memory(session_id)
+        if "pending_agent_action" in memory:
+            memory.pop("pending_agent_action", None)
+            await self._save_memory(session_id, memory)
+
+    def _pending_action_expired(self, pending: dict[str, Any]) -> bool:
+        try:
+            expires_at = datetime.fromisoformat(str(pending.get("expires_at")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return expires_at <= datetime.now(tz=UTC)
+
+    def _pending_action_public_payload(self, pending: dict[str, Any]) -> dict[str, Any]:
+        output = pending.get("preview_output") if isinstance(pending.get("preview_output"), dict) else {}
+        tool_name = str(pending.get("tool_name") or "")
+        target = str(
+            output.get("target")
+            or output.get("schedule_name")
+            or output.get("workflow_name")
+            or output.get("person")
+            or output.get("state")
+            or tool_name.replace("_", " ")
+        ).strip()
+        title = self._confirmation_title(tool_name, target, output)
+        return {
+            "confirmation_id": pending.get("id"),
+            "session_id": pending.get("session_id"),
+            "tool_name": tool_name,
+            "title": title,
+            "description": str(output.get("detail") or "This action needs confirmation before Alfred continues."),
+            "confirm_label": self._confirmation_button_label(tool_name, output),
+            "cancel_label": "Cancel",
+            "risk_level": "high" if tool_name in {"open_device", "command_device", "open_gate"} else "medium",
+            "target": target,
+            "expires_at": pending.get("expires_at"),
+        }
+
+    def _confirmation_title(self, tool_name: str, target: str, output: dict[str, Any]) -> str:
+        if tool_name in {"open_device", "command_device", "open_gate"}:
+            action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
+            return f"{'Close' if action == 'close' else 'Open'} {target or 'gate'}?"
+        if tool_name == "override_schedule":
+            return f"Override schedule for {target or 'person'}?"
+        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
+            state = str(output.get("state") or "").strip()
+            return f"{'Enable' if state in {'enabled', 'on', 'true'} or tool_name == 'enable_maintenance_mode' else 'Disable'} Maintenance Mode?"
+        return f"Confirm {target or tool_name.replace('_', ' ')}?"
+
+    def _confirmation_button_label(self, tool_name: str, output: dict[str, Any] | None = None) -> str:
+        if tool_name in {"open_device", "command_device", "open_gate"}:
+            action = "open" if tool_name == "open_gate" else str((output or {}).get("action") or "open")
+            return "Close" if action == "close" else "Open"
+        if tool_name == "override_schedule":
+            return "Create override"
+        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
+            return "Confirm"
+        return "Confirm"
+
+    def _confirmed_arguments_for_pending(self, pending: dict[str, Any]) -> dict[str, Any]:
+        arguments = dict(pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {})
+        output = pending.get("preview_output") if isinstance(pending.get("preview_output"), dict) else {}
+        confirmation_field = str(output.get("confirmation_field") or "confirm")
+        arguments[confirmation_field] = True
+        return arguments
+
+    def _route_from_pending(self, pending: dict[str, Any]) -> IntentRoute:
+        route = pending.get("route") if isinstance(pending.get("route"), dict) else {}
+        intents = tuple(
+            intent
+            for intent in (str(item) for item in route.get("intents", ["General"]))
+            if intent in SUPPORTED_INTENTS
+        ) or ("General",)
+        try:
+            confidence = float(route.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        return IntentRoute(
+            intents=intents,
+            confidence=max(0.0, min(1.0, confidence)),
+            requires_entity_resolution=bool(route.get("requires_entity_resolution", False)),
+            reason=str(route.get("reason") or "resumed pending action"),
+            source=str(route.get("source") or "pending_action"),
+        )
 
     def _audit_agent_tool_call(self, call: ToolCall, output: dict[str, Any]) -> None:
         context = get_chat_tool_context()
@@ -1883,12 +2932,16 @@ class ChatService:
 
     def _tool_status(self, tool_name: str) -> dict[str, Any]:
         labels = {
+            "resolve_human_entity": "Resolving system entity...",
             "query_presence": "Checking presence logs...",
             "query_device_states": "Checking device states...",
-            "open_device": "Preparing device open command...",
+            "open_device": "Preparing device command...",
+            "command_device": "Preparing device command...",
+            "open_gate": "Preparing gate open command...",
             "get_maintenance_status": "Checking Maintenance Mode...",
             "enable_maintenance_mode": "Preparing Maintenance Mode...",
             "disable_maintenance_mode": "Preparing Maintenance Mode...",
+            "toggle_maintenance_mode": "Preparing Maintenance Mode...",
             "get_active_malfunctions": "Checking gate malfunction state...",
             "get_malfunction_history": "Reviewing gate malfunction history...",
             "trigger_manual_malfunction_override": "Preparing gate malfunction override...",
@@ -1896,6 +2949,7 @@ class ChatService:
             "diagnose_access_event": "Diagnosing access event...",
             "query_lpr_timing": "Checking LPR timing...",
             "query_vehicle_detection_history": "Counting vehicle detections...",
+            "get_telemetry_trace": "Reading telemetry trace...",
             "query_anomalies": "Checking anomaly records...",
             "summarize_access_rhythm": "Summarizing site rhythm...",
             "calculate_visit_duration": "Calculating visit duration...",
@@ -1915,6 +2969,7 @@ class ChatService:
             "delete_schedule": "Deleting schedule...",
             "query_schedule_targets": "Checking schedule assignments...",
             "assign_schedule_to_entity": "Assigning schedule...",
+            "override_schedule": "Preparing schedule override...",
             "verify_schedule_access": "Verifying schedule access...",
             "query_notification_catalog": "Checking notification options...",
             "query_notification_workflows": "Checking notification workflows...",
@@ -2112,6 +3167,9 @@ class ChatService:
             or re.search(r"\b(?:what(?:'s| is)|check)\b", lower)
         )
 
+    def _looks_like_device_action_request(self, lower: str) -> bool:
+        return self._looks_like_device_open_request(lower) or self._looks_like_device_close_request(lower)
+
     def _looks_like_device_open_request(self, lower: str) -> bool:
         if not any(word in lower for word in ["gate", "garage", "door", "cover"]):
             return False
@@ -2120,6 +3178,16 @@ class ChatService:
         return bool(
             re.search(r"^\s*(?:please\s+)?(?:confirm(?:ed)?\s+)?open\s+(?:the\s+|my\s+)?", lower)
             or re.search(r"\b(?:can|could|would)\s+you\s+open\s+(?:the\s+|my\s+)?", lower)
+        )
+
+    def _looks_like_device_close_request(self, lower: str) -> bool:
+        if not any(word in lower for word in ["garage", "door", "cover"]):
+            return False
+        if re.search(r"\b(?:is|are|was|were)\b[^?]*\bclosed?\b", lower):
+            return False
+        return bool(
+            re.search(r"^\s*(?:please\s+)?(?:confirm(?:ed)?\s+)?(?:close|shut)\s+(?:the\s+|my\s+)?", lower)
+            or re.search(r"\b(?:can|could|would)\s+you\s+(?:close|shut)\s+(?:the\s+|my\s+)?", lower)
         )
 
     def _looks_like_access_diagnostic_request(self, lower: str) -> bool:
@@ -2235,9 +3303,17 @@ class ChatService:
             ]
         )
 
-    def _access_diagnostic_args_from_message(self, message: str, memory: dict[str, Any]) -> dict[str, Any]:
+    def _access_diagnostic_args_from_message(
+        self,
+        message: str,
+        memory: dict[str, Any],
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         lower = message.lower()
         args: dict[str, Any] = {"day": self._day_from_message(lower)}
+        actor_subject = self._actor_subject_from_message(lower, actor_context or {})
+        args.update(self._subject_args(actor_subject))
         registration_number = self._registration_from_message(message)
         if registration_number:
             args["registration_number"] = registration_number
@@ -2315,14 +3391,20 @@ class ChatService:
         return bool(camera_like_terms.intersection(camera_name.lower().split()))
 
     def _explicitly_confirmed_device_open(self, lower: str) -> bool:
+        return self._explicitly_confirmed_device_action(lower)
+
+    def _explicitly_confirmed_device_action(self, lower: str) -> bool:
         return bool(
             re.search(r"\b(confirm|confirmed|authorise|authorize|approved|yes)\b", lower)
-            and re.search(r"\bopen\b", lower)
+            and re.search(r"\b(open|close|shut)\b", lower)
         )
+
+    def _device_action_from_message(self, lower: str) -> str:
+        return "close" if self._looks_like_device_close_request(lower) else "open"
 
     def _device_target_from_message(self, lower: str) -> str | None:
         patterns = [
-            r"(?:confirm|confirmed|authorise|authorize|approved|yes,?\s*)?\s*open\s+(?:the\s+)?([a-z0-9 _.-]*?(?:gate|door|garage)[a-z0-9 _.-]*?)(?:\s+please|\.|\?|$)",
+            r"(?:confirm|confirmed|authorise|authorize|approved|yes,?\s*)?\s*(?:open|close|shut)\s+(?:the\s+|my\s+)?([a-z0-9 _.-]*?(?:gate|door|garage)[a-z0-9 _.-]*?)(?:\s+please|\.|\?|$)",
             r"(?:state|status)\s+(?:of|for)\s+(?:the\s+)?([a-z0-9 _.-]{2,80})",
             r"(?:is|are|check)\s+(?:the\s+)?([a-z0-9 _.-]*?(?:gate|door|garage)[a-z0-9 _.-]*?)(?:\s+(?:open|closed|opening|closing|locked|unlocked)|\?|$)",
             r"(?:what(?:'s| is))\s+(?:the\s+)?([a-z0-9 _.-]*?(?:gate|door|garage)[a-z0-9 _.-]*?)(?:\s+(?:state|status|doing)|\?|$)",
@@ -2331,7 +3413,7 @@ class ChatService:
             match = re.search(pattern, lower)
             if match:
                 target = re.sub(
-                    r"\b(open|closed|opening|closing|locked|unlocked|state|status|doing|please)\b",
+                    r"\b(open|close|shut|closed|opening|closing|locked|unlocked|state|status|doing|please)\b",
                     "",
                     match.group(1),
                 )
@@ -2360,6 +3442,10 @@ class ChatService:
         output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
         if tool_name == "get_camera_snapshot":
             return self._camera_snapshot_direct_text(output)
+        if tool_name == "resolve_human_entity":
+            return self._entity_resolution_direct_text(output)
+        if tool_name == "get_telemetry_trace":
+            return self._telemetry_trace_direct_text(output)
         diagnostic_result = next(
             (
                 result.get("output")
@@ -2398,8 +3484,15 @@ class ChatService:
                 f"{device.get('name') or 'Device'} is {device.get('state') or 'unknown'}"
                 for device in devices[:5]
             )
-        if tool_name == "open_device":
+        if tool_name in {"open_device", "command_device", "open_gate"}:
             return self._device_open_direct_text(output)
+        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"} and output.get("requires_confirmation"):
+            return str(output.get("detail") or "Maintenance Mode needs confirmation before I change it.")
+        if tool_name == "override_schedule":
+            if output.get("requires_confirmation"):
+                return str(output.get("detail") or "The temporary schedule override needs confirmation.")
+            if output.get("created"):
+                return f"Created the temporary schedule override until {output.get('ends_at_display') or output.get('ends_at')}."
         if tool_name == "query_leaderboard":
             top = output.get("top_known") if isinstance(output.get("top_known"), dict) else None
             known = output.get("known") if isinstance(output.get("known"), list) else []
@@ -2419,6 +3512,30 @@ class ChatService:
         if tool_name == "delete_schedule":
             return self._schedule_delete_direct_text(output)
         return json.dumps([result["output"] for result in tool_results], default=str)
+
+    def _entity_resolution_direct_text(self, output: dict[str, Any]) -> str:
+        if output.get("status") == "unique" and isinstance(output.get("match"), dict):
+            match = output["match"]
+            label = match.get("display_name") or match.get("name") or match.get("registration_number") or "that entity"
+            return f"I resolved that to {label}."
+        if output.get("status") == "ambiguous":
+            matches = output.get("matches") if isinstance(output.get("matches"), list) else []
+            labels = [
+                str(match.get("display_name") or match.get("name") or match.get("registration_number") or "")
+                for match in matches[:4]
+                if isinstance(match, dict)
+            ]
+            return f"I found multiple possible matches: {', '.join(label for label in labels if label)}."
+        return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity."
+
+    def _telemetry_trace_direct_text(self, output: dict[str, Any]) -> str:
+        if not output.get("found"):
+            return str(output.get("error") or "I could not find that telemetry trace.")
+        trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+        trace_id = trace.get("trace_id") or "the trace"
+        duration = trace.get("duration_ms")
+        status = trace.get("status") or "unknown status"
+        return f"{trace_id} finished with {status}{f' in {duration}ms' if duration is not None else ''}."
 
     def _access_diagnostic_direct_text(self, output: dict[str, Any]) -> str:
         if not output.get("found"):

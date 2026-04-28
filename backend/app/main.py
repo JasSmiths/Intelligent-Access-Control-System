@@ -6,12 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
-from app.api.v1 import ai as ai_routes
-from app.api.v1 import auth as auth_routes
-from app.api.v1 import leaderboard as leaderboard_routes
-from app.api.v1 import schedules as schedule_routes
-from app.api.v1 import users as user_routes
-from app.api.v1 import webhooks as webhook_routes
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
@@ -73,6 +67,27 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
     root_path=settings.root_path,
+    openapi_tags=[
+        {"name": "Health", "description": "Backend health and service readiness checks."},
+        {"name": "Authentication", "description": "First-run setup, login, logout, and current-user preferences."},
+        {"name": "AI Agents", "description": "Provider discovery, agent tooling, chat, uploads, and chat realtime."},
+        {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
+        {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
+        {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
+        {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
+        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, gate, cover, and announcement operations."},
+        {"name": "UniFi Protect", "description": "UniFi Protect cameras, media, managed package updates, and backups."},
+        {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
+        {"name": "Maintenance", "description": "Maintenance mode status and controls."},
+        {"name": "Notifications", "description": "Notification workflow catalog, rules, previews, and tests."},
+        {"name": "Schedules", "description": "Reusable weekly access windows and dependency checks."},
+        {"name": "Realtime", "description": "Dashboard realtime WebSocket channel."},
+        {"name": "Settings", "description": "Dynamic runtime settings and integration test actions."},
+        {"name": "Telemetry", "description": "Trace, audit, category, artifact, and purge endpoints."},
+        {"name": "Users", "description": "Admin-managed local dashboard users."},
+        {"name": "Webhooks", "description": "External event ingestion endpoints."},
+        {"name": "Simulation", "description": "Hardware-free LPR simulation endpoints."},
+    ],
 )
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
@@ -86,26 +101,19 @@ app.add_middleware(
 
 
 PUBLIC_AUTH_PATHS = {
-    "/api/auth/status",
-    "/api/auth/setup",
-    "/api/auth/login",
-    "/api/auth/logout",
     "/api/v1/auth/status",
     "/api/v1/auth/setup",
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
     "/api/v1/webhooks/ubiquiti/lpr",
-    "/api/webhooks/ubiquiti/lpr",
 }
 
 READ_ONLY_METHODS = {"GET", "HEAD"}
 ALWAYS_TRACE_API_PREFIXES = (
     "/api/v1/webhooks/",
-    "/api/webhooks/",
 )
 MAINTENANCE_IGNORED_WEBHOOK_PATHS = {
     "/api/v1/webhooks/ubiquiti/lpr",
-    "/api/webhooks/ubiquiti/lpr",
 }
 
 
@@ -114,11 +122,11 @@ def _requires_auth(path: str) -> bool:
         return False
     if path in PUBLIC_AUTH_PATHS:
         return False
-    return path.startswith("/api/") or path in {"/docs", "/openapi.json", "/redoc"}
+    return path.startswith("/api/v1/") or path in {"/docs", "/openapi.json", "/redoc"}
 
 
 def _should_trace_api_request(method: str, path: str) -> bool:
-    if not path.startswith("/api/") or path.startswith("/api/v1/telemetry"):
+    if not path.startswith("/api/v1/") or path.startswith("/api/v1/telemetry"):
         return False
     if path.startswith(ALWAYS_TRACE_API_PREFIXES):
         return True
@@ -224,12 +232,12 @@ async def telemetry_http_middleware(request: Request, call_next):
     return response
 
 
-@app.get("/health", tags=["health"])
+@app.get("/health", include_in_schema=False)
 async def root_health() -> dict[str, str]:
     return {"status": "ok", "service": "backend"}
 
 
-@app.get("/", tags=["health"])
+@app.get("/", include_in_schema=False)
 async def service_root() -> dict[str, object]:
     """Identify the backend when a LAN user browses to the base URL."""
 
@@ -249,9 +257,3 @@ async def service_root() -> dict[str, object]:
 
 
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(ai_routes.router, prefix="/api", tags=["ai"])
-app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
-app.include_router(leaderboard_routes.router, prefix="/api", tags=["leaderboard"])
-app.include_router(schedule_routes.router, prefix="/api/schedules", tags=["schedules"])
-app.include_router(user_routes.router, prefix="/api/users", tags=["users"])
-app.include_router(webhook_routes.router, prefix="/api/webhooks", tags=["webhooks"])

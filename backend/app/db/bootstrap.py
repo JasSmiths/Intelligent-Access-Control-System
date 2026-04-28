@@ -82,6 +82,22 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS person_id UUID"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_person_id ON users (person_id)"))
+            await conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE users
+                        ADD CONSTRAINT fk_users_person_id
+                        FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE SET NULL;
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END $$;
+                    """
+                )
+            )
             await conn.execute(
                 text(
                     """

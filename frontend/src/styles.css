@@ -280,6 +280,51 @@ h2 {
   white-space: nowrap;
 }
 
+.profile-menu-shell {
+  position: relative;
+}
+
+.profile-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 90;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-strong);
+}
+
+.profile-menu-item {
+  width: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0 12px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.profile-menu-item:hover:not(:disabled) {
+  background: var(--gray-soft);
+}
+
+.profile-menu-item.danger {
+  color: var(--red);
+}
+
+.profile-menu-item:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .profile-photo {
   width: 40px;
   height: 40px;
@@ -377,6 +422,12 @@ h2 {
   justify-items: center;
   min-height: 52px;
   padding: 8px;
+}
+
+.sidebar-collapsed .profile-menu {
+  left: 0;
+  right: auto;
+  width: 180px;
 }
 
 .sidebar-collapsed .sidebar-status {
@@ -8374,7 +8425,6 @@ tr:last-child td {
 }
 
 .chat-confirm-button {
-  grid-column: 1 / -1;
   min-height: 34px;
   display: inline-flex;
   align-items: center;
@@ -8386,6 +8436,18 @@ tr:last-child td {
   color: white;
   font-size: 12px;
   font-weight: 650;
+}
+
+.chat-confirm-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+}
+
+.chat-confirm-button.secondary {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .chat-confirm-button:disabled {
@@ -8730,6 +8792,28 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.typing-activities {
+  display: grid;
+  gap: 4px;
+}
+
+.typing-activity {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.typing-activity.running {
+  color: var(--text);
+}
+
+.typing-activity.failed {
+  color: var(--danger);
+}
+
+.typing-activity.requires_confirmation {
+  color: var(--warning);
+}
+
 .typing-bubble {
   display: inline-flex;
   align-items: center;
@@ -8857,6 +8941,12 @@ tr:last-child td {
     justify-items: center;
     min-height: 58px;
     padding: 8px;
+  }
+
+  .profile-menu {
+    left: 0;
+    right: auto;
+    width: 180px;
   }
 
   .sidebar-status {
@@ -9009,6 +9099,13 @@ tr:last-child td {
     justify-items: stretch;
     min-height: 74px;
     padding: 12px;
+  }
+
+  .profile-menu,
+  .sidebar-collapsed .profile-menu {
+    left: 0;
+    right: 0;
+    width: auto;
   }
 
   .profile-switcher > svg:last-child {

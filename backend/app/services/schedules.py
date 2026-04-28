@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Person, Schedule, Vehicle
+from app.models import Person, Schedule, ScheduleOverride, Vehicle
 from app.services.settings import get_runtime_config
 
 MINUTES_PER_SLOT = 30
@@ -24,6 +24,8 @@ class ScheduleEvaluation:
     schedule_id: uuid.UUID | None = None
     schedule_name: str | None = None
     reason: str = ""
+    override_id: uuid.UUID | None = None
+    override_ends_at: datetime | None = None
 
 
 def empty_time_blocks() -> dict[str, list[dict[str, str]]]:
@@ -73,6 +75,18 @@ async def evaluate_vehicle_schedule(
     timezone_name: str,
     default_policy: str,
 ) -> ScheduleEvaluation:
+    owner = vehicle.owner
+    person_id = vehicle.person_id or (owner.id if owner else None)
+    if person_id:
+        override = await active_schedule_override(
+            session,
+            person_id=person_id,
+            occurred_at=occurred_at,
+            vehicle_id=vehicle.id,
+        )
+        if override:
+            return _evaluate_override(override)
+
     vehicle_schedule = await _schedule_for_id(session, vehicle.schedule_id, vehicle.schedule)
     if vehicle.schedule_id:
         if not vehicle_schedule:
@@ -84,7 +98,6 @@ async def evaluate_vehicle_schedule(
             )
         return _evaluate_schedule(vehicle_schedule, occurred_at, timezone_name, source="vehicle")
 
-    owner = vehicle.owner
     owner_schedule = await _schedule_for_id(session, owner.schedule_id, owner.schedule) if owner else None
     if owner and owner.schedule_id:
         if not owner_schedule:
@@ -96,6 +109,35 @@ async def evaluate_vehicle_schedule(
             )
         return _evaluate_schedule(owner_schedule, occurred_at, timezone_name, source="person")
 
+    return _evaluate_default_policy(default_policy)
+
+
+async def evaluate_person_schedule(
+    session: AsyncSession,
+    person: Person,
+    occurred_at: datetime,
+    *,
+    timezone_name: str,
+    default_policy: str,
+) -> ScheduleEvaluation:
+    override = await active_schedule_override(
+        session,
+        person_id=person.id,
+        occurred_at=occurred_at,
+    )
+    if override:
+        return _evaluate_override(override)
+
+    person_schedule = await _schedule_for_id(session, person.schedule_id, person.schedule)
+    if person.schedule_id:
+        if not person_schedule:
+            return ScheduleEvaluation(
+                allowed=False,
+                source="person",
+                schedule_id=person.schedule_id,
+                reason="Person schedule was not found.",
+            )
+        return _evaluate_schedule(person_schedule, occurred_at, timezone_name, source="person")
     return _evaluate_default_policy(default_policy)
 
 
@@ -127,6 +169,31 @@ async def evaluate_schedule_id(
             reason="Assigned schedule was not found.",
         )
     return _evaluate_schedule(schedule, occurred_at, timezone_name, source=source)
+
+
+async def active_schedule_override(
+    session: AsyncSession,
+    *,
+    person_id: uuid.UUID,
+    occurred_at: datetime,
+    vehicle_id: uuid.UUID | None = None,
+) -> ScheduleOverride | None:
+    checked_at = occurred_at if occurred_at.tzinfo else occurred_at.replace(tzinfo=UTC)
+    query = (
+        select(ScheduleOverride)
+        .where(
+            ScheduleOverride.person_id == person_id,
+            ScheduleOverride.is_active.is_(True),
+            ScheduleOverride.starts_at <= checked_at,
+            ScheduleOverride.ends_at > checked_at,
+        )
+        .order_by(ScheduleOverride.ends_at.desc(), ScheduleOverride.created_at.desc())
+    )
+    overrides = (await session.scalars(query)).all()
+    for override in overrides:
+        if override.vehicle_id is None or (vehicle_id and override.vehicle_id == vehicle_id):
+            return override
+    return None
 
 
 async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -> dict[str, list[dict[str, str | None]]]:
@@ -206,6 +273,16 @@ def _evaluate_schedule(
         schedule_id=schedule.id,
         schedule_name=schedule.name,
         reason=f"{schedule.name} allowed this time." if allowed else f"{schedule.name} does not allow this time.",
+    )
+
+
+def _evaluate_override(override: ScheduleOverride) -> ScheduleEvaluation:
+    return ScheduleEvaluation(
+        allowed=True,
+        source="schedule_override",
+        reason="A temporary schedule override is active.",
+        override_id=override.id,
+        override_ends_at=override.ends_at,
     )
 
 

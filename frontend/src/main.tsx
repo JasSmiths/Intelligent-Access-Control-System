@@ -833,6 +833,7 @@ type UserAccount = {
   role: UserRole;
   is_active: boolean;
   last_login_at: string | null;
+  person_id: string | null;
   preferences: ProfilePreferences & Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -864,6 +865,7 @@ type ChatAttachmentDraft = ChatAttachment & {
 
 type ChatConfirmationAction = {
   type: string;
+  confirmationId?: string;
   toolName: string;
   toolArguments: Record<string, unknown>;
   target: string;
@@ -876,6 +878,14 @@ type ChatConfirmationAction = {
   statusLabel: string;
   userEcho: string;
   sent?: boolean;
+};
+
+type ChatToolActivity = {
+  id: string;
+  batchId?: string;
+  tool: string;
+  label: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "requires_confirmation";
 };
 
 type ChatMessageItem = {
@@ -1056,7 +1066,7 @@ async function uploadChatAttachment(file: File, sessionId: string | null): Promi
   const body = new FormData();
   body.append("file", file);
   const suffix = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
-  const response = await fetch(`/api/chat/upload${suffix}`, {
+  const response = await fetch(`/api/v1/ai/chat/upload${suffix}`, {
     method: "POST",
     credentials: "include",
     body
@@ -1134,6 +1144,32 @@ async function copyToClipboard(text: string) {
   textarea.select();
   document.execCommand("copy");
   textarea.remove();
+}
+
+function chatPendingAction(pendingAction: unknown): ChatConfirmationAction | null {
+  if (!isRecord(pendingAction)) return null;
+  const confirmationId = String(pendingAction.confirmation_id || "").trim();
+  const toolName = String(pendingAction.tool_name || "").trim();
+  if (!confirmationId || !toolName) return null;
+  const target = String(pendingAction.target || toolName.replace(/_/g, " ")).trim();
+  const title = String(pendingAction.title || `Confirm ${target}?`);
+  const description = String(pendingAction.description || "This action needs confirmation before Alfred continues.");
+  const buttonLabel = String(pendingAction.confirm_label || "Confirm");
+  return {
+    type: toolName,
+    confirmationId,
+    toolName,
+    toolArguments: {},
+    target,
+    displayTarget: target,
+    command: `confirm ${target}`,
+    title,
+    description,
+    buttonLabel,
+    pendingLabel: "Confirmed",
+    statusLabel: `${buttonLabel} ${target}...`,
+    userEcho: `Confirmed: ${target}`
+  };
 }
 
 function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | null {
@@ -1457,6 +1493,8 @@ function App() {
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = React.useState(false);
+  const [loggingOut, setLoggingOut] = React.useState(false);
   const [isMobileNavigation, setIsMobileNavigation] = React.useState(() =>
     typeof window !== "undefined" ? window.matchMedia("(max-width: 720px)").matches : false
   );
@@ -1464,6 +1502,8 @@ function App() {
   const sidebarRef = React.useRef<HTMLElement | null>(null);
   const alertsButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
+  const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const profileButtonRef = React.useRef<HTMLButtonElement | null>(null);
 
   const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
     setLprTimingTestActive(false);
@@ -1677,6 +1717,34 @@ function App() {
     setProfilePreferences({ sidebarCollapsed: !sidebarCollapsed });
   }, [isMobileNavigation, setProfilePreferences, sidebarCollapsed]);
 
+  const handleLogout = React.useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setProfileMenuOpen(false);
+    try {
+      await api.post<{ status: string }>("/api/v1/auth/logout");
+      setAuthStatus({ setup_required: false, authenticated: false, user: null });
+      setPresence([]);
+      setEvents([]);
+      setAnomalies([]);
+      setPeople([]);
+      setVehicles([]);
+      setGroups([]);
+      setSchedules([]);
+      setIntegrationStatus(null);
+      setMaintenanceStatus(null);
+      setRealtime([]);
+      setNotificationToasts([]);
+      setLoading(true);
+      setMobileNavOpen(false);
+      window.history.replaceState({}, "", "/login");
+    } catch (logoutError) {
+      window.alert(logoutError instanceof Error ? logoutError.message : "Unable to log out. Please try again.");
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [loggingOut]);
+
   React.useEffect(() => {
     if (settingsActive && !navigationCollapsed) {
       setSettingsExpanded(true);
@@ -1706,6 +1774,31 @@ function App() {
       window.removeEventListener("pointerdown", onPointerDown);
     };
   }, [alertsOpen]);
+
+  React.useEffect(() => {
+    if (!profileMenuOpen) return undefined;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProfileMenuOpen(false);
+        profileButtonRef.current?.focus();
+      }
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (profileMenuRef.current?.contains(target) || profileButtonRef.current?.contains(target)) return;
+      setProfileMenuOpen(false);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [profileMenuOpen]);
 
   if (!authStatus) {
     return <AuthLoading />;
@@ -1794,14 +1887,39 @@ function App() {
           })}
         </nav>
         <div className="sidebar-footer">
-          <button className="profile-switcher" type="button">
-            <UserAvatar user={currentUser} />
-            <span>
-              <strong>{displayUserName(currentUser)}</strong>
-              <small>{currentUser.role === "admin" ? "Owner" : "Standard User"}</small>
-            </span>
-            <ChevronDown size={16} />
-          </button>
+          <div className="profile-menu-shell">
+            <button
+              aria-controls="profile-menu"
+              aria-expanded={profileMenuOpen}
+              aria-haspopup="menu"
+              className="profile-switcher"
+              onClick={() => setProfileMenuOpen((current) => !current)}
+              ref={profileButtonRef}
+              title={navigationCollapsed ? displayUserName(currentUser) : undefined}
+              type="button"
+            >
+              <UserAvatar user={currentUser} />
+              <span>
+                <strong>{displayUserName(currentUser)}</strong>
+                <small>{currentUser.role === "admin" ? "Owner" : "Standard User"}</small>
+              </span>
+              <ChevronDown size={16} />
+            </button>
+            {profileMenuOpen ? (
+              <div className="profile-menu" id="profile-menu" ref={profileMenuRef} role="menu">
+                <button
+                  className="profile-menu-item danger"
+                  disabled={loggingOut}
+                  onClick={handleLogout}
+                  role="menuitem"
+                  type="button"
+                >
+                  {loggingOut ? <Loader2 className="spin" size={16} /> : <LogOut size={16} />}
+                  <span>{loggingOut ? "Logging out..." : "Logout"}</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
           <div className="sidebar-status">
             <span className="dot live" />
             <span>Online</span>
@@ -5535,7 +5653,7 @@ function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeM
     setRefreshing(true);
     setError("");
     try {
-      setLeaderboard(await api.get<LeaderboardResponse>("/api/leaderboard"));
+      setLeaderboard(await api.get<LeaderboardResponse>("/api/v1/leaderboard"));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Top Charts.");
     } finally {
@@ -10874,6 +10992,7 @@ function UsersView({
   onCurrentUserUpdated: (user: UserAccount) => void;
 }) {
   const [users, setUsers] = React.useState<UserAccount[]>([]);
+  const [people, setPeople] = React.useState<Person[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [modal, setModal] = React.useState<"create" | "edit" | null>(null);
@@ -10884,7 +11003,12 @@ function UsersView({
   const loadUsers = React.useCallback(async () => {
     setError("");
     try {
-      setUsers(await api.get<UserAccount[]>("/api/v1/users"));
+      const [nextUsers, nextPeople] = await Promise.all([
+        api.get<UserAccount[]>("/api/v1/users"),
+        api.get<Person[]>("/api/v1/people")
+      ]);
+      setUsers(nextUsers);
+      setPeople(nextPeople);
     } catch (userError) {
       setError(userError instanceof Error ? userError.message : "Unable to load users");
     } finally {
@@ -10991,7 +11115,10 @@ function UsersView({
                 <UserAvatar user={user} />
                 <div>
                   <strong>{displayUserName(user)}</strong>
-                  <span>@{user.username}{user.email ? ` • ${user.email}` : ""}</span>
+                  <span>
+                    @{user.username}{user.email ? ` • ${user.email}` : ""}
+                    {user.person_id ? ` • linked to ${people.find((person) => person.id === user.person_id)?.display_name ?? "directory person"}` : ""}
+                  </span>
                 </div>
                 <Badge tone={user.role === "admin" ? "blue" : "gray"}>{user.role === "admin" ? "Admin" : "Standard"}</Badge>
                 <Badge tone={user.is_active ? "green" : "amber"}>{user.is_active ? "Active" : "Inactive"}</Badge>
@@ -11015,6 +11142,7 @@ function UsersView({
       {modal ? (
         <UserModal
           mode={modal}
+          people={people}
           user={selectedUser}
           onClose={closeModal}
           onSaved={async (password, savedUser) => {
@@ -11034,11 +11162,13 @@ function UsersView({
 
 function UserModal({
   mode,
+  people,
   user,
   onClose,
   onSaved
 }: {
   mode: "create" | "edit";
+  people: Person[];
   user: UserAccount | null;
   onClose: () => void;
   onSaved: (temporaryPassword: string | null, savedUser?: UserAccount) => Promise<void>;
@@ -11049,6 +11179,7 @@ function UserModal({
     last_name: user?.last_name ?? "",
     email: user?.email ?? "",
     profile_photo_data_url: user?.profile_photo_data_url ?? "",
+    person_id: user?.person_id ?? "",
     role: user?.role ?? "standard",
     is_active: user?.is_active ?? true,
     temporary_password: "",
@@ -11086,6 +11217,7 @@ function UserModal({
           last_name: form.last_name,
           email: form.email || null,
           profile_photo_data_url: form.profile_photo_data_url || null,
+          person_id: form.person_id || null,
           role: form.role,
           is_active: form.is_active,
           temporary_password: form.generate_password ? null : form.temporary_password,
@@ -11099,6 +11231,7 @@ function UserModal({
           last_name: form.last_name,
           email: form.email || null,
           profile_photo_data_url: form.profile_photo_data_url || null,
+          person_id: form.person_id || null,
           role: form.role,
           is_active: form.is_active
         });
@@ -11137,6 +11270,7 @@ function UserModal({
               role: form.role as UserRole,
               is_active: Boolean(form.is_active),
               last_login_at: user?.last_login_at ?? null,
+              person_id: String(form.person_id || "") || null,
               preferences: user?.preferences ?? { sidebarCollapsed: false },
               created_at: user?.created_at ?? new Date().toISOString(),
               updated_at: user?.updated_at ?? new Date().toISOString()
@@ -11185,6 +11319,15 @@ function UserModal({
             <MessageCircle size={17} />
             <input value={form.email} onChange={(event) => update("email", event.target.value)} type="email" />
           </div>
+        </label>
+        <label className="field">
+          <span>Directory person</span>
+          <select value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
+            <option value="">No linked person</option>
+            {people.map((person) => (
+              <option key={person.id} value={person.id}>{person.display_name}</option>
+            ))}
+          </select>
         </label>
         <div className="field-grid">
           <label className="field">
@@ -11659,6 +11802,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
   const [connectionNonce, setConnectionNonce] = React.useState(0);
   const [thinking, setThinking] = React.useState(false);
   const [toolStatus, setToolStatus] = React.useState("");
+  const [toolActivities, setToolActivities] = React.useState<ChatToolActivity[]>([]);
   const [dragActive, setDragActive] = React.useState(false);
   const [copyMenu, setCopyMenu] = React.useState<ChatCopyMenu | null>(null);
   const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
@@ -11818,11 +11962,65 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
       if (data.type === "chat.thinking") {
         setThinking(true);
         setToolStatus("Thinking...");
+        setToolActivities([]);
+        return;
+      }
+      if (data.type === "chat.tool_batch") {
+        const batchId = typeof payload.batch_id === "string" ? payload.batch_id : clientId("tool-batch");
+        const status = typeof payload.status === "string" ? payload.status : "";
+        const tools = Array.isArray(payload.tools) ? payload.tools : [];
+        if (status === "completed") {
+          setToolActivities((current) => current.filter((item) => item.batchId !== batchId));
+        } else {
+          setToolActivities((current) => {
+            const next = current.filter((item) => item.batchId !== batchId);
+            tools.forEach((tool) => {
+              if (!isRecord(tool)) return;
+              const callId = String(tool.call_id || tool.tool || clientId("tool"));
+              next.push({
+                id: callId,
+                batchId,
+                tool: String(tool.tool || "tool"),
+                label: String(tool.label || "Running system tool..."),
+                status: "queued"
+              });
+            });
+            return next;
+          });
+        }
         return;
       }
       if (data.type === "chat.tool_status") {
         setThinking(true);
-        setToolStatus(typeof payload.label === "string" ? payload.label : "Running system tool...");
+        const label = typeof payload.label === "string" ? payload.label : "Running system tool...";
+        setToolStatus(label);
+        const tool = typeof payload.tool === "string" ? payload.tool : "tool";
+        const status = ["queued", "running", "succeeded", "failed", "requires_confirmation"].includes(String(payload.status))
+          ? String(payload.status) as ChatToolActivity["status"]
+          : "running";
+        const id = typeof payload.call_id === "string" ? payload.call_id : `${tool}:${String(payload.batch_id || "single")}`;
+        setToolActivities((current) => {
+          const existing = current.find((item) => item.id === id);
+          if (status === "succeeded") return current.filter((item) => item.id !== id);
+          if (existing) {
+            return current.map((item) => item.id === id ? { ...item, label, status } : item);
+          }
+          return [
+            ...current,
+            {
+              id,
+              batchId: typeof payload.batch_id === "string" ? payload.batch_id : undefined,
+              tool,
+              label,
+              status
+            }
+          ];
+        });
+        return;
+      }
+      if (data.type === "chat.confirmation_required") {
+        setThinking(true);
+        setToolStatus("Waiting for confirmation...");
         return;
       }
       if (data.type === "chat.response.delta") {
@@ -11843,7 +12041,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
       if (data.type === "chat.response") {
         const text = typeof payload.text === "string" ? payload.text : "";
         const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
-        const confirmationAction = chatConfirmationAction(payload.tool_results);
+        const confirmationAction = chatPendingAction(payload.pending_action) ?? chatConfirmationAction(payload.tool_results);
         const responseText = confirmationAction
           ? text
           : text;
@@ -11878,6 +12076,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
         });
         setThinking(false);
         setToolStatus("");
+        setToolActivities([]);
         return;
       }
       if (data.type === "chat.error") {
@@ -11891,6 +12090,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
         ]);
         setThinking(false);
         setToolStatus("");
+        setToolActivities([]);
       }
     };
     socket.onerror = () => {
@@ -11902,6 +12102,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
       setConnected(false);
       setThinking(false);
       setToolStatus("");
+      setToolActivities([]);
       if (!cancelled) {
         const delay = Math.min(8000, 700 + connectionNonce * 600);
         reconnectTimerId = window.setTimeout(() => {
@@ -11927,7 +12128,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
         feedRef.current.scrollTop = feedRef.current.scrollHeight;
       }
     });
-  }, [messages, thinking, toolStatus]);
+  }, [messages, thinking, toolStatus, toolActivities]);
 
   const dismissTeaser = React.useCallback(() => {
     sessionStorage.setItem(teaserStorageKey, "true");
@@ -11984,9 +12185,10 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
     });
   }, [sessionId]);
 
-  const sendConfirmationAction = React.useCallback((messageId: string, action: ChatConfirmationAction) => {
+  const sendConfirmationAction = React.useCallback((messageId: string, action: ChatConfirmationAction, decision: "confirm" | "cancel" = "confirm") => {
     const socket = socketRef.current;
     if (!connected || thinking || !socket || socket.readyState !== WebSocket.OPEN || action.sent) return;
+    const userEcho = decision === "confirm" ? action.userEcho : `Cancelled: ${action.displayTarget}`;
     setMessages((current) => [
       ...current.map((message) =>
         message.id === messageId && message.confirmationAction
@@ -11996,20 +12198,22 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
       {
         id: clientId("user"),
         role: "user",
-        text: action.userEcho
+        text: userEcho
       }
     ]);
     socket.send(JSON.stringify({
-      message: action.userEcho,
+      message: userEcho,
       session_id: sessionId,
       attachments: [],
+      client_context: chatClientContext(),
       tool_confirmation: {
-        name: action.toolName,
-        arguments: action.toolArguments
+        id: action.confirmationId,
+        confirmation_id: action.confirmationId,
+        decision
       }
     }));
     setThinking(true);
-    setToolStatus(action.statusLabel);
+    setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
   }, [connected, sessionId, thinking]);
 
   const selectLlmProvider = React.useCallback(async (provider: LlmProviderKey) => {
@@ -12066,7 +12270,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
       ...current,
       { id: clientId("user"), role: "user", text, attachments }
     ]);
-    socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments }));
+    socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
     setDraft("");
     setLlmPickerOpen(false);
     setLlmFeedback("");
@@ -12147,7 +12351,7 @@ function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccou
                   />
                 ))}
               </AnimatePresence>
-              {thinking ? <TypingIndicator status={toolStatus} /> : null}
+              {thinking ? <TypingIndicator activities={toolActivities} status={toolStatus} /> : null}
             </div>
 
             <div className="chat-composer">
@@ -12335,7 +12539,7 @@ function ChatMessageBubble({
   index: number;
   senderName: string;
   onOpenCopyMenu: (menu: ChatCopyMenu) => void;
-  onConfirm: (messageId: string, action: ChatConfirmationAction) => void;
+  onConfirm: (messageId: string, action: ChatConfirmationAction, decision?: "confirm" | "cancel") => void;
 }) {
   const longPressTimerRef = React.useRef<number | null>(null);
   const displayText = cleanChatText(message.text, message.attachments ?? []);
@@ -12382,6 +12586,7 @@ function ChatMessageBubble({
             <ChatConfirmationCard
               action={message.confirmationAction}
               onConfirm={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction)}
+              onCancel={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction, "cancel")}
             />
           ) : null}
           {message.attachments?.length ? (
@@ -12425,9 +12630,11 @@ function ChatCopyMenu({
 
 function ChatConfirmationCard({
   action,
+  onCancel,
   onConfirm
 }: {
   action: ChatConfirmationAction;
+  onCancel: () => void;
   onConfirm: () => void;
 }) {
   return (
@@ -12439,10 +12646,16 @@ function ChatConfirmationCard({
         <strong>{action.title}</strong>
         <small>{action.description}</small>
       </span>
-      <button className="chat-confirm-button" disabled={action.sent} onClick={onConfirm} type="button">
-        <ShieldCheck size={14} />
-        <span>{action.sent ? action.pendingLabel : action.buttonLabel}</span>
-      </button>
+      <span className="chat-confirm-actions">
+        <button className="chat-confirm-button secondary" disabled={action.sent} onClick={onCancel} type="button">
+          <X size={14} />
+          <span>Cancel</span>
+        </button>
+        <button className="chat-confirm-button" disabled={action.sent} onClick={onConfirm} type="button">
+          <ShieldCheck size={14} />
+          <span>{action.sent ? action.pendingLabel : action.buttonLabel}</span>
+        </button>
+      </span>
     </div>
   );
 }
@@ -12499,7 +12712,7 @@ function ChatAttachmentPreview({
   );
 }
 
-function TypingIndicator({ status }: { status: string }) {
+function TypingIndicator({ activities, status }: { activities: ChatToolActivity[]; status: string }) {
   return (
     <motion.div
       className="typing-row"
@@ -12507,7 +12720,15 @@ function TypingIndicator({ status }: { status: string }) {
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
     >
-      {status ? <span className="typing-status">{status}</span> : null}
+      {activities.length ? (
+        <span className="typing-activities">
+          {activities.slice(0, 3).map((activity) => (
+            <span className={`typing-activity ${activity.status}`} key={activity.id}>
+              {activity.label}
+            </span>
+          ))}
+        </span>
+      ) : status ? <span className="typing-status">{status}</span> : null}
       <span className="typing-bubble" aria-label="Alfred is typing">
         <i />
         <i />
@@ -12528,6 +12749,13 @@ function publicChatAttachment(attachment: ChatAttachmentDraft): ChatAttachment {
     download_url: attachment.download_url,
     source: attachment.source,
     created_at: attachment.created_at
+  };
+}
+
+function chatClientContext() {
+  return {
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    locale: navigator.language
   };
 }
 

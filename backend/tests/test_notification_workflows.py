@@ -522,7 +522,7 @@ async def test_ai_alert_tool_does_not_report_false_success(monkeypatch) -> None:
     monkeypatch.setattr(ai_tools, "get_notification_service", lambda: FailingNotificationService())
 
     result = await ai_tools.trigger_anomaly_alert(
-        {"subject": "Test anomaly", "severity": "critical", "message": "Something happened"}
+        {"subject": "Test anomaly", "severity": "critical", "message": "Something happened", "confirm": True}
     )
 
     assert result["sent"] is False

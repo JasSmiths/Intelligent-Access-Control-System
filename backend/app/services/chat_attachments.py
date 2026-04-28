@@ -65,7 +65,7 @@ class ChatAttachment:
     sha256: str
 
     def to_public_dict(self) -> dict[str, Any]:
-        url = f"/api/chat/files/{self.id}"
+        url = f"/api/v1/ai/chat/files/{self.id}"
         return {
             "id": self.id,
             "filename": self.filename,
