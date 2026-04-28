@@ -442,6 +442,8 @@ class LocalProvider:
                 summaries.append(self._summarize_anomalies(output))
             elif tool_name == "calculate_visit_duration":
                 summaries.append(self._summarize_duration(output))
+            elif tool_name == "query_leaderboard":
+                summaries.append(self._summarize_leaderboard(output))
             elif tool_name == "summarize_access_rhythm":
                 summaries.append(self._summarize_rhythm(output))
             elif tool_name == "trigger_anomaly_alert":
@@ -546,6 +548,36 @@ class LocalProvider:
             f"{output.get('entries')} entries, {output.get('exits')} exits, "
             f"{output.get('denials')} denials, {output.get('anomaly_events')} anomaly events."
         )
+
+    def _summarize_leaderboard(self, output: dict[str, Any]) -> str:
+        if output.get("error"):
+            return f"Leaderboard query failed: {output.get('error')}"
+        top = output.get("top_known") if isinstance(output.get("top_known"), dict) else None
+        known = output.get("known") if isinstance(output.get("known"), list) else []
+        unknown = output.get("unknown") if isinstance(output.get("unknown"), list) else []
+        lines: list[str] = []
+        if top:
+            lines.append(
+                f"Top Charts leader: {top.get('display_name') or top.get('registration_number')} "
+                f"with {top.get('read_count')} Detectiions."
+            )
+        if known:
+            vip = "; ".join(
+                f"#{row.get('rank')} {row.get('display_name') or row.get('registration_number')} ({row.get('read_count')})"
+                for row in known[:5]
+                if isinstance(row, dict)
+            )
+            if vip:
+                lines.append(f"VIP Lounge: {vip}.")
+        if unknown:
+            mystery = "; ".join(
+                f"#{row.get('rank')} {row.get('registration_number')} ({row.get('read_count')})"
+                for row in unknown[:5]
+                if isinstance(row, dict)
+            )
+            if mystery:
+                lines.append(f"Mystery Guests: {mystery}.")
+        return " ".join(lines) if lines else "I found no leaderboard entries yet."
 
     def _summarize_dvla_vehicle(self, output: dict[str, Any]) -> str:
         if output.get("error"):

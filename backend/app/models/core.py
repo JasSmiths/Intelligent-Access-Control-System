@@ -1,8 +1,8 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -77,6 +77,11 @@ class Vehicle(Base, TimestampMixin):
     make: Mapped[str | None] = mapped_column(String(80))
     model: Mapped[str | None] = mapped_column(String(120))
     color: Mapped[str | None] = mapped_column(String(80))
+    mot_status: Mapped[str | None] = mapped_column(String(80))
+    tax_status: Mapped[str | None] = mapped_column(String(80))
+    mot_expiry: Mapped[date | None] = mapped_column(Date)
+    tax_expiry: Mapped[date | None] = mapped_column(Date)
+    last_dvla_lookup_date: Mapped[date | None] = mapped_column(Date)
     description: Mapped[str | None] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -189,6 +194,23 @@ class NotificationRule(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
 
+class LeaderboardState(Base, TimestampMixin):
+    __tablename__ = "leaderboard_state"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="SET NULL"), index=True
+    )
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
+    read_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"), index=True
+    )
+
+
 class Schedule(Base, TimestampMixin):
     __tablename__ = "schedules"
 
@@ -246,9 +268,12 @@ class Anomaly(Base, TimestampMixin):
     severity: Mapped[AnomalySeverity] = mapped_column(Enum(AnomalySeverity), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     event: Mapped[AccessEvent | None] = relationship(back_populates="anomalies")
+    resolved_by: Mapped[User | None] = relationship()
 
 
 class ChatSession(Base, TimestampMixin):

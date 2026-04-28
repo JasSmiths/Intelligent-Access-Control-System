@@ -54,7 +54,7 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
             {
                 "value": "unauthorized_plate",
                 "label": "Unauthorised Vehicle Detected",
-                "severity": "critical",
+                "severity": "warning",
                 "description": "A plate is denied because it is unknown or inactive.",
             },
             {
@@ -76,6 +76,18 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "description": "A person already marked away is detected exiting again.",
             },
             {
+                "value": "expired_mot_detected",
+                "label": "Expired MOT Detected",
+                "severity": "warning",
+                "description": "DVLA reports a vehicle MOT status other than Valid on arrival.",
+            },
+            {
+                "value": "expired_tax_detected",
+                "label": "Expired Tax Detected",
+                "severity": "warning",
+                "description": "DVLA reports a vehicle tax status other than Taxed or SORN on arrival.",
+            },
+            {
                 "value": "gate_open_failed",
                 "label": "Gate Open Failed",
                 "severity": "critical",
@@ -86,6 +98,12 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "label": "Garage Door Failed",
                 "severity": "critical",
                 "description": "A linked garage door command failed.",
+            },
+            {
+                "value": "leaderboard_overtake",
+                "label": "Leaderboard Overtake",
+                "severity": "info",
+                "description": "A known vehicle takes the top spot on Top Charts.",
             },
             {
                 "value": "agent_anomaly_alert",
@@ -126,6 +144,11 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
             {"name": "VehicleMake", "token": "@VehicleMake", "label": "Vehicle make"},
             {"name": "VehicleModel", "token": "@VehicleModel", "label": "Vehicle model"},
             {"name": "VehicleColor", "token": "@VehicleColor", "label": "Vehicle colour"},
+            {"name": "VehicleColour", "token": "@VehicleColour", "label": "Vehicle colour"},
+            {"name": "MotStatus", "token": "@MotStatus", "label": "MOT status"},
+            {"name": "MotExpiry", "token": "@MotExpiry", "label": "MOT expiry"},
+            {"name": "TaxStatus", "token": "@TaxStatus", "label": "Tax status"},
+            {"name": "TaxExpiry", "token": "@TaxExpiry", "label": "Tax expiry"},
         ],
     },
     {
@@ -151,6 +174,14 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
             {"name": "EntityId", "token": "@EntityId", "label": "Entity ID"},
         ],
     },
+    {
+        "group": "Leaderboard",
+        "items": [
+            {"name": "NewWinnerName", "token": "@NewWinnerName", "label": "New winner"},
+            {"name": "OvertakenName", "token": "@OvertakenName", "label": "Overtaken person"},
+            {"name": "ReadCount", "token": "@ReadCount", "label": "Read count"},
+        ],
+    },
 ]
 
 MOCK_FACTS = {
@@ -166,6 +197,11 @@ MOCK_FACTS = {
     "vehicle_make": "Tesla",
     "vehicle_model": "Model Y Dual Motor Long Range",
     "vehicle_color": "Pearl white",
+    "vehicle_colour": "Pearl white",
+    "mot_status": "Valid",
+    "mot_expiry": "2026-10-14",
+    "tax_status": "Taxed",
+    "tax_expiry": "2027-01-01",
     "object_pronoun": "her",
     "possessive_determiner": "her",
     "direction": "entry",
@@ -176,6 +212,9 @@ MOCK_FACTS = {
     "gate_status": "opening",
     "garage_door": "Main garage door",
     "entity_id": "cover.main_garage_door",
+    "new_winner_name": "Steph Smith",
+    "overtaken_name": "Jason Smith",
+    "read_count": "42",
 }
 
 
@@ -629,6 +668,10 @@ class NotificationService:
                 continue
             target = endpoint_id.split(":", 1)[1]
             if target and target != "*":
+                if not target.startswith("notify.mobile_app_"):
+                    raise NotificationDeliveryError(
+                        "Home Assistant mobile targets must be notify.mobile_app_* services."
+                    )
                 targets.append(target)
         return list(dict.fromkeys(targets))
 
@@ -886,7 +929,12 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "VehicleDisplayName": vehicle_name,
         "VehicleMake": pick("vehicle_make", "make"),
         "VehicleModel": pick("vehicle_model", "model"),
-        "VehicleColor": pick("vehicle_color", "color", "colour"),
+        "VehicleColor": pick("vehicle_color", "vehicle_colour", "color", "colour"),
+        "VehicleColour": pick("vehicle_colour", "vehicle_color", "colour", "color"),
+        "MotStatus": pick("mot_status", "motStatus"),
+        "MotExpiry": pick("mot_expiry", "motExpiry", "mot_expiry_date"),
+        "TaxStatus": pick("tax_status", "taxStatus"),
+        "TaxExpiry": pick("tax_expiry", "taxExpiry", "tax_due_date", "taxDueDate"),
         "Direction": pick("direction"),
         "Decision": pick("decision"),
         "TimingClassification": pick("timing_classification"),
@@ -900,6 +948,9 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "GateStatus": pick("gate_status", "gate_state"),
         "GarageDoor": pick("garage_door"),
         "EntityId": pick("entity_id"),
+        "NewWinnerName": pick("new_winner_name", "winner_name"),
+        "OvertakenName": pick("overtaken_name", "previous_winner_name"),
+        "ReadCount": pick("read_count", "leaderboard_read_count"),
     }
 
 

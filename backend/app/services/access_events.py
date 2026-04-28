@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any
@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.modules.gate.base import GateState
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
@@ -31,7 +32,10 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
+from app.services.alert_snapshots import capture_alert_snapshot
+from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.event_bus import event_bus
+from app.services.leaderboard import get_leaderboard_service
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
@@ -45,6 +49,14 @@ KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
+
+
+def dvla_mot_alert_required(mot_status: str | None) -> bool:
+    return bool(mot_status and mot_status.strip().casefold() != "valid")
+
+
+def dvla_tax_alert_required(tax_status: str | None) -> bool:
+    return bool(tax_status and tax_status.strip().casefold() not in {"taxed", "sorn"})
 
 
 def _known_vehicle_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
@@ -608,6 +620,15 @@ class AccessEventService:
             )
             timing_span.finish(output_payload={"timing_classification": timing.value})
 
+            dvla_enrichment = await self._dvla_enrichment_for_event(
+                vehicle=vehicle,
+                registration_number=read.registration_number,
+                direction=direction,
+                direction_resolution=direction_resolution,
+                runtime=runtime,
+                trace=trace,
+            )
+
             persistence_span = trace.start_span(
                 "Persist Access Event, Presence, and Anomalies",
                 attributes={"decision": decision.value, "direction": direction.value},
@@ -682,12 +703,28 @@ class AccessEventService:
                 "anomaly_count": len(anomalies),
             },
         )
+        if dvla_enrichment:
+            await self._notify_compliance_issues(event, person, vehicle, dvla_enrichment)
+        if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY and event.vehicle_id:
+            try:
+                await get_leaderboard_service().evaluate_known_overtake(event.id)
+            except Exception as exc:
+                logger.warning(
+                    "leaderboard_overtake_evaluation_failed",
+                    extra={"event_id": str(event.id), "registration_number": event.registration_number, "error": str(exc)},
+                )
         if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
             if not self._automatic_open_allowed(direction_resolution):
                 await self._publish_gate_open_skipped(event, direction_resolution)
                 gate_opened = False
             else:
-                gate_opened = await self._open_gate_for_event(event, person, open_garage_doors=True, trace=trace)
+                gate_opened = await self._open_gate_for_event(
+                    event,
+                    person,
+                    open_garage_doors=True,
+                    trace=trace,
+                    dvla_enrichment=dvla_enrichment,
+                )
             if gate_opened and person:
                 await get_notification_service().notify(
                     NotificationContext(
@@ -699,6 +736,7 @@ class AccessEventService:
                             person,
                             vehicle,
                             self._authorized_entry_message(person, vehicle),
+                            dvla_enrichment=dvla_enrichment,
                         ),
                     )
                 )
@@ -709,7 +747,13 @@ class AccessEventService:
                     event_type=anomaly.anomaly_type.value,
                     subject=event.registration_number,
                     severity=anomaly.severity.value,
-                    facts=self._notification_facts(event, person, vehicle, anomaly.message),
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        vehicle,
+                        anomaly.message,
+                        dvla_enrichment=dvla_enrichment,
+                    ),
                 )
                 )
         trace.finish(
@@ -726,6 +770,192 @@ class AccessEventService:
             },
         )
 
+    async def _dvla_enrichment_for_event(
+        self,
+        *,
+        vehicle: Vehicle | None,
+        registration_number: str,
+        direction: AccessDirection,
+        direction_resolution: dict[str, Any],
+        runtime: RuntimeConfig,
+        trace: Any | None = None,
+    ) -> dict[str, str | None] | None:
+        if not self._should_run_dvla_enrichment(direction, direction_resolution):
+            return None
+
+        today = self._dvla_cache_date(runtime.site_timezone)
+        span = (
+            trace.start_span(
+                "DVLA Vehicle Enrichment",
+                category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                attributes={
+                    "registration_number": registration_number,
+                    "known_vehicle": bool(vehicle),
+                    "vehicle_id": str(vehicle.id) if vehicle else None,
+                    "last_lookup_date": (
+                        vehicle.last_dvla_lookup_date.isoformat()
+                        if vehicle and vehicle.last_dvla_lookup_date
+                        else None
+                    ),
+                    "cache_date": today.isoformat(),
+                },
+            )
+            if trace
+            else None
+        )
+
+        if vehicle and vehicle.last_dvla_lookup_date == today:
+            payload = self._vehicle_dvla_payload(vehicle)
+            if span:
+                span.finish(status="ok", output_payload={"status": "cached"})
+            return payload
+
+        try:
+            normalized = await lookup_normalized_vehicle_registration(registration_number)
+        except DvlaVehicleEnquiryError as exc:
+            detail = self._sanitize_dvla_error(exc)
+            if span:
+                span.finish(status="error", output_payload={"status": "failed"}, error=detail)
+            await self._publish_dvla_enrichment_failure(registration_number, exc.status_code, detail)
+            return None
+        except Exception as exc:
+            detail = self._sanitize_dvla_error(exc)
+            if span:
+                span.finish(status="error", output_payload={"status": "failed"}, error=detail)
+            await self._publish_dvla_enrichment_failure(registration_number, None, detail)
+            return None
+
+        if vehicle:
+            self._apply_dvla_enrichment(vehicle, normalized, today)
+            payload = self._vehicle_dvla_payload(vehicle)
+            status = "refreshed"
+        else:
+            payload = normalized.as_payload()
+            status = "ephemeral"
+
+        if span:
+            span.finish(status="ok", output_payload={"status": status})
+        return payload
+
+    def _should_run_dvla_enrichment(
+        self,
+        direction: AccessDirection,
+        direction_resolution: dict[str, Any],
+    ) -> bool:
+        if direction == AccessDirection.EXIT:
+            return False
+        if direction == AccessDirection.ENTRY:
+            return True
+
+        gate_observation = direction_resolution.get("gate_observation") or {}
+        gate_state = self._coerce_gate_state(gate_observation.get("state")) if isinstance(gate_observation, dict) else GateState.UNKNOWN
+        return gate_state in ARRIVAL_GATE_STATES
+
+    def _dvla_cache_date(self, timezone_name: str) -> date:
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except Exception:
+            timezone = self._timezone
+        return datetime.now(tz=timezone).date()
+
+    def _vehicle_dvla_payload(self, vehicle: Vehicle) -> dict[str, str | None]:
+        return {
+            "registration_number": vehicle.registration_number,
+            "make": vehicle.make,
+            "colour": vehicle.color,
+            "mot_status": vehicle.mot_status,
+            "tax_status": vehicle.tax_status,
+            "mot_expiry": vehicle.mot_expiry.isoformat() if vehicle.mot_expiry else None,
+            "tax_expiry": vehicle.tax_expiry.isoformat() if vehicle.tax_expiry else None,
+        }
+
+    def _apply_dvla_enrichment(
+        self,
+        vehicle: Vehicle,
+        normalized: NormalizedDvlaVehicle,
+        lookup_date: date,
+    ) -> None:
+        if normalized.make:
+            vehicle.make = normalized.make
+        if normalized.colour:
+            vehicle.color = normalized.colour
+        vehicle.mot_status = normalized.mot_status
+        vehicle.tax_status = normalized.tax_status
+        vehicle.mot_expiry = normalized.mot_expiry
+        vehicle.tax_expiry = normalized.tax_expiry
+        vehicle.last_dvla_lookup_date = lookup_date
+
+    async def _publish_dvla_enrichment_failure(
+        self,
+        registration_number: str,
+        status_code: int | None,
+        detail: str,
+    ) -> None:
+        logger.warning(
+            "lpr_dvla_enrichment_failed",
+            extra={
+                "registration_number": registration_number,
+                "status_code": status_code,
+                "error": detail,
+            },
+        )
+        await event_bus.publish(
+            "dvla.enrichment_failed",
+            {
+                "registration_number": registration_number,
+                "status_code": status_code,
+                "error": detail,
+            },
+        )
+
+    def _sanitize_dvla_error(self, exc: Exception) -> str:
+        detail = str(exc).replace("\n", " ").strip()
+        return detail or exc.__class__.__name__
+
+    async def _notify_compliance_issues(
+        self,
+        event: AccessEvent,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        dvla_enrichment: dict[str, str | None],
+    ) -> None:
+        mot_status = dvla_enrichment.get("mot_status")
+        tax_status = dvla_enrichment.get("tax_status")
+        notifications = []
+        if dvla_mot_alert_required(mot_status):
+            notifications.append(
+                NotificationContext(
+                    event_type="expired_mot_detected",
+                    subject=f"Expired MOT detected for {event.registration_number}",
+                    severity=AnomalySeverity.WARNING.value,
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        vehicle,
+                        f"DVLA reports MOT status {mot_status} for {event.registration_number}.",
+                        dvla_enrichment=dvla_enrichment,
+                    ),
+                )
+            )
+        if dvla_tax_alert_required(tax_status):
+            notifications.append(
+                NotificationContext(
+                    event_type="expired_tax_detected",
+                    subject=f"Expired tax detected for {event.registration_number}",
+                    severity=AnomalySeverity.WARNING.value,
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        vehicle,
+                        f"DVLA reports tax status {tax_status} for {event.registration_number}.",
+                        dvla_enrichment=dvla_enrichment,
+                    ),
+                )
+            )
+
+        for context in notifications:
+            await get_notification_service().notify(context)
+
     async def _open_gate_for_event(
         self,
         event: AccessEvent,
@@ -733,6 +963,7 @@ class AccessEventService:
         *,
         open_garage_doors: bool,
         trace: Any | None = None,
+        dvla_enrichment: dict[str, str | None] | None = None,
     ) -> bool:
         reason = (
             f"Automatic LPR grant for {event.registration_number}"
@@ -785,6 +1016,7 @@ class AccessEventService:
                         person,
                         event.vehicle,
                         str(exc),
+                        dvla_enrichment=dvla_enrichment,
                     ),
                 )
             )
@@ -840,12 +1072,19 @@ class AccessEventService:
                             person,
                             event.vehicle,
                             result.detail or "Automatic gate open command failed.",
+                            dvla_enrichment=dvla_enrichment,
                         ),
                     )
                 )
 
         if gate_opened and open_garage_doors:
-            await self._open_garage_doors_for_event(event, person, reason, trace=trace)
+            await self._open_garage_doors_for_event(
+                event,
+                person,
+                reason,
+                trace=trace,
+                dvla_enrichment=dvla_enrichment,
+            )
         return gate_opened
 
     async def _publish_gate_open_skipped(
@@ -866,7 +1105,13 @@ class AccessEventService:
         )
 
     async def _open_garage_doors_for_event(
-        self, event: AccessEvent, person: Person | None, reason: str, *, trace: Any | None = None
+        self,
+        event: AccessEvent,
+        person: Person | None,
+        reason: str,
+        *,
+        trace: Any | None = None,
+        dvla_enrichment: dict[str, str | None] | None = None,
     ) -> None:
         if not person or not person.garage_door_entity_ids:
             return
@@ -943,6 +1188,7 @@ class AccessEventService:
                             person,
                             event.vehicle,
                             detail,
+                            dvla_enrichment=dvla_enrichment,
                             garage_door=str(entity.get("name") or entity["entity_id"]),
                             entity_id=str(entity["entity_id"]),
                         ),
@@ -1019,6 +1265,7 @@ class AccessEventService:
                         person,
                         event.vehicle,
                         outcome.detail or f"Automatic garage door open command failed for {outcome.name}.",
+                        dvla_enrichment=dvla_enrichment,
                         garage_door=outcome.name,
                         entity_id=outcome.entity_id,
                     ),
@@ -1031,10 +1278,15 @@ class AccessEventService:
         person: Person | None,
         vehicle: Vehicle | None,
         message: str,
-        **extra: str,
+        *,
+        dvla_enrichment: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> dict[str, str]:
         group = person.group if person else None
         vehicle_display_name = self._vehicle_display_name(vehicle, event.registration_number)
+        dvla = dvla_enrichment or {}
+        vehicle_make = self._fact_text(dvla.get("make")) or (vehicle.make if vehicle else "") or ""
+        vehicle_colour = self._fact_text(dvla.get("colour")) or (vehicle.color if vehicle else "") or ""
         facts = {
             "message": message,
             "first_name": person.first_name if person else "",
@@ -1044,9 +1296,14 @@ class AccessEventService:
             "vehicle_registration_number": event.registration_number,
             "registration_number": event.registration_number,
             "vehicle_display_name": vehicle_display_name,
-            "vehicle_make": vehicle.make or "" if vehicle else "",
-            "vehicle_model": vehicle.model or "" if vehicle else "",
-            "vehicle_color": vehicle.color or "" if vehicle else "",
+            "vehicle_make": vehicle_make,
+            "vehicle_model": vehicle.model if vehicle and vehicle.model else "",
+            "vehicle_color": vehicle_colour,
+            "vehicle_colour": vehicle_colour,
+            "mot_status": self._fact_text(dvla.get("mot_status")),
+            "mot_expiry": self._fact_text(dvla.get("mot_expiry")),
+            "tax_status": self._fact_text(dvla.get("tax_status")),
+            "tax_expiry": self._fact_text(dvla.get("tax_expiry")),
             "object_pronoun": "them",
             "possessive_determiner": "their",
             "direction": event.direction.value,
@@ -1055,8 +1312,15 @@ class AccessEventService:
             "timing_classification": event.timing_classification.value,
             "occurred_at": event.occurred_at.isoformat(),
         }
-        facts.update(extra)
+        facts.update({key: self._fact_text(value) for key, value in extra.items()})
         return facts
+
+    def _fact_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        return str(value)
 
     def _authorized_entry_message(self, person: Person, vehicle: Vehicle | None) -> str:
         first_name = person.first_name or person.display_name.split(" ", 1)[0]
@@ -1402,15 +1666,15 @@ class AccessEventService:
         anomalies: list[Anomaly] = []
 
         if not vehicle:
-            anomalies.append(
-                Anomaly(
-                    event=event,
-                    anomaly_type=AnomalyType.UNAUTHORIZED_PLATE,
-                    severity=AnomalySeverity.CRITICAL,
-                    message=f"Unauthorized plate {event.registration_number} was denied.",
-                    context={"registration_number": event.registration_number},
-                )
+            anomaly = Anomaly(
+                event=event,
+                anomaly_type=AnomalyType.UNAUTHORIZED_PLATE,
+                severity=AnomalySeverity.WARNING,
+                message="Unauthorised Plate, Access Denied",
+                context={"registration_number": event.registration_number},
             )
+            await capture_alert_snapshot(anomaly)
+            anomalies.append(anomaly)
             return anomalies
 
         if not allowed:

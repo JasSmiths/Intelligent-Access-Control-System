@@ -173,7 +173,9 @@ Main tables:
 
 - `groups`: Family, Friends, Visitors, Contractors, subtype support.
 - `people`: driver/person profiles.
-- `vehicles`: one person to many vehicles.
+- `vehicles`: one person to many vehicles. Stores canonical UI make/model/color
+  plus DVLA compliance/cache fields `mot_status`, `tax_status`, `mot_expiry`,
+  `tax_expiry`, and `last_dvla_lookup_date`.
 - `schedules`: reusable weekly access windows assigned directly to people,
   vehicles, notification conditions, and configured door entities.
 - `notification_rules`: DB-backed notification workflows with triggers,
@@ -371,6 +373,22 @@ Current behavior:
   camera (leaving). Use a clear `entry` or `exit` result from that camera
   tie-breaker as the source of truth; if the tie-breaker fails or returns
   unknown, keep the gate-state entry decision.
+- Run DVLA enrichment after debounce/known-plate resolution and direction
+  classification, but only for arrival-like events. Exit events must never call
+  DVLA.
+- For known arriving vehicles, use same-day cached `vehicles` compliance fields
+  when `last_dvla_lookup_date` equals the current date in `site_timezone`;
+  otherwise call the shared DVLA service, refresh official make/color and
+  compliance fields, and set `last_dvla_lookup_date`.
+- For unknown arriving vehicles, call the shared DVLA service and keep the
+  normalized result only in the in-memory notification context. Do not persist
+  unknown-vehicle DVLA data into `vehicles`, `access_events.raw_payload`, or
+  telemetry span payloads.
+- DVLA enrichment failures are non-blocking: log/publish sanitized telemetry and
+  continue access event persistence, presence updates, gate/garage commands, and
+  existing notifications.
+- Expired MOT/tax compliance is advisory only. It can emit notification
+  workflow triggers but must not deny access or block gate/garage commands.
 - Persist one final `access_event`.
 - Update presence if access is granted.
 - Create anomalies for unauthorized plates, outside schedule, duplicate entry,
@@ -464,13 +482,18 @@ Notification workflows:
 - Configured through `/api/v1/notifications/*` and the Settings /
   Notifications UI.
 - Trigger catalog currently covers authorised entry, unauthorised plate,
-  outside schedule, duplicate entry/exit, gate open failure, garage door open
-  failure, AI anomaly alert, and integration tests.
+  outside schedule, duplicate entry/exit, expired MOT/tax detected, gate open
+  failure, garage door open failure, leaderboard overtake, AI anomaly alert,
+  and integration tests.
 - Supported action channels are mobile/Apprise, in-app realtime dashboard
   notifications, and Home Assistant voice/TTS.
 - Supported conditions currently include schedule windows and presence state.
 - Templates use `@Variable` tokens in the Tiptap editor. Legacy `[Variable]`
   tokens are accepted by the renderer but should not be used for new UI.
+- Vehicle notification variables include `@VehicleMake`, `@VehicleColor`,
+  `@VehicleColour`, `@MotStatus`, `@MotExpiry`, `@TaxStatus`, and
+  `@TaxExpiry`. `@VehicleColor` and `@VehicleColour` resolve from the same
+  unified colour fact.
 
 Rules:
 
@@ -505,6 +528,18 @@ Rules:
   parameters.
 - Normalize VRNs by removing spaces and non-alphanumeric characters before
   calling DVLA.
+- Keep `backend/app/services/dvla.py` as the shared integration boundary for
+  raw lookups and normalized enrichment. Manual lookup endpoints, AI tools,
+  leaderboard enrichment, and LPR enrichment should reuse this service rather
+  than calling the DVLA module directly.
+- Manual vehicle lookup through `POST /api/v1/integrations/dvla/lookup` still
+  returns `vehicle` and `display_vehicle`, and now also returns a normalized
+  compliance view. Vehicle create/update endpoints continue to accept
+  client-provided make/model/color and must not force an extra server-side DVLA
+  lookup on save.
+- LPR known-vehicle DVLA refreshes may overwrite `Vehicle.make` and
+  `Vehicle.color` with official DVLA make/colour. Compliance fields are stored
+  only for known vehicles.
 - Do not log or expose the `x-api-key` value.
 - Surface DVLA HTTP/API failures back to the caller; do not report a successful
   lookup unless DVLA returned a successful response.
@@ -797,6 +832,10 @@ Current frontend integration/editor surfaces:
   camera media/snapshot analysis, and managed update/backup controls.
 - Settings / Notifications is the notification workflow builder with
   trigger/condition/action editing and Tiptap `@Variable` insertion.
+- Vehicles edit modal includes a display-only DVLA Compliance card for MOT
+  status/expiry, tax status/expiry, and last DVLA sync date. Make and colour
+  remain on the main vehicle details fields, and registration edits still use
+  the manual DVLA auto-fill flow.
 
 Current realtime behavior:
 

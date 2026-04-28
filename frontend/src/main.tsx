@@ -47,6 +47,7 @@ import {
   Plus,
   Paperclip,
   RefreshCcw,
+  RefreshCw,
   Search,
   Send,
   Smartphone,
@@ -59,6 +60,7 @@ import {
   Sun,
   Terminal,
   Trash2,
+  Trophy,
   Type,
   UserPlus,
   UserRound,
@@ -163,13 +165,37 @@ type AccessEvent = {
   anomaly_count: number;
 };
 
+type AlertSeverity = "info" | "warning" | "critical";
+type AlertStatus = "open" | "resolved";
+
+type AlertResolver = {
+  id: string;
+  username: string;
+  display_name: string;
+};
+
 type Anomaly = {
   id: string;
+  alert_ids: string[];
+  grouped: boolean;
   event_id?: string | null;
   type: string;
-  severity: "info" | "warning" | "critical";
+  severity: AlertSeverity;
+  status: AlertStatus;
   message: string;
+  registration_number: string;
+  count: number;
+  local_date: string | null;
   created_at: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+  resolved_by_user_id: string | null;
+  resolved_by: AlertResolver | null;
+  resolution_note: string | null;
+  snapshot_url?: string | null;
+  snapshot_captured_at?: string | null;
+  snapshot_bytes?: number | null;
 };
 
 type Person = {
@@ -198,11 +224,73 @@ type Vehicle = {
   make: string | null;
   model: string | null;
   color?: string | null;
+  mot_status?: string | null;
+  tax_status?: string | null;
+  mot_expiry?: string | null;
+  tax_expiry?: string | null;
+  last_dvla_lookup_date?: string | null;
   person_id?: string | null;
   owner?: string | null;
   schedule_id?: string | null;
   schedule?: string | null;
   is_active?: boolean;
+};
+
+type LeaderboardPerson = {
+  id: string | null;
+  first_name: string;
+  last_name: string;
+  display_name: string;
+  profile_photo_data_url: string | null;
+};
+
+type LeaderboardVehicle = {
+  id: string | null;
+  registration_number: string;
+  vehicle_photo_data_url: string | null;
+  make: string;
+  model: string;
+  color: string;
+  description: string;
+  display_name: string;
+};
+
+type LeaderboardKnownEntry = {
+  rank: number;
+  registration_number: string;
+  read_count: number;
+  last_seen_at: string | null;
+  vehicle_id: string;
+  person_id: string;
+  first_name: string;
+  display_name: string;
+  vehicle_name: string;
+  person: LeaderboardPerson;
+  vehicle: LeaderboardVehicle;
+};
+
+type LeaderboardDvla = {
+  status: string;
+  vehicle: Record<string, unknown> | null;
+  display_vehicle: Record<string, unknown> | null;
+  label: string;
+  error?: string;
+};
+
+type LeaderboardUnknownEntry = {
+  rank: number;
+  registration_number: string;
+  read_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  dvla: LeaderboardDvla;
+};
+
+type LeaderboardResponse = {
+  known: LeaderboardKnownEntry[];
+  unknown: LeaderboardUnknownEntry[];
+  top_known: LeaderboardKnownEntry | null;
+  generated_at: string;
 };
 
 type Group = {
@@ -237,7 +325,8 @@ type RealtimeMessage = {
 const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
 
 const REALTIME_DATA_REFRESH_EVENTS = new Set([
-  "access_event.finalize_failed"
+  "access_event.finalize_failed",
+  "alerts.updated"
 ]);
 
 type TelemetrySpan = {
@@ -493,6 +582,16 @@ type DvlaLookupResponse = {
     colour?: string | null;
     color?: string | null;
   } & Record<string, unknown>;
+  normalized_vehicle?: {
+    registration_number?: string | null;
+    make?: string | null;
+    colour?: string | null;
+    color?: string | null;
+    mot_status?: string | null;
+    mot_expiry?: string | null;
+    tax_status?: string | null;
+    tax_expiry?: string | null;
+  };
 };
 
 type UnifiProtectStatus = {
@@ -707,7 +806,9 @@ type ViewKey =
   | "groups"
   | "schedules"
   | "vehicles"
+  | "top_charts"
   | "events"
+  | "alerts"
   | "reports"
   | "integrations"
   | "logs"
@@ -718,13 +819,23 @@ type ViewKey =
   | "settings_lpr"
   | "users";
 
+type NavigateOptions = {
+  replace?: boolean;
+  search?: string;
+  hash?: string;
+};
+
+type NavigateToView = (nextView: ViewKey, options?: NavigateOptions) => void;
+
 const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
   { key: "people", label: "People", icon: UserRound },
   { key: "groups", label: "Groups", icon: Users },
   { key: "schedules", label: "Schedules", icon: Clock3 },
   { key: "vehicles", label: "Vehicles", icon: Car },
+  { key: "top_charts", label: "Top Charts", icon: Trophy },
   { key: "events", label: "Events", icon: CalendarDays },
+  { key: "alerts", label: "Alerts", icon: Bell },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "integrations", label: "API & Integrations", icon: PlugZap },
   { key: "logs", label: "Logs", icon: FileText },
@@ -745,7 +856,9 @@ const viewPaths: Record<ViewKey, string> = {
   groups: "/groups",
   schedules: "/schedules",
   vehicles: "/vehicles",
+  top_charts: "/top-charts",
   events: "/events",
+  alerts: "/alerts",
   reports: "/reports",
   integrations: "/integrations",
   logs: "/logs",
@@ -1177,14 +1290,20 @@ function App() {
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
+  const [isMobileNavigation, setIsMobileNavigation] = React.useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 720px)").matches : false
+  );
+  const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
+  const sidebarRef = React.useRef<HTMLElement | null>(null);
   const alertsButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
 
-  const navigateToView = React.useCallback((nextView: ViewKey, options?: { replace?: boolean }) => {
+  const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
     setView(nextView);
     localStorage.setItem("iacs-active-view", nextView);
-    const nextPath = viewPaths[nextView];
-    if (window.location.pathname !== nextPath) {
+    const nextPath = `${viewPaths[nextView]}${options?.search ?? ""}${options?.hash ?? ""}`;
+    const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentPath !== nextPath) {
       if (options?.replace) {
         window.history.replaceState({ view: nextView }, "", nextPath);
       } else {
@@ -1219,7 +1338,7 @@ function App() {
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
-        api.get<Anomaly[]>("/api/v1/anomalies?limit=30"),
+        api.get<Anomaly[]>("/api/v1/alerts?status=open&limit=100"),
         api.get<Person[]>("/api/v1/people"),
         api.get<Vehicle[]>("/api/v1/vehicles"),
         api.get<Group[]>("/api/v1/groups"),
@@ -1293,6 +1412,36 @@ function App() {
   }, [authStatus?.authenticated, refreshFromRealtime]);
 
   React.useEffect(() => {
+    const media = window.matchMedia("(max-width: 720px)");
+    const syncMobileNavigation = () => {
+      setIsMobileNavigation(media.matches);
+      if (!media.matches) {
+        setMobileNavOpen(false);
+      }
+    };
+    syncMobileNavigation();
+    media.addEventListener("change", syncMobileNavigation);
+    return () => media.removeEventListener("change", syncMobileNavigation);
+  }, []);
+
+  React.useEffect(() => {
+    if (!mobileNavOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileNavOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileNavOpen]);
+
+  React.useEffect(() => {
+    if (mobileNavOpen) {
+      sidebarRef.current?.scrollTo({ top: 0 });
+    }
+  }, [mobileNavOpen]);
+
+  React.useEffect(() => {
     if (!authStatus) return;
     if (authStatus.setup_required && window.location.pathname !== "/setup") {
       window.history.replaceState({}, "", "/setup");
@@ -1306,13 +1455,31 @@ function App() {
   }, [authStatus, navigateToView, view]);
 
   const sidebarCollapsed = profilePreferences.sidebarCollapsed;
+  const navigationCollapsed = !isMobileNavigation && sidebarCollapsed;
+  const navigationExpanded = isMobileNavigation ? mobileNavOpen : !sidebarCollapsed;
   const settingsActive = view === "settings" || view.startsWith("settings_") || view === "users";
+  const bellAlerts = React.useMemo(() => anomalies.filter(isBellAlert), [anomalies]);
+
+  const navigateFromNav = React.useCallback((nextView: ViewKey) => {
+    navigateToView(nextView);
+    if (isMobileNavigation) {
+      setMobileNavOpen(false);
+    }
+  }, [isMobileNavigation, navigateToView]);
+
+  const toggleNavigation = React.useCallback(() => {
+    if (isMobileNavigation) {
+      setMobileNavOpen((current) => !current);
+      return;
+    }
+    setProfilePreferences({ sidebarCollapsed: !sidebarCollapsed });
+  }, [isMobileNavigation, setProfilePreferences, sidebarCollapsed]);
 
   React.useEffect(() => {
-    if (settingsActive && !sidebarCollapsed) {
+    if (settingsActive && !navigationCollapsed) {
       setSettingsExpanded(true);
     }
-  }, [settingsActive, sidebarCollapsed]);
+  }, [settingsActive, navigationCollapsed]);
 
   React.useEffect(() => {
     if (!alertsOpen) return undefined;
@@ -1351,16 +1518,19 @@ function App() {
   }
 
   return (
-    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
-      <aside className="sidebar" id="site-sidebar">
+    <div className={`${navigationCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}${mobileNavOpen ? " mobile-nav-open" : ""}`}>
+      <aside className="sidebar" id="site-sidebar" aria-hidden={isMobileNavigation && !mobileNavOpen} ref={sidebarRef}>
         <div className="brand">
           <div className="brand-mark">
             <ShieldCheck size={28} />
           </div>
-          <div>
+          <div className="brand-copy">
             <strong>Intelligent</strong>
             <span>Access Control</span>
           </div>
+          <button className="icon-button sidebar-close-button" onClick={() => setMobileNavOpen(false)} type="button" aria-label="Close navigation">
+            <X size={16} />
+          </button>
         </div>
         <nav className="nav-list" aria-label="Main navigation">
           {primaryNavItems.map((item) => {
@@ -1375,14 +1545,14 @@ function App() {
                       setSettingsExpanded((current) => !current);
                     }}
                     type="button"
-                    title={sidebarCollapsed ? item.label : undefined}
-                    aria-expanded={settingsExpanded && !sidebarCollapsed}
+                    title={navigationCollapsed ? item.label : undefined}
+                    aria-expanded={settingsExpanded && !navigationCollapsed}
                   >
                     <Icon size={18} />
                     <span>{item.label}</span>
                     <ChevronDown className="nav-chevron" size={15} />
                   </button>
-                  {settingsExpanded && !sidebarCollapsed ? (
+                  {settingsExpanded && !navigationCollapsed ? (
                     <div className="nav-submenu">
                       {settingsNavItems.map((subItem) => {
                         const SubIcon = subItem.icon;
@@ -1390,7 +1560,7 @@ function App() {
                           <button
                             className={subItem.key === view ? "nav-item nested active" : "nav-item nested"}
                             key={subItem.key}
-                            onClick={() => navigateToView(subItem.key)}
+                            onClick={() => navigateFromNav(subItem.key)}
                             type="button"
                           >
                             <SubIcon size={16} />
@@ -1404,12 +1574,12 @@ function App() {
               );
             }
             return (
-            <button
+              <button
                 key={item.key}
                 className={item.key === view ? "nav-item active" : "nav-item"}
-                onClick={() => navigateToView(item.key)}
+                onClick={() => navigateFromNav(item.key)}
                 type="button"
-                title={sidebarCollapsed ? item.label : undefined}
+                title={navigationCollapsed ? item.label : undefined}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
@@ -1440,12 +1610,9 @@ function App() {
               className="icon-button topbar-menu"
               type="button"
               aria-controls="site-sidebar"
-              aria-expanded={!sidebarCollapsed}
-              aria-label={sidebarCollapsed ? "Expand navigation sidebar" : "Collapse navigation sidebar"}
-              onClick={() => {
-                if (window.matchMedia("(max-width: 720px)").matches) return;
-                setProfilePreferences({ sidebarCollapsed: !sidebarCollapsed });
-              }}
+              aria-expanded={navigationExpanded}
+              aria-label={navigationExpanded ? "Collapse navigation sidebar" : "Expand navigation sidebar"}
+              onClick={toggleNavigation}
             >
               <Menu size={20} />
             </button>
@@ -1470,12 +1637,16 @@ function App() {
                 type="button"
               >
                 <Bell size={20} />
-                {anomalies.length ? <span>{Math.min(anomalies.length, 99)}</span> : null}
+                {bellAlerts.length ? <span>{Math.min(bellAlerts.length, 99)}</span> : null}
               </button>
               {alertsOpen ? (
                 <AlertTray
-                  anomalies={anomalies}
+                  anomalies={bellAlerts}
                   onRefresh={refresh}
+                  onViewAll={() => {
+                    setAlertsOpen(false);
+                    navigateToView("alerts");
+                  }}
                   ref={alertsTrayRef}
                 />
               ) : null}
@@ -1505,6 +1676,7 @@ function App() {
             onClearRealtime={() => setRealtime([])}
             refresh={refresh}
             currentUser={currentUser}
+            navigateToView={navigateToView}
             onCurrentUserUpdated={(user) =>
               setAuthStatus((current) => current ? { ...current, user } : current)
             }
@@ -1523,7 +1695,8 @@ function App() {
 const AlertTray = React.forwardRef<HTMLDivElement, {
   anomalies: Anomaly[];
   onRefresh: () => Promise<void>;
-}>(function AlertTray({ anomalies, onRefresh }, ref) {
+  onViewAll: () => void;
+}>(function AlertTray({ anomalies, onRefresh, onViewAll }, ref) {
   const alertCount = anomalies.length;
   const recentAnomalies = anomalies.slice(0, 8);
   return (
@@ -1531,7 +1704,7 @@ const AlertTray = React.forwardRef<HTMLDivElement, {
       <div className="alert-tray-header">
         <div>
           <strong>Alerts</strong>
-          <span>{alertCount ? `${alertCount} active alert${alertCount === 1 ? "" : "s"}` : "No active alerts"}</span>
+          <span>{alertCount ? `${alertCount} actionable alert${alertCount === 1 ? "" : "s"}` : "No actionable alerts"}</span>
         </div>
         <button className="icon-button" onClick={() => onRefresh().catch(() => undefined)} type="button" aria-label="Refresh alerts">
           <RefreshCcw size={15} />
@@ -1546,18 +1719,20 @@ const AlertTray = React.forwardRef<HTMLDivElement, {
             <div>
               <div className="alert-tray-row-head">
                 <strong>{titleCase(anomaly.type)}</strong>
-                <Badge tone={anomaly.severity === "critical" ? "red" : anomaly.severity === "warning" ? "amber" : "blue"}>
-                  {anomaly.severity}
-                </Badge>
+                <Badge tone={alertSeverityTone(anomaly.severity)}>{alertSeverityLabel(anomaly.severity)}</Badge>
               </div>
               <p>{anomaly.message}</p>
-              <time>{formatDate(anomaly.created_at)}</time>
+              <time>{formatDate(anomaly.last_seen_at || anomaly.created_at)}</time>
             </div>
           </article>
         )) : (
-          <EmptyState icon={CheckCircle2} label="No active alerts" />
+          <EmptyState icon={CheckCircle2} label="No actionable alerts" />
         )}
       </div>
+      <button className="alert-tray-view-all" onClick={onViewAll} type="button">
+        View all alerts
+        <ChevronRight size={15} />
+      </button>
     </div>
   );
 });
@@ -1787,6 +1962,7 @@ function View(props: {
   onClearRealtime: () => void;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
+  navigateToView: NavigateToView;
   onCurrentUserUpdated: (user: UserAccount) => void;
 }) {
   switch (props.view) {
@@ -1798,8 +1974,12 @@ function View(props: {
       return <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
     case "vehicles":
       return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+    case "top_charts":
+      return <TopChartsView query={props.search} realtime={props.realtime} />;
     case "events":
       return <EventsView events={props.events} query={props.search} />;
+    case "alerts":
+      return <AlertsView refreshDashboard={props.refresh} />;
     case "reports":
       return <ReportsView events={props.events} presence={props.presence} />;
     case "integrations":
@@ -1819,7 +1999,7 @@ function View(props: {
     case "users":
       return <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />;
     default:
-      return <Dashboard {...props} currentUser={props.currentUser} />;
+      return <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;
   }
 }
 
@@ -1831,7 +2011,8 @@ function Dashboard({
   people,
   vehicles,
   refresh,
-  currentUser
+  currentUser,
+  navigateToView
 }: {
   presence: Presence[];
   events: AccessEvent[];
@@ -1841,6 +2022,7 @@ function Dashboard({
   vehicles: Vehicle[];
   refresh: () => Promise<void>;
   currentUser: UserAccount;
+  navigateToView: NavigateToView;
 }) {
   const [now, setNow] = React.useState(() => new Date());
   const [simulatorPlate, setSimulatorPlate] = React.useState("");
@@ -1851,9 +2033,11 @@ function Dashboard({
   const exited = presence.filter((item) => item.state === "exited").length;
   const unknown = Math.max(presence.length - present - exited, 0);
   const latestEvent = events[0];
-  const critical = anomalies.filter((item) => item.severity === "critical").length;
+  const actionableAlerts = anomalies.filter(isActionableAlert);
+  const critical = actionableAlerts.filter((item) => item.severity === "critical").length;
+  const warning = actionableAlerts.filter((item) => item.severity === "warning").length;
   const displayEvents = getDashboardEvents(events, vehicles, people);
-  const displayAnomalies = getDashboardAnomalies(anomalies);
+  const displayAnomalies = getDashboardAnomalies(actionableAlerts);
   const expected = Math.max(people.length, presence.length);
   const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
   const exitedToday = todayEvents.filter((event) => event.direction === "exit").length;
@@ -1863,12 +2047,12 @@ function Dashboard({
   const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
   const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
-  const siteStatusTitle = critical ? "Action needed" : deniedToday ? "Attention required" : "All systems normal";
+  const siteStatusTitle = critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
   const siteStatusDetail = critical
     ? `${critical} critical alert${critical === 1 ? "" : "s"}`
-    : deniedToday
-      ? `${deniedToday} denied attempt${deniedToday === 1 ? "" : "s"} today`
-      : "No active alerts";
+    : warning
+      ? `${warning} warning alert${warning === 1 ? "" : "s"}`
+      : "No actionable alerts";
   const greeting = greetingForDate(now);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
   const selectedPlate = simulatorPlate || vehicles[0]?.registration_number || "";
@@ -1936,9 +2120,9 @@ function Dashboard({
             </div>
           </div>
           <div className="status-metrics">
-            <StatusMetric label="People tracked" value={String(people.length)} />
-            <StatusMetric label="Active vehicles" value={String(activeVehicles)} />
-            <StatusMetric label="Live sources" value={String(liveSources)} />
+            <StatusMetric label="People tracked" mobileLabel="People" value={String(people.length)} />
+            <StatusMetric label="Active vehicles" mobileLabel="Vehicles" value={String(activeVehicles)} />
+            <StatusMetric label="Live sources" mobileLabel="Sources" value={String(liveSources)} />
           </div>
         </div>
 
@@ -2008,7 +2192,7 @@ function Dashboard({
                     <strong>{event.label}</strong>
                     <span>{event.subtitle}</span>
                   </div>
-                  <Badge tone={event.status === "IN" ? "green" : "gray"}>{event.status}</Badge>
+                  <EventStatusBadge event={event} />
                 </div>
               );
             }) : <EmptyState icon={CalendarDays} label="No recent events" />}
@@ -2017,10 +2201,15 @@ function Dashboard({
         </div>
 
         <div className="card anomaly-card">
-          <PanelHeader title="Anomalies" action="View all" />
+          <PanelHeader title="Alerts" action="View all" onAction={() => navigateToView("alerts")} />
           <div className="anomaly-feed">
             {displayAnomalies.length ? displayAnomalies.map((item) => (
-              <div className="anomaly-feed-row" key={`${item.time}-${item.title}`}>
+              <button
+                className="anomaly-feed-row"
+                key={item.id}
+                onClick={() => navigateToView("alerts", { search: `?alert=${encodeURIComponent(item.id)}` })}
+                type="button"
+              >
                 <span className={`anomaly-icon ${item.severity}`}>
                   <AlertTriangle size={20} />
                 </span>
@@ -2029,10 +2218,10 @@ function Dashboard({
                   <span>{item.detail}</span>
                 </div>
                 <time>{item.time}</time>
-              </div>
-            )) : <EmptyState icon={CheckCircle2} label="No anomalies" />}
+              </button>
+            )) : <EmptyState icon={CheckCircle2} label="No actionable alerts" />}
           </div>
-          <p className="unresolved-count">{anomalies.length} unresolved</p>
+          <p className="unresolved-count">{actionableAlerts.length} action needed</p>
         </div>
 
         <div className="card chart-card">
@@ -2147,7 +2336,7 @@ function GateConfirmModal({
   );
 }
 
-function PanelHeader({ title, action, actionKind }: { title: string; action?: string; actionKind?: "link" | "select" }) {
+function PanelHeader({ title, action, actionKind, onAction }: { title: string; action?: string; actionKind?: "link" | "select"; onAction?: () => void }) {
   return (
     <div className="panel-header">
       <h2>{title}</h2>
@@ -2158,17 +2347,21 @@ function PanelHeader({ title, action, actionKind }: { title: string; action?: st
             <ChevronDown size={14} />
           </button>
         ) : (
-          <button className="panel-link" type="button">{action}</button>
+          <button className="panel-link" onClick={onAction} type="button">{action}</button>
         )
       ) : null}
     </div>
   );
 }
 
-function StatusMetric({ label, value }: { label: string; value: string }) {
+function StatusMetric({ label, mobileLabel, value }: { label: string; mobileLabel?: string; value: string }) {
   return (
     <div>
-      <span><i />{label}</span>
+      <span>
+        <i />
+        <span className="status-label status-label-desktop">{label}</span>
+        <span className="status-label status-label-mobile">{mobileLabel ?? label}</span>
+      </span>
       <strong>{value}</strong>
     </div>
   );
@@ -2296,7 +2489,10 @@ type DashboardEvent = {
   label: string;
   subtitle: string;
   status: "IN" | "OUT";
-  tone: "green" | "blue" | "gray";
+  statusTone: BadgeTone;
+  statusIcon?: React.ElementType;
+  statusLabel: string;
+  tone: "green" | "blue" | "gray" | "amber";
   icon: React.ElementType;
 };
 
@@ -2308,6 +2504,7 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
     const vehicle = vehiclesByRegistration.get(event.registration_number.toUpperCase());
     const owner = vehicle?.person_id ? peopleById.get(vehicle.person_id) : undefined;
     const ownerFirstName = owner?.first_name || vehicle?.owner?.split(" ")[0] || "";
+    const isDenied = event.decision === "denied" || event.direction === "denied";
 
     return {
       id: event.id,
@@ -2315,26 +2512,76 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
       label: ownerFirstName || "Unknown",
       subtitle: `${event.registration_number}  •  LPR`,
       status: event.direction === "exit" ? "OUT" : "IN",
-      tone: event.decision === "denied" ? "gray" : event.direction === "entry" ? "green" : "blue",
-      icon: event.direction === "exit" ? LogOut : event.decision === "denied" ? AlertTriangle : Car
+      statusTone: isDenied ? "amber" : event.direction === "entry" ? "green" : "gray",
+      statusIcon: isDenied ? Lock : undefined,
+      statusLabel: isDenied ? "Denied" : event.direction === "exit" ? "Out" : "In",
+      tone: isDenied ? "amber" : event.direction === "entry" ? "green" : "blue",
+      icon: event.direction === "exit" ? LogOut : isDenied ? AlertTriangle : Car
     };
   });
 }
 
+function EventStatusBadge({ event }: { event: DashboardEvent }) {
+  if (event.statusIcon) {
+    const Icon = event.statusIcon;
+    return (
+      <Badge tone={event.statusTone}>
+        <span className="event-status-icon" aria-label={event.statusLabel} title={event.statusLabel}>
+          <Icon size={13} aria-hidden="true" />
+        </span>
+      </Badge>
+    );
+  }
+  return <Badge tone={event.statusTone}>{event.status}</Badge>;
+}
+
 type DashboardAnomaly = {
+  id: string;
   title: string;
   detail: string;
   time: string;
-  severity: "warning" | "critical";
+  severity: AlertSeverity;
 };
 
 function getDashboardAnomalies(anomalies: Anomaly[]): DashboardAnomaly[] {
   return anomalies.slice(0, 4).map((item) => ({
+    id: item.id,
     title: titleCase(item.type),
     detail: item.message,
-    time: formatTime(item.created_at),
-    severity: item.severity === "critical" ? "critical" : "warning"
+    time: formatTime(item.last_seen_at || item.created_at),
+    severity: item.severity
   }));
+}
+
+function isActionableAlert(alert: Anomaly) {
+  return alert.status === "open" && (alert.severity === "warning" || alert.severity === "critical");
+}
+
+function isBellAlert(alert: Anomaly) {
+  return isActionableAlert(alert) && alert.type !== "unauthorized_plate";
+}
+
+function alertIdFromLocation() {
+  return new URLSearchParams(window.location.search).get("alert") ?? "";
+}
+
+function alertMatchesFocus(alert: Anomaly, focusedAlertId: string) {
+  return Boolean(focusedAlertId && (alert.id === focusedAlertId || alert.alert_ids.includes(focusedAlertId)));
+}
+
+function alertDomId(alertId: string) {
+  return `alert-row-${alertId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+function alertSeverityTone(severity: AlertSeverity): BadgeTone {
+  if (severity === "critical") return "red";
+  if (severity === "warning") return "amber";
+  return "blue";
+}
+
+function alertSeverityLabel(severity: AlertSeverity) {
+  if (severity === "info") return "Informational";
+  return titleCase(severity);
 }
 
 function DailyEntriesChart({ events }: { events: AccessEvent[] }) {
@@ -2449,7 +2696,7 @@ function PresenceList({ presence }: { presence: Presence[] }) {
 }
 
 function AnomalyList({ anomalies }: { anomalies: Anomaly[] }) {
-  if (!anomalies.length) return <EmptyState icon={CheckCircle2} label="No anomalies" />;
+  if (!anomalies.length) return <EmptyState icon={CheckCircle2} label="No alerts" />;
   return (
     <div className="compact-list">
       {anomalies.map((item) => (
@@ -2459,7 +2706,7 @@ function AnomalyList({ anomalies }: { anomalies: Anomaly[] }) {
             <strong>{item.type.replaceAll("_", " ")}</strong>
             <span>{item.message}</span>
           </div>
-          <Badge tone={item.severity === "critical" ? "red" : "amber"}>{item.severity}</Badge>
+          <Badge tone={alertSeverityTone(item.severity)}>{alertSeverityLabel(item.severity)}</Badge>
         </div>
       ))}
     </div>
@@ -2830,6 +3077,7 @@ function SchedulesView({
           </div>
           <div className="schedule-policy-actions" role="group" aria-label="No schedule default policy">
             <button
+              aria-label="Always Allow"
               aria-pressed={defaultPolicy === "allow"}
               className={defaultPolicy === "allow" ? "schedule-policy-option active allow" : "schedule-policy-option allow"}
               disabled={accessSettings.loading || policySaving}
@@ -2837,9 +3085,11 @@ function SchedulesView({
               type="button"
             >
               <CheckCircle2 size={16} />
-              Always Allow
+              <span className="policy-label-full">Always Allow</span>
+              <span className="policy-label-short">Allow</span>
             </button>
             <button
+              aria-label="Never Allow"
               aria-pressed={defaultPolicy === "deny"}
               className={defaultPolicy === "deny" ? "schedule-policy-option active deny" : "schedule-policy-option deny"}
               disabled={accessSettings.loading || policySaving}
@@ -2847,7 +3097,8 @@ function SchedulesView({
               type="button"
             >
               <Lock size={16} />
-              Never Allow
+              <span className="policy-label-full">Never Allow</span>
+              <span className="policy-label-short">Deny</span>
             </button>
           </div>
           <div className="schedule-policy-status">
@@ -2872,7 +3123,7 @@ function SchedulesView({
               <div className="schedule-card-icon">
                 <Clock3 size={18} />
               </div>
-              <div>
+              <div className="schedule-card-copy">
                 <strong>{schedule.name}</strong>
                 <span>{schedule.description || scheduleSummary(schedule.time_blocks)}</span>
               </div>
@@ -3788,9 +4039,9 @@ function PersonModal({
 
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
 
-  const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
     if (!file.type.startsWith("image/")) {
       setError("Please choose an image file.");
       return;
@@ -4175,7 +4426,6 @@ function VehiclesView({
       {error ? <div className="auth-error inline-error">{error}</div> : null}
 
       <div className="card users-card vehicles-card">
-        <PanelHeader title="Fleet Roster" action={`${filtered.length} vehicles`} actionKind="select" />
         {filtered.length ? (
           <div className="users-table vehicles-table">
             {filtered.map((vehicle) => (
@@ -4193,7 +4443,7 @@ function VehiclesView({
                 tabIndex={0}
               >
                 <VehiclePhoto vehicle={vehicle} />
-                <div>
+                <div className="vehicle-row-main">
                   <strong>{vehicle.registration_number}</strong>
                   <span>{vehicleTitle(vehicle)}</span>
                 </div>
@@ -4225,16 +4475,17 @@ function VehiclesView({
         <VehicleModal
           defaultPolicyOptionLabel={defaultPolicyOptionLabel}
           mode={selectedVehicle ? "edit" : "create"}
-          onClose={closeModal}
-          onSaved={async () => {
-            await refresh();
-            closeModal();
-          }}
-          people={people}
-          schedules={schedules}
-          setPageError={setError}
-          vehicle={selectedVehicle}
-        />
+            onClose={closeModal}
+            onSaved={async () => {
+              await refresh();
+              closeModal();
+            }}
+            people={people}
+            refreshVehicles={refresh}
+            schedules={schedules}
+            setPageError={setError}
+            vehicle={selectedVehicle}
+          />
       ) : null}
     </section>
   );
@@ -4246,6 +4497,7 @@ function VehicleModal({
   onClose,
   onSaved,
   people,
+  refreshVehicles,
   schedules,
   setPageError,
   vehicle
@@ -4255,6 +4507,7 @@ function VehicleModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
   people: Person[];
+  refreshVehicles: () => Promise<void>;
   schedules: Schedule[];
   setPageError: (message: string) => void;
   vehicle: Vehicle | null;
@@ -4265,6 +4518,11 @@ function VehicleModal({
     make: vehicle?.make ?? "",
     model: vehicle?.model ?? "",
     color: vehicle?.color ?? "",
+    mot_status: vehicle?.mot_status ?? "",
+    tax_status: vehicle?.tax_status ?? "",
+    mot_expiry: vehicle?.mot_expiry ?? "",
+    tax_expiry: vehicle?.tax_expiry ?? "",
+    last_dvla_lookup_date: vehicle?.last_dvla_lookup_date ?? "",
     description: vehicle?.description ?? "",
     person_id: vehicle?.person_id ?? "",
     schedule_id: vehicle?.schedule_id ?? "",
@@ -4272,6 +4530,7 @@ function VehicleModal({
   });
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [complianceRefreshing, setComplianceRefreshing] = React.useState(false);
   const [dvlaLookup, setDvlaLookup] = React.useState<{ status: "idle" | "loading" | "found" | "error"; message: string }>({
     status: "idle",
     message: ""
@@ -4297,22 +4556,29 @@ function VehicleModal({
 
     const timer = window.setTimeout(async () => {
       try {
-        const result = await api.post<DvlaLookupResponse>("/api/v1/integrations/dvla/lookup", {
-          registration_number: registrationNumber
-        });
-        if (lookupRequestRef.current !== requestId) return;
-        lastLookupRegistrationRef.current = registrationNumber;
-        const displayVehicle = result.display_vehicle ?? result.vehicle;
-        const make = typeof displayVehicle.make === "string" ? displayVehicle.make : "";
-        const model = typeof displayVehicle.model === "string" ? displayVehicle.model : "";
-        const color = typeof (displayVehicle.colour ?? displayVehicle.color) === "string" ? String(displayVehicle.colour ?? displayVehicle.color) : "";
-        setForm((current) => ({
-          ...current,
-          registration_number: result.registration_number || current.registration_number,
-          make: make || current.make,
-          model: model || current.model,
-          color: color || current.color
-        }));
+          const result = await api.post<DvlaLookupResponse>("/api/v1/integrations/dvla/lookup", {
+            registration_number: registrationNumber
+          });
+          if (lookupRequestRef.current !== requestId) return;
+          lastLookupRegistrationRef.current = registrationNumber;
+          const displayVehicle = result.display_vehicle ?? result.vehicle;
+          const normalizedVehicle = result.normalized_vehicle;
+          const make = normalizedVehicle?.make || (typeof displayVehicle.make === "string" ? displayVehicle.make : "");
+          const model = typeof displayVehicle.model === "string" ? displayVehicle.model : "";
+          const normalizedColor = normalizedVehicle?.colour ?? normalizedVehicle?.color;
+          const color = normalizedColor || (typeof (displayVehicle.colour ?? displayVehicle.color) === "string" ? String(displayVehicle.colour ?? displayVehicle.color) : "");
+          setForm((current) => ({
+            ...current,
+            registration_number: result.registration_number || current.registration_number,
+            make: make || current.make,
+            model: model || current.model,
+            color: color || current.color,
+            mot_status: normalizedVehicle?.mot_status ?? current.mot_status,
+            tax_status: normalizedVehicle?.tax_status ?? current.tax_status,
+            mot_expiry: normalizedVehicle?.mot_expiry ?? current.mot_expiry,
+            tax_expiry: normalizedVehicle?.tax_expiry ?? current.tax_expiry,
+            last_dvla_lookup_date: normalizedVehicle ? localDateKey() : current.last_dvla_lookup_date
+          }));
         setDvlaLookup({ status: "found", message: "DVLA details applied" });
       } catch (lookupError) {
         if (lookupRequestRef.current !== requestId) return;
@@ -4336,27 +4602,59 @@ function VehicleModal({
       setError("Please choose an image file.");
       return;
     }
-    if (file.size > 8 * 1024 * 1024) {
-      setError("Vehicle images must be 8 MB or smaller.");
-      return;
-    }
-    setError("");
-    update("vehicle_photo_data_url", await fileToDataUrl(file));
-  };
+      if (file.size > 8 * 1024 * 1024) {
+        setError("Vehicle images must be 8 MB or smaller.");
+        return;
+      }
+      setError("");
+      update("vehicle_photo_data_url", await fileToDataUrl(file));
+    };
 
-  const submit = async (event: React.FormEvent) => {
+    const refreshCompliance = async () => {
+      if (mode !== "edit" || !vehicle) return;
+      setError("");
+      setPageError("");
+      setComplianceRefreshing(true);
+      try {
+        const refreshed = await api.post<Vehicle>(`/api/v1/vehicles/${vehicle.id}/dvla-refresh`);
+        setForm((current) => ({
+          ...current,
+          make: refreshed.make ?? current.make,
+          color: refreshed.color ?? current.color,
+          mot_status: refreshed.mot_status ?? "",
+          tax_status: refreshed.tax_status ?? "",
+          mot_expiry: refreshed.mot_expiry ?? "",
+          tax_expiry: refreshed.tax_expiry ?? "",
+          last_dvla_lookup_date: refreshed.last_dvla_lookup_date ?? ""
+        }));
+        await refreshVehicles();
+      } catch (lookupError) {
+        const message = lookupError instanceof Error ? lookupError.message : "Unable to refresh DVLA compliance";
+        setError(message);
+        setPageError(message);
+      } finally {
+        setComplianceRefreshing(false);
+      }
+    };
+
+    const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
     setPageError("");
     setSubmitting(true);
-    const payload = {
-      registration_number: form.registration_number,
-      vehicle_photo_data_url: form.vehicle_photo_data_url || null,
-      make: form.make || null,
-      model: form.model || null,
-      color: form.color || null,
-      description: form.description || null,
-      person_id: form.person_id || null,
+      const payload = {
+        registration_number: form.registration_number,
+        vehicle_photo_data_url: form.vehicle_photo_data_url || null,
+        make: form.make || null,
+        model: form.model || null,
+        color: form.color || null,
+        mot_status: form.mot_status || null,
+        tax_status: form.tax_status || null,
+        mot_expiry: form.mot_expiry || null,
+        tax_expiry: form.tax_expiry || null,
+        last_dvla_lookup_date: form.last_dvla_lookup_date || null,
+        description: form.description || null,
+        person_id: form.person_id || null,
       schedule_id: form.schedule_id || null,
       is_active: form.is_active
     };
@@ -4384,12 +4682,19 @@ function VehicleModal({
     make: form.make || null,
     model: form.model || null,
     color: form.color || null,
+      mot_status: form.mot_status || null,
+      tax_status: form.tax_status || null,
+      mot_expiry: form.mot_expiry || null,
+      tax_expiry: form.tax_expiry || null,
+      last_dvla_lookup_date: form.last_dvla_lookup_date || null,
     person_id: form.person_id || null,
     owner: people.find((person) => person.id === form.person_id)?.display_name ?? null,
     schedule_id: form.schedule_id || null,
     schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
     is_active: form.is_active
   };
+    const motStatus = form.mot_status || null;
+    const taxStatus = form.tax_status || null;
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -4487,6 +4792,39 @@ function VehicleModal({
             ))}
           </select>
         </label>
+          <div className="vehicle-compliance-card">
+            <div className="vehicle-compliance-title">
+              <ShieldCheck size={17} />
+              <div>
+                <strong>Compliance</strong>
+                <span>{vehicleLastDvlaCheckLabel(form.last_dvla_lookup_date || null)}</span>
+              </div>
+              {mode === "edit" ? (
+                <button
+                  aria-label="Refresh DVLA compliance"
+                  className="icon-button vehicle-compliance-refresh"
+                  disabled={complianceRefreshing}
+                  onClick={refreshCompliance}
+                  title="Refresh DVLA compliance"
+                  type="button"
+                >
+                  <RefreshCw className={complianceRefreshing ? "spin" : undefined} size={15} />
+                </button>
+              ) : null}
+            </div>
+            <div className="vehicle-compliance-grid">
+              <div className="vehicle-compliance-row">
+                <span className="vehicle-compliance-label">MOT</span>
+                <Badge tone={motComplianceTone(motStatus)}>{motStatus || "Unknown"}</Badge>
+                <span className="vehicle-compliance-expiry">{vehicleComplianceExpiryLabel(form.mot_expiry || null)}</span>
+              </div>
+              <div className="vehicle-compliance-row">
+                <span className="vehicle-compliance-label">Tax</span>
+                <Badge tone={taxComplianceTone(taxStatus)}>{taxStatus || "Unknown"}</Badge>
+                <span className="vehicle-compliance-expiry">{vehicleComplianceExpiryLabel(form.tax_expiry || null)}</span>
+              </div>
+          </div>
+        </div>
         <div className="modal-actions">
           <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
@@ -4497,6 +4835,229 @@ function VehicleModal({
       </form>
     </div>
   );
+}
+
+function motComplianceTone(status: string | null | undefined): BadgeTone {
+  if (!status) return "gray";
+  return status.trim().toLowerCase() === "valid" ? "green" : "red";
+}
+
+function taxComplianceTone(status: string | null | undefined): BadgeTone {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) return "gray";
+  if (normalized === "taxed") return "green";
+  if (normalized === "sorn") return "gray";
+  return "red";
+}
+
+function vehicleComplianceExpiryLabel(value: string | null | undefined) {
+  return value ? `Expires ${formatDateOnly(value)}` : "Expiry unavailable";
+}
+
+function vehicleLastDvlaCheckLabel(value: string | null | undefined) {
+  if (!value) return "Not checked yet";
+  return dateOnlyKey(value) === localDateKey() ? "Last checked with DVLA: Today" : `Last checked with DVLA: ${formatDateOnly(value)}`;
+}
+
+function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeMessage[] }) {
+  const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [refreshing, setRefreshing] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const load = React.useCallback(async () => {
+    setRefreshing(true);
+    setError("");
+    try {
+      setLeaderboard(await api.get<LeaderboardResponse>("/api/leaderboard"));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load Top Charts.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load().catch(() => undefined);
+  }, [load]);
+
+  const latestRealtime = realtime[0];
+  React.useEffect(() => {
+    if (!latestRealtime) return;
+    if (latestRealtime.type === "access_event.finalized" || latestRealtime.type === "leaderboard_overtake") {
+      load().catch(() => undefined);
+    }
+  }, [latestRealtime?.created_at, latestRealtime?.type, load]);
+
+  const knownRows = React.useMemo(
+    () => (leaderboard?.known ?? []).filter((item) => leaderboardKnownMatches(item, query)),
+    [leaderboard?.known, query]
+  );
+  const unknownRows = React.useMemo(
+    () => (leaderboard?.unknown ?? []).filter((item) => leaderboardUnknownMatches(item, query)),
+    [leaderboard?.unknown, query]
+  );
+  const knownReadCount = React.useMemo(
+    () => knownRows.reduce((total, item) => total + item.read_count, 0),
+    [knownRows]
+  );
+  const unknownReadCount = React.useMemo(
+    () => unknownRows.reduce((total, item) => total + item.read_count, 0),
+    [unknownRows]
+  );
+
+  return (
+    <section className="view-stack top-charts-page">
+      <Toolbar title="Top Charts" count={knownRows.length + unknownRows.length} icon={Trophy}>
+        <button className="secondary-button" onClick={() => load().catch(() => undefined)} disabled={refreshing} type="button">
+          <RefreshCcw size={15} /> {refreshing ? "Refreshing" : "Refresh"}
+        </button>
+      </Toolbar>
+
+      {error ? <div className="error-banner">{error}</div> : null}
+      {loading ? (
+        <div className="loading-panel">Loading Top Charts</div>
+      ) : (
+        <div className="top-charts-grid">
+          <section className="card top-charts-card top-charts-known-card">
+            <div className="top-charts-card-header">
+              <div>
+                <span className="eyebrow">Known Plates</span>
+                <h2>The VIP Lounge</h2>
+                <p>Known plates battling for driveway supremacy.</p>
+              </div>
+              <Badge tone="green">{knownReadCount} Detectiions</Badge>
+            </div>
+
+            {knownRows.length ? (
+              <div className="top-charts-list">
+                {knownRows.map((entry) => (
+                  <LeaderboardKnownRow entry={entry} key={`${entry.vehicle_id}-${entry.registration_number}`} />
+                ))}
+              </div>
+            ) : (
+              <EmptyState icon={Trophy} label="No VIP Detectiions yet" />
+            )}
+          </section>
+
+          <section className="card top-charts-card top-charts-unknown-card">
+            <div className="top-charts-card-header">
+              <div>
+                <span className="eyebrow">Unknown Plates</span>
+                <h2>The Mystery Guests</h2>
+                <p>Who are these people and why do they keep turning around in the driveway?</p>
+              </div>
+              <Badge tone="amber">{unknownReadCount} Detectiions</Badge>
+            </div>
+
+            {unknownRows.length ? (
+              <div className="top-charts-list">
+                {unknownRows.map((entry) => (
+                  <LeaderboardUnknownRow entry={entry} key={entry.registration_number} />
+                ))}
+              </div>
+            ) : (
+              <EmptyState icon={Search} label="No mystery guests yet" />
+            )}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry }) {
+  const firstName = entry.person.first_name || entry.first_name || entry.display_name.split(" ")[0] || "VIP";
+  return (
+    <article className="top-charts-row">
+      <span className={rankBadgeClass(entry.rank)}>{entry.rank}</span>
+      <LeaderboardAvatar imageUrl={entry.person.profile_photo_data_url} name={entry.person.display_name || firstName} />
+      <div className="top-charts-row-main">
+        <strong>{firstName}</strong>
+        <span>{entry.vehicle_name || entry.vehicle.display_name || "Vehicle details pending"}</span>
+        <small>{entry.registration_number}</small>
+      </div>
+      <div className="top-charts-read-count">
+        <strong>{entry.read_count}</strong>
+        <span>{entry.read_count === 1 ? "Detectiion" : "Detectiions"}</span>
+      </div>
+    </article>
+  );
+}
+
+function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
+  const label = entry.dvla.label || "DVLA details unavailable";
+  const showStatus = entry.dvla.status && entry.dvla.status !== "ok";
+  return (
+    <article className="top-charts-row">
+      <span className={rankBadgeClass(entry.rank)}>{entry.rank}</span>
+      <div className="top-charts-plate-avatar" aria-hidden="true">
+        <Search size={17} />
+      </div>
+      <div className="top-charts-row-main">
+        <strong>{entry.registration_number}</strong>
+        <span>{label}</span>
+        <small>{mysteryGuestQuip(entry.rank)}</small>
+      </div>
+      <div className="top-charts-read-count">
+        {showStatus ? <Badge tone={leaderboardDvlaTone(entry.dvla.status)}>{leaderboardDvlaLabel(entry.dvla.status)}</Badge> : null}
+        <strong>{entry.read_count}</strong>
+        <span>{entry.read_count === 1 ? "Detectiion" : "Detectiions"}</span>
+      </div>
+    </article>
+  );
+}
+
+function LeaderboardAvatar({ imageUrl, name }: { imageUrl: string | null; name: string }) {
+  return (
+    <span className="top-charts-avatar" aria-label={name}>
+      {imageUrl ? <img alt="" src={imageUrl} /> : initials(name).toUpperCase()}
+    </span>
+  );
+}
+
+function leaderboardKnownMatches(entry: LeaderboardKnownEntry, query: string) {
+  return (
+    matches(entry.registration_number, query) ||
+    matches(entry.display_name, query) ||
+    matches(entry.person.display_name, query) ||
+    matches(entry.vehicle_name, query)
+  );
+}
+
+function leaderboardUnknownMatches(entry: LeaderboardUnknownEntry, query: string) {
+  return (
+    matches(entry.registration_number, query) ||
+    matches(entry.dvla.label, query) ||
+    matches(String(entry.dvla.error ?? ""), query)
+  );
+}
+
+function rankBadgeClass(rank: number) {
+  if (rank === 1) return "rank-badge rank-badge-gold";
+  if (rank === 2) return "rank-badge rank-badge-silver";
+  if (rank === 3) return "rank-badge rank-badge-bronze";
+  return "rank-badge";
+}
+
+function leaderboardDvlaTone(status: string): BadgeTone {
+  if (status === "unconfigured") return "gray";
+  if (status === "failed") return "amber";
+  return "gray";
+}
+
+function leaderboardDvlaLabel(status: string) {
+  if (status === "unconfigured") return "DVLA off";
+  if (status === "failed") return "DVLA failed";
+  return titleCase(status);
+}
+
+function mysteryGuestQuip(rank: number) {
+  if (rank === 1) return "Chief driveway plot twist";
+  if (rank === 2) return "Strong encore energy";
+  if (rank === 3) return "Podium-level mystery";
+  return "Still under investigation";
 }
 
 function EventsView({ events, query }: { events: AccessEvent[]; query: string }) {
@@ -4513,7 +5074,7 @@ function EventsView({ events, query }: { events: AccessEvent[]; query: string })
               <th>Decision</th>
               <th>Confidence</th>
               <th>When</th>
-              <th>Anomalies</th>
+              <th>Alerts</th>
             </tr>
           </thead>
           <tbody>
@@ -4531,6 +5092,255 @@ function EventsView({ events, query }: { events: AccessEvent[]; query: string })
         </table>
       </div>
     </section>
+  );
+}
+
+type AlertActionTarget = {
+  alert: Anomaly;
+  action: "resolve" | "reopen";
+};
+
+function AlertsView({ refreshDashboard }: { refreshDashboard: () => Promise<void> }) {
+  const [alerts, setAlerts] = React.useState<Anomaly[]>([]);
+  const [statusFilter, setStatusFilter] = React.useState<"open" | "resolved" | "all">("open");
+  const [severityFilter, setSeverityFilter] = React.useState<"all" | AlertSeverity>("all");
+  const [typeFilter, setTypeFilter] = React.useState("all");
+  const [query, setQuery] = React.useState("");
+  const [focusedAlertId, setFocusedAlertId] = React.useState(() => alertIdFromLocation());
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const [actionTarget, setActionTarget] = React.useState<AlertActionTarget | null>(null);
+  const [resolutionNote, setResolutionNote] = React.useState("");
+  const [actionLoading, setActionLoading] = React.useState(false);
+
+  const loadAlerts = React.useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const params = new URLSearchParams({ status: statusFilter, limit: "200" });
+      if (severityFilter !== "all") params.set("severity", severityFilter);
+      if (typeFilter !== "all") params.set("type", typeFilter);
+      if (query.trim()) params.set("q", query.trim());
+      setAlerts(await api.get<Anomaly[]>(`/api/v1/alerts?${params}`));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load alerts");
+    } finally {
+      setLoading(false);
+    }
+  }, [query, severityFilter, statusFilter, typeFilter]);
+
+  React.useEffect(() => {
+    loadAlerts().catch(() => undefined);
+  }, [loadAlerts]);
+
+  React.useEffect(() => {
+    const updateFocusedAlert = () => setFocusedAlertId(alertIdFromLocation());
+    window.addEventListener("popstate", updateFocusedAlert);
+    return () => window.removeEventListener("popstate", updateFocusedAlert);
+  }, []);
+
+  React.useEffect(() => {
+    if (!focusedAlertId || loading) return;
+    const target = alerts.find((alert) => alertMatchesFocus(alert, focusedAlertId));
+    if (!target) return;
+    window.requestAnimationFrame(() => {
+      const node = document.getElementById(alertDomId(target.id));
+      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+      node?.focus({ preventScroll: true });
+    });
+  }, [alerts, focusedAlertId, loading]);
+
+  const actOnAlert = async (target: AlertActionTarget, note?: string) => {
+    setActionLoading(true);
+    setError("");
+    try {
+      await api.patch("/api/v1/alerts/action", {
+        alert_ids: target.alert.alert_ids,
+        action: target.action,
+        note: note ?? null
+      });
+      setActionTarget(null);
+      setResolutionNote("");
+      await Promise.all([loadAlerts(), refreshDashboard()]);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to update alert");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const openCount = alerts.filter((alert) => alert.status === "open").length;
+  const actionableCount = alerts.filter(isActionableAlert).length;
+
+  return (
+    <section className="view-stack alerts-page">
+      <Toolbar title="Alerts" count={alerts.length} icon={Bell}>
+        <button className="secondary-button" onClick={() => loadAlerts().catch(() => undefined)} type="button">
+          <RefreshCcw size={15} /> Refresh
+        </button>
+      </Toolbar>
+
+      <div className="alerts-summary-grid">
+        <MetricCard icon={AlertTriangle} label="Action Needed" value={String(actionableCount)} detail="warning and critical" tone={actionableCount ? "amber" : "gray"} />
+        <MetricCard icon={Bell} label="Open Alerts" value={String(openCount)} detail="including informational" tone={openCount ? "blue" : "green"} />
+        <MetricCard icon={CheckCircle2} label="Resolved View" value={statusFilter === "resolved" ? String(alerts.length) : "available"} detail="audit trail retained" tone="green" />
+      </div>
+
+      <div className="alerts-controls">
+        <div className="alert-status-tabs" role="tablist" aria-label="Alert status">
+          {(["open", "resolved", "all"] as const).map((value) => (
+            <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)} type="button">
+              {titleCase(value)}
+            </button>
+          ))}
+        </div>
+        <label className="search alerts-search">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search plate, message, or context..." />
+        </label>
+        <select value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value as typeof severityFilter)} aria-label="Filter by severity">
+          <option value="all">All severities</option>
+          <option value="critical">Critical</option>
+          <option value="warning">Warning</option>
+          <option value="info">Informational</option>
+        </select>
+        <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} aria-label="Filter by alert type">
+          <option value="all">All types</option>
+          <option value="unauthorized_plate">Unknown plate</option>
+          <option value="outside_schedule">Outside schedule</option>
+          <option value="duplicate_entry">Duplicate entry</option>
+          <option value="duplicate_exit">Duplicate exit</option>
+        </select>
+      </div>
+
+      {error ? <div className="error-banner">{error}</div> : null}
+      {loading ? (
+        <div className="loading-panel">Loading alerts</div>
+      ) : alerts.length ? (
+        <div className="alerts-list">
+          {alerts.map((alert) => (
+            <AlertReviewRow
+              alert={alert}
+              focused={alertMatchesFocus(alert, focusedAlertId)}
+              key={alert.id}
+              onReopen={() => actOnAlert({ alert, action: "reopen" })}
+              onResolve={() => {
+                setResolutionNote("");
+                setActionTarget({ alert, action: "resolve" });
+              }}
+            />
+          ))}
+        </div>
+      ) : (
+        <EmptyState icon={CheckCircle2} label="No alerts match this view" />
+      )}
+
+      {actionTarget?.action === "resolve" ? (
+        <div className="modal-backdrop" role="presentation">
+          <form
+            className="modal-card alert-resolution-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              actOnAlert(actionTarget, resolutionNote).catch(() => undefined);
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="alert-resolution-title"
+          >
+            <div className="modal-header">
+              <h2 id="alert-resolution-title">Resolve alert?</h2>
+              <p>{actionTarget.alert.grouped ? `${actionTarget.alert.count} grouped alert records` : titleCase(actionTarget.alert.type)}</p>
+            </div>
+            <label className="field">
+              <span>Resolution note</span>
+              <textarea value={resolutionNote} onChange={(event) => setResolutionNote(event.target.value)} placeholder="Optional note for the audit trail" rows={4} />
+            </label>
+            <div className="modal-actions">
+              <button className="secondary-button" disabled={actionLoading} onClick={() => setActionTarget(null)} type="button">
+                Cancel
+              </button>
+              <button className="primary-button" disabled={actionLoading} type="submit">
+                <Check size={16} />
+                {actionLoading ? "Resolving..." : "Resolve Alert"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AlertReviewRow({
+  alert,
+  focused,
+  onResolve,
+  onReopen
+}: {
+  alert: Anomaly;
+  focused: boolean;
+  onResolve: () => void;
+  onReopen: () => void;
+}) {
+  const isResolved = alert.status === "resolved";
+  const isUnknownPlate = alert.type === "unauthorized_plate";
+  const title = isUnknownPlate
+    ? alert.registration_number || "Unknown registration"
+    : titleCase(alert.type);
+  const message = isUnknownPlate ? "Unauthorised Plate, Access Denied" : alert.message;
+  const showReadCount = alert.grouped && alert.count > 1;
+  return (
+    <article
+      className={`alert-review-row ${alert.status}${focused ? " focused" : ""}`}
+      id={alertDomId(alert.id)}
+      tabIndex={focused ? -1 : undefined}
+    >
+      <span className={`alert-review-icon ${alert.severity}`}>
+        {isResolved ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
+      </span>
+      <div className="alert-review-main">
+        <div className={alert.snapshot_url ? "alert-review-content has-snapshot" : "alert-review-content"}>
+          {alert.snapshot_url ? (
+            <img
+              alt={`${title} snapshot from camera.gate`}
+              className="alert-review-snapshot"
+              loading="lazy"
+              src={alert.snapshot_url}
+            />
+          ) : null}
+          <div className="alert-review-copy">
+            <strong>{title}</strong>
+            <span>{message}</span>
+          </div>
+        </div>
+        <div className="alert-review-meta">
+          <span>First Seen: <strong>{formatDate(alert.first_seen_at || alert.created_at)}</strong></span>
+          <span>Last Seen: <strong>{formatDate(alert.last_seen_at || alert.created_at)}</strong></span>
+        </div>
+        {isResolved ? (
+          <div className="alert-resolution-detail">
+            <span>Resolved {alert.resolved_at ? formatDate(alert.resolved_at) : ""}{alert.resolved_by ? ` by ${alert.resolved_by.display_name}` : ""}</span>
+            {alert.resolution_note ? <p>{alert.resolution_note}</p> : null}
+          </div>
+        ) : null}
+      </div>
+      <div className="alert-review-side">
+        <div className="alert-review-badges">
+          <Badge tone={alertSeverityTone(alert.severity)}>{alertSeverityLabel(alert.severity)}</Badge>
+          {showReadCount ? <Badge tone="gray">{alert.count} reads</Badge> : null}
+          <Badge tone={isResolved ? "green" : "blue"}>{isResolved ? "Resolved" : "Open"}</Badge>
+        </div>
+        <div className="alert-review-actions">
+          {isResolved ? (
+            <button className="secondary-button" onClick={onReopen} type="button">Reopen</button>
+          ) : (
+            <button className="primary-button" onClick={onResolve} type="button">
+              <Check size={15} /> Resolve
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -7113,7 +7923,10 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
     label: "Events",
     events: [
       { value: "authorized_entry", label: "Authorised Vehicle Detected", severity: "info", description: "A known vehicle is granted entry inside its access policy." },
-      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "critical", description: "A plate is denied because it is unknown or inactive." }
+      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "warning", description: "A plate is denied because it is unknown or inactive." },
+      { value: "expired_mot_detected", label: "Expired MOT Detected", severity: "warning", description: "DVLA reports a vehicle MOT status other than Valid on arrival." },
+      { value: "expired_tax_detected", label: "Expired Tax Detected", severity: "warning", description: "DVLA reports a vehicle tax status other than Taxed or SORN on arrival." },
+      { value: "leaderboard_overtake", label: "Leaderboard Overtake", severity: "info", description: "A known vehicle takes the top spot on Top Charts." }
     ]
   }
 ];
@@ -7132,7 +7945,13 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
     items: [
       { name: "Registration", token: "@Registration", label: "Registration" },
       { name: "VehicleName", token: "@VehicleName", label: "Friendly vehicle name" },
-      { name: "VehicleMake", token: "@VehicleMake", label: "Vehicle make" }
+      { name: "VehicleMake", token: "@VehicleMake", label: "Vehicle make" },
+      { name: "VehicleColor", token: "@VehicleColor", label: "Vehicle colour" },
+      { name: "VehicleColour", token: "@VehicleColour", label: "Vehicle colour" },
+      { name: "MotStatus", token: "@MotStatus", label: "MOT status" },
+      { name: "MotExpiry", token: "@MotExpiry", label: "MOT expiry" },
+      { name: "TaxStatus", token: "@TaxStatus", label: "Tax status" },
+      { name: "TaxExpiry", token: "@TaxExpiry", label: "Tax expiry" }
     ]
   },
   {
@@ -7141,6 +7960,14 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
       { name: "Time", token: "@Time", label: "Event time" },
       { name: "GateStatus", token: "@GateStatus", label: "Gate status" },
       { name: "Message", token: "@Message", label: "Message" }
+    ]
+  },
+  {
+    group: "Leaderboard",
+    items: [
+      { name: "NewWinnerName", token: "@NewWinnerName", label: "New winner" },
+      { name: "OvertakenName", token: "@OvertakenName", label: "Overtaken person" },
+      { name: "ReadCount", token: "@ReadCount", label: "Read count" }
     ]
   }
 ];
@@ -7157,6 +7984,11 @@ const mockNotificationContext: Record<string, string> = {
   VehicleMake: "Tesla",
   VehicleModel: "Model Y Dual Motor Long Range",
   VehicleColor: "Pearl white",
+  VehicleColour: "Pearl white",
+  MotStatus: "Valid",
+  MotExpiry: "2026-10-14",
+  TaxStatus: "Taxed",
+  TaxExpiry: "2027-01-01",
   Time: "18:42",
   GateStatus: "opening",
   Direction: "entry",
@@ -7165,7 +7997,10 @@ const mockNotificationContext: Record<string, string> = {
   Severity: "Info",
   EventType: "Authorised Entry",
   Subject: "Steph arrived at the gate",
-  Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range."
+  Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
+  NewWinnerName: "Steph Smith",
+  OvertakenName: "Jason Smith",
+  ReadCount: "42"
 };
 
 const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<NotificationAction, "title_template" | "message_template">> = {
@@ -7756,7 +8591,7 @@ function NotificationActionCard({
           <select value={action.target_mode} onChange={(event) => onChange({ ...action, target_mode: event.target.value as NotificationTargetMode })}>
             <option value="all">All</option>
             {action.type === "voice" ? <option value="many">Many</option> : null}
-            <option value="selected">Specific target</option>
+            <option value="selected">Specific targets</option>
           </select>
         </label>
         {action.target_mode !== "all" ? (
@@ -9990,6 +10825,33 @@ function formatDate(value: string) {
     day: "2-digit",
     month: "short"
   }).format(new Date(value));
+}
+
+function formatDateOnly(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  }).format(dateOnlyToDate(value));
+}
+
+function dateOnlyKey(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  return localDateKey(new Date(value));
+}
+
+function localDateKey(value = new Date()) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateOnlyToDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!match) return new Date(value);
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
 
 function formatTime(value: string) {

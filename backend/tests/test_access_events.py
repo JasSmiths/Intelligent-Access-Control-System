@@ -1,16 +1,21 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 import uuid
 
 import pytest
 
 from app.models.enums import AccessDirection, PresenceState
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
+from app.services import access_events as access_events_module
 from app.services.access_events import (
     AccessEventService,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
+    dvla_mot_alert_required,
+    dvla_tax_alert_required,
 )
+from app.services.dvla import NormalizedDvlaVehicle
 
 
 class FakePresenceSession:
@@ -214,3 +219,184 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
 
     assert finalized == [{"candidate_count": 2, "best_registration_number": "MD25VNO"}]
     assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
+    service = AccessEventService()
+    vehicle = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="PE70DHX",
+        make="Peugeot",
+        color="White",
+        mot_status="Valid",
+        tax_status="Taxed",
+        mot_expiry=date(2026, 10, 14),
+        tax_expiry=date(2027, 1, 1),
+        last_dvla_lookup_date=date(2026, 4, 27),
+    )
+
+    async def fail_lookup(_registration_number):
+        raise AssertionError("same-day cache should skip DVLA")
+
+    monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
+    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fail_lookup)
+
+    result = await service._dvla_enrichment_for_event(
+        vehicle=vehicle,
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        direction_resolution={},
+        runtime=SimpleNamespace(site_timezone="Europe/London"),
+    )
+
+    assert result == {
+        "registration_number": "PE70DHX",
+        "make": "Peugeot",
+        "colour": "White",
+        "mot_status": "Valid",
+        "tax_status": "Taxed",
+        "mot_expiry": "2026-10-14",
+        "tax_expiry": "2027-01-01",
+    }
+
+
+@pytest.mark.asyncio
+async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
+    service = AccessEventService()
+    vehicle = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="MD25VNO",
+        make="Old",
+        color="Black",
+        mot_status=None,
+        tax_status=None,
+        mot_expiry=None,
+        tax_expiry=None,
+        last_dvla_lookup_date=date(2026, 4, 26),
+    )
+    calls = []
+
+    async def fake_lookup(registration_number):
+        calls.append(registration_number)
+        return NormalizedDvlaVehicle(
+            registration_number=registration_number,
+            make="Tesla",
+            colour="Blue",
+            mot_status="Expired",
+            tax_status="Untaxed",
+            mot_expiry=date(2026, 1, 1),
+            tax_expiry=date(2026, 2, 1),
+        )
+
+    monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
+    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+
+    result = await service._dvla_enrichment_for_event(
+        vehicle=vehicle,
+        registration_number="MD25VNO",
+        direction=AccessDirection.ENTRY,
+        direction_resolution={},
+        runtime=SimpleNamespace(site_timezone="Europe/London"),
+    )
+
+    assert calls == ["MD25VNO"]
+    assert vehicle.make == "Tesla"
+    assert vehicle.color == "Blue"
+    assert vehicle.mot_status == "Expired"
+    assert vehicle.tax_status == "Untaxed"
+    assert vehicle.last_dvla_lookup_date == date(2026, 4, 27)
+    assert result["mot_expiry"] == "2026-01-01"
+
+
+@pytest.mark.asyncio
+async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypatch) -> None:
+    service = AccessEventService()
+
+    async def fake_lookup(registration_number):
+        return NormalizedDvlaVehicle(
+            registration_number=registration_number,
+            make="Ford",
+            colour="Silver",
+            mot_status="Valid",
+            tax_status="Taxed",
+            mot_expiry=None,
+            tax_expiry=None,
+        )
+
+    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+
+    result = await service._dvla_enrichment_for_event(
+        vehicle=None,
+        registration_number="UNKNOWN1",
+        direction=AccessDirection.DENIED,
+        direction_resolution={"gate_observation": {"state": "closed"}},
+        runtime=SimpleNamespace(site_timezone="Europe/London"),
+    )
+
+    assert result["registration_number"] == "UNKNOWN1"
+    assert result["make"] == "Ford"
+    assert result["colour"] == "Silver"
+
+
+@pytest.mark.asyncio
+async def test_exit_events_skip_dvla_lookup(monkeypatch) -> None:
+    service = AccessEventService()
+
+    async def fail_lookup(_registration_number):
+        raise AssertionError("exits should not call DVLA")
+
+    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fail_lookup)
+
+    result = await service._dvla_enrichment_for_event(
+        vehicle=None,
+        registration_number="PE70DHX",
+        direction=AccessDirection.EXIT,
+        direction_resolution={"gate_observation": {"state": "open"}},
+        runtime=SimpleNamespace(site_timezone="Europe/London"),
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None:
+    service = AccessEventService()
+    published = []
+
+    async def fake_lookup(_registration_number):
+        raise DvlaVehicleEnquiryError("DVLA API key is not configured.", status_code=400)
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    result = await service._dvla_enrichment_for_event(
+        vehicle=None,
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        direction_resolution={},
+        runtime=SimpleNamespace(site_timezone="Europe/London"),
+    )
+
+    assert result is None
+    assert published == [
+        (
+            "dvla.enrichment_failed",
+            {
+                "registration_number": "PE70DHX",
+                "status_code": 400,
+                "error": "DVLA API key is not configured.",
+            },
+        )
+    ]
+
+
+def test_dvla_compliance_alert_helpers() -> None:
+    assert not dvla_mot_alert_required("Valid")
+    assert dvla_mot_alert_required("Expired")
+    assert not dvla_tax_alert_required("Taxed")
+    assert not dvla_tax_alert_required("SORN")
+    assert dvla_tax_alert_required("Untaxed")

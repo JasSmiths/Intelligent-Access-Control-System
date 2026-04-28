@@ -23,9 +23,10 @@ from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_ve
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
-from app.services.dvla import lookup_vehicle_registration
+from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.home_assistant import get_home_assistant_service
+from app.services.leaderboard import get_leaderboard_service
 from app.services.notifications import (
     get_notification_service,
     normalize_actions,
@@ -248,6 +249,33 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=query_access_events,
+        ),
+        AgentTool(
+            name="query_leaderboard",
+            description="Return the Top Charts leaderboard for known VIP plates and denied unknown Mystery Guest plates.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all", "known", "unknown", "top_known"],
+                        "description": "Which Top Charts section to return.",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "enrich_unknowns": {
+                        "type": "boolean",
+                        "description": "Whether to include live DVLA enrichment for unknown plates.",
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Optional person, vehicle, or plate text to filter leaderboard rows.",
+                    },
+                    "person": {"type": "string", "description": "Optional known person name to filter VIP rows."},
+                    "registration_number": {"type": "string", "description": "Optional plate to filter known or unknown rows."},
+                },
+                "additionalProperties": False,
+            },
+            handler=query_leaderboard,
         ),
         AgentTool(
             name="query_anomalies",
@@ -907,12 +935,69 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"events": records, "count": len(records), "timezone": config.site_timezone}
 
 
+async def query_leaderboard(arguments: dict[str, Any]) -> dict[str, Any]:
+    scope = _normalize(arguments.get("scope") or "all")
+    if scope not in {"", "all", "known", "unknown", "top_known"}:
+        return {"error": "scope must be all, known, unknown, or top_known."}
+    scope = scope or "all"
+
+    try:
+        limit = int(arguments.get("limit") or 25)
+    except (TypeError, ValueError):
+        limit = 25
+    enrich_unknowns = arguments.get("enrich_unknowns")
+    if enrich_unknowns is None:
+        enrich_unknowns = scope in {"all", "unknown"}
+
+    leaderboard = await get_leaderboard_service().get_leaderboard(
+        limit=limit,
+        enrich_unknowns=bool(enrich_unknowns),
+    )
+
+    search = _leaderboard_search_text(arguments)
+    known = [
+        row
+        for row in list(leaderboard.get("known") or [])
+        if not search or _leaderboard_known_matches(row, search)
+    ]
+    unknown = [
+        row
+        for row in list(leaderboard.get("unknown") or [])
+        if not search or _leaderboard_unknown_matches(row, search)
+    ]
+    top_known = leaderboard.get("top_known")
+    if search and isinstance(top_known, dict) and not _leaderboard_known_matches(top_known, search):
+        top_known = known[0] if known else None
+
+    response: dict[str, Any] = {
+        "scope": scope,
+        "generated_at": leaderboard.get("generated_at"),
+        "top_known": top_known,
+        "known_count": len(known),
+        "unknown_count": len(unknown),
+        "search": search or None,
+        "enriched_unknowns": bool(enrich_unknowns),
+    }
+    if scope in {"all", "known"}:
+        response["known"] = known
+    if scope in {"all", "unknown"}:
+        response["unknown"] = unknown
+    if scope == "top_known":
+        response["known"] = [top_known] if top_known else []
+    return response
+
+
 async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
     limit = int(arguments.get("limit") or 25)
     severity = _normalize(arguments.get("severity"))
     config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
-        query = select(Anomaly).order_by(Anomaly.created_at.desc()).limit(limit)
+        query = (
+            select(Anomaly)
+            .where(Anomaly.resolved_at.is_(None))
+            .order_by(Anomaly.created_at.desc())
+            .limit(limit)
+        )
         anomalies = (await session.scalars(query)).all()
 
     records = [
@@ -920,6 +1005,7 @@ async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
             "type": anomaly.anomaly_type.value,
             "severity": anomaly.severity.value,
             "message": anomaly.message,
+            "status": "open",
             "created_at": _agent_datetime_iso(anomaly.created_at, config.site_timezone),
             "created_at_display": _agent_datetime_display(anomaly.created_at, config.site_timezone),
         }
@@ -1052,6 +1138,7 @@ async def lookup_dvla_vehicle(arguments: dict[str, Any]) -> dict[str, Any]:
         "registration_number": registration_number,
         "vehicle": vehicle,
         "display_vehicle": display_vehicle_record(vehicle, registration_number),
+        "normalized_vehicle": normalize_vehicle_enquiry_response(vehicle, registration_number).as_payload(),
     }
 
 
@@ -1946,6 +2033,68 @@ def _person_record_matches(person: dict[str, str], requested: str) -> bool:
     requested_tokens = set(requested_key.split())
     display_tokens = set(display_key.split())
     return bool(requested_tokens and requested_tokens <= display_tokens) or requested_key == group_key
+
+
+def _leaderboard_search_text(arguments: dict[str, Any]) -> str:
+    registration = str(arguments.get("registration_number") or "").strip()
+    if registration:
+        return normalize_registration_number(registration).lower()
+    return _person_match_key(
+        " ".join(
+            str(arguments.get(key) or "").strip()
+            for key in ("search", "person")
+            if str(arguments.get(key) or "").strip()
+        )
+    )
+
+
+def _leaderboard_known_matches(row: dict[str, Any], requested: str) -> bool:
+    if not requested:
+        return True
+    person = row.get("person") if isinstance(row.get("person"), dict) else {}
+    vehicle = row.get("vehicle") if isinstance(row.get("vehicle"), dict) else {}
+    haystack = _person_match_key(
+        " ".join(
+            str(value or "")
+            for value in [
+                row.get("registration_number"),
+                row.get("first_name"),
+                row.get("display_name"),
+                row.get("vehicle_name"),
+                person.get("first_name"),
+                person.get("last_name"),
+                person.get("display_name"),
+                vehicle.get("registration_number"),
+                vehicle.get("make"),
+                vehicle.get("model"),
+                vehicle.get("color"),
+                vehicle.get("description"),
+                vehicle.get("display_name"),
+            ]
+        )
+    )
+    return requested in haystack
+
+
+def _leaderboard_unknown_matches(row: dict[str, Any], requested: str) -> bool:
+    if not requested:
+        return True
+    dvla = row.get("dvla") if isinstance(row.get("dvla"), dict) else {}
+    display_vehicle = dvla.get("display_vehicle") if isinstance(dvla.get("display_vehicle"), dict) else {}
+    haystack = _person_match_key(
+        " ".join(
+            str(value or "")
+            for value in [
+                row.get("registration_number"),
+                dvla.get("label"),
+                display_vehicle.get("make"),
+                display_vehicle.get("model"),
+                display_vehicle.get("colour"),
+                display_vehicle.get("color"),
+            ]
+        )
+    )
+    return requested in haystack
 
 
 def _person_match_key(value: str) -> str:

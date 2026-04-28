@@ -185,6 +185,76 @@ def test_access_event_time_planner_extracts_first_name() -> None:
     assert call.arguments["day"] == "recent"
 
 
+def test_leaderboard_tool_is_registered_and_selected() -> None:
+    tools = ai_tools.build_agent_tools()
+    service = ChatService()
+
+    selected = service._select_tools_for_request("Who is winning Top Charts?", {}, [], [])
+    planned = service._plan_tool_calls("Who is winning Top Charts?", {}, [])
+
+    assert "query_leaderboard" in tools
+    assert [tool.name for tool in selected] == ["query_leaderboard"]
+    assert planned[0].name == "query_leaderboard"
+    assert planned[0].arguments["scope"] == "top_known"
+
+
+@pytest.mark.asyncio
+async def test_query_leaderboard_filters_rows(monkeypatch) -> None:
+    class FakeLeaderboardService:
+        async def get_leaderboard(self, *, limit, enrich_unknowns):
+            assert limit == 10
+            assert enrich_unknowns is True
+            return {
+                "generated_at": "2026-04-27T12:00:00+00:00",
+                "top_known": {
+                    "rank": 1,
+                    "registration_number": "VIP123",
+                    "display_name": "Steph Smith",
+                    "vehicle_name": "Silver Ford Transit",
+                    "read_count": 7,
+                    "person": {"display_name": "Steph Smith"},
+                    "vehicle": {"registration_number": "VIP123", "make": "Ford", "model": "Transit", "color": "Silver"},
+                },
+                "known": [
+                    {
+                        "rank": 1,
+                        "registration_number": "VIP123",
+                        "display_name": "Steph Smith",
+                        "vehicle_name": "Silver Ford Transit",
+                        "read_count": 7,
+                        "person": {"display_name": "Steph Smith"},
+                        "vehicle": {"registration_number": "VIP123", "make": "Ford", "model": "Transit", "color": "Silver"},
+                    },
+                    {
+                        "rank": 2,
+                        "registration_number": "OTHER1",
+                        "display_name": "Jason Smith",
+                        "vehicle_name": "Blue Tesla",
+                        "read_count": 5,
+                        "person": {"display_name": "Jason Smith"},
+                        "vehicle": {"registration_number": "OTHER1", "make": "Tesla", "model": "Model Y", "color": "Blue"},
+                    },
+                ],
+                "unknown": [
+                    {
+                        "rank": 1,
+                        "registration_number": "MYSTERY1",
+                        "read_count": 3,
+                        "dvla": {"label": "White Ford Transit", "display_vehicle": {"make": "Ford", "colour": "White"}},
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(ai_tools, "get_leaderboard_service", lambda: FakeLeaderboardService())
+
+    result = await ai_tools.query_leaderboard({"scope": "all", "limit": 10, "search": "Steph", "enrich_unknowns": True})
+
+    assert result["top_known"]["display_name"] == "Steph Smith"
+    assert result["known_count"] == 1
+    assert result["unknown_count"] == 0
+    assert result["known"][0]["registration_number"] == "VIP123"
+
+
 def test_person_record_match_accepts_first_name_and_punctuation() -> None:
     assert ai_tools._person_record_matches({"display_name": "Steph Smith", "group": "Family"}, "steph?")
 

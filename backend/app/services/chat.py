@@ -67,6 +67,7 @@ NOTIFICATION_TOOL_NAMES = (
     "preview_notification_workflow",
     "test_notification_workflow",
 )
+LEADERBOARD_TOOL_NAMES = ("query_leaderboard",)
 DEVICE_TOOL_NAMES = ("query_device_states", "open_device")
 CAMERA_TOOL_NAMES = ("analyze_camera_snapshot", "get_camera_snapshot")
 FILE_TOOL_NAMES = (
@@ -90,8 +91,8 @@ STATE_CHANGING_TOOL_NAMES = {
 
 SYSTEM_PROMPT = """You are the Intelligent Access Control System assistant.
 Answer concisely and use tool results as the source of truth for presence,
-events, anomalies, schedules, access rhythm, device states, DVLA vehicle
-lookups, and camera snapshot analysis. If the
+events, anomalies, schedules, access rhythm, leaderboards, device states, DVLA
+vehicle lookups, and camera snapshot analysis. If the
 user asks a follow-up with pronouns like they, he, she, or it, use the session
 memory context. Never invent access events, people, or DVLA vehicle records
 that are not present in tool results. When a DVLA vehicle lookup succeeds,
@@ -1156,6 +1157,7 @@ class ChatService:
     ) -> list[AgentTool]:
         lower = message.lower()
         names: set[str] = set()
+        leaderboard_request = self._looks_like_leaderboard_request(lower)
 
         if attachments:
             names.add("read_chat_attachment")
@@ -1168,7 +1170,7 @@ class ChatService:
         if any(word in lower for word in ["gate", "garage", "door", "cover", "device"]):
             names.add("query_device_states")
 
-        if any(word in lower for word in ["present", "presence", "onsite", "on site", "here", "who is", "who's"]):
+        if not leaderboard_request and any(word in lower for word in ["present", "presence", "onsite", "on site", "here", "who is", "who's"]):
             names.add("query_presence")
 
         if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "leave", "left", "exit", "exited", "event", "denied", "access log"]):
@@ -1182,6 +1184,9 @@ class ChatService:
 
         if any(word in lower for word in ["summary", "summarize", "summarise", "rhythm", "report"]):
             names.update(("summarize_access_rhythm", "query_access_events"))
+
+        if leaderboard_request:
+            names.update(LEADERBOARD_TOOL_NAMES)
 
         if any(word in lower for word in ["schedule", "schedules", "timeframe", "allowed", "access window"]):
             names.update(SCHEDULE_TOOL_NAMES)
@@ -1230,6 +1235,7 @@ class ChatService:
     ) -> list[ToolCall]:
         lower = message.lower()
         subject = self._subject_from_message(lower, memory)
+        leaderboard_request = self._looks_like_leaderboard_request(lower)
         calls: list[ToolCall] = []
 
         for index, attachment in enumerate(attachments[:4]):
@@ -1270,7 +1276,7 @@ class ChatService:
         if self._looks_like_schedule_delete_request(lower):
             calls.append(self._planned_schedule_delete_call(message))
 
-        if any(word in lower for word in ["present", "here", "onsite", "on site", "who is"]):
+        if not leaderboard_request and any(word in lower for word in ["present", "here", "onsite", "on site", "who is"]):
             calls.append(ToolCall("planned-query-presence", "query_presence", self._subject_args(subject)))
 
         if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "left", "leave", "exit", "exited", "event", "denied"]):
@@ -1333,6 +1339,9 @@ class ChatService:
                     {"day": "today" if "today" in lower else "recent"},
                 )
             )
+
+        if leaderboard_request:
+            calls.append(self._planned_leaderboard_call(message))
 
         if "presence" in lower and any(word in lower for word in ["csv", "export", "download", "spreadsheet"]):
             calls.append(
@@ -1411,6 +1420,24 @@ class ChatService:
         subject = self._subject_from_message(lower, memory)
         args.update(self._subject_args(subject))
         return ToolCall("planned-access-event-time", "query_access_events", args)
+
+    def _planned_leaderboard_call(self, message: str) -> ToolCall:
+        lower = message.lower()
+        scope = "all"
+        if any(phrase in lower for phrase in ["mystery", "unknown", "stranger", "denied"]):
+            scope = "unknown"
+        elif any(phrase in lower for phrase in ["vip", "known", "family", "leader", "winner", "winning", "top spot", "number one", "#1"]):
+            scope = "top_known" if any(phrase in lower for phrase in ["leader", "winner", "winning", "top spot", "number one", "#1"]) else "known"
+
+        args: dict[str, Any] = {
+            "scope": scope,
+            "limit": self._leaderboard_limit_from_message(lower),
+            "enrich_unknowns": scope in {"all", "unknown"},
+        }
+        registration_number = self._registration_from_message(message)
+        if registration_number:
+            args["registration_number"] = registration_number
+        return ToolCall("planned-query-leaderboard", "query_leaderboard", args)
 
     def _device_open_direct_text(self, output: dict[str, Any]) -> str:
         device = output.get("device") if isinstance(output.get("device"), dict) else {}
@@ -1581,6 +1608,43 @@ class ChatService:
         ]
         return any(phrase in lower for phrase in lookup_phrases)
 
+    def _looks_like_leaderboard_request(self, lower: str) -> bool:
+        terms = [
+            "leaderboard",
+            "leader board",
+            "top charts",
+            "top chart",
+            "vip lounge",
+            "mystery guests",
+            "mystery guest",
+            "read count",
+            "detectiion",
+            "detectiions",
+            "detection",
+            "detections",
+            "most detected",
+            "most detections",
+            "most reads",
+            "top spot",
+            "number one",
+            "#1",
+            "winner",
+            "overtake",
+            "overtaken",
+        ]
+        if any(term in lower for term in terms):
+            return True
+        return bool(
+            re.search(r"\b(?:who|what|which)\b.*\b(?:leading|lead|leader|top)\b", lower)
+            and re.search(r"\b(?:plate|plates|car|vehicle|vehicles|vip|known|unknown)\b", lower)
+        )
+
+    def _leaderboard_limit_from_message(self, lower: str) -> int:
+        match = re.search(r"\btop\s+(\d{1,3})\b", lower)
+        if match:
+            return max(1, min(int(match.group(1)), 100))
+        return 25
+
     async def _execute_tool_call(
         self,
         session_id: uuid.UUID,
@@ -1667,6 +1731,7 @@ class ChatService:
             "query_anomalies": "Checking anomaly records...",
             "summarize_access_rhythm": "Summarizing site rhythm...",
             "calculate_visit_duration": "Calculating visit duration...",
+            "query_leaderboard": "Checking Top Charts...",
             "trigger_anomaly_alert": "Preparing alert notification...",
             "get_system_users": "Checking user directory...",
             "lookup_dvla_vehicle": "Looking up vehicle details...",
@@ -1992,6 +2057,22 @@ class ChatService:
             )
         if tool_name == "open_device":
             return self._device_open_direct_text(output)
+        if tool_name == "query_leaderboard":
+            top = output.get("top_known") if isinstance(output.get("top_known"), dict) else None
+            known = output.get("known") if isinstance(output.get("known"), list) else []
+            unknown = output.get("unknown") if isinstance(output.get("unknown"), list) else []
+            if top:
+                return (
+                    f"{top.get('display_name') or top.get('registration_number')} is leading Top Charts "
+                    f"with {top.get('read_count')} Detectiions."
+                )
+            if known:
+                first = known[0]
+                return f"{first.get('display_name') or first.get('registration_number')} leads the VIP Lounge."
+            if unknown:
+                first = unknown[0]
+                return f"{first.get('registration_number')} leads the Mystery Guests list."
+            return "I found no leaderboard entries yet."
         if tool_name == "delete_schedule":
             return self._schedule_delete_direct_text(output)
         return json.dumps([result["output"] for result in tool_results], default=str)

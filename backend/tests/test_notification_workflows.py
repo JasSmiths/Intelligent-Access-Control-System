@@ -12,6 +12,7 @@ from app.modules.notifications.base import NotificationContext
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notifications import (
     NotificationService,
+    TRIGGER_CATALOG,
     context_variables,
     normalize_actions,
     normalize_conditions,
@@ -120,6 +121,61 @@ def test_context_variables_include_vehicle_aliases_and_time() -> None:
     assert variables["Time"] == "18:42"
 
 
+def test_leaderboard_overtake_trigger_and_variables_are_available() -> None:
+    events = [event for group in TRIGGER_CATALOG for event in group["events"]]
+    assert any(event["value"] == "leaderboard_overtake" for event in events)
+
+    variables = context_variables(
+        NotificationContext(
+            event_type="leaderboard_overtake",
+            subject="Steph took the lead",
+            severity="info",
+            facts={
+                "new_winner_name": "Steph Smith",
+                "overtaken_name": "Jason Smith",
+                "read_count": "42",
+                "vehicle_name": "Silver Ford Transit",
+            },
+        )
+    )
+
+    assert variables["NewWinnerName"] == "Steph Smith"
+    assert variables["OvertakenName"] == "Jason Smith"
+    assert variables["ReadCount"] == "42"
+    assert variables["VehicleName"] == "Silver Ford Transit"
+
+
+def test_dvla_compliance_triggers_and_variables_are_available() -> None:
+    events = [event for group in TRIGGER_CATALOG for event in group["events"]]
+    assert any(event["value"] == "expired_mot_detected" for event in events)
+    assert any(event["value"] == "expired_tax_detected" for event in events)
+
+    variables = context_variables(
+        NotificationContext(
+            event_type="expired_mot_detected",
+            subject="Expired MOT detected",
+            severity="warning",
+            facts={
+                "registration_number": "PE70DHX",
+                "vehicle_make": "Peugeot",
+                "vehicle_colour": "Silver",
+                "mot_status": "Expired",
+                "mot_expiry": "2026-10-14",
+                "tax_status": "Taxed",
+                "tax_expiry": "2027-01-01",
+            },
+        )
+    )
+
+    assert variables["VehicleMake"] == "Peugeot"
+    assert variables["VehicleColor"] == "Silver"
+    assert variables["VehicleColour"] == "Silver"
+    assert variables["MotStatus"] == "Expired"
+    assert variables["MotExpiry"] == "2026-10-14"
+    assert variables["TaxStatus"] == "Taxed"
+    assert variables["TaxExpiry"] == "2027-01-01"
+
+
 def test_normalizers_keep_workflow_shape_strict() -> None:
     actions = normalize_actions(
         [
@@ -145,6 +201,29 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
     assert actions[0]["media"]["attach_camera_snapshot"] is True
     assert len(conditions) == 1
     assert conditions[0]["mode"] == "person_home"
+
+
+async def test_home_assistant_mobile_targets_accept_specific_notify_services() -> None:
+    service = NotificationService()
+
+    targets = await service._select_home_assistant_mobile_targets(
+        SimpleNamespace(),
+        {
+            "target_mode": "selected",
+            "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
+        },
+    )
+
+    assert targets == ["notify.mobile_app_jason"]
+
+    with pytest.raises(NotificationDeliveryError):
+        await service._select_home_assistant_mobile_targets(
+            SimpleNamespace(),
+            {
+                "target_mode": "selected",
+                "target_ids": ["home_assistant_mobile:notify.family_group"],
+            },
+        )
 
 
 def test_presence_condition_modes() -> None:

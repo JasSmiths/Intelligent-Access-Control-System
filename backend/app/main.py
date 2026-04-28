@@ -8,6 +8,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.api.router import api_router
 from app.api.v1 import ai as ai_routes
 from app.api.v1 import auth as auth_routes
+from app.api.v1 import leaderboard as leaderboard_routes
 from app.api.v1 import schedules as schedule_routes
 from app.api.v1 import users as user_routes
 from app.api.v1 import webhooks as webhook_routes
@@ -228,6 +229,7 @@ async def service_root() -> dict[str, object]:
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(ai_routes.router, prefix="/api", tags=["ai"])
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
+app.include_router(leaderboard_routes.router, prefix="/api", tags=["leaderboard"])
 app.include_router(schedule_routes.router, prefix="/api/schedules", tags=["schedules"])
 app.include_router(user_routes.router, prefix="/api/users", tags=["users"])
 app.include_router(webhook_routes.router, prefix="/api/webhooks", tags=["webhooks"])

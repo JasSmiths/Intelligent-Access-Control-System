@@ -7,6 +7,7 @@ from app.api.v1 import (
     events,
     health,
     integrations,
+    leaderboard,
     notifications,
     realtime,
     schedules,
@@ -25,6 +26,7 @@ api_router.include_router(ai.router, prefix="/ai", tags=["ai"])
 api_router.include_router(directory.router, tags=["directory"])
 api_router.include_router(events.router, tags=["events"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+api_router.include_router(leaderboard.router, tags=["leaderboard"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 api_router.include_router(schedules.router, prefix="/schedules", tags=["schedules"])
 api_router.include_router(unifi_protect.router, prefix="/integrations/unifi-protect", tags=["integrations"])

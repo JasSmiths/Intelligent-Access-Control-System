@@ -23,6 +23,7 @@ ACRONYMS = {
     "MG",
     "MOT",
     "TVR",
+    "SORN",
     "VW",
 }
 SMALL_WORDS = {"and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}

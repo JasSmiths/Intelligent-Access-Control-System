@@ -39,7 +39,7 @@ from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppNotifier,
     HomeAssistantMobileAppTarget,
 )
-from app.services.dvla import lookup_vehicle_registration
+from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id
@@ -233,6 +233,11 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
         status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else 503
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     display_vehicle = display_vehicle_record(vehicle, registration_number)
+    normalized_vehicle = normalize_vehicle_enquiry_response(
+        vehicle,
+        registration_number,
+        display_vehicle=display_vehicle,
+    )
     emit_audit_log(
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="dvla.lookup",
@@ -252,6 +257,7 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
         "registration_number": registration_number,
         "vehicle": vehicle,
         "display_vehicle": display_vehicle,
+        "normalized_vehicle": normalized_vehicle.as_payload(),
     }
 
 

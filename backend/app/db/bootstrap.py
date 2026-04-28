@@ -59,6 +59,11 @@ async def init_database() -> None:
             )
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS vehicle_photo_data_url TEXT"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS schedule_id UUID"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mot_status VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tax_status VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mot_expiry DATE"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tax_expiry DATE"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_dvla_lookup_date DATE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicles_schedule_id ON vehicles (schedule_id)"))
             await conn.execute(
                 text(
@@ -124,6 +129,27 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_step_order ON telemetry_spans (step_order)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_started_at ON telemetry_spans (started_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_status ON telemetry_spans (status)"))
+            await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolved_by_user_id UUID"))
+            await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolution_note TEXT"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_resolved_at ON anomalies (resolved_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_resolved_by_user_id ON anomalies (resolved_by_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_anomaly_type ON anomalies (anomaly_type)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_severity ON anomalies (severity)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_created_at ON anomalies (created_at)"))
+            await conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE anomalies
+                        ADD CONSTRAINT fk_anomalies_resolved_by_user_id
+                        FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END $$;
+                    """
+                )
+            )
         logger.info("database_schema_ready")
 
     await seed_dynamic_settings()

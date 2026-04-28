@@ -1,4 +1,6 @@
 import uuid
+from datetime import date, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -11,7 +13,8 @@ from app.api.dependencies import current_user
 from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import Group, Person, Schedule, User, Vehicle
 from app.models.enums import GroupCategory
-from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, friendly_vehicle_text
+from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -31,6 +34,11 @@ class PersonVehicleResponse(BaseModel):
     make: str | None
     model: str | None
     color: str | None
+    mot_status: str | None = None
+    tax_status: str | None = None
+    mot_expiry: date | None = None
+    tax_expiry: date | None = None
+    last_dvla_lookup_date: date | None = None
     schedule_id: str | None = None
     schedule: str | None = None
 
@@ -87,6 +95,11 @@ class VehicleResponse(BaseModel):
     make: str | None
     model: str | None
     color: str | None
+    mot_status: str | None
+    tax_status: str | None
+    mot_expiry: date | None
+    tax_expiry: date | None
+    last_dvla_lookup_date: date | None
     person_id: str | None
     owner: str | None
     schedule_id: str | None
@@ -100,6 +113,11 @@ class CreateVehicleRequest(BaseModel):
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
+    mot_status: str | None = Field(default=None, max_length=80)
+    tax_status: str | None = Field(default=None, max_length=80)
+    mot_expiry: date | None = None
+    tax_expiry: date | None = None
+    last_dvla_lookup_date: date | None = None
     description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     schedule_id: uuid.UUID | None = None
@@ -112,6 +130,11 @@ class UpdateVehicleRequest(BaseModel):
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
+    mot_status: str | None = Field(default=None, max_length=80)
+    tax_status: str | None = Field(default=None, max_length=80)
+    mot_expiry: date | None = None
+    tax_expiry: date | None = None
+    last_dvla_lookup_date: date | None = None
     description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     schedule_id: uuid.UUID | None = None
@@ -171,6 +194,31 @@ def normalize_optional_text(value: str | None) -> str | None:
     return text or None
 
 
+def local_today(timezone_name: str | None) -> date:
+    try:
+        timezone = ZoneInfo(timezone_name or "Europe/London")
+    except ZoneInfoNotFoundError:
+        timezone = ZoneInfo("UTC")
+    return datetime.now(tz=timezone).date()
+
+
+def apply_dvla_vehicle_details(
+    vehicle: Vehicle,
+    normalized: NormalizedDvlaVehicle,
+    *,
+    lookup_date: date,
+) -> None:
+    if normalized.make:
+        vehicle.make = normalize_vehicle_text(normalized.make)
+    if normalized.colour:
+        vehicle.color = normalize_vehicle_text(normalized.colour)
+    vehicle.mot_status = normalize_vehicle_text(normalized.mot_status)
+    vehicle.tax_status = normalize_vehicle_text(normalized.tax_status)
+    vehicle.mot_expiry = normalized.mot_expiry
+    vehicle.tax_expiry = normalized.tax_expiry
+    vehicle.last_dvla_lookup_date = lookup_date
+
+
 def normalize_home_assistant_mobile_notify_service(service_name: str | None) -> str | None:
     service_name = normalize_optional_text(service_name)
     if service_name and not service_name.startswith("notify.mobile_app_"):
@@ -190,6 +238,11 @@ def serialize_vehicle(vehicle: Vehicle) -> dict:
         "make": vehicle.make,
         "model": vehicle.model,
         "color": vehicle.color,
+        "mot_status": vehicle.mot_status,
+        "tax_status": vehicle.tax_status,
+        "mot_expiry": vehicle.mot_expiry,
+        "tax_expiry": vehicle.tax_expiry,
+        "last_dvla_lookup_date": vehicle.last_dvla_lookup_date,
         "person_id": str(vehicle.person_id) if vehicle.person_id else None,
         "owner": vehicle.owner.display_name if vehicle.owner else None,
         "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
@@ -223,6 +276,11 @@ def serialize_person(person: Person) -> dict:
                     "make": vehicle.make,
                     "model": vehicle.model,
                     "color": vehicle.color,
+                    "mot_status": vehicle.mot_status,
+                    "tax_status": vehicle.tax_status,
+                    "mot_expiry": vehicle.mot_expiry,
+                    "tax_expiry": vehicle.tax_expiry,
+                    "last_dvla_lookup_date": vehicle.last_dvla_lookup_date,
                     "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
                     "schedule": vehicle.schedule.name if vehicle.schedule else None,
                 }
@@ -255,6 +313,11 @@ def vehicle_audit_snapshot(vehicle: Vehicle) -> dict:
         "make": vehicle.make,
         "model": vehicle.model,
         "color": vehicle.color,
+        "mot_status": vehicle.mot_status,
+        "tax_status": vehicle.tax_status,
+        "mot_expiry": vehicle.mot_expiry.isoformat() if vehicle.mot_expiry else None,
+        "tax_expiry": vehicle.tax_expiry.isoformat() if vehicle.tax_expiry else None,
+        "last_dvla_lookup_date": vehicle.last_dvla_lookup_date.isoformat() if vehicle.last_dvla_lookup_date else None,
         "description": vehicle.description,
         "is_active": vehicle.is_active,
     }
@@ -504,6 +567,11 @@ async def add_vehicle(
         make=normalize_vehicle_text(request.make),
         model=normalize_vehicle_text(request.model),
         color=normalize_vehicle_text(request.color),
+        mot_status=normalize_vehicle_text(request.mot_status),
+        tax_status=normalize_vehicle_text(request.tax_status),
+        mot_expiry=request.mot_expiry,
+        tax_expiry=request.tax_expiry,
+        last_dvla_lookup_date=request.last_dvla_lookup_date,
         description=normalize_optional_text(request.description),
         is_active=request.is_active,
     )
@@ -571,6 +639,16 @@ async def update_vehicle(
         vehicle.model = normalize_vehicle_text(request.model)
     if "color" in request.model_fields_set:
         vehicle.color = normalize_vehicle_text(request.color)
+    if "mot_status" in request.model_fields_set:
+        vehicle.mot_status = normalize_vehicle_text(request.mot_status)
+    if "tax_status" in request.model_fields_set:
+        vehicle.tax_status = normalize_vehicle_text(request.tax_status)
+    if "mot_expiry" in request.model_fields_set:
+        vehicle.mot_expiry = request.mot_expiry
+    if "tax_expiry" in request.model_fields_set:
+        vehicle.tax_expiry = request.tax_expiry
+    if "last_dvla_lookup_date" in request.model_fields_set:
+        vehicle.last_dvla_lookup_date = request.last_dvla_lookup_date
     if "description" in request.model_fields_set:
         vehicle.description = normalize_optional_text(request.description)
     if request.is_active is not None:
@@ -592,6 +670,49 @@ async def update_vehicle(
     except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Vehicle already exists") from exc
+
+    refreshed_vehicle = await session.scalar(
+        select(Vehicle)
+        .options(selectinload(Vehicle.owner), selectinload(Vehicle.schedule))
+        .where(Vehicle.id == vehicle.id)
+    )
+    if not refreshed_vehicle:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved vehicle")
+
+    return VehicleResponse(**serialize_vehicle(refreshed_vehicle))
+
+
+@router.post("/vehicles/{vehicle_id}/dvla-refresh", response_model=VehicleResponse)
+async def refresh_vehicle_dvla(
+    vehicle_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> VehicleResponse:
+    vehicle = await session.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+
+    before = vehicle_audit_snapshot(vehicle)
+    try:
+        normalized = await lookup_normalized_vehicle_registration(vehicle.registration_number)
+    except DvlaVehicleEnquiryError as exc:
+        status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else status.HTTP_503_SERVICE_UNAVAILABLE
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    config = await get_runtime_config()
+    apply_dvla_vehicle_details(vehicle, normalized, lookup_date=local_today(config.site_timezone))
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="vehicle.dvla_refresh",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Vehicle",
+        target_id=vehicle.id,
+        target_label=vehicle.registration_number,
+        diff=audit_diff(before, vehicle_audit_snapshot(vehicle)),
+    )
+    await session.commit()
 
     refreshed_vehicle = await session.scalar(
         select(Vehicle)
