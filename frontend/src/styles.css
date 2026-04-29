@@ -3946,6 +3946,291 @@ tr:last-child td {
   grid-column: 1 / -1;
 }
 
+.passes-page {
+  max-width: 1540px;
+}
+
+.users-hero.passes-hero {
+  min-height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.passes-toolbar {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.pass-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pass-filter-bar button,
+.visitor-pass-window-select button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.pass-filter-bar button.active,
+.visitor-pass-window-select button.active {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
+.pass-filter-bar button span {
+  min-width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.visitor-pass-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.visitor-pass-card {
+  min-height: 246px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  border-left: 4px solid var(--line-strong);
+}
+
+.visitor-pass-card.active {
+  border-left-color: var(--green);
+}
+
+.visitor-pass-card.scheduled {
+  border-left-color: var(--blue);
+}
+
+.visitor-pass-card.used {
+  border-left-color: var(--violet);
+}
+
+.visitor-pass-card.cancelled {
+  border-left-color: var(--red);
+}
+
+.visitor-pass-card-head {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.visitor-pass-card-head strong,
+.visitor-pass-card-head span:not(.badge),
+.visitor-pass-window span,
+.visitor-pass-vehicle strong,
+.visitor-pass-vehicle span,
+.visitor-pass-duration span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-card-head strong,
+.visitor-pass-vehicle strong {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.visitor-pass-card-head span:not(.badge),
+.visitor-pass-window span,
+.visitor-pass-vehicle span,
+.visitor-pass-duration span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.visitor-pass-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-window {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-window div,
+.visitor-pass-vehicle {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.visitor-pass-window svg,
+.visitor-pass-vehicle svg {
+  color: var(--muted);
+}
+
+.visitor-pass-telemetry {
+  display: grid;
+  gap: 10px;
+}
+
+.visitor-pass-duration {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.visitor-pass-duration .badge {
+  flex: 0 0 auto;
+}
+
+.visitor-pass-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.passes-loading,
+.passes-empty-card {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.passes-loading {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.visitor-pass-modal {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.visitor-date-picker {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-date-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.visitor-date-picker-head strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.visitor-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.visitor-calendar-grid span,
+.visitor-calendar-grid button {
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.visitor-calendar-grid span {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.visitor-calendar-grid button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 620;
+}
+
+.visitor-calendar-grid button.muted {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 70%, var(--surface-soft));
+}
+
+.visitor-calendar-grid button.active {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.visitor-pass-window-select {
+  display: grid;
+  gap: 8px;
+}
+
+.visitor-pass-window-select > span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.visitor-pass-window-select > div {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rotate-90 {
+  transform: rotate(90deg);
+}
+
 .schedule-modal {
   width: min(1220px, calc(100vw - 32px));
   max-height: calc(var(--app-viewport-height) - 36px);
@@ -6353,61 +6638,87 @@ tr:last-child td {
 }
 
 .variable-suggestion-menu {
-  position: absolute;
-  z-index: 80;
-  top: calc(100% + 6px);
-  left: 0;
-  width: min(360px, 100%);
-  max-height: 300px;
+  position: fixed;
+  z-index: 400;
+  width: clamp(260px, 32vw, 360px);
+  max-width: calc(100vw - 16px);
+  max-height: var(--variable-menu-max-height, 16rem);
   overflow: auto;
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 7px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: var(--shadow-strong);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.16), 0 4px 14px rgba(15, 23, 42, 0.08);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+}
+
+.variable-suggestion-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.variable-suggestion-menu::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+
+.variable-suggestion-menu::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .variable-suggestion-group {
   display: grid;
-  gap: 5px;
+  gap: 3px;
 }
 
 .variable-suggestion-group > strong {
+  padding: 2px 4px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
+  line-height: 1.2;
 }
 
 .variable-suggestion-group button {
-  min-height: 34px;
+  min-height: 30px;
   display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr);
+  grid-template-columns: minmax(104px, 0.9fr) minmax(0, 1fr);
   gap: 8px;
   align-items: center;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text);
   text-align: left;
 }
 
-.variable-suggestion-group button:hover {
+.variable-suggestion-group button:hover,
+.variable-suggestion-group button.active {
   border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
   background: var(--blue-soft);
+}
+
+.variable-suggestion-group button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 20%, transparent);
 }
 
 .variable-suggestion-group code {
   color: var(--blue);
   font-size: 12px;
+  font-weight: 700;
   overflow-wrap: anywhere;
 }
 
 .variable-suggestion-group span {
   color: var(--muted-strong);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .notification-preview-rail {
@@ -9463,6 +9774,7 @@ tr:last-child td {
   .provider-grid,
   .integration-tile-grid,
   .protect-camera-grid,
+  .visitor-pass-grid,
   .settings-form-grid,
   .ha-setup-grid,
   .slot-grid,
@@ -9500,6 +9812,8 @@ tr:last-child td {
   .ha-device-title,
   .ha-entity-composer,
   .schedule-policy-card,
+  .passes-toolbar,
+  .users-hero.passes-hero,
   .weekly-schedule-toolbar,
   .protect-section-header,
   .protect-exposes-header,
@@ -9521,7 +9835,8 @@ tr:last-child td {
   }
 
   .schedule-policy-actions,
-  .schedule-policy-status {
+  .schedule-policy-status,
+  .passes-toolbar .secondary-button {
     width: 100%;
   }
 
@@ -9580,6 +9895,30 @@ tr:last-child td {
 
   .apprise-manager-header .primary-button {
     width: 100%;
+  }
+
+  .users-hero.passes-hero,
+  .passes-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pass-filter-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .visitor-pass-window-select > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .visitor-pass-card-head {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .visitor-pass-card-head .badge {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .apprise-url-head {

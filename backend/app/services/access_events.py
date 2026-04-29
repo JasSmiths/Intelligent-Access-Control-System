@@ -22,7 +22,7 @@ from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
-from app.models import AccessEvent, Anomaly, Person, Presence, Vehicle
+from app.models import AccessEvent, Anomaly, Person, Presence, Vehicle, VisitorPass
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
@@ -38,15 +38,19 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.leaderboard import get_leaderboard_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
-from app.services.schedules import evaluate_schedule_id, evaluate_vehicle_schedule
+from app.services.schedules import ScheduleEvaluation, evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, TELEMETRY_CATEGORY_LPR, telemetry
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
+from app.services.visitor_passes import get_visitor_pass_service, serialize_visitor_pass
 
 logger = get_logger(__name__)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
+VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
+VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
@@ -581,25 +585,63 @@ class AccessEventService:
             person = vehicle.owner if vehicle else None
             runtime = self._runtime or await get_runtime_config()
             identity_active = bool(vehicle and (not person or person.is_active))
+            visitor_pass: VisitorPass | None = None
+            visitor_pass_mode: str | None = None
+            if not vehicle:
+                visitor_pass_mode = self._visitor_pass_candidate_kind(direction_read)
+                visitor_span = trace.start_span(
+                    "Visitor Pass Matching",
+                    attributes={
+                        "registration_number": read.registration_number,
+                        "candidate_kind": visitor_pass_mode,
+                    },
+                )
+                visitor_service = get_visitor_pass_service()
+                if visitor_pass_mode == "arrival":
+                    visitor_pass = await visitor_service.claim_active_pass(
+                        session,
+                        occurred_at=read.captured_at,
+                        registration_number=read.registration_number,
+                    )
+                elif visitor_pass_mode == "departure":
+                    visitor_pass = await visitor_service.find_departure_pass(
+                        session,
+                        occurred_at=read.captured_at,
+                        registration_number=read.registration_number,
+                    )
+                visitor_span.finish(
+                    output_payload={
+                        "matched": bool(visitor_pass),
+                        "mode": visitor_pass_mode,
+                        "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
+                        "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
+                    }
+                )
             schedule_span = trace.start_span(
                 "Schedule & Access Rule Evaluation",
                 attributes={
                     "identity_active": identity_active,
                     "vehicle_id": str(vehicle.id) if vehicle else None,
                     "person_id": str(person.id) if person else None,
+                    "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 },
             )
-            schedule_evaluation = (
-                await evaluate_vehicle_schedule(
+            if vehicle and identity_active:
+                schedule_evaluation = await evaluate_vehicle_schedule(
                     session,
                     vehicle,
                     read.captured_at,
                     timezone_name=runtime.site_timezone,
                     default_policy=runtime.schedule_default_policy,
                 )
-                if vehicle and identity_active
-                else None
-            )
+            elif visitor_pass:
+                schedule_evaluation = ScheduleEvaluation(
+                    allowed=True,
+                    source=f"visitor_pass_{visitor_pass_mode or 'match'}",
+                    reason=f"Visitor pass matched for {visitor_pass.visitor_name}.",
+                )
+            else:
+                schedule_evaluation = None
             schedule_span.finish(
                 output_payload={
                     "allowed": schedule_evaluation.allowed if schedule_evaluation else False,
@@ -611,12 +653,13 @@ class AccessEventService:
                     "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
                 }
             )
-            allowed = bool(identity_active and schedule_evaluation and schedule_evaluation.allowed)
+            allowed = bool(schedule_evaluation and schedule_evaluation.allowed and (identity_active or visitor_pass))
             direction_span = trace.start_span(
                 "Direction Classification",
                 attributes={
                     "allowed": allowed,
                     "gate_observation": self._gate_observation_from_read(direction_read),
+                    "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 },
             )
             direction, direction_resolution = await self._resolve_direction(
@@ -654,6 +697,11 @@ class AccessEventService:
                 direction=direction,
                 direction_resolution=direction_resolution,
                 runtime=runtime,
+                trace=trace,
+            )
+            vehicle_visual_detection = await self._vehicle_visual_detection_for_read(
+                read,
+                wait_for_match=vehicle is None,
                 trace=trace,
             )
 
@@ -694,6 +742,8 @@ class AccessEventService:
                         ],
                     },
                     "direction_resolution": direction_resolution,
+                    VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY: vehicle_visual_detection,
+                    VISITOR_PASS_PAYLOAD_KEY: self._visitor_pass_payload(visitor_pass, visitor_pass_mode),
                     "telemetry": {
                         "trace_id": trace.trace_id,
                     },
@@ -702,7 +752,28 @@ class AccessEventService:
             session.add(event)
             await session.flush()
 
-            anomalies = await self._build_anomalies(session, event, person, vehicle, allowed)
+            if visitor_pass:
+                visitor_service = get_visitor_pass_service()
+                if visitor_pass_mode == "arrival":
+                    await visitor_service.record_arrival(
+                        session,
+                        visitor_pass,
+                        event=event,
+                        dvla_enrichment=dvla_enrichment,
+                        visual_detection=vehicle_visual_detection,
+                        trace_id=trace.trace_id,
+                    )
+                elif visitor_pass_mode == "departure":
+                    await visitor_service.record_departure(session, visitor_pass, event=event)
+
+            anomalies = await self._build_anomalies(
+                session,
+                event,
+                person,
+                vehicle,
+                allowed,
+                visitor_pass=visitor_pass,
+            )
             session.add_all(anomalies)
 
             if allowed and person:
@@ -729,8 +800,15 @@ class AccessEventService:
                 "occurred_at": event.occurred_at.isoformat(),
                 "timing_classification": timing.value,
                 "anomaly_count": len(anomalies),
+                "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
+                "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
             },
         )
+        if visitor_pass:
+            await event_bus.publish(
+                "visitor_pass.used" if visitor_pass_mode == "arrival" else "visitor_pass.departure_recorded",
+                {"visitor_pass": serialize_visitor_pass(visitor_pass)},
+            )
         if dvla_enrichment:
             await self._notify_compliance_issues(event, person, vehicle, dvla_enrichment)
         if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY and event.vehicle_id:
@@ -795,6 +873,8 @@ class AccessEventService:
                 "direction": direction.value,
                 "timing_classification": timing.value,
                 "anomaly_count": len(anomalies),
+                "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
+                "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
             },
         )
 
@@ -1300,6 +1380,49 @@ class AccessEventService:
                 )
             )
 
+    async def _vehicle_visual_detection_for_read(
+        self,
+        read: PlateRead,
+        *,
+        wait_for_match: bool,
+        trace=None,
+    ) -> dict[str, Any] | None:
+        span = (
+            trace.start_span(
+                "Vehicle Visual Attribute Match",
+                attributes={
+                    "registration_number": read.registration_number,
+                    "wait_for_match": wait_for_match,
+                },
+            )
+            if trace
+            else None
+        )
+        attempts = 5 if wait_for_match else 1
+        recorder = get_vehicle_visual_detection_recorder()
+        match: dict[str, Any] | None = None
+        for attempt in range(1, attempts + 1):
+            match = await recorder.recent_match(
+                read.registration_number,
+                occurred_at=read.captured_at,
+                max_age_seconds=45.0,
+            )
+            if match:
+                break
+            if attempt < attempts:
+                await asyncio.sleep(0.25)
+        if span:
+            span.finish(
+                output_payload={
+                    "matched": bool(match),
+                    "observed_vehicle_type": (match or {}).get("observed_vehicle_type"),
+                    "observed_vehicle_color": (match or {}).get("observed_vehicle_color"),
+                    "source": (match or {}).get("source"),
+                    "event_id": (match or {}).get("event_id"),
+                }
+            )
+        return match
+
     def _notification_facts(
         self,
         event: AccessEvent,
@@ -1314,7 +1437,26 @@ class AccessEventService:
         vehicle_display_name = self._vehicle_display_name(vehicle, event.registration_number)
         dvla = dvla_enrichment or {}
         vehicle_make = self._fact_text(dvla.get("make")) or (vehicle.make if vehicle else "") or ""
-        vehicle_colour = self._fact_text(dvla.get("colour")) or (vehicle.color if vehicle else "") or ""
+        visual_detection = self._vehicle_visual_detection_from_event(event)
+        detected_vehicle_type = self._fact_text(
+            visual_detection.get("observed_vehicle_type")
+            or visual_detection.get("vehicle_type")
+            or visual_detection.get("detected_vehicle_type")
+        )
+        detected_vehicle_colour = self._fact_text(
+            visual_detection.get("observed_vehicle_color")
+            or visual_detection.get("observed_vehicle_colour")
+            or visual_detection.get("vehicle_color")
+            or visual_detection.get("vehicle_colour")
+            or visual_detection.get("detected_vehicle_color")
+            or visual_detection.get("detected_vehicle_colour")
+        )
+        dvla_colour = self._fact_text(dvla.get("colour"))
+        vehicle_colour = (
+            (dvla_colour or (vehicle.color if vehicle else "") or detected_vehicle_colour)
+            if vehicle
+            else (detected_vehicle_colour or dvla_colour)
+        )
         facts = {
             "message": message,
             "access_event_id": str(event.id),
@@ -1327,9 +1469,13 @@ class AccessEventService:
             "registration_number": event.registration_number,
             "vehicle_display_name": vehicle_display_name,
             "vehicle_make": vehicle_make,
+            "vehicle_type": detected_vehicle_type,
             "vehicle_model": vehicle.model if vehicle and vehicle.model else "",
             "vehicle_color": vehicle_colour,
             "vehicle_colour": vehicle_colour,
+            "detected_vehicle_type": detected_vehicle_type,
+            "detected_vehicle_color": detected_vehicle_colour,
+            "detected_vehicle_colour": detected_vehicle_colour,
             "mot_status": self._fact_text(dvla.get("mot_status")),
             "mot_expiry": self._fact_text(dvla.get("mot_expiry")),
             "tax_status": self._fact_text(dvla.get("tax_status")),
@@ -1344,6 +1490,10 @@ class AccessEventService:
         }
         facts.update({key: self._fact_text(value) for key, value in extra.items()})
         return facts
+
+    def _vehicle_visual_detection_from_event(self, event: AccessEvent) -> dict[str, Any]:
+        payload = (event.raw_payload or {}).get(VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY)
+        return payload if isinstance(payload, dict) else {}
 
     def _fact_text(self, value: Any) -> str:
         if value is None:
@@ -1624,6 +1774,35 @@ class AccessEventService:
         gate_observation = direction_resolution.get("gate_observation") or {}
         return self._coerce_gate_state(gate_observation.get("state")) == GateState.CLOSED
 
+    def _visitor_pass_candidate_kind(self, read: PlateRead) -> str:
+        gate_observation = self._gate_observation_from_read(read)
+        gate_state = self._coerce_gate_state(gate_observation.get("state"))
+        if gate_state in DEPARTURE_GATE_STATES:
+            return "departure"
+        if gate_state in ARRIVAL_GATE_STATES:
+            return "arrival"
+        explicit = str((read.raw_payload or {}).get("direction") or (read.raw_payload or {}).get("Direction") or "").lower()
+        if explicit in {"exit", "leave", "departure", "out"}:
+            return "departure"
+        return "arrival"
+
+    def _visitor_pass_payload(
+        self,
+        visitor_pass: VisitorPass | None,
+        mode: str | None,
+    ) -> dict[str, Any] | None:
+        if not visitor_pass:
+            return None
+        return {
+            "id": str(visitor_pass.id),
+            "visitor_name": visitor_pass.visitor_name,
+            "status": visitor_pass.status.value,
+            "mode": mode,
+            "expected_time": visitor_pass.expected_time.isoformat(),
+            "window_minutes": visitor_pass.window_minutes,
+            "number_plate": visitor_pass.number_plate,
+        }
+
     def _gate_observation_from_read(self, read: PlateRead) -> dict[str, Any]:
         value = (read.raw_payload or {}).get(GATE_OBSERVATION_PAYLOAD_KEY)
         if not isinstance(value, dict):
@@ -1692,10 +1871,14 @@ class AccessEventService:
         person: Person | None,
         vehicle: Vehicle | None,
         allowed: bool,
+        *,
+        visitor_pass: VisitorPass | None = None,
     ) -> list[Anomaly]:
         anomalies: list[Anomaly] = []
 
         if not vehicle:
+            if visitor_pass:
+                return anomalies
             anomaly = Anomaly(
                 event=event,
                 anomaly_type=AnomalyType.UNAUTHORIZED_PLATE,

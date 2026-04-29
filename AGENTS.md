@@ -192,6 +192,12 @@ Main tables:
   vehicles, notification conditions, and configured door entities.
 - `schedule_overrides`: one-off temporary access allowances, currently created
   by Alfred with confirmation.
+- `visitor_passes`: anticipated one-shot access windows for unknown visitor
+  vehicles. Stores visitor name, expected time, +/- window minutes, lifecycle
+  status (`active`, `scheduled`, `used`, `expired`, `cancelled`), creation
+  source (`ui`, `alfred`, future Discord/Slack/Calendar, etc.), creating user,
+  arrival/departure event links, trace ID, plate, DVLA/visual vehicle details,
+  and calculated duration on site.
 - `notification_rules`: DB-backed notification workflows with triggers,
   conditions, actions, active state, and templated content.
 - `presence`: current person presence state.
@@ -365,6 +371,51 @@ Schedule rules:
 - If no schedule applies, `schedule_default_policy` controls allow/deny.
 - There is no legacy time-slot fallback.
 
+## Visitor Passes
+
+Visitor Pass service:
+
+- `backend/app/services/visitor_passes.py`
+- `backend/app/api/v1/visitor_passes.py`
+
+Routes:
+
+- `GET /api/v1/visitor-passes`: list passes, with repeated `status` query
+  filters and optional `q` search.
+- `GET /api/v1/visitor-passes/{pass_id}`: fetch one pass.
+- `POST /api/v1/visitor-passes`: create a UI-sourced pass.
+- `PATCH /api/v1/visitor-passes/{pass_id}`: edit scheduled/active pass details.
+- `POST /api/v1/visitor-passes/{pass_id}/cancel`: cancel a scheduled/active
+  pass.
+
+Lifecycle rules:
+
+- Pass windows are `expected_time +/- window_minutes`; default window is 30
+  minutes.
+- `scheduled` becomes `active` once the current time enters the window.
+- `active` or still-`scheduled` passes become `expired` once the window has
+  elapsed without a detection.
+- A matching unknown arrival claims the best active pass and sets it to `used`.
+- `used` and `cancelled` are terminal for lifecycle refresh; used passes can
+  still receive departure telemetry.
+- If multiple active passes overlap, choose the pass whose `expected_time` is
+  closest to the detection time, then the oldest `created_at` as tie-breaker.
+- A later same-plate exit updates `departure_time`, `departure_event_id`, and
+  `duration_on_site_seconds`.
+- The lifecycle worker runs from FastAPI lifespan every 30 seconds via
+  `VisitorPassService.start()`.
+- All creates, updates, cancels, lifecycle status changes, pass claims, and
+  telemetry links write audit rows.
+
+Extensibility:
+
+- Creation must go through `VisitorPassService.create_pass(..., source=...)`.
+  Keep source values lower-case strings such as `ui`, `alfred`, `discord`,
+  `slack`, or `calendar` so future modules can hook in without changing the
+  core matching logic.
+- Do not model Visitor Pass vehicles as `vehicles` rows. Unknown-visitor DVLA
+  and visual telemetry belongs on `visitor_passes`, not the directory.
+
 ## LPR and Access Pipeline
 
 Webhook endpoint:
@@ -419,6 +470,12 @@ Current behavior:
 - Select the best candidate, preferring exact active stored-plate matches, then
   highest confidence, then latest captured time.
 - Determine authorization from vehicle/person/schedule.
+- For unknown vehicles, run Visitor Pass matching before anomaly creation:
+  arrival-like reads try to claim an active pass in the current window, and
+  exit-like reads try to find a used same-plate pass with no departure. A
+  Visitor Pass match grants the event, stores `raw_payload.visitor_pass`, links
+  the pass to the access event/trace, and suppresses the unauthorized-plate
+  anomaly.
 - Classify presence timing as `earlier_than_usual`, `normal`,
   `later_than_usual`, or `unknown` from recent matching historical events.
 - Infer direction primarily from the captured top-gate state:
@@ -443,17 +500,22 @@ Current behavior:
 - For unknown arriving vehicles, call the shared DVLA service and keep the
   normalized result only in the in-memory notification context. Do not persist
   unknown-vehicle DVLA data into `vehicles`, `access_events.raw_payload`, or
-  telemetry span payloads.
+  telemetry span payloads. If a Visitor Pass is claimed, persist normalized
+  vehicle make/colour and plate only on the linked `visitor_passes` row.
 - DVLA enrichment failures are non-blocking: log/publish sanitized telemetry and
   continue access event persistence, presence updates, gate/garage commands, and
   existing notifications.
 - Expired MOT/tax compliance is advisory only. It can emit notification
   workflow triggers but must not deny access or block gate/garage commands.
 - Persist one final `access_event`.
+- For Visitor Pass arrivals, mark the pass `used`, set `arrival_time`,
+  `arrival_event_id`, `telemetry_trace_id`, `number_plate`, and vehicle details
+  when available. For Visitor Pass exits, set departure/duration fields.
 - Update presence if access is granted.
 - Create anomalies/alerts for unauthorized plates, outside schedule, duplicate
   entry, and duplicate exit. Unauthorized-plate alerts attempt to attach a
-  compact live `camera.gate` snapshot for unresolved alert review.
+  compact live `camera.gate` snapshot for unresolved alert review. Do not
+  create unauthorized-plate anomalies for Visitor Pass matched unknown plates.
 - Record sanitized telemetry traces/spans for webhook/API ingress, debounce,
   vehicle verification, schedule evaluation, direction resolution, DVLA,
   persistence, gate/garage commands, notifications, and vision tie-breakers.
@@ -813,6 +875,23 @@ Alfred 2.0 behavior:
   person, vehicle, group, or device identifiers.
 - Access causality questions should prefer `diagnose_access_event` over shallow
   event lists.
+- Visitor Pass intent (`Visitor_Passes`) handles expected unknown visitors and
+  visitor follow-ups. If the user says something like "I have a visitor
+  coming", Alfred must gather the visitor name and expected time before
+  preparing `create_visitor_pass`; ask concise follow-ups instead of guessing.
+- Visitor Pass names are free-text expected visitors. Alfred must not call
+  `resolve_human_entity` or check whether the visitor exists as a `Person`
+  before creating a pass.
+- Alfred must always interpret Visitor Pass times in local site time silently;
+  never ask the user to confirm local-time details unless the date or clock time
+  is missing, and never mention local-time names, labels, or UTC offsets in pass
+  confirmation text.
+- If the user does not specify a Visitor Pass window, Alfred must default to
+  `window_minutes=30` (`+/- 30m`). Do not ask for plate, make, or colour while
+  creating a pass; arrival telemetry fills those fields later.
+- For questions like "What car did Sarah arrive in?" or "How long was Sarah
+  here?", Alfred should use `query_visitor_passes` or `get_visitor_pass` and
+  answer from the linked pass telemetry.
 - State-changing tools return `requires_confirmation` first. The chat UI stores
   a pending action in chat session context, renders confirm/cancel controls,
   and calls `/api/v1/ai/chat/confirm` or sends `tool_confirmation` on the chat
@@ -847,6 +926,8 @@ Current Alfred tools:
   `update_schedule`, `delete_schedule`, `query_schedule_targets`,
   `assign_schedule_to_entity`, `verify_schedule_access`,
   `override_schedule`.
+- Visitor Passes: `query_visitor_passes`, `get_visitor_pass`,
+  `create_visitor_pass`, `update_visitor_pass`, `cancel_visitor_pass`.
 - Notifications: `query_notification_catalog`,
   `query_notification_workflows`, `get_notification_workflow`,
   `create_notification_workflow`, `update_notification_workflow`,
@@ -860,19 +941,20 @@ Current Alfred tools:
 State-changing Alfred tools:
 
 - `assign_schedule_to_entity`, `create_notification_workflow`,
-  `create_schedule`, `delete_notification_workflow`, `delete_schedule`,
-  `disable_maintenance_mode`, `enable_maintenance_mode`, `command_device`,
-  `open_gate`, `open_device`, `override_schedule`, `trigger_anomaly_alert`,
+  `create_schedule`, `create_visitor_pass`, `cancel_visitor_pass`,
+  `delete_notification_workflow`, `delete_schedule`, `disable_maintenance_mode`,
+  `enable_maintenance_mode`, `command_device`, `open_gate`, `open_device`,
+  `override_schedule`, `trigger_anomaly_alert`,
   `trigger_manual_malfunction_override`, `test_notification_workflow`,
-  `toggle_maintenance_mode`, `update_notification_workflow`, and
-  `update_schedule`.
+  `toggle_maintenance_mode`, `update_notification_workflow`, `update_schedule`,
+  and `update_visitor_pass`.
 
 Memory:
 
 - Chat sessions persist in `chat_sessions`.
 - Chat messages persist in `chat_messages`.
-- Session context tracks recent subject/person/group, guided schedule-edit
-  state, and pending confirmation actions.
+- Session context tracks recent subject/person/group/visitor, guided schedule
+  and Visitor Pass setup state, and pending confirmation actions.
 - Example: after "Did the gardener arrive today?", "How long did they stay?"
   resolves to the gardener context.
 
@@ -940,6 +1022,14 @@ Schedules:
 - `PATCH /api/v1/schedules/{schedule_id}`
 - `GET /api/v1/schedules/{schedule_id}/dependencies`
 - `DELETE /api/v1/schedules/{schedule_id}`
+
+Visitor Passes:
+
+- `GET /api/v1/visitor-passes`
+- `POST /api/v1/visitor-passes`
+- `GET /api/v1/visitor-passes/{pass_id}`
+- `PATCH /api/v1/visitor-passes/{pass_id}`
+- `POST /api/v1/visitor-passes/{pass_id}/cancel`
 
 Settings:
 
@@ -1084,6 +1174,7 @@ Current frontend views:
 - People
 - Groups
 - Schedules
+- Passes
 - Vehicles
 - Top Charts
 - Events
@@ -1124,6 +1215,12 @@ Current frontend integration/editor surfaces:
   snapshots when available.
 - Top Charts shows known granted-entry leaders and denied unknown Mystery Guest
   leaders, with optional DVLA enrichment for unknown plates.
+- Passes view (`/passes`) is the Visitor Pass management hub. It defaults to
+  Active + Scheduled filters, supports multi-select All/Active/Scheduled/Used/
+  Expired/Cancelled status filters, and provides `+ Visitor Pass` creation with
+  visitor name, custom calendar/time picker, and preset +/- 30/60/90/120/180
+  minute windows. Used pass cards must show captured vehicle summary such as
+  `Silver Ford - PE70DHX` plus duration/departure data when available.
 - Logs includes realtime event logs plus Telemetry & Audit tabs for LPR, gate
   events, maintenance, AI audit, CRUD, API, integrations, and access traces.
 

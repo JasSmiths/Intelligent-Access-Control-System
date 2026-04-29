@@ -26,6 +26,7 @@ from app.services.telemetry import (
     telemetry_request_id,
 )
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.visitor_passes import get_visitor_pass_service
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     await init_database()
     await event_bus.start()
     await get_notification_service().start()
+    await get_visitor_pass_service().start()
     await get_access_event_service().start()
     await get_home_assistant_service().start()
     await get_gate_malfunction_service().start()
@@ -57,6 +59,7 @@ async def lifespan(app: FastAPI):
         await get_gate_malfunction_service().stop()
         await get_home_assistant_service().stop()
         await get_access_event_service().stop()
+        await get_visitor_pass_service().stop()
         await get_notification_service().stop()
         await event_bus.stop()
         logger.info("stopped_backend")
@@ -81,6 +84,7 @@ app = FastAPI(
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},
         {"name": "Notifications", "description": "Notification workflow catalog, rules, previews, and tests."},
         {"name": "Schedules", "description": "Reusable weekly access windows and dependency checks."},
+        {"name": "Visitor Passes", "description": "Anticipated one-shot visitor access windows and telemetry."},
         {"name": "Realtime", "description": "Dashboard realtime WebSocket channel."},
         {"name": "Settings", "description": "Dynamic runtime settings and integration test actions."},
         {"name": "Telemetry", "description": "Trace, audit, category, artifact, and purge endpoints."},
@@ -230,6 +234,31 @@ async def telemetry_http_middleware(request: Request, call_next):
     response.headers["X-IACS-Request-ID"] = request_id
     CURRENT_REQUEST_ID.reset(request_token)
     return response
+
+
+@app.middleware("http")
+async def api_error_response_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        if not request.url.path.startswith("/api/"):
+            raise
+        request_id = request.headers.get("x-request-id") or telemetry_request_id()
+        logger.exception(
+            "api_request_failed",
+            extra={"method": request.method, "path": request.url.path, "request_id": request_id},
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    f"Unexpected backend error while handling {request.method} {request.url.path}. "
+                    f"Check backend logs with request ID {request_id}."
+                ),
+                "request_id": request_id,
+            },
+            headers={"X-IACS-Request-ID": request_id},
+        )
 
 
 @app.get("/health", include_in_schema=False)

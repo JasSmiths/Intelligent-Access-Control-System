@@ -206,9 +206,9 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
             },
             {
                 "value": "unauthorized_plate",
-                "label": "Unauthorised Vehicle Detected",
+                "label": "Unknown Vehicle Detected",
                 "severity": "warning",
-                "description": "A plate is denied because it is unknown or inactive.",
+                "description": "An unknown or inactive vehicle plate is denied.",
             },
         ],
     },
@@ -235,6 +235,7 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
             {"name": "VehicleName", "token": "@VehicleName", "label": "Friendly vehicle name"},
             {"name": "VehicleDisplayName", "token": "@VehicleDisplayName", "label": "Vehicle display name"},
             {"name": "VehicleMake", "token": "@VehicleMake", "label": "Vehicle make"},
+            {"name": "VehicleType", "token": "@VehicleType", "label": "Vehicle type"},
             {"name": "VehicleModel", "token": "@VehicleModel", "label": "Vehicle model"},
             {"name": "VehicleColor", "token": "@VehicleColor", "label": "Vehicle colour"},
             {"name": "VehicleColour", "token": "@VehicleColour", "label": "Vehicle colour"},
@@ -300,9 +301,13 @@ MOCK_FACTS = {
     "vehicle_display_name": "2026 Tesla Model Y Dual Motor Long Range",
     "vehicle_name": "2026 Tesla Model Y Dual Motor Long Range",
     "vehicle_make": "Tesla",
+    "vehicle_type": "Car",
     "vehicle_model": "Model Y Dual Motor Long Range",
     "vehicle_color": "Pearl white",
     "vehicle_colour": "Pearl white",
+    "detected_vehicle_type": "Car",
+    "detected_vehicle_color": "Pearl white",
+    "detected_vehicle_colour": "Pearl white",
     "mot_status": "Valid",
     "mot_expiry": "2026-10-14",
     "tax_status": "Taxed",
@@ -1172,11 +1177,35 @@ def notification_context_from_payload(payload: dict[str, Any]) -> NotificationCo
 
 def sample_notification_context(trigger_event: str | None = None) -> NotificationContext:
     event_type = trigger_event or "authorized_entry"
+    facts = dict(MOCK_FACTS)
+    if event_type == "unauthorized_plate":
+        facts.update(
+            {
+                "message": "An unknown Grey Tesla car with registration AB12CDE was detected at the gate.",
+                "first_name": "",
+                "last_name": "",
+                "display_name": "",
+                "group_name": "",
+                "vehicle_registration_number": "AB12CDE",
+                "registration_number": "AB12CDE",
+                "vehicle_display_name": "AB12CDE",
+                "vehicle_name": "AB12CDE",
+                "vehicle_make": "Tesla",
+                "vehicle_type": "Car",
+                "vehicle_model": "",
+                "vehicle_color": "Grey",
+                "vehicle_colour": "Grey",
+                "detected_vehicle_type": "Car",
+                "detected_vehicle_color": "Grey",
+                "detected_vehicle_colour": "Grey",
+                "decision": "denied",
+            }
+        )
     return NotificationContext(
         event_type=event_type,
-        subject="Steph arrived at the gate",
+        subject="AB12CDE" if event_type == "unauthorized_plate" else "Steph arrived at the gate",
         severity=trigger_severity(event_type),
-        facts=dict(MOCK_FACTS),
+        facts=facts,
     )
 
 
@@ -1219,6 +1248,26 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         default=context.subject,
     )
     occurred_at = pick("occurred_at", "created_at")
+    if context.event_type == "unauthorized_plate":
+        vehicle_color = pick(
+            "detected_vehicle_colour",
+            "detected_vehicle_color",
+            "observed_vehicle_colour",
+            "observed_vehicle_color",
+            "vehicle_colour",
+            "vehicle_color",
+            "colour",
+            "color",
+        )
+    else:
+        vehicle_color = pick(
+            "vehicle_color",
+            "vehicle_colour",
+            "detected_vehicle_color",
+            "detected_vehicle_colour",
+            "color",
+            "colour",
+        )
     return {
         "FirstName": first_name,
         "FirstNamePossessive": _possessive(first_name),
@@ -1232,9 +1281,10 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "VehicleName": vehicle_name,
         "VehicleDisplayName": vehicle_name,
         "VehicleMake": pick("vehicle_make", "make"),
+        "VehicleType": pick("vehicle_type", "detected_vehicle_type", "observed_vehicle_type"),
         "VehicleModel": pick("vehicle_model", "model"),
-        "VehicleColor": pick("vehicle_color", "vehicle_colour", "color", "colour"),
-        "VehicleColour": pick("vehicle_colour", "vehicle_color", "colour", "color"),
+        "VehicleColor": vehicle_color,
+        "VehicleColour": vehicle_color,
         "MotStatus": pick("mot_status", "motStatus"),
         "MotExpiry": pick("mot_expiry", "motExpiry", "mot_expiry_date"),
         "TaxStatus": pick("tax_status", "taxStatus"),

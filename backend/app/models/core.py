@@ -18,6 +18,7 @@ from app.models.enums import (
     PresenceState,
     TimingClassification,
     UserRole,
+    VisitorPassStatus,
 )
 
 
@@ -401,6 +402,49 @@ class AccessEvent(Base, TimestampMixin):
 
     vehicle: Mapped[Vehicle | None] = relationship(back_populates="events")
     anomalies: Mapped[list["Anomaly"]] = relationship(back_populates="event")
+
+
+class VisitorPass(Base, TimestampMixin):
+    __tablename__ = "visitor_passes"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    visitor_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    expected_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    window_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    status: Mapped[VisitorPassStatus] = mapped_column(
+        Enum(VisitorPassStatus),
+        default=VisitorPassStatus.SCHEDULED,
+        nullable=False,
+        index=True,
+    )
+    creation_source: Mapped[str] = mapped_column(String(80), default="ui", nullable=False, index=True)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    arrival_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    departure_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    number_plate: Mapped[str | None] = mapped_column(String(32), index=True)
+    vehicle_make: Mapped[str | None] = mapped_column(String(80))
+    vehicle_colour: Mapped[str | None] = mapped_column(String(80))
+    duration_on_site_seconds: Mapped[int | None] = mapped_column(Integer)
+    arrival_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    departure_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    telemetry_trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+
+    created_by: Mapped[User | None] = relationship()
+    arrival_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[arrival_event_id])
+    departure_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[departure_event_id])
+
+
+Index("ix_visitor_passes_status_expected_time", VisitorPass.status, VisitorPass.expected_time)
+Index("ix_visitor_passes_number_plate_status", VisitorPass.number_plate, VisitorPass.status)
 
 
 class Anomaly(Base, TimestampMixin):

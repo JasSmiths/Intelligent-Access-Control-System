@@ -9,6 +9,7 @@ from app.services.access_events import AccessEventService, get_access_event_serv
 from app.services.event_bus import event_bus
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
+from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -88,6 +89,10 @@ async def receive_ubiquiti_lpr(
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
     await get_lpr_timing_recorder().record_webhook_plate(read)
+    await get_vehicle_visual_detection_recorder().record_unifi_payload(
+        raw_payload,
+        registration_number=read.registration_number,
+    )
     telemetry.record_span(
         "Webhook payload normalized to PlateRead",
         category=TELEMETRY_CATEGORY_WEBHOOKS_API,

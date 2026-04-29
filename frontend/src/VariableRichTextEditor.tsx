@@ -1,12 +1,25 @@
 import React from "react";
+import { computePosition, flip, offset, shift, size, type Placement, type VirtualElement } from "@floating-ui/dom";
 import { Mention } from "@tiptap/extension-mention";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import { createPortal } from "react-dom";
 
 type NotificationVariable = {
   name: string;
   token: string;
   label: string;
+};
+
+type NotificationVariableWithGroup = NotificationVariable & { group: string };
+type SuggestionState = { query: string; from: number; to: number };
+type TiptapEditor = NonNullable<ReturnType<typeof useEditor>>;
+type FloatingLayout = {
+  maxHeight: number;
+  placement: Placement;
+  ready: boolean;
+  x: number;
+  y: number;
 };
 
 export function VariableRichTextEditor({
@@ -22,10 +35,51 @@ export function VariableRichTextEditor({
   variables: Array<NotificationVariable & { group: string }>;
   onChange: (value: string) => void;
 }) {
-  const [suggestion, setSuggestion] = React.useState<{ query: string; from: number; to: number } | null>(null);
+  const [suggestion, setSuggestion] = React.useState<SuggestionState | null>(null);
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [floatingLayout, setFloatingLayout] = React.useState<FloatingLayout>({
+    maxHeight: 256,
+    placement: "top-start",
+    ready: false,
+    x: 0,
+    y: 0
+  });
+  const activeIndexRef = React.useRef(0);
+  const editorRef = React.useRef<TiptapEditor | null>(null);
+  const filteredRef = React.useRef<NotificationVariableWithGroup[]>([]);
+  const itemRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
+  const onChangeRef = React.useRef(onChange);
+  const suggestionRef = React.useRef<SuggestionState | null>(null);
   const valueRef = React.useRef(value);
   const variablesRef = React.useRef(variables);
+
+  onChangeRef.current = onChange;
   variablesRef.current = variables;
+
+  const updateSuggestion = React.useCallback((nextSuggestion: SuggestionState | null) => {
+    suggestionRef.current = nextSuggestion;
+    setSuggestion(nextSuggestion);
+  }, []);
+
+  const updateActiveIndex = React.useCallback((nextIndex: number) => {
+    activeIndexRef.current = nextIndex;
+    setActiveIndex(nextIndex);
+  }, []);
+
+  const insertVariable = React.useCallback((variable: NotificationVariable) => {
+    const activeEditor = editorRef.current;
+    const activeSuggestion = suggestionRef.current;
+    if (!activeEditor || !activeSuggestion) return;
+    activeEditor
+      .chain()
+      .focus()
+      .deleteRange({ from: activeSuggestion.from, to: activeSuggestion.to })
+      .insertContent({ type: "mention", attrs: { id: variable.name, label: variable.name } })
+      .insertContent(" ")
+      .run();
+    updateSuggestion(null);
+  }, [updateSuggestion]);
 
   const editor = useEditor({
     extensions: [
@@ -51,18 +105,53 @@ export function VariableRichTextEditor({
     editorProps: {
       attributes: {
         class: multiline ? "variable-editor-content multiline" : "variable-editor-content"
+      },
+      handleKeyDown(_view, event) {
+        const activeSuggestion = suggestionRef.current;
+        const options = filteredRef.current;
+        if (!activeSuggestion) return false;
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          updateSuggestion(null);
+          return true;
+        }
+
+        if (!options.length) return false;
+
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          updateActiveIndex((activeIndexRef.current + 1) % options.length);
+          return true;
+        }
+
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          updateActiveIndex((activeIndexRef.current - 1 + options.length) % options.length);
+          return true;
+        }
+
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          const index = Math.min(activeIndexRef.current, options.length - 1);
+          insertVariable(options[index]);
+          return true;
+        }
+
+        return false;
       }
     },
     onUpdate({ editor: activeEditor }) {
       const next = tiptapDocToTemplate(activeEditor.getJSON());
       valueRef.current = next;
-      onChange(next);
-      setSuggestion(findMentionSuggestion(activeEditor));
+      onChangeRef.current(next);
+      updateSuggestion(findMentionSuggestion(activeEditor));
     },
     onSelectionUpdate({ editor: activeEditor }) {
-      setSuggestion(findMentionSuggestion(activeEditor));
+      updateSuggestion(findMentionSuggestion(activeEditor));
     }
   }, []);
+  editorRef.current = editor;
 
   React.useEffect(() => {
     if (!editor || value === valueRef.current) return;
@@ -78,45 +167,138 @@ export function VariableRichTextEditor({
       if (!target) return;
       const pos = editor.view.posAtDOM(target, 0);
       editor.commands.setTextSelection({ from: pos, to: pos + 1 });
-      setSuggestion({ query: "", from: pos, to: pos + 1 });
+      updateSuggestion({ query: "", from: pos, to: pos + 1 });
     };
     element.addEventListener("click", onClick);
     return () => element.removeEventListener("click", onClick);
-  }, [editor]);
+  }, [editor, updateSuggestion]);
 
   const filtered = React.useMemo(() => {
     const query = suggestion?.query.toLowerCase() ?? "";
-    return variables.filter((variable) => `${variable.name} ${variable.label} ${variable.group}`.toLowerCase().includes(query)).slice(0, 10);
+    return variables.filter((variable) => `${variable.name} ${variable.label} ${variable.group}`.toLowerCase().includes(query));
   }, [suggestion?.query, variables]);
+  const grouped = React.useMemo(() => groupVariables(filtered), [filtered]);
+  const filteredSignature = React.useMemo(() => filtered.map((variable) => variable.name).join("\u0000"), [filtered]);
 
-  const insertVariable = (variable: NotificationVariable) => {
-    if (!editor || !suggestion) return;
-    editor.chain().focus().deleteRange({ from: suggestion.from, to: suggestion.to }).insertContent({ type: "mention", attrs: { id: variable.name, label: variable.name } }).insertContent(" ").run();
-    setSuggestion(null);
-  };
+  filteredRef.current = filtered;
+  suggestionRef.current = suggestion;
 
-  return (
-    <label className="field variable-editor-field">
-      <span>{label}</span>
-      <div className="variable-editor-wrap">
-        <EditorContent editor={editor} />
-        {suggestion && filtered.length ? (
-          <div className="variable-suggestion-menu">
-            {groupVariables(filtered).map((group) => (
-              <div className="variable-suggestion-group" key={group.group}>
-                <strong>{group.group}</strong>
-                {group.items.map((variable) => (
-                  <button key={variable.name} onMouseDown={(event) => event.preventDefault()} onClick={() => insertVariable(variable)} type="button">
-                    <code>{variable.token}</code>
-                    <span>{variable.label}</span>
-                  </button>
-                ))}
-              </div>
+  React.useEffect(() => {
+    itemRefs.current.length = filtered.length;
+    updateActiveIndex(0);
+  }, [filtered.length, filteredSignature, suggestion?.query, updateActiveIndex]);
+
+  React.useEffect(() => {
+    itemRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, filteredSignature]);
+
+  React.useLayoutEffect(() => {
+    const isOpen = Boolean(editor && suggestion && filtered.length);
+    if (!isOpen) {
+      setFloatingLayout((current) => ({ ...current, ready: false }));
+      return undefined;
+    }
+
+    let cancelled = false;
+    const menu = menuRef.current;
+    if (!menu || !editor || !suggestion) return undefined;
+
+    const updatePosition = async () => {
+      const cursor = getCursorVirtualElement(editor, suggestion.to);
+      if (!cursor || !menuRef.current) return;
+
+      let maxHeight = 256;
+      const position = await computePosition(cursor, menuRef.current, {
+        middleware: [
+          offset(8),
+          flip({ padding: 8 }),
+          shift({ padding: 8 }),
+          size({
+            padding: 8,
+            apply({ availableHeight }) {
+              maxHeight = Math.max(48, Math.min(256, Math.floor(availableHeight)));
+            }
+          })
+        ],
+        placement: "top-start",
+        strategy: "fixed"
+      });
+
+      if (cancelled) return;
+      setFloatingLayout({
+        maxHeight,
+        placement: position.placement,
+        ready: true,
+        x: position.x,
+        y: position.y
+      });
+    };
+
+    const frame = window.requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [editor, filtered.length, filteredSignature, suggestion]);
+
+  const menu = suggestion && filtered.length && typeof document !== "undefined"
+    ? createPortal(
+      <div
+        aria-label="Notification variables"
+        className="variable-suggestion-menu"
+        data-placement={floatingLayout.placement}
+        ref={menuRef}
+        role="listbox"
+        style={{
+          "--variable-menu-max-height": `${floatingLayout.maxHeight}px`,
+          left: floatingLayout.x,
+          top: floatingLayout.y,
+          visibility: floatingLayout.ready ? "visible" : "hidden"
+        } as React.CSSProperties}
+      >
+        {grouped.map((group) => (
+          <div className="variable-suggestion-group" key={group.group}>
+            <strong>{group.group}</strong>
+            {group.items.map(({ index, variable }) => (
+              <button
+                aria-selected={index === activeIndex}
+                className={index === activeIndex ? "active" : undefined}
+                key={variable.name}
+                onClick={() => insertVariable(variable)}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => updateActiveIndex(index)}
+                ref={(node) => {
+                  itemRefs.current[index] = node;
+                }}
+                role="option"
+                type="button"
+              >
+                <code>{variable.token}</code>
+                <span>{variable.label}</span>
+              </button>
             ))}
           </div>
-        ) : null}
-      </div>
-    </label>
+        ))}
+      </div>,
+      document.body
+    )
+    : null;
+
+  return (
+    <>
+      <label className="field variable-editor-field">
+        <span>{label}</span>
+        <div className="variable-editor-wrap">
+          <EditorContent editor={editor} />
+        </div>
+      </label>
+      {menu}
+    </>
   );
 }
 
@@ -163,7 +345,7 @@ function tiptapDocToTemplate(node: unknown): string {
   return children.join("");
 }
 
-function findMentionSuggestion(editor: NonNullable<ReturnType<typeof useEditor>>) {
+function findMentionSuggestion(editor: TiptapEditor) {
   const { from } = editor.state.selection;
   const start = Math.max(1, from - 48);
   const text = editor.state.doc.textBetween(start, from, "\n", " ");
@@ -173,12 +355,39 @@ function findMentionSuggestion(editor: NonNullable<ReturnType<typeof useEditor>>
   return { query, from: from - query.length - 1, to: from };
 }
 
-function groupVariables(variables: Array<NotificationVariable & { group: string }>) {
-  const grouped = new Map<string, Array<NotificationVariable & { group: string }>>();
-  for (const variable of variables) {
-    const rows = grouped.get(variable.group) ?? [];
-    rows.push(variable);
-    grouped.set(variable.group, rows);
+function getCursorVirtualElement(editor: TiptapEditor, position: number): VirtualElement | null {
+  try {
+    const coords = editor.view.coordsAtPos(position);
+    const width = Math.max(1, coords.right - coords.left);
+    const height = Math.max(1, coords.bottom - coords.top);
+    return {
+      getBoundingClientRect() {
+        return {
+          bottom: coords.top + height,
+          height,
+          left: coords.left,
+          right: coords.left + width,
+          top: coords.top,
+          width,
+          x: coords.left,
+          y: coords.top,
+          toJSON() {
+            return this;
+          }
+        };
+      }
+    };
+  } catch {
+    return null;
   }
+}
+
+function groupVariables(variables: NotificationVariableWithGroup[]) {
+  const grouped = new Map<string, Array<{ index: number; variable: NotificationVariableWithGroup }>>();
+  variables.forEach((variable, index) => {
+    const rows = grouped.get(variable.group) ?? [];
+    rows.push({ index, variable });
+    grouped.set(variable.group, rows);
+  });
   return Array.from(grouped.entries()).map(([group, items]) => ({ group, items }));
 }

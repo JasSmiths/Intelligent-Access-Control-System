@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
@@ -23,8 +24,9 @@ from app.modules.unifi_protect.client import (
     websocket_message_payload,
 )
 from app.services.event_bus import event_bus
-from app.services.lpr_timing import get_lpr_timing_recorder
+from app.services.lpr_timing import extract_unifi_protect_track_observations, get_lpr_timing_recorder
 from app.services.settings import get_runtime_config
+from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
 
 logger = get_logger(__name__)
 
@@ -109,6 +111,7 @@ class UnifiProtectIntegrationService:
         event_type: str | None = None,
         limit: int = 25,
         since=None,
+        until=None,
     ) -> list[dict[str, Any]]:
         api = await self._ensure_api(subscribe=True)
         events = await list_unifi_protect_events(
@@ -117,8 +120,43 @@ class UnifiProtectIntegrationService:
             event_type=event_type,
             limit=limit,
             since=since,
+            until=until,
         )
         return [serialize_unifi_event(event) for event in events]
+
+    async def event_lpr_track(self, event_id: str) -> dict[str, Any]:
+        api = await self._ensure_api(subscribe=True)
+        event = None
+        try:
+            event = await api.get_event(event_id)
+        except Exception as exc:
+            logger.debug("unifi_protect_event_lookup_for_track_failed", extra={"event_id": event_id, "error": str(exc)})
+        try:
+            track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
+        except Exception as exc:
+            raise UnifiProtectError(str(exc)) from exc
+        observations = extract_unifi_protect_track_observations(
+            track,
+            event=event,
+            event_id=event_id,
+            received_at=datetime.now(tz=UTC),
+        )
+        return {
+            "event": serialize_unifi_event(event) if event is not None else {"id": event_id},
+            "observations": [asdict(observation) for observation in observations],
+            "count": len(observations),
+        }
+
+    async def send_alarm_webhook_test(self, trigger_id: str) -> dict[str, Any]:
+        api = await self._ensure_api(subscribe=True)
+        method = getattr(api, "send_alarm_webhook_public", None)
+        if not callable(method):
+            raise UnifiProtectError("Installed uiprotect package does not expose Alarm Manager webhook tests.")
+        try:
+            result = await method(trigger_id)
+        except Exception as exc:
+            raise UnifiProtectError(str(exc)) from exc
+        return {"trigger_id": trigger_id, "result": result}
 
     async def snapshot(self, camera_id: str, *, width: int | None = None, height: int | None = None, channel: str | None = None):
         api = await self._ensure_api(subscribe=True)
@@ -195,6 +233,12 @@ class UnifiProtectIntegrationService:
             received_at = datetime.now(tz=UTC)
             loop = asyncio.get_running_loop()
             loop.create_task(get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at))
+            loop.create_task(
+                get_vehicle_visual_detection_recorder().record_unifi_protect_message(
+                    message,
+                    received_at=received_at,
+                )
+            )
             event_id = self._lpr_track_probe_event_id(message)
             if (
                 event_id
@@ -265,6 +309,13 @@ class UnifiProtectIntegrationService:
                     continue
 
                 count = await get_lpr_timing_recorder().record_unifi_protect_track(
+                    track,
+                    event=event,
+                    event_id=event_id,
+                    received_at=datetime.now(tz=UTC),
+                    probe_attempt=attempt,
+                )
+                await get_vehicle_visual_detection_recorder().record_unifi_protect_track(
                     track,
                     event=event,
                     event_id=event_id,

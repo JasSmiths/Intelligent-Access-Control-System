@@ -18,6 +18,7 @@ from app.api.v1 import (
     telemetry,
     unifi_protect,
     users,
+    visitor_passes,
     webhooks,
 )
 from app.simulation.router import router as simulation_router
@@ -40,5 +41,6 @@ api_router.include_router(realtime.router, prefix="/realtime", tags=["Realtime"]
 api_router.include_router(settings.router, prefix="/settings", tags=["Settings"])
 api_router.include_router(telemetry.router, prefix="/telemetry", tags=["Telemetry"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
+api_router.include_router(visitor_passes.router, prefix="/visitor-passes", tags=["Visitor Passes"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 api_router.include_router(simulation_router, prefix="/simulation", tags=["Simulation"])

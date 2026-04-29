@@ -38,6 +38,7 @@ DEFAULT_AGENT_TOOL_NAMES = (
     "query_access_events",
     "query_anomalies",
     "query_schedules",
+    "query_visitor_passes",
     "query_device_states",
 )
 
@@ -45,6 +46,8 @@ EVENT_TOOL_NAMES = (
     "query_presence",
     "query_access_events",
     "diagnose_access_event",
+    "investigate_access_incident",
+    "query_unifi_protect_events",
     "query_lpr_timing",
     "query_vehicle_detection_history",
     "query_anomalies",
@@ -62,6 +65,13 @@ SCHEDULE_TOOL_NAMES = (
     "assign_schedule_to_entity",
     "override_schedule",
     "verify_schedule_access",
+)
+VISITOR_PASS_TOOL_NAMES = (
+    "query_visitor_passes",
+    "get_visitor_pass",
+    "create_visitor_pass",
+    "update_visitor_pass",
+    "cancel_visitor_pass",
 )
 NOTIFICATION_TOOL_NAMES = (
     "query_notification_catalog",
@@ -89,8 +99,11 @@ FILE_TOOL_NAMES = (
 )
 STATE_CHANGING_TOOL_NAMES = {
     "assign_schedule_to_entity",
+    "backfill_access_event_from_protect",
+    "cancel_visitor_pass",
     "create_notification_workflow",
     "create_schedule",
+    "create_visitor_pass",
     "delete_notification_workflow",
     "delete_schedule",
     "disable_maintenance_mode",
@@ -98,13 +111,16 @@ STATE_CHANGING_TOOL_NAMES = {
     "open_gate",
     "open_device",
     "command_device",
+    "investigate_access_incident",
     "override_schedule",
+    "test_unifi_alarm_webhook",
     "trigger_manual_malfunction_override",
     "test_notification_workflow",
     "toggle_maintenance_mode",
     "trigger_anomaly_alert",
     "update_notification_workflow",
     "update_schedule",
+    "update_visitor_pass",
 }
 
 
@@ -121,6 +137,14 @@ Rules of engagement:
 - For gate or garage-door failures, check Maintenance Mode and schedules before assuming a hardware malfunction.
 - For "why did/didn't the gate open" questions, inspect the matching access event, schedule decision, captured gate state, Maintenance Mode, gate command result, and relevant telemetry.
 - For access-event causality, prefer diagnose_access_event over shallow event lists.
+- If an access event is missing, nothing was logged, a departure/arrival was expected but not recorded, or no notification was sent, use investigate_access_incident. Do not stop at "no event found"; compare IACS with UniFi Protect durable event history and smartDetectTrack candidates.
+- If diagnose_access_event finds no matching event, fall through to investigate_access_incident before answering.
+- For Visitor Pass requests, do not create a pass until both visitor name and expected time are known; ask a short follow-up for missing details.
+- Visitor Passes are for expected unknown visitors. Do not look up or require a matching Person record before creating one.
+- For Visitor Pass requests, always use local site time silently. Never ask the user to confirm local-time details unless the date or clock time is missing, and never mention local-time names or labels.
+- If no Visitor Pass time window is specified, use the default +/- 30 minute window.
+- Do not ask for vehicle plate, make, or colour when creating a Visitor Pass. The LPR/DVLA pipeline fills those details on arrival.
+- Use Visitor Pass tools for expected unknown visitors and for follow-ups such as what car a visitor arrived in or how long they stayed.
 - For MOT, tax, or vehicle identity questions, use DVLA/vehicle tools and report compliance as advisory unless a tool says access was denied for another reason.
 - For state-changing tools, call the tool with confirmation set to false when confirmation is required so the UI can render a confirmation button. Do not claim an action has happened until a confirmed tool result says it happened.
 - Do not expose internal entity IDs, Home Assistant entity IDs, raw JSON, tool protocol, or hidden reasoning unless the user explicitly asks for diagnostics.
@@ -133,9 +157,10 @@ Return only compact JSON with this exact shape:
 
 Allowed categories:
 Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
-Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
+Visitor_Passes, Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
 
-Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions.
+Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions, missing access events, "nothing logged", and notification failures.
+Use Visitor_Passes for expected visitors, guest passes, visitor pass CRUD, and visitor telemetry follow-ups.
 Use General only when no operational category is clear."""
 
 REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
@@ -147,6 +172,7 @@ REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
 - Never expose the thought field to the user.
 - Use only tools in the scoped catalog below.
 - Use resolve_human_entity before using a guessed person, vehicle, group, device, or database ID.
+- Exception: never use resolve_human_entity to create a Visitor Pass. Visitor Pass names are free-text expected unknown visitors, not directory People.
 - If a tool returns requires_confirmation, stop and tell the user to use the confirmation button.
 - If you cannot finish within {max_iterations} tool calls, return a concise final answer summarizing what you checked.
 
@@ -161,6 +187,7 @@ SUPPORTED_INTENTS = {
     "Access_Logs",
     "Access_Diagnostics",
     "Schedules",
+    "Visitor_Passes",
     "Maintenance",
     "Compliance_DVLA",
     "Notifications",
@@ -273,6 +300,24 @@ class ChatService:
         )
         try:
             tool_results: list[dict[str, Any]] = []
+            guided_visitor_pass = await self._handle_guided_visitor_pass_flow(
+                session_uuid,
+                message,
+                memory,
+                actor_context=actor_context,
+                provider_name=provider.name,
+                status_callback=status_callback,
+            )
+            if guided_visitor_pass:
+                return guided_visitor_pass
+            guided_schedule = await self._handle_guided_schedule_flow(
+                session_uuid,
+                message,
+                memory,
+                status_callback=status_callback,
+            )
+            if guided_schedule:
+                return guided_schedule
             route = await self._classify_intent(provider, message, memory, attachment_refs, actor_context=actor_context)
             selected_tools = self._select_tools_for_route(route, attachment_refs)
             messages = await self._build_agent_messages(
@@ -451,38 +496,42 @@ class ChatService:
 
             tool_results = list(pending.get("tool_results") if isinstance(pending.get("tool_results"), list) else [])
             tool_results.append(tool_result)
-            route = self._route_from_pending(pending)
-            selected_tools = [
-                self._tools[name]
-                for name in pending.get("selected_tools", [])
-                if isinstance(name, str) and name in self._tools
-            ] or self._select_tools_for_route(route, [])
-            memory = await self._load_memory(session_uuid)
-            messages = await self._build_agent_messages(
-                session_uuid,
-                tool_results,
-                selected_tools,
-                route,
-                actor_context=actor_context,
-            )
-            try:
-                resumed = await self._run_provider_agent_loop(
-                    provider,
+            if self._confirmed_tool_finishes_without_resume(tool_name):
+                tool_results = [tool_result]
+                result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
+            else:
+                route = self._route_from_pending(pending)
+                selected_tools = [
+                    self._tools[name]
+                    for name in pending.get("selected_tools", [])
+                    if isinstance(name, str) and name in self._tools
+                ] or self._select_tools_for_route(route, [])
+                memory = await self._load_memory(session_uuid)
+                messages = await self._build_agent_messages(
                     session_uuid,
-                    messages,
                     tool_results,
                     selected_tools,
-                    memory,
-                    route=route,
-                    user_message=str(pending.get("user_message") or ""),
-                    attachments=[],
+                    route,
                     actor_context=actor_context,
-                    status_callback=status_callback,
                 )
-                result_text = resumed.text if isinstance(resumed, LlmResult) else resumed.text
-            except Exception as exc:
-                logger.info("agent_confirmation_resume_failed", extra={"tool": tool_name, "error": str(exc)[:240]})
-                result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
+                try:
+                    resumed = await self._run_provider_agent_loop(
+                        provider,
+                        session_uuid,
+                        messages,
+                        tool_results,
+                        selected_tools,
+                        memory,
+                        route=route,
+                        user_message=str(pending.get("user_message") or ""),
+                        attachments=[],
+                        actor_context=actor_context,
+                        status_callback=status_callback,
+                    )
+                    result_text = resumed.text if isinstance(resumed, LlmResult) else resumed.text
+                except Exception as exc:
+                    logger.info("agent_confirmation_resume_failed", extra={"tool": tool_name, "error": str(exc)[:240]})
+                    result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
         finally:
             set_chat_tool_context({}, token=context_token)
 
@@ -509,6 +558,9 @@ class ChatService:
             tool_results,
             attachments,
         )
+
+    def _confirmed_tool_finishes_without_resume(self, tool_name: str) -> bool:
+        return tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
@@ -693,13 +745,15 @@ class ChatService:
             intents.append("Notifications")
         if any(word in lower for word in ["maintenance", "kill-switch", "kill switch", "disable automation", "resume automation"]):
             intents.append("Maintenance")
+        if self._looks_like_visitor_pass_request(lower) or memory.get("pending_visitor_pass_create"):
+            intents.append("Visitor_Passes")
         if any(word in lower for word in ["schedule", "schedules", "timeframe", "allowed", "access window"]):
             intents.append("Schedules")
         if any(word in lower for word in ["dvla", "mot", "tax", "compliance", "registration", "plate", "vehicle", "tesla", "car"]):
             intents.append("Compliance_DVLA")
         if any(word in lower for word in ["gate", "garage", "door", "cover", "device", "malfunction", "fubar", "stuck", "open"]):
             intents.append("Gate_Hardware")
-        if self._looks_like_access_diagnostic_request(lower) or any(
+        if self._looks_like_missing_access_incident(lower) or self._looks_like_access_diagnostic_request(lower) or any(
             word in lower for word in ["why", "failed", "failure", "didn't", "didnt", "slow", "latency", "delay", "malfunction"]
         ):
             intents.append("Access_Diagnostics")
@@ -712,6 +766,8 @@ class ChatService:
             intents.append("Users_Settings")
         if memory.get("pending_schedule_create"):
             intents.append("Schedules")
+        if memory.get("last_visitor_name") and any(phrase in lower for phrase in ["what car", "which car", "how long", "duration", "stayed", "arrived in"]):
+            intents.append("Visitor_Passes")
         if not intents:
             intents.append("General")
         deduped = tuple(dict.fromkeys(intent for intent in intents if intent in SUPPORTED_INTENTS))
@@ -743,10 +799,13 @@ class ChatService:
         attachments: list[dict[str, Any]],
     ) -> list[AgentTool]:
         intents = set(route.intents or ("General",))
-        names: set[str] = {"resolve_human_entity"}
+        pure_visitor_pass_route = intents == {"Visitor_Passes"}
+        names: set[str] = set() if pure_visitor_pass_route else {"resolve_human_entity"}
         if attachments:
             names.add("read_chat_attachment")
         for name, tool in self._tools.items():
+            if pure_visitor_pass_route and name == "resolve_human_entity":
+                continue
             if intents.intersection(tool.categories):
                 if intents == {"General"} and not tool.read_only:
                     continue
@@ -754,12 +813,16 @@ class ChatService:
         if "Access_Diagnostics" in intents:
             names.update(
                 {
+                    "backfill_access_event_from_protect",
                     "diagnose_access_event",
                     "get_maintenance_status",
                     "get_telemetry_trace",
+                    "investigate_access_incident",
                     "query_access_events",
                     "query_lpr_timing",
+                    "query_unifi_protect_events",
                     "resolve_human_entity",
+                    "test_unifi_alarm_webhook",
                     "verify_schedule_access",
                 }
             )
@@ -769,6 +832,8 @@ class ChatService:
             names.update({"lookup_dvla_vehicle", "query_vehicle_detection_history"})
         if "Schedules" in intents:
             names.update({"query_schedules", "query_schedule_targets", "verify_schedule_access"})
+        if "Visitor_Passes" in intents:
+            names.update(VISITOR_PASS_TOOL_NAMES)
         if "Reports_Files" in intents and attachments:
             names.add("read_chat_attachment")
         return [tool for name, tool in self._tools.items() if name in names]
@@ -1087,7 +1152,17 @@ class ChatService:
                     )
 
         if iteration > 0 or not calls:
-            if "Access_Diagnostics" in intents and "diagnose_access_event" in allowed:
+            if (
+                "Access_Diagnostics" in intents
+                and "investigate_access_incident" in allowed
+                and (
+                    self._looks_like_missing_access_incident(lower)
+                    or self._latest_diagnostic_result_not_found(tool_results)
+                )
+            ):
+                args = self._access_incident_args_from_message(message, memory, actor_context=actor_context)
+                calls.append(ToolCall("react-investigate-access-incident", "investigate_access_incident", args))
+            elif "Access_Diagnostics" in intents and "diagnose_access_event" in allowed:
                 args = self._access_diagnostic_args_from_message(message, memory, actor_context=actor_context)
                 args.setdefault("summarize_payload", True)
                 args.setdefault("span_limit", 20)
@@ -1152,6 +1227,41 @@ class ChatService:
                     )
                 elif "get_maintenance_status" in allowed:
                     calls.append(ToolCall("react-maintenance-status", "get_maintenance_status", {}))
+            elif "Visitor_Passes" in intents:
+                visitor_name = self._visitor_name_from_message(message) or str(memory.get("last_visitor_name") or "")
+                expected_time = self._visitor_expected_time_from_message(message)
+                if self._looks_like_visitor_pass_cancel_request(lower) and "cancel_visitor_pass" in allowed:
+                    calls.append(
+                        ToolCall(
+                            "react-cancel-visitor-pass",
+                            "cancel_visitor_pass",
+                            {
+                                "visitor_name": visitor_name,
+                                "reason": message,
+                                "confirm": self._is_confirmation_message(lower),
+                            },
+                        )
+                    )
+                elif self._looks_like_visitor_pass_create_request(lower) and "create_visitor_pass" in allowed and visitor_name and expected_time:
+                    calls.append(
+                        ToolCall(
+                            "react-create-visitor-pass",
+                            "create_visitor_pass",
+                            {
+                                "visitor_name": visitor_name,
+                                "expected_time": expected_time,
+                                "window_minutes": self._visitor_window_from_message(lower) or 30,
+                                "confirm": self._is_confirmation_message(lower),
+                            },
+                        )
+                    )
+                elif "query_visitor_passes" in allowed:
+                    query_args: dict[str, Any] = {"limit": 10}
+                    if visitor_name:
+                        query_args["search"] = visitor_name
+                    elif not any(phrase in lower for phrase in ["what car", "which car", "how long", "duration", "stayed", "arrived in"]):
+                        query_args["statuses"] = ["active", "scheduled"]
+                    calls.append(ToolCall("react-query-visitor-passes", "query_visitor_passes", query_args))
             elif "Compliance_DVLA" in intents:
                 registration_number = self._registration_from_message(message)
                 if registration_number and "lookup_dvla_vehicle" in allowed:
@@ -1207,6 +1317,8 @@ class ChatService:
             return ["vehicle", "person"]
         if "Schedules" in intents:
             return ["person", "vehicle", "group", "device"]
+        if "Visitor_Passes" in intents:
+            return ["person", "vehicle"]
         if "Access_Logs" in intents or "Access_Diagnostics" in intents:
             return ["person", "vehicle", "group"]
         return ["person", "vehicle", "group", "device"]
@@ -1257,6 +1369,8 @@ class ChatService:
             compacted = {}
             for key, item in list(value.items())[:50]:
                 key_text = str(key)
+                if key_text.lower() in {"timezone", "site_timezone"}:
+                    continue
                 if any(secret in key_text.lower() for secret in ("api_key", "password", "secret", "token")):
                     compacted[key_text] = "[redacted]"
                 elif any(media in key_text.lower() for media in ("image", "photo", "snapshot", "thumbnail", "video")):
@@ -1289,6 +1403,177 @@ class ChatService:
             if "route" not in str(exc) and "actor_context" not in str(exc):
                 raise
             return await self._build_messages(session_id, tool_results, selected_tools)
+
+    async def _handle_guided_visitor_pass_flow(
+        self,
+        session_id: uuid.UUID,
+        message: str,
+        memory: dict[str, Any],
+        *,
+        actor_context: dict[str, Any] | None,
+        provider_name: str,
+        status_callback: StatusCallback | None,
+    ) -> ChatTurnResult | None:
+        pending = memory.get("pending_visitor_pass_create")
+        if isinstance(pending, dict):
+            return await self._continue_visitor_pass_create(
+                session_id,
+                message,
+                memory,
+                pending,
+                actor_context=actor_context,
+                provider_name=provider_name,
+                status_callback=status_callback,
+            )
+
+        lower = message.lower()
+        if not self._looks_like_visitor_pass_create_request(lower):
+            return None
+
+        runtime = await get_runtime_config()
+        visitor_name = self._visitor_name_from_message(message)
+        expected_time = self._visitor_expected_time_from_message(message, runtime.site_timezone)
+        window_minutes = self._visitor_window_from_message(lower) or 30
+        if not visitor_name or not expected_time:
+            memory["pending_visitor_pass_create"] = {
+                "visitor_name": visitor_name,
+                "expected_time": expected_time,
+                "window_minutes": window_minutes,
+            }
+            await self._save_memory(session_id, memory)
+            return await self._direct_response(
+                session_id,
+                self._visitor_pass_missing_details_text(visitor_name, expected_time),
+            )
+
+        return await self._prepare_visitor_pass_confirmation(
+            session_id,
+            memory,
+            visitor_name=visitor_name,
+            expected_time=expected_time,
+            window_minutes=window_minutes,
+            actor_context=actor_context,
+            provider_name=provider_name,
+            user_message=message,
+            status_callback=status_callback,
+        )
+
+    async def _continue_visitor_pass_create(
+        self,
+        session_id: uuid.UUID,
+        message: str,
+        memory: dict[str, Any],
+        pending: dict[str, Any],
+        *,
+        actor_context: dict[str, Any] | None,
+        provider_name: str,
+        status_callback: StatusCallback | None,
+    ) -> ChatTurnResult:
+        lower = message.lower().strip()
+        if lower in {"cancel", "stop", "never mind", "nevermind"}:
+            memory.pop("pending_visitor_pass_create", None)
+            await self._save_memory(session_id, memory)
+            return await self._direct_response(session_id, "No problem - I cancelled that Visitor Pass setup.")
+
+        runtime = await get_runtime_config()
+        visitor_name = (
+            self._visitor_name_from_message(message)
+            or str(pending.get("visitor_name") or "").strip()
+            or None
+        )
+        expected_time = (
+            self._visitor_expected_time_from_message(message, runtime.site_timezone)
+            or str(pending.get("expected_time") or "").strip()
+            or None
+        )
+        window_minutes = self._visitor_window_from_message(lower) or int(pending.get("window_minutes") or 30)
+        if not visitor_name or not expected_time:
+            memory["pending_visitor_pass_create"] = {
+                "visitor_name": visitor_name,
+                "expected_time": expected_time,
+                "window_minutes": window_minutes,
+            }
+            await self._save_memory(session_id, memory)
+            return await self._direct_response(
+                session_id,
+                self._visitor_pass_missing_details_text(visitor_name, expected_time),
+            )
+
+        return await self._prepare_visitor_pass_confirmation(
+            session_id,
+            memory,
+            visitor_name=visitor_name,
+            expected_time=expected_time,
+            window_minutes=window_minutes,
+            actor_context=actor_context,
+            provider_name=provider_name,
+            user_message=message,
+            status_callback=status_callback,
+        )
+
+    async def _prepare_visitor_pass_confirmation(
+        self,
+        session_id: uuid.UUID,
+        memory: dict[str, Any],
+        *,
+        visitor_name: str,
+        expected_time: str,
+        window_minutes: int,
+        actor_context: dict[str, Any] | None,
+        provider_name: str,
+        user_message: str,
+        status_callback: StatusCallback | None,
+    ) -> ChatTurnResult:
+        call = ToolCall(
+            "guided-create-visitor-pass",
+            "create_visitor_pass",
+            {
+                "visitor_name": visitor_name,
+                "expected_time": expected_time,
+                "window_minutes": window_minutes,
+                "confirm": False,
+            },
+        )
+        tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
+        output = tool_result.get("output") if isinstance(tool_result.get("output"), dict) else {}
+        if not output.get("requires_confirmation"):
+            memory.pop("pending_visitor_pass_create", None)
+            await self._save_memory(session_id, memory)
+            text = str(output.get("detail") or output.get("error") or "I could not prepare that Visitor Pass.")
+            return await self._direct_response(session_id, text, tool_results=[tool_result])
+
+        memory.pop("pending_visitor_pass_create", None)
+        memory["last_visitor_name"] = visitor_name
+        await self._save_memory(session_id, memory)
+        route = IntentRoute(("Visitor_Passes",), 0.95, False, "guided visitor pass creation")
+        selected_tools = [self._tools[name] for name in VISITOR_PASS_TOOL_NAMES if name in self._tools]
+        pending_action = await self._store_pending_agent_action(
+            session_id,
+            tool_result,
+            [tool_result],
+            route,
+            selected_tools,
+            provider_name=provider_name,
+            user_message=user_message,
+            user_id=str(((actor_context or {}).get("user") or {}).get("id") or ""),
+            actor_context=actor_context or {},
+            iteration=0,
+        )
+        if status_callback:
+            await status_callback({"event": "chat.confirmation_required", **pending_action})
+        return await self._direct_response(
+            session_id,
+            str(output.get("detail") or f"Create a Visitor Pass for {visitor_name}?"),
+            tool_results=[tool_result],
+            pending_action=pending_action,
+        )
+
+    def _visitor_pass_missing_details_text(self, visitor_name: str | None, expected_time: str | None) -> str:
+        if not visitor_name and not expected_time:
+            return "Sure - who is visiting, and when should I expect them?"
+        if not visitor_name:
+            return "What is the visitor's name?"
+        return f"What time should I expect {visitor_name}?"
 
     async def _handle_guided_schedule_flow(
         self,
@@ -1549,6 +1834,7 @@ class ChatService:
         *,
         tool_results: list[dict[str, Any]] | None = None,
         provider: str = "guided",
+        pending_action: dict[str, Any] | None = None,
     ) -> ChatTurnResult:
         tool_results = tool_results or []
         attachments = self._attachments_from_tool_results(tool_results)
@@ -1563,7 +1849,7 @@ class ChatService:
                 "attachments": attachments,
             },
         )
-        return ChatTurnResult(str(session_id), provider, text, tool_results, attachments)
+        return ChatTurnResult(str(session_id), provider, text, tool_results, attachments, pending_action)
 
     async def _provider_error_response(
         self,
@@ -1634,15 +1920,22 @@ class ChatService:
         cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
         cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
         cleaned = cleaned.replace("***", "")
+        cleaned = self._strip_local_time_labels(cleaned)
         cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         if not cleaned and any(attachment.get("kind") == "image" for attachment in attachments):
             return "Here's the latest snapshot."
         return cleaned
 
+    def _strip_local_time_labels(self, text: str) -> str:
+        cleaned = re.sub(r"\s*\((?:Europe/London)\)", "", text)
+        cleaned = re.sub(r"\s+Europe/London\b", "", cleaned)
+        return cleaned
+
     def _confirmation_user_message(self, tool_name: str, arguments: dict[str, Any]) -> str:
         target = (
             arguments.get("target")
+            or arguments.get("visitor_name")
             or arguments.get("schedule_name")
             or arguments.get("rule_name")
             or arguments.get("name")
@@ -1664,6 +1957,21 @@ class ChatService:
             if output.get("created"):
                 return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
             return str(output.get("detail") or "I did not create the schedule override.")
+        if tool_name == "create_visitor_pass":
+            if output.get("created"):
+                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                return f"Created the Visitor Pass for {visitor_pass.get('visitor_name') or output.get('visitor_name') or 'that visitor'}."
+            return str(output.get("detail") or output.get("error") or "I did not create the Visitor Pass.")
+        if tool_name == "update_visitor_pass":
+            if output.get("updated"):
+                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                return f"Updated the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
+            return str(output.get("detail") or output.get("error") or "I did not update the Visitor Pass.")
+        if tool_name == "cancel_visitor_pass":
+            if output.get("cancelled"):
+                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                return f"Cancelled the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
+            return str(output.get("detail") or output.get("error") or "I did not cancel the Visitor Pass.")
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
             if output.get("changed") or output.get("enabled") or output.get("disabled"):
                 state = output.get("state") or ("enabled" if output.get("enabled") else "disabled")
@@ -1691,6 +1999,19 @@ class ChatService:
             if output.get("sent"):
                 return "Sent the notification workflow test."
             return str(output.get("detail") or "I did not send the notification workflow test.")
+        if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
+            if output.get("backfilled"):
+                return (
+                    f"Backfilled the {output.get('direction') or 'access'} event for "
+                    f"{output.get('registration_number') or 'that plate'} at "
+                    f"{output.get('occurred_at_display') or output.get('occurred_at')}. "
+                    f"Presence {'was' if output.get('presence_updated') else 'was not'} updated."
+                )
+            return str(output.get("detail") or output.get("error") or "I did not backfill the access event.")
+        if tool_name == "test_unifi_alarm_webhook":
+            if output.get("sent"):
+                return "Sent the UniFi Protect Alarm Manager webhook test and checked for a matching IACS webhook trace."
+            return str(output.get("detail") or output.get("error") or "I did not send the UniFi Protect webhook test.")
         if tool_name == "trigger_anomaly_alert":
             if output.get("sent"):
                 return f"Sent the anomaly alert: {output.get('title') or 'Alert'}."
@@ -1755,8 +2076,6 @@ class ChatService:
             chat_session = await session.get(ChatSession, session_id)
             memory = chat_session.context if chat_session and chat_session.context else {}
 
-        runtime = await get_runtime_config()
-        site_timezone = runtime.site_timezone or DEFAULT_CHAT_TIMEZONE
         history_rows = self._select_relevant_history(list(reversed(rows)), memory)
         route_payload = {
             "intents": list(route.intents) if route else ["General"],
@@ -1777,14 +2096,15 @@ class ChatService:
                 ),
             )
         )
+        prompt_actor_context = self._compact_prompt_value(actor_context or {})
         messages = [
             ChatMessageInput(
                 "system",
                 (
-                    f"{SYSTEM_PROMPT}\nSite timezone: {site_timezone}. "
-                    "All user-facing dates and times must use this timezone; "
-                    "do not present UTC timestamps unless the user explicitly asks for UTC.\n"
-                    f"Current authenticated user context: {json.dumps(actor_context or {}, default=str, separators=(',', ':'))}\n"
+                    f"{SYSTEM_PROMPT}\n"
+                    "All user-facing dates and times must use local site time; "
+                    "never mention local-time names, local-time labels, UTC offsets, or UTC timestamps unless the user explicitly asks for UTC.\n"
+                    f"Current authenticated user context: {json.dumps(prompt_actor_context, default=str, separators=(',', ':'))}\n"
                     f"Session memory: {json.dumps(memory, default=str)}\n\n{tool_protocol}"
                 ),
             )
@@ -1811,11 +2131,11 @@ class ChatService:
 
         latest_user = next((row for row in reversed(rows) if row.role == "user"), None)
         latest_content = latest_user.content if latest_user else ""
-        if memory.get("pending_schedule_create"):
+        if memory.get("pending_schedule_create") or memory.get("pending_visitor_pass_create"):
             return rows[-MAX_RELEVANT_HISTORY_MESSAGES:]
 
         relevant_terms = self._history_terms(latest_content)
-        for key in ("last_subject", "last_person", "last_group"):
+        for key in ("last_subject", "last_person", "last_group", "last_visitor_name"):
             relevant_terms.update(self._history_terms(str(memory.get(key) or "")))
 
         selected_ids = {id(row) for row in rows[-RECENT_HISTORY_LIMIT:]}
@@ -1882,6 +2202,12 @@ class ChatService:
 
         for result in tool_results:
             output = result.get("output", {})
+            visitor_passes = output.get("visitor_passes") if isinstance(output.get("visitor_passes"), list) else []
+            visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else None
+            for pass_record in ([visitor_pass] if visitor_pass else []) + visitor_passes:
+                if isinstance(pass_record, dict) and pass_record.get("visitor_name"):
+                    memory["last_visitor_name"] = pass_record["visitor_name"]
+                    memory["last_subject"] = pass_record["visitor_name"]
             for event in output.get("events", []):
                 if event.get("person"):
                     memory["last_person"] = event["person"]
@@ -1938,8 +2264,8 @@ class ChatService:
         if any(word in lower for word in ["arrive", "arrival", "arrived", "came", "leave", "left", "exit", "exited", "event", "denied", "access log"]):
             names.update(("query_access_events", "query_anomalies"))
 
-        if self._looks_like_access_diagnostic_request(lower):
-            names.update(("diagnose_access_event", "query_access_events", "query_lpr_timing"))
+        if self._looks_like_missing_access_incident(lower) or self._looks_like_access_diagnostic_request(lower):
+            names.update(("diagnose_access_event", "investigate_access_incident", "query_access_events", "query_lpr_timing", "query_unifi_protect_events"))
 
         if self._looks_like_vehicle_detection_count_request(lower):
             names.update(("query_vehicle_detection_history", "query_access_events", "query_leaderboard"))
@@ -1961,6 +2287,9 @@ class ChatService:
 
         if memory.get("pending_schedule_create"):
             names.update(SCHEDULE_TOOL_NAMES)
+
+        if self._looks_like_visitor_pass_request(lower) or memory.get("pending_visitor_pass_create") or memory.get("last_visitor_name"):
+            names.update(VISITOR_PASS_TOOL_NAMES)
 
         if any(word in lower for word in ["notification", "notifications", "workflow", "workflows", "template", "apprise"]):
             names.update(NOTIFICATION_TOOL_NAMES)
@@ -1991,6 +2320,8 @@ class ChatService:
                     names.update(MAINTENANCE_TOOL_NAMES)
                 elif name in SCHEDULE_TOOL_NAMES:
                     names.update(SCHEDULE_TOOL_NAMES)
+                elif name in VISITOR_PASS_TOOL_NAMES:
+                    names.update(VISITOR_PASS_TOOL_NAMES)
                 elif name in NOTIFICATION_TOOL_NAMES:
                     names.update(NOTIFICATION_TOOL_NAMES)
 
@@ -2091,7 +2422,15 @@ class ChatService:
                 )
             )
 
-        if self._looks_like_access_diagnostic_request(lower):
+        if self._looks_like_missing_access_incident(lower):
+            calls.append(
+                ToolCall(
+                    "planned-access-incident",
+                    "investigate_access_incident",
+                    self._access_incident_args_from_message(message, memory),
+                )
+            )
+        elif self._looks_like_access_diagnostic_request(lower):
             diagnostic_args = self._access_diagnostic_args_from_message(message, memory)
             calls.append(ToolCall("planned-access-diagnostics", "diagnose_access_event", diagnostic_args))
             if self._looks_like_lpr_timing_request(lower):
@@ -2450,6 +2789,10 @@ class ChatService:
             candidate = re.sub(r"[^A-Z0-9]", "", match.group(0))
             if re.fullmatch(r"\d+(?:MS|S|SEC|SECS|SECOND|SECONDS|MILLISECOND|MILLISECONDS)", candidate):
                 continue
+            if re.fullmatch(r"AT\d{1,4}", candidate):
+                continue
+            if re.match(r"^\d{1,2}(?:AM|PM)", candidate):
+                continue
             if 2 <= len(candidate) <= 8 and any(char.isalpha() for char in candidate) and any(char.isdigit() for char in candidate):
                 return candidate
         return None
@@ -2807,6 +3150,7 @@ class ChatService:
         tool_name = str(pending.get("tool_name") or "")
         target = str(
             output.get("target")
+            or output.get("visitor_name")
             or output.get("schedule_name")
             or output.get("workflow_name")
             or output.get("person")
@@ -2814,12 +3158,15 @@ class ChatService:
             or tool_name.replace("_", " ")
         ).strip()
         title = self._confirmation_title(tool_name, target, output)
+        description = self._strip_local_time_labels(
+            str(output.get("detail") or "This action needs confirmation before Alfred continues.")
+        )
         return {
             "confirmation_id": pending.get("id"),
             "session_id": pending.get("session_id"),
             "tool_name": tool_name,
             "title": title,
-            "description": str(output.get("detail") or "This action needs confirmation before Alfred continues."),
+            "description": description,
             "confirm_label": self._confirmation_button_label(tool_name, output),
             "cancel_label": "Cancel",
             "risk_level": "high" if tool_name in {"open_device", "command_device", "open_gate"} else "medium",
@@ -2833,6 +3180,12 @@ class ChatService:
             return f"{'Close' if action == 'close' else 'Open'} {target or 'gate'}?"
         if tool_name == "override_schedule":
             return f"Override schedule for {target or 'person'}?"
+        if tool_name == "create_visitor_pass":
+            return f"Create Visitor Pass for {target or 'visitor'}?"
+        if tool_name == "update_visitor_pass":
+            return f"Update Visitor Pass for {target or 'visitor'}?"
+        if tool_name == "cancel_visitor_pass":
+            return f"Cancel Visitor Pass for {target or 'visitor'}?"
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
             state = str(output.get("state") or "").strip()
             return f"{'Enable' if state in {'enabled', 'on', 'true'} or tool_name == 'enable_maintenance_mode' else 'Disable'} Maintenance Mode?"
@@ -2844,6 +3197,16 @@ class ChatService:
             return "Close" if action == "close" else "Open"
         if tool_name == "override_schedule":
             return "Create override"
+        if tool_name == "create_visitor_pass":
+            return "Create pass"
+        if tool_name == "update_visitor_pass":
+            return "Update pass"
+        if tool_name == "cancel_visitor_pass":
+            return "Cancel pass"
+        if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
+            return "Backfill event"
+        if tool_name == "test_unifi_alarm_webhook":
+            return "Send test"
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
             return "Confirm"
         return "Confirm"
@@ -2947,6 +3310,10 @@ class ChatService:
             "trigger_manual_malfunction_override": "Preparing gate malfunction override...",
             "query_access_events": "Reviewing access events...",
             "diagnose_access_event": "Diagnosing access event...",
+            "investigate_access_incident": "Investigating access incident...",
+            "query_unifi_protect_events": "Checking UniFi Protect history...",
+            "backfill_access_event_from_protect": "Preparing access event backfill...",
+            "test_unifi_alarm_webhook": "Preparing Protect webhook test...",
             "query_lpr_timing": "Checking LPR timing...",
             "query_vehicle_detection_history": "Counting vehicle detections...",
             "get_telemetry_trace": "Reading telemetry trace...",
@@ -2979,8 +3346,155 @@ class ChatService:
             "delete_notification_workflow": "Preparing notification workflow deletion...",
             "preview_notification_workflow": "Previewing notification workflow...",
             "test_notification_workflow": "Preparing notification test...",
+            "query_visitor_passes": "Checking Visitor Passes...",
+            "get_visitor_pass": "Checking Visitor Pass...",
+            "create_visitor_pass": "Preparing Visitor Pass...",
+            "update_visitor_pass": "Preparing Visitor Pass update...",
+            "cancel_visitor_pass": "Preparing Visitor Pass cancellation...",
         }
         return {"tool": tool_name, "label": labels.get(tool_name, "Running system tool...")}
+
+    def _looks_like_visitor_pass_request(self, lower: str) -> bool:
+        return (
+            "visitor pass" in lower
+            or "guest pass" in lower
+            or bool(re.search(r"\b(?:create|make|add|book|set\s*up|setup)\s+(?:a\s+)?pass\b", lower))
+            or bool(re.search(r"\bpass\s+(?:for|to)\b", lower))
+            or bool(re.search(r"\bpass\b.*\b(?:coming|arriving|visiting|expected|tomorrow|today|tonight)\b", lower))
+            or "visitor coming" in lower
+            or "guest coming" in lower
+            or "visitor arriving" in lower
+            or "guest arriving" in lower
+            or "expected visitor" in lower
+            or "expected guest" in lower
+            or bool(re.search(r"\b(visitor|guest)\b.*\b(pass|coming|arriving|expect|expected|cancel|delete|remove|revoke|visit)\b", lower))
+        )
+
+    def _looks_like_visitor_pass_create_request(self, lower: str) -> bool:
+        if self._looks_like_visitor_pass_cancel_request(lower):
+            return False
+        return self._looks_like_visitor_pass_request(lower) and any(
+            phrase in lower
+            for phrase in [
+                "coming",
+                "arriving",
+                "expecting",
+                "expect ",
+                "create",
+                "new",
+                "add",
+                "book",
+                "set up",
+                "setup",
+                "make",
+                "coming over",
+            ]
+        )
+
+    def _looks_like_visitor_pass_cancel_request(self, lower: str) -> bool:
+        return self._looks_like_visitor_pass_request(lower) and bool(re.search(r"\b(cancel|delete|remove|revoke)\b", lower))
+
+    def _visitor_name_from_message(self, message: str) -> str | None:
+        patterns = [
+            r"(?:called|named)\s+([A-Za-z][A-Za-z' -]{1,48})",
+            r"(?:visitor|guest)\s+(?:called|named)\s+([A-Za-z][A-Za-z' -]{1,48})",
+            r"(?:expecting|expect|having|have)\s+(?:a\s+)?(?:visitor|guest)?\s*(?:called|named)?\s+([A-Za-z][A-Za-z' -]{1,48})",
+            r"\b([A-Za-z][A-Za-z' -]{1,48})\s+(?:is\s+|'s\s+)?(?:coming|arriving|visiting)\b",
+            r"(?:visitor|guest)\s+([A-Za-z][A-Za-z' -]{1,48})(?:\s+(?:at|on|tomorrow|today|tonight|coming|arriving)\b|$)",
+            r"\bfor\s+([A-Za-z][A-Za-z' -]{1,48})(?:\s+(?:at|on|tomorrow|today|tonight)\b|$)",
+            r"^([A-Za-z][A-Za-z' -]{1,48})(?:\s+(?:at|on|tomorrow|today|tonight|in)\b|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if not match:
+                continue
+            cleaned = self._clean_visitor_name_candidate(match.group(1))
+            if cleaned:
+                return cleaned
+        return None
+
+    def _clean_visitor_name_candidate(self, value: str) -> str | None:
+        name = re.split(
+            r"\b(?:at|around|about|on|today|tomorrow|tonight|this|next|in|from|for|with|coming|arriving|visiting)\b",
+            value,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        name = re.sub(r"\b(?:a|an|the|visitor|guest|is|will|be|called|named)\b", " ", name, flags=re.IGNORECASE)
+        name = " ".join(name.strip(" .,!?'\"").split())
+        if not name or name.lower() in {"coming", "arriving", "visiting", "today", "tomorrow", "tonight"}:
+            return None
+        return name[:80]
+
+    def _visitor_expected_time_from_message(
+        self,
+        message: str,
+        timezone_name: str = DEFAULT_CHAT_TIMEZONE,
+    ) -> str | None:
+        text = message.strip()
+        iso_match = re.search(r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?", text)
+        if iso_match:
+            raw = iso_match.group(0).replace(" ", "T")
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+            if parsed:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+                return parsed.astimezone(ZoneInfo(timezone_name)).isoformat()
+
+        timezone = ZoneInfo(timezone_name)
+        now = datetime.now(tz=timezone)
+        lower = text.lower()
+        relative = re.search(r"\bin\s+(\d{1,3})\s*(minute|minutes|mins|min|hour|hours|hrs|hr)\b", lower)
+        if relative:
+            amount = int(relative.group(1))
+            unit = relative.group(2)
+            delta = timedelta(hours=amount) if unit.startswith(("hour", "hr")) else timedelta(minutes=amount)
+            return (now + delta).isoformat()
+
+        time_match = re.search(
+            r"\b(?:at|around|about|by)?\s*(?:approx(?:imately)?|roughly|circa|about|around)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+            lower,
+        )
+        if not time_match:
+            time_match = re.search(
+                r"\b(?:at|around|about|by)\s*(?:approx(?:imately)?|roughly|circa|about|around)?\s*(\d{1,2}):(\d{2})\b",
+                lower,
+            )
+        if not time_match:
+            if re.search(r"\b(noon|midday)\b", lower):
+                hour, minute = 12, 0
+            elif "midnight" in lower:
+                hour, minute = 0, 0
+            else:
+                return None
+        else:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2) or 0)
+            meridiem = time_match.group(3)
+            if meridiem == "pm" and hour != 12:
+                hour += 12
+            elif meridiem == "am" and hour == 12:
+                hour = 0
+            if hour > 23 or minute > 59:
+                return None
+
+        days_offset = 1 if "tomorrow" in lower else 0
+        expected = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_offset)
+        if days_offset == 0 and "today" not in lower and expected <= now:
+            expected = expected + timedelta(days=1)
+        return expected.isoformat()
+
+    def _visitor_window_from_message(self, lower: str) -> int | None:
+        match = re.search(r"(?:\+/-|plus/minus|window|within|for)\s*(\d{1,3})\s*(?:minutes|minute|mins|min|m)?", lower)
+        if not match:
+            return None
+        minutes = int(match.group(1))
+        if minutes in {30, 60, 90, 120, 180}:
+            return minutes
+        return max(1, min(minutes, 180))
 
     def _looks_like_schedule_create_request(self, lower: str) -> bool:
         return "schedule" in lower and any(word in lower for word in ["create", "new", "add", "make"])
@@ -3252,6 +3766,43 @@ class ChatService:
             term in lower for term in access_terms
         )
 
+    def _looks_like_missing_access_incident(self, lower: str) -> bool:
+        phrases = [
+            "nothing logged",
+            "nothing was logged",
+            "not logged",
+            "didn't log",
+            "didnt log",
+            "did not log",
+            "wasn't logged",
+            "wasnt logged",
+            "no event",
+            "no access event",
+            "no log",
+            "missing event",
+            "not recorded",
+            "wasn't recorded",
+            "wasnt recorded",
+            "no notification",
+            "not notified",
+            "why wasn't",
+            "why wasnt",
+        ]
+        if any(phrase in lower for phrase in phrases):
+            return any(
+                term in lower
+                for term in ["left", "leave", "exit", "arrived", "arrival", "entry", "gate", "lpr", "plate", "car", "vehicle", "notification", "logged", "recorded"]
+            )
+        return False
+
+    def _latest_diagnostic_result_not_found(self, tool_results: list[dict[str, Any]]) -> bool:
+        for result in reversed(tool_results):
+            if result.get("name") != "diagnose_access_event":
+                continue
+            output = result.get("output")
+            return isinstance(output, dict) and not bool(output.get("found"))
+        return False
+
     def _looks_like_vehicle_detection_count_request(self, lower: str) -> bool:
         if not any(phrase in lower for phrase in ["how many times", "how often", "count"]):
             return False
@@ -3330,6 +3881,53 @@ class ChatService:
         elif any(word in lower for word in ["entry", "entries", "enter", "arrival", "arrivals", "arrive", "arrived", "arriving"]):
             args["direction"] = "entry"
         return args
+
+    def _access_incident_args_from_message(
+        self,
+        message: str,
+        memory: dict[str, Any],
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        lower = message.lower()
+        args = self._access_diagnostic_args_from_message(message, memory, actor_context=actor_context)
+        args.pop("span_limit", None)
+        args.pop("summarize_payload", None)
+        args["incident_type"] = self._incident_type_from_message(lower)
+        if not any(key in args for key in ("person", "person_id", "vehicle_id", "registration_number")):
+            person_name = self._person_name_from_event_time_message(lower)
+            if person_name:
+                args["person"] = person_name
+        expected_time = self._expected_time_from_message(lower)
+        if expected_time:
+            args["expected_time"] = expected_time
+            args["window_minutes"] = 20
+        if "this morning" in lower or "today" in lower:
+            args["day"] = "today"
+        if "yesterday" in lower:
+            args["day"] = "yesterday"
+        return args
+
+    def _incident_type_from_message(self, lower: str) -> str:
+        if any(phrase in lower for phrase in ["nothing logged", "nothing was logged", "not logged", "didn't log", "didnt log", "no event", "missing event", "not recorded"]):
+            return "missing_event"
+        if "notification" in lower or "notified" in lower or "notify" in lower:
+            return "notification_failure"
+        if "garage" in lower:
+            return "garage_failure"
+        if "schedule" in lower or "denied" in lower or "outside" in lower:
+            return "schedule_denial"
+        if "gate" in lower and any(word in lower for word in ["open", "failed", "failure", "didn't", "didnt"]):
+            return "gate_failure"
+        return "auto"
+
+    def _expected_time_from_message(self, lower: str) -> str | None:
+        match = re.search(r"\b(?:at|around|about|by)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b", lower)
+        if not match:
+            match = re.search(r"\b(\d{1,2}:\d{2}\s*(?:am|pm)?)\b", lower)
+        if not match:
+            return None
+        return re.sub(r"\s+", "", match.group(1))
 
     def _person_name_from_diagnostic_message(self, lower: str) -> str | None:
         patterns = [
@@ -3446,6 +4044,34 @@ class ChatService:
             return self._entity_resolution_direct_text(output)
         if tool_name == "get_telemetry_trace":
             return self._telemetry_trace_direct_text(output)
+        if tool_name in {"query_visitor_passes", "get_visitor_pass"}:
+            passes = output.get("visitor_passes") if isinstance(output.get("visitor_passes"), list) else []
+            if not passes and isinstance(output.get("visitor_pass"), dict):
+                passes = [output["visitor_pass"]]
+            if not passes:
+                return str(output.get("error") or "I couldn't find any matching Visitor Passes.")
+            visitor_pass = passes[0]
+            name = visitor_pass.get("visitor_name") or "The visitor"
+            if visitor_pass.get("vehicle_summary"):
+                duration = f" {visitor_pass.get('visit_summary')}." if visitor_pass.get("visit_summary") else ""
+                return f"{name} arrived in {visitor_pass.get('vehicle_summary')}.{duration}".strip()
+            if visitor_pass.get("duration_human"):
+                return f"{name} was on site for {visitor_pass.get('duration_human')}."
+            return f"{name} has a {visitor_pass.get('status') or 'visitor'} pass for {visitor_pass.get('expected_time_display') or visitor_pass.get('expected_time')}."
+        if tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}:
+            if output.get("requires_confirmation"):
+                return str(output.get("detail") or "That Visitor Pass change needs confirmation.")
+            return self._confirmation_result_text(tool_name, output)
+        incident_result = next(
+            (
+                result.get("output")
+                for result in reversed(tool_results)
+                if result.get("name") == "investigate_access_incident" and isinstance(result.get("output"), dict)
+            ),
+            None,
+        )
+        if isinstance(incident_result, dict):
+            return self._access_incident_direct_text(incident_result)
         diagnostic_result = next(
             (
                 result.get("output")
@@ -3470,6 +4096,10 @@ class ChatService:
                 return str(output.get("error") or "I could not find a matching access event to diagnose.")
             hints = output.get("answer_hints") if isinstance(output.get("answer_hints"), list) else []
             return " ".join(str(hint) for hint in hints[:3] if hint) or "I found the diagnostic record."
+        if tool_name in {"investigate_access_incident", "backfill_access_event_from_protect", "test_unifi_alarm_webhook"}:
+            if output.get("requires_confirmation"):
+                return str(output.get("detail") or "This needs confirmation before I change anything.")
+            return self._confirmation_result_text(tool_name, output)
         if tool_name == "query_vehicle_detection_history":
             if not output.get("found"):
                 return str(output.get("error") or "I could not find that vehicle in the access events.")
@@ -3565,6 +4195,28 @@ class ChatService:
             f"{gate.get('outcome_reason') or ''} "
             f"{notifications.get('summary') or ''}"
         ).strip()
+
+    def _access_incident_direct_text(self, output: dict[str, Any]) -> str:
+        if output.get("backfilled"):
+            return self._confirmation_result_text("backfill_access_event_from_protect", output)
+        if output.get("error"):
+            return str(output.get("detail") or output.get("error"))
+        root = str(output.get("root_cause") or "unknown").replace("_", " ")
+        confidence = output.get("confidence") or "unknown"
+        iacs = "found an IACS access event" if output.get("found_iacs_event") else "found no matching IACS access event"
+        protect = "Protect has matching evidence" if output.get("found_protect_event") else "Protect did not show a matching event"
+        comparison = output.get("iacs_vs_protect") if isinstance(output.get("iacs_vs_protect"), dict) else {}
+        action = output.get("recommended_action") if isinstance(output.get("recommended_action"), dict) else {}
+        detail = str(output.get("detail") or action.get("summary") or "").strip()
+        pieces = [
+            f"I investigated the incident: IACS {iacs}; {protect}.",
+            f"Likely root cause: {root} ({confidence} confidence).",
+        ]
+        if comparison.get("comparison"):
+            pieces.append(str(comparison["comparison"]))
+        if detail:
+            pieces.append(detail)
+        return " ".join(pieces)
 
     def _diagnostic_output(self, tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
         for result in tool_results:

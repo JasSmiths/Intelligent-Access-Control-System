@@ -23,6 +23,7 @@ from app.models.core import (
     TelemetryTrace,
     User,
     Vehicle,
+    VisitorPass,
 )
 
 __all__ = [
@@ -48,4 +49,5 @@ __all__ = [
     "TelemetryTrace",
     "User",
     "Vehicle",
+    "VisitorPass",
 ]

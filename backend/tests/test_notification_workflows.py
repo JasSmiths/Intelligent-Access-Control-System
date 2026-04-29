@@ -282,6 +282,36 @@ def test_dvla_compliance_triggers_and_variables_are_available() -> None:
     assert variables["TaxExpiry"] == "2027-01-01"
 
 
+def test_unknown_vehicle_variables_prefer_detected_visual_colour_and_type() -> None:
+    variables = context_variables(
+        NotificationContext(
+            event_type="unauthorized_plate",
+            subject="AB12CDE",
+            severity="warning",
+            facts={
+                "registration_number": "AB12CDE",
+                "vehicle_make": "Tesla",
+                "vehicle_colour": "White",
+                "detected_vehicle_colour": "Grey",
+                "detected_vehicle_type": "Car",
+            },
+        )
+    )
+
+    assert variables["VehicleRegistrationNumber"] == "AB12CDE"
+    assert variables["VehicleMake"] == "Tesla"
+    assert variables["VehicleColour"] == "Grey"
+    assert variables["VehicleColor"] == "Grey"
+    assert variables["VehicleType"] == "Car"
+    assert (
+        render_template(
+            "An unknown @VehicleColour @VehicleMake @VehicleType with registration @Registration has been detected at the gate.",
+            variables,
+        )
+        == "An unknown Grey Tesla Car with registration AB12CDE has been detected at the gate."
+    )
+
+
 def test_gate_malfunction_triggers_and_variables_are_available() -> None:
     events = [event for group in TRIGGER_CATALOG for event in group["events"]]
     for trigger in [

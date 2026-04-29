@@ -105,6 +105,33 @@ type Schedule = {
   updated_at: string;
 };
 
+type VisitorPassStatus = "active" | "scheduled" | "used" | "expired" | "cancelled";
+
+type VisitorPass = {
+  id: string;
+  visitor_name: string;
+  expected_time: string;
+  window_minutes: number;
+  window_start: string;
+  window_end: string;
+  status: VisitorPassStatus;
+  creation_source: string;
+  created_by_user_id: string | null;
+  created_by: string | null;
+  arrival_time: string | null;
+  departure_time: string | null;
+  number_plate: string | null;
+  vehicle_make: string | null;
+  vehicle_colour: string | null;
+  duration_on_site_seconds: number | null;
+  duration_human: string | null;
+  arrival_event_id: string | null;
+  departure_event_id: string | null;
+  telemetry_trace_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type ScheduleDependencyItem = {
   id: string;
   name: string;
@@ -366,7 +393,13 @@ const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
 
 const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "access_event.finalize_failed",
-  "alerts.updated"
+  "alerts.updated",
+  "visitor_pass.created",
+  "visitor_pass.updated",
+  "visitor_pass.cancelled",
+  "visitor_pass.status_changed",
+  "visitor_pass.used",
+  "visitor_pass.departure_recorded"
 ]);
 
 type TelemetrySpan = {
@@ -913,6 +946,7 @@ type ViewKey =
   | "people"
   | "groups"
   | "schedules"
+  | "passes"
   | "vehicles"
   | "top_charts"
   | "events"
@@ -940,6 +974,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
   { key: "people", label: "People", icon: UserRound },
   { key: "groups", label: "Groups", icon: Users },
   { key: "schedules", label: "Schedules", icon: Clock3 },
+  { key: "passes", label: "Passes", icon: ClipboardPaste },
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "top_charts", label: "Top Charts", icon: Trophy },
   { key: "events", label: "Events", icon: CalendarDays },
@@ -963,6 +998,7 @@ const viewPaths: Record<ViewKey, string> = {
   people: "/people",
   groups: "/groups",
   schedules: "/schedules",
+  passes: "/passes",
   vehicles: "/vehicles",
   top_charts: "/top-charts",
   events: "/events",
@@ -1047,14 +1083,54 @@ const api = {
 };
 
 async function apiError(response: Response) {
-  let detail = `${response.status} ${response.statusText}`;
-  try {
-    const payload = await response.json();
-    detail = typeof payload.detail === "string" ? payload.detail : detail;
-  } catch {
-    // Keep the HTTP status text when the response is not JSON.
+  const statusLabel = `${response.status} ${response.statusText || "Request failed"}`;
+  let detail: string | null = null;
+  const body = await response.text().catch(() => "");
+
+  if (body.trim()) {
+    try {
+      const payload = JSON.parse(body) as unknown;
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const record = payload as Record<string, unknown>;
+        detail =
+          describeApiErrorDetail(record.detail) ||
+          describeApiErrorDetail(record.message) ||
+          describeApiErrorDetail(record.error);
+      } else {
+        detail = describeApiErrorDetail(payload);
+      }
+    } catch {
+      detail = body.trim();
+    }
   }
-  return new Error(detail);
+
+  return new Error(detail && detail !== statusLabel ? `${statusLabel}: ${detail}` : statusLabel);
+}
+
+function describeApiErrorDetail(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.map(describeApiErrorDetail).filter((part): part is string => Boolean(part));
+    return parts.length ? parts.join("; ") : null;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const message =
+      describeApiErrorDetail(record.msg) ||
+      describeApiErrorDetail(record.message) ||
+      describeApiErrorDetail(record.detail);
+    const location = Array.isArray(record.loc)
+      ? record.loc.filter(Boolean).join(".")
+      : typeof record.loc === "string"
+        ? record.loc
+        : null;
+    if (message && location) return `${location}: ${message}`;
+    if (message) return message;
+    return JSON.stringify(record);
+  }
+  return null;
 }
 
 function wsUrl(path: string) {
@@ -1174,116 +1250,114 @@ function chatPendingAction(pendingAction: unknown): ChatConfirmationAction | nul
 
 function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | null {
   if (!Array.isArray(toolResults)) return null;
-  for (const result of toolResults) {
-    if (!isRecord(result) || !isRecord(result.output)) continue;
-    if (result.output.requires_confirmation !== true) continue;
-    const args = isRecord(result.arguments) ? result.arguments : {};
-    const toolName = String(result.name || "").trim();
-    const confirmationField = String(result.output.confirmation_field || (toolName === "test_notification_workflow" ? "confirm_send" : "confirm"));
-    const toolArguments = { ...args, [confirmationField]: true };
-    if (result.name === "open_device") {
-      const target = String(result.output.target || args.target || args.entity_id || "").trim();
-      if (!target) return null;
-      const displayTarget = formatDeviceTargetName(target);
-      return {
-        type: "open_device",
-        toolName,
-        toolArguments,
-        target,
-        displayTarget,
-        command: `confirm open ${target}`,
-        title: `Open ${displayTarget}?`,
-        description: "This will be logged as an Alfred action.",
-        buttonLabel: "Confirm",
-        pendingLabel: "Confirmed",
-        statusLabel: `Opening ${displayTarget}...`,
-        userEcho: `Confirmed: open ${displayTarget}`
-      };
-    }
-    if (result.name === "update_schedule") {
-      const target = String(result.output.schedule_name || args.schedule_name || args.name || "").trim();
-      if (!target) return null;
-      const summary = typeof result.output.summary === "string" ? result.output.summary : "the requested times";
-      return {
-        type: "update_schedule",
-        toolName,
-        toolArguments,
-        target,
-        displayTarget: target,
-        command: `confirm update ${target} schedule`,
-        title: `Update ${target}?`,
-        description: `Replace the existing allowed times with ${summary}.`,
-        buttonLabel: "Update schedule",
-        pendingLabel: "Update confirmed",
-        statusLabel: `Updating ${target}...`,
-        userEcho: `Confirmed: update ${target}`
-      };
-    }
-    if (result.name === "delete_schedule") {
-      const schedule = isRecord(result.output.schedule) ? result.output.schedule : {};
-      const target = String(result.output.schedule_name || schedule.name || args.schedule_name || args.name || "").trim();
-      if (!target) return null;
-      return {
-        type: "delete_schedule",
-        toolName,
-        toolArguments,
-        target,
-        displayTarget: target,
-        command: `confirm delete ${target} schedule`,
-        title: `Delete ${target}?`,
-        description: String(result.output.detail || "This schedule will be permanently deleted."),
-        buttonLabel: "Delete schedule",
-        pendingLabel: "Delete confirmed",
-        statusLabel: `Deleting ${target}...`,
-        userEcho: `Confirmed: delete ${target}`
-      };
-    }
-    if ([
-      "create_notification_workflow",
-      "update_notification_workflow",
-      "delete_notification_workflow",
-      "test_notification_workflow"
-    ].includes(toolName)) {
-      const target = String(result.output.workflow_name || args.rule_name || args.name || "notification workflow").trim();
-      const actionVerb = toolName === "create_notification_workflow"
-        ? "Create"
-        : toolName === "update_notification_workflow"
-          ? "Update"
-          : toolName === "delete_notification_workflow"
-            ? "Delete"
-            : "Send test for";
-      return {
-        type: toolName,
-        toolName,
-        toolArguments,
-        target,
-        displayTarget: target,
-        command: `${actionVerb.toLowerCase()} ${target}`,
-        title: `${actionVerb} ${target}?`,
-        description: String(result.output.detail || "This changes notification workflow behaviour."),
-        buttonLabel: toolName === "test_notification_workflow" ? "Send test" : actionVerb,
-        pendingLabel: "Confirmed",
-        statusLabel: `${actionVerb} ${target}...`,
-        userEcho: `Confirmed: ${actionVerb.toLowerCase()} ${target}`
-      };
-    }
-    if (toolName) {
-      const target = String(result.output.target || result.output.schedule_name || result.output.workflow_name || args.target || args.schedule_name || args.name || toolName.replace(/_/g, " ")).trim();
-      return {
-        type: toolName,
-        toolName,
-        toolArguments,
-        target,
-        displayTarget: target,
-        command: `confirm ${toolName}`,
-        title: `Confirm ${target}?`,
-        description: String(result.output.detail || "This action needs confirmation before Alfred continues."),
-        buttonLabel: "Confirm",
-        pendingLabel: "Confirmed",
-        statusLabel: `Confirming ${target}...`,
-        userEcho: `Confirmed: ${target}`
-      };
-    }
+  const result = [...toolResults].reverse().find((item) => isRecord(item) && isRecord(item.output));
+  if (!isRecord(result) || !isRecord(result.output) || result.output.requires_confirmation !== true) return null;
+  const args = isRecord(result.arguments) ? result.arguments : {};
+  const toolName = String(result.name || "").trim();
+  const confirmationField = String(result.output.confirmation_field || (toolName === "test_notification_workflow" ? "confirm_send" : "confirm"));
+  const toolArguments = { ...args, [confirmationField]: true };
+  if (result.name === "open_device") {
+    const target = String(result.output.target || args.target || args.entity_id || "").trim();
+    if (!target) return null;
+    const displayTarget = formatDeviceTargetName(target);
+    return {
+      type: "open_device",
+      toolName,
+      toolArguments,
+      target,
+      displayTarget,
+      command: `confirm open ${target}`,
+      title: `Open ${displayTarget}?`,
+      description: "This will be logged as an Alfred action.",
+      buttonLabel: "Confirm",
+      pendingLabel: "Confirmed",
+      statusLabel: `Opening ${displayTarget}...`,
+      userEcho: `Confirmed: open ${displayTarget}`
+    };
+  }
+  if (result.name === "update_schedule") {
+    const target = String(result.output.schedule_name || args.schedule_name || args.name || "").trim();
+    if (!target) return null;
+    const summary = typeof result.output.summary === "string" ? result.output.summary : "the requested times";
+    return {
+      type: "update_schedule",
+      toolName,
+      toolArguments,
+      target,
+      displayTarget: target,
+      command: `confirm update ${target} schedule`,
+      title: `Update ${target}?`,
+      description: `Replace the existing allowed times with ${summary}.`,
+      buttonLabel: "Update schedule",
+      pendingLabel: "Update confirmed",
+      statusLabel: `Updating ${target}...`,
+      userEcho: `Confirmed: update ${target}`
+    };
+  }
+  if (result.name === "delete_schedule") {
+    const schedule = isRecord(result.output.schedule) ? result.output.schedule : {};
+    const target = String(result.output.schedule_name || schedule.name || args.schedule_name || args.name || "").trim();
+    if (!target) return null;
+    return {
+      type: "delete_schedule",
+      toolName,
+      toolArguments,
+      target,
+      displayTarget: target,
+      command: `confirm delete ${target} schedule`,
+      title: `Delete ${target}?`,
+      description: String(result.output.detail || "This schedule will be permanently deleted."),
+      buttonLabel: "Delete schedule",
+      pendingLabel: "Delete confirmed",
+      statusLabel: `Deleting ${target}...`,
+      userEcho: `Confirmed: delete ${target}`
+    };
+  }
+  if ([
+    "create_notification_workflow",
+    "update_notification_workflow",
+    "delete_notification_workflow",
+    "test_notification_workflow"
+  ].includes(toolName)) {
+    const target = String(result.output.workflow_name || args.rule_name || args.name || "notification workflow").trim();
+    const actionVerb = toolName === "create_notification_workflow"
+      ? "Create"
+      : toolName === "update_notification_workflow"
+        ? "Update"
+        : toolName === "delete_notification_workflow"
+          ? "Delete"
+          : "Send test for";
+    return {
+      type: toolName,
+      toolName,
+      toolArguments,
+      target,
+      displayTarget: target,
+      command: `${actionVerb.toLowerCase()} ${target}`,
+      title: `${actionVerb} ${target}?`,
+      description: String(result.output.detail || "This changes notification workflow behaviour."),
+      buttonLabel: toolName === "test_notification_workflow" ? "Send test" : actionVerb,
+      pendingLabel: "Confirmed",
+      statusLabel: `${actionVerb} ${target}...`,
+      userEcho: `Confirmed: ${actionVerb.toLowerCase()} ${target}`
+    };
+  }
+  if (toolName) {
+    const target = String(result.output.target || result.output.schedule_name || result.output.workflow_name || args.target || args.schedule_name || args.name || toolName.replace(/_/g, " ")).trim();
+    return {
+      type: toolName,
+      toolName,
+      toolArguments,
+      target,
+      displayTarget: target,
+      command: `confirm ${toolName}`,
+      title: `Confirm ${target}?`,
+      description: String(result.output.detail || "This action needs confirmation before Alfred continues."),
+      buttonLabel: "Confirm",
+      pendingLabel: "Confirmed",
+      statusLabel: `Confirming ${target}...`,
+      userEcho: `Confirmed: ${target}`
+    };
   }
   return null;
 }
@@ -2648,6 +2722,8 @@ function View(props: {
       return <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
     case "schedules":
       return <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
+    case "passes":
+      return <PassesView query={props.search} realtime={props.realtime} />;
     case "vehicles":
       return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
     case "top_charts":
@@ -3952,6 +4028,411 @@ function SchedulesView({
           setPageError={setError}
         />
       ) : null}
+    </section>
+  );
+}
+
+const visitorPassStatuses: VisitorPassStatus[] = ["active", "scheduled", "used", "expired", "cancelled"];
+const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "scheduled"]);
+const visitorPassWindowOptions = [30, 60, 90, 120, 180];
+
+function PassesView({ query, realtime }: { query: string; realtime: RealtimeMessage[] }) {
+  const [passes, setPasses] = React.useState<VisitorPass[]>([]);
+  const [filters, setFilters] = React.useState<Set<VisitorPassStatus>>(() => new Set(defaultVisitorPassFilters));
+  const [modalPass, setModalPass] = React.useState<VisitorPass | null>(null);
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const [cancellingId, setCancellingId] = React.useState<string | null>(null);
+
+  const loadPasses = React.useCallback(async () => {
+    const params = new URLSearchParams();
+    if (filters.size && filters.size < visitorPassStatuses.length) {
+      filters.forEach((status) => params.append("status", status));
+    }
+    if (query.trim()) params.set("q", query.trim());
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    setLoading(true);
+    setError("");
+    try {
+      setPasses(await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load Visitor Passes");
+    } finally {
+      setLoading(false);
+    }
+  }, [filters, query]);
+
+  React.useEffect(() => {
+    loadPasses().catch(() => undefined);
+  }, [loadPasses]);
+
+  React.useEffect(() => {
+    const latest = realtime[0];
+    if (!latest) return;
+    if (isVisitorPassRealtimeEvent(latest)) {
+      const livePass = visitorPassFromRealtime(latest);
+      if (livePass) {
+        setPasses((current) => [livePass, ...current.filter((item) => item.id !== livePass.id)]);
+      }
+      loadPasses().catch(() => undefined);
+    } else if (latest.type === "access_event.finalized") {
+      loadPasses().catch(() => undefined);
+    }
+  }, [realtime, loadPasses]);
+
+  const openCreate = () => {
+    setModalPass(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (visitorPass: VisitorPass) => {
+    setModalPass(visitorPass);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setModalPass(null);
+  };
+
+  const cancelPass = async (visitorPass: VisitorPass) => {
+    if (!window.confirm(`Cancel Visitor Pass for ${visitorPass.visitor_name}?`)) return;
+    setCancellingId(visitorPass.id);
+    setError("");
+    try {
+      await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/cancel`, { reason: "Cancelled from dashboard" });
+      await loadPasses();
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Unable to cancel Visitor Pass");
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  const visiblePasses = passes.filter((visitorPass) => visitorPassMatchesStatus(visitorPass, filters) && visitorPassMatches(visitorPass, query));
+  const counts = React.useMemo(() => visitorPassStatuses.reduce<Record<VisitorPassStatus, number>>((acc, status) => {
+    acc[status] = passes.filter((visitorPass) => visitorPass.status === status).length;
+    return acc;
+  }, { active: 0, scheduled: 0, used: 0, expired: 0, cancelled: 0 }), [passes]);
+
+  return (
+    <section className="view-stack passes-page">
+      <div className="users-hero passes-hero card">
+        <div>
+          <span className="eyebrow">Anticipatory Access</span>
+          <h1>Passes</h1>
+          <p>One-shot visitor windows for unknown vehicles, with captured arrival, vehicle, and duration telemetry.</p>
+        </div>
+        <button className="primary-button" onClick={openCreate} type="button">
+          <Plus size={17} /> Visitor Pass
+        </button>
+      </div>
+
+      <div className="passes-toolbar card">
+        <PassFilterBar counts={counts} filters={filters} onChange={setFilters} />
+        <button className="secondary-button" onClick={() => loadPasses()} type="button">
+          <RefreshCw size={15} /> Refresh
+        </button>
+      </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      {loading ? (
+        <div className="card passes-loading">
+          <Loader2 className="spin" size={18} /> Loading Visitor Passes
+        </div>
+      ) : visiblePasses.length ? (
+        <div className="visitor-pass-grid">
+          {visiblePasses.map((visitorPass) => (
+            <VisitorPassCard
+              cancelling={cancellingId === visitorPass.id}
+              key={visitorPass.id}
+              onCancel={cancelPass}
+              onEdit={openEdit}
+              visitorPass={visitorPass}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="card passes-empty-card">
+          <EmptyState icon={ClipboardPaste} label="No Visitor Passes match this view" />
+        </div>
+      )}
+
+      {modalOpen ? (
+        <VisitorPassModal
+          mode={modalPass ? "edit" : "create"}
+          onClose={closeModal}
+          onSaved={async () => {
+            await loadPasses();
+            closeModal();
+          }}
+          visitorPass={modalPass}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function PassFilterBar({
+  filters,
+  counts,
+  onChange
+}: {
+  filters: Set<VisitorPassStatus>;
+  counts: Record<VisitorPassStatus, number>;
+  onChange: (filters: Set<VisitorPassStatus>) => void;
+}) {
+  const allSelected = filters.size === visitorPassStatuses.length;
+  const toggleStatus = (status: VisitorPassStatus) => {
+    const next = new Set(filters);
+    if (next.has(status)) {
+      next.delete(status);
+    } else {
+      next.add(status);
+    }
+    onChange(next.size ? next : new Set(defaultVisitorPassFilters));
+  };
+  return (
+    <div className="pass-filter-bar" role="group" aria-label="Visitor Pass status filters">
+      <button className={allSelected ? "active" : ""} onClick={() => onChange(new Set(visitorPassStatuses))} type="button">
+        All
+      </button>
+      {visitorPassStatuses.map((status) => (
+        <button
+          aria-pressed={filters.has(status)}
+          className={filters.has(status) ? "active" : ""}
+          key={status}
+          onClick={() => toggleStatus(status)}
+          type="button"
+        >
+          {titleCase(status)}
+          <span>{counts[status]}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function VisitorPassCard({
+  visitorPass,
+  cancelling,
+  onEdit,
+  onCancel
+}: {
+  visitorPass: VisitorPass;
+  cancelling: boolean;
+  onEdit: (visitorPass: VisitorPass) => void;
+  onCancel: (visitorPass: VisitorPass) => void;
+}) {
+  const editable = visitorPass.status === "active" || visitorPass.status === "scheduled";
+  const vehicleSummary = visitorPassVehicleSummary(visitorPass);
+  return (
+    <article className={`card visitor-pass-card ${visitorPass.status}`}>
+      <div className="visitor-pass-card-head">
+        <div className="visitor-pass-icon">
+          <ClipboardPaste size={18} />
+        </div>
+        <div>
+          <strong>{visitorPass.visitor_name}</strong>
+          <span>{formatDate(visitorPass.expected_time)} · +/- {visitorPass.window_minutes}m</span>
+        </div>
+        <Badge tone={visitorPassStatusTone(visitorPass.status)}>{titleCase(visitorPass.status)}</Badge>
+      </div>
+
+      <div className="visitor-pass-window">
+        <div>
+          <Clock3 size={15} />
+          <span>{formatDate(visitorPass.window_start)} to {formatDate(visitorPass.window_end)}</span>
+        </div>
+        <div>
+          <GitBranch size={15} />
+          <span>{titleCase(visitorPass.creation_source)}{visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}</span>
+        </div>
+      </div>
+
+      {visitorPass.status === "used" ? (
+        <section className="visitor-pass-telemetry">
+          <div className="visitor-pass-vehicle">
+            <Car size={17} />
+            <div>
+              <strong>{vehicleSummary || "Vehicle details pending"}</strong>
+              <span>{visitorPass.arrival_time ? `Arrived ${formatDate(visitorPass.arrival_time)}` : "Arrival not recorded"}</span>
+            </div>
+          </div>
+          <div className="visitor-pass-duration">
+            <Badge tone={visitorPass.departure_time ? "green" : "amber"}>
+              {visitorPass.duration_human || (visitorPass.departure_time ? "Duration pending" : "On site")}
+            </Badge>
+            {visitorPass.departure_time ? <span>Left {formatDate(visitorPass.departure_time)}</span> : <span>Departure pending</span>}
+          </div>
+        </section>
+      ) : null}
+
+      <div className="visitor-pass-actions">
+        {editable ? (
+          <>
+            <button className="secondary-button" onClick={() => onEdit(visitorPass)} type="button">
+              <Pencil size={15} /> Edit
+            </button>
+            <button className="secondary-button danger" disabled={cancelling} onClick={() => onCancel(visitorPass)} type="button">
+              <X size={15} /> {cancelling ? "Cancelling..." : "Cancel"}
+            </button>
+          </>
+        ) : (
+          <span>{visitorPass.number_plate || "No plate linked"}</span>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function VisitorPassModal({
+  mode,
+  visitorPass,
+  onClose,
+  onSaved
+}: {
+  mode: "create" | "edit";
+  visitorPass: VisitorPass | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [visitorName, setVisitorName] = React.useState(visitorPass?.visitor_name ?? "");
+  const [expectedTime, setExpectedTime] = React.useState(() => visitorPass ? new Date(visitorPass.expected_time) : nextVisitorPassDate());
+  const [windowMinutes, setWindowMinutes] = React.useState(visitorPass?.window_minutes ?? 30);
+  const [error, setError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    const payload = {
+      visitor_name: visitorName.trim(),
+      expected_time: expectedTime.toISOString(),
+      window_minutes: windowMinutes
+    };
+    try {
+      if (mode === "edit" && visitorPass) {
+        await api.patch<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}`, payload);
+      } else {
+        await api.post<VisitorPass>("/api/v1/visitor-passes", payload);
+      }
+      await onSaved();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save Visitor Pass");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card visitor-pass-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <div>
+            <h2>{mode === "edit" ? "Edit Visitor Pass" : "New Visitor Pass"}</h2>
+            <p>{formatDate(expectedTime.toISOString())} · +/- {windowMinutes} minutes</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        {error ? <div className="auth-error">{error}</div> : null}
+
+        <label className="field">
+          <span>Visitor name</span>
+          <div className="field-control">
+            <UserPlus size={17} />
+            <input value={visitorName} onChange={(event) => setVisitorName(event.target.value)} required />
+          </div>
+        </label>
+
+        <VisitorDateTimePicker value={expectedTime} onChange={setExpectedTime} />
+
+        <div className="visitor-pass-window-select">
+          <span>Time Window</span>
+          <div>
+            {visitorPassWindowOptions.map((minutes) => (
+              <button
+                aria-pressed={windowMinutes === minutes}
+                className={windowMinutes === minutes ? "active" : ""}
+                key={minutes}
+                onClick={() => setWindowMinutes(minutes)}
+                type="button"
+              >
+                +/- {minutes}m
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" disabled={submitting} type="submit">
+            <Save size={16} />
+            {submitting ? "Saving..." : mode === "edit" ? "Save Pass" : "Create Pass"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function VisitorDateTimePicker({ value, onChange }: { value: Date; onChange: (value: Date) => void }) {
+  const [visibleMonth, setVisibleMonth] = React.useState(() => new Date(value.getFullYear(), value.getMonth(), 1));
+  const days = visitorCalendarDays(visibleMonth);
+  const selectedKey = visitorDateKey(value);
+  const timeValue = `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+  const timeOptions = visitorTimeOptions(timeValue);
+
+  const setDay = (day: Date) => {
+    const next = new Date(day);
+    next.setHours(value.getHours(), value.getMinutes(), 0, 0);
+    onChange(next);
+  };
+
+  const setTime = (time: string) => {
+    const [hour, minute] = time.split(":").map(Number);
+    const next = new Date(value);
+    next.setHours(hour, minute, 0, 0);
+    onChange(next);
+  };
+
+  return (
+    <section className="visitor-date-picker">
+      <div className="visitor-date-picker-head">
+        <button aria-label="Previous month" className="icon-button" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))} type="button">
+          <ChevronDown className="rotate-90" size={15} />
+        </button>
+        <strong>{visibleMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</strong>
+        <button aria-label="Next month" className="icon-button" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))} type="button">
+          <ChevronRight size={15} />
+        </button>
+      </div>
+      <div className="visitor-calendar-grid">
+        {scheduleDays.map((day) => <span key={day}>{day.slice(0, 2)}</span>)}
+        {days.map((day) => (
+          <button
+            className={`${day.getMonth() === visibleMonth.getMonth() ? "" : "muted"} ${visitorDateKey(day) === selectedKey ? "active" : ""}`}
+            key={day.toISOString()}
+            onClick={() => setDay(day)}
+            type="button"
+          >
+            {day.getDate()}
+          </button>
+        ))}
+      </div>
+      <label className="field">
+        <span>Expected time</span>
+        <select value={timeValue} onChange={(event) => setTime(event.target.value)}>
+          {timeOptions.map((time) => (
+            <option key={time} value={time}>{time}</option>
+          ))}
+        </select>
+      </label>
     </section>
   );
 }
@@ -9117,7 +9598,7 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
       { value: "duplicate_entry", label: "Duplicate Entry", severity: "warning", description: "A person already marked home is detected entering again." },
       { value: "duplicate_exit", label: "Duplicate Exit", severity: "info", description: "A person already marked away is detected exiting again." },
       { value: "outside_schedule", label: "Outside Schedule", severity: "warning", description: "A known vehicle is denied by schedule or access policy." },
-      { value: "unauthorized_plate", label: "Unauthorised Vehicle Detected", severity: "warning", description: "A plate is denied because it is unknown or inactive." }
+      { value: "unauthorized_plate", label: "Unknown Vehicle Detected", severity: "warning", description: "An unknown or inactive vehicle plate is denied." }
     ]
   }
 ];
@@ -9137,6 +9618,7 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
       { name: "Registration", token: "@Registration", label: "Registration" },
       { name: "VehicleName", token: "@VehicleName", label: "Friendly vehicle name" },
       { name: "VehicleMake", token: "@VehicleMake", label: "Vehicle make" },
+      { name: "VehicleType", token: "@VehicleType", label: "Vehicle type" },
       { name: "VehicleColor", token: "@VehicleColor", label: "Vehicle colour" },
       { name: "VehicleColour", token: "@VehicleColour", label: "Vehicle colour" },
       { name: "MotStatus", token: "@MotStatus", label: "MOT status" },
@@ -9185,6 +9667,7 @@ const mockNotificationContext: Record<string, string> = {
   VehicleName: "2026 Tesla Model Y Dual Motor Long Range",
   VehicleDisplayName: "2026 Tesla Model Y Dual Motor Long Range",
   VehicleMake: "Tesla",
+  VehicleType: "Car",
   VehicleModel: "Model Y Dual Motor Long Range",
   VehicleColor: "Pearl white",
   VehicleColour: "Pearl white",
@@ -9812,11 +10295,11 @@ function NotificationWorkflowEditor({
 
           <div className="modal-actions workflow-editor-footer">
             {feedback ? <div className={`notification-feedback workflow-editor-feedback ${feedback.tone}`} role="status">{feedback.text}</div> : null}
-            <button className="secondary-button" onClick={onCancel} type="button">
-              Cancel
-            </button>
             <button className="secondary-button" onClick={onSendTest} disabled={testing} type="button">
               <Send size={15} /> {testing ? "Sending..." : "Send Test"}
+            </button>
+            <button className="secondary-button" onClick={onCancel} type="button">
+              Cancel
             </button>
             <button className="primary-button" onClick={onSave} disabled={saving} type="button">
               <Save size={15} /> {saving ? "Saving..." : "Save"}
@@ -12806,6 +13289,109 @@ function useProfilePreferences(user: UserAccount | null): [ProfilePreferences, (
 async function simulate(path: string, refresh: () => Promise<void>) {
   await api.post(path);
   window.setTimeout(() => refresh().catch(() => undefined), 3200);
+}
+
+function visitorPassMatches(visitorPass: VisitorPass, query: string) {
+  return (
+    matches(visitorPass.visitor_name, query) ||
+    matches(visitorPass.number_plate ?? "", query) ||
+    matches(visitorPass.vehicle_make ?? "", query) ||
+    matches(visitorPass.vehicle_colour ?? "", query) ||
+    matches(visitorPass.status, query)
+  );
+}
+
+function visitorPassMatchesStatus(visitorPass: VisitorPass, filters: Set<VisitorPassStatus>) {
+  return !filters.size || filters.size === visitorPassStatuses.length || filters.has(visitorPass.status);
+}
+
+function isVisitorPassRealtimeEvent(event: RealtimeMessage) {
+  return event.type.startsWith("visitor_pass.");
+}
+
+function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
+  const candidate = event.payload.visitor_pass;
+  if (!isRecord(candidate)) return null;
+  const status = stringPayload(candidate.status) as VisitorPassStatus;
+  if (!visitorPassStatuses.includes(status)) return null;
+  const id = stringPayload(candidate.id);
+  const visitorName = stringPayload(candidate.visitor_name);
+  const expectedTime = stringPayload(candidate.expected_time);
+  if (!id || !visitorName || !expectedTime) return null;
+  return {
+    id,
+    visitor_name: visitorName,
+    expected_time: expectedTime,
+    window_minutes: numberPayload(candidate.window_minutes) || 30,
+    window_start: stringPayload(candidate.window_start),
+    window_end: stringPayload(candidate.window_end),
+    status,
+    creation_source: stringPayload(candidate.creation_source) || "unknown",
+    created_by_user_id: stringPayload(candidate.created_by_user_id) || null,
+    created_by: stringPayload(candidate.created_by) || null,
+    arrival_time: stringPayload(candidate.arrival_time) || null,
+    departure_time: stringPayload(candidate.departure_time) || null,
+    number_plate: stringPayload(candidate.number_plate) || null,
+    vehicle_make: stringPayload(candidate.vehicle_make) || null,
+    vehicle_colour: stringPayload(candidate.vehicle_colour) || null,
+    duration_on_site_seconds: typeof candidate.duration_on_site_seconds === "number" ? candidate.duration_on_site_seconds : null,
+    duration_human: stringPayload(candidate.duration_human) || null,
+    arrival_event_id: stringPayload(candidate.arrival_event_id) || null,
+    departure_event_id: stringPayload(candidate.departure_event_id) || null,
+    telemetry_trace_id: stringPayload(candidate.telemetry_trace_id) || null,
+    created_at: stringPayload(candidate.created_at),
+    updated_at: stringPayload(candidate.updated_at)
+  };
+}
+
+function visitorPassStatusTone(status: VisitorPassStatus): BadgeTone {
+  if (status === "active") return "green";
+  if (status === "scheduled") return "blue";
+  if (status === "used") return "purple";
+  if (status === "cancelled") return "red";
+  return "gray";
+}
+
+function visitorPassVehicleSummary(visitorPass: VisitorPass) {
+  const vehicle = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ");
+  return [vehicle, visitorPass.number_plate].filter(Boolean).join(" - ");
+}
+
+function nextVisitorPassDate() {
+  const next = new Date();
+  next.setMinutes(Math.ceil(next.getMinutes() / 15) * 15, 0, 0);
+  if (next.getMinutes() === 60) {
+    next.setHours(next.getHours() + 1, 0, 0, 0);
+  }
+  return next;
+}
+
+function visitorDateKey(value: Date) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+function visitorCalendarDays(month: Date) {
+  const first = new Date(month.getFullYear(), month.getMonth(), 1);
+  const mondayOffset = (first.getDay() + 6) % 7;
+  const start = new Date(first);
+  start.setDate(first.getDate() - mondayOffset);
+  return Array.from({ length: 42 }, (_, index) => {
+    const day = new Date(start);
+    day.setDate(start.getDate() + index);
+    return day;
+  });
+}
+
+function visitorTimeOptions(selected?: string) {
+  const options = Array.from({ length: 96 }, (_, index) => {
+    const minutes = index * 15;
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  });
+  if (selected && !options.includes(selected)) {
+    options.push(selected);
+    options.sort();
+  }
+  return options;
 }
 
 function matches(value: string, query: string) {

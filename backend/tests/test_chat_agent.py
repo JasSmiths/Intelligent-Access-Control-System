@@ -253,6 +253,38 @@ def test_actor_context_prevents_my_car_entity_resolution() -> None:
     assert args["vehicle_id"] == "vehicle-1"
 
 
+def test_visitor_pass_create_prompt_prepares_pass_without_person_resolution() -> None:
+    service = ChatService()
+    message = "Chris Starkey is coming tomorrow at approx 11am, create a pass for him"
+    route = service._deterministic_intent_route(message, {}, [], actor_context={})
+    selected = service._select_tools_for_route(route, [])
+    calls = service._deterministic_react_calls(
+        message,
+        route,
+        {},
+        [],
+        [],
+        selected,
+        iteration=0,
+        actor_context={},
+    )
+
+    assert route.intents == ("Visitor_Passes",)
+    assert route.requires_entity_resolution is False
+    assert "resolve_human_entity" not in {tool.name for tool in selected}
+    assert len(calls) == 1
+    assert calls[0].name == "create_visitor_pass"
+    assert calls[0].arguments["visitor_name"] == "Chris Starkey"
+    assert calls[0].arguments["window_minutes"] == 30
+    assert calls[0].arguments["confirm"] is False
+    assert "person_id" not in calls[0].arguments
+    parsed = datetime.fromisoformat(str(calls[0].arguments["expected_time"]))
+    assert parsed.hour == 11
+    assert parsed.minute == 0
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() is not None
+
+
 def test_unlinked_actor_context_does_not_guess_me() -> None:
     service = ChatService()
 
@@ -271,6 +303,26 @@ def test_pending_confirmation_uses_stored_arguments() -> None:
     confirmed = service._confirmed_arguments_for_pending(pending)
 
     assert confirmed == {"target": "Top Gate", "confirm": True}
+
+
+def test_confirmed_visitor_pass_action_does_not_resume_original_request() -> None:
+    service = ChatService()
+
+    assert service._confirmed_tool_finishes_without_resume("create_visitor_pass") is True
+    assert service._confirmed_tool_finishes_without_resume("update_visitor_pass") is True
+    assert service._confirmed_tool_finishes_without_resume("cancel_visitor_pass") is True
+    assert service._confirmed_tool_finishes_without_resume("open_gate") is False
+
+
+def test_assistant_text_cleanup_removes_local_time_label() -> None:
+    service = ChatService()
+
+    cleaned = service._clean_assistant_text(
+        "Create a Visitor Pass at 30 Apr 2026, 11:00 Europe/London with a +/- 30 minute window?",
+        [],
+    )
+
+    assert cleaned == "Create a Visitor Pass at 30 Apr 2026, 11:00 with a +/- 30 minute window?"
 
 
 def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
@@ -586,6 +638,71 @@ def test_access_diagnostic_tools_are_registered_and_planned() -> None:
     assert planned[1].name == "query_lpr_timing"
 
 
+def test_missing_access_incident_routes_to_investigator() -> None:
+    tools = ai_tools.build_agent_tools()
+    service = ChatService()
+    message = "Steph left at 07:38am this morning however nothing was logged about this"
+
+    route = service._deterministic_intent_route(message, {}, [])
+    selected = service._select_tools_for_route(route, [])
+    planned = service._plan_tool_calls(message, {}, [])
+
+    assert "investigate_access_incident" in tools
+    assert tools["investigate_access_incident"].requires_confirmation is True
+    assert tools["backfill_access_event_from_protect"].requires_confirmation is True
+    assert tools["test_unifi_alarm_webhook"].requires_confirmation is True
+    assert "Access_Diagnostics" in route.intents
+    assert "investigate_access_incident" in [tool.name for tool in selected]
+    assert planned[0].name == "investigate_access_incident"
+    assert planned[0].arguments["person"] == "steph"
+    assert planned[0].arguments["direction"] == "exit"
+    assert planned[0].arguments["day"] == "today"
+    assert planned[0].arguments["expected_time"] == "07:38am"
+    assert planned[0].arguments["incident_type"] == "missing_event"
+
+
+def test_diagnostic_no_match_falls_through_to_incident_in_react_loop() -> None:
+    service = ChatService()
+    route = IntentRoute(("Access_Diagnostics",), 0.9, False, "test")
+    selected = [
+        service._tools["diagnose_access_event"],
+        service._tools["investigate_access_incident"],
+    ]
+    calls = service._deterministic_react_calls(
+        "Why did Steph's latest LPR fail?",
+        route,
+        {},
+        [],
+        [{"name": "diagnose_access_event", "output": {"found": False}}],
+        selected,
+        iteration=1,
+    )
+
+    assert calls[0].name == "investigate_access_incident"
+    assert calls[0].arguments["person"] == "steph"
+
+
+def test_access_incident_direct_text_reports_comparison_and_action() -> None:
+    service = ChatService()
+    text = service._access_incident_direct_text(
+        {
+            "found_iacs_event": False,
+            "found_protect_event": True,
+            "root_cause": "protect_lpr_detected_but_iacs_webhook_missing",
+            "confidence": "high",
+            "iacs_vs_protect": {
+                "comparison": "Protect saw a matching LPR candidate but IACS has no access event."
+            },
+            "recommended_action": {"summary": "Fix UniFi Protect Alarm Manager delivery, then send a test."},
+        }
+    )
+
+    assert "IACS found no matching IACS access event" in text
+    assert "Protect has matching evidence" in text
+    assert "protect lpr detected but iacs webhook missing" in text
+    assert "Fix UniFi Protect Alarm Manager delivery" in text
+
+
 def test_hosted_provider_prefetches_deep_access_diagnostics() -> None:
     service = ChatService()
     calls = service._preplanned_context_calls(
@@ -858,7 +975,7 @@ def test_agent_datetime_formats_europe_london() -> None:
     value = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
     assert ai_tools._agent_datetime_iso(value, "Europe/London") == "2026-04-27T13:00:00+01:00"
-    assert ai_tools._agent_datetime_display(value, "Europe/London") == "27 Apr 2026, 13:00 Europe/London"
+    assert ai_tools._agent_datetime_display(value, "Europe/London") == "27 Apr 2026, 13:00"
 
 
 @pytest.mark.asyncio

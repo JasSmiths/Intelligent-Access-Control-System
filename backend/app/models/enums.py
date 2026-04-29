@@ -32,6 +32,14 @@ class TimingClassification(StrEnum):
     LATER_THAN_USUAL = "later_than_usual"
 
 
+class VisitorPassStatus(StrEnum):
+    ACTIVE = "active"
+    SCHEDULED = "scheduled"
+    USED = "used"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
 class AnomalyType(StrEnum):
     UNAUTHORIZED_PLATE = "unauthorized_plate"
     DUPLICATE_ENTRY = "duplicate_entry"

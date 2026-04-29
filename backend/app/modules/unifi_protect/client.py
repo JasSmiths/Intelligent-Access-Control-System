@@ -204,6 +204,7 @@ async def list_unifi_protect_events(
     event_type: str | None = None,
     limit: int = 25,
     since: datetime | None = None,
+    until: datetime | None = None,
 ) -> list[Any]:
     activate_unifi_protect_package_overlay()
     try:
@@ -212,7 +213,7 @@ async def list_unifi_protect_events(
         raise UnifiProtectError("The uiprotect package is not installed in the backend environment.") from exc
 
     start = since or datetime.now(tz=UTC) - timedelta(hours=24)
-    end = datetime.now(tz=UTC) + timedelta(seconds=10)
+    end = until or datetime.now(tz=UTC) + timedelta(seconds=10)
     types = None
     if event_type:
         try:

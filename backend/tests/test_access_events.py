@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from app.models.enums import AccessDirection, PresenceState
+from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
 from app.services import access_events as access_events_module
@@ -401,3 +401,37 @@ def test_dvla_compliance_alert_helpers() -> None:
     assert not dvla_tax_alert_required("Taxed")
     assert not dvla_tax_alert_required("SORN")
     assert dvla_tax_alert_required("Untaxed")
+
+
+def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -> None:
+    service = AccessEventService()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        raw_payload={
+            "vehicle_visual_detection": {
+                "observed_vehicle_color": "Grey",
+                "observed_vehicle_type": "Car",
+                "source": "uiprotect_event",
+            },
+            "telemetry": {"trace_id": "trace-1"},
+        },
+        registration_number="AB12CDE",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.DENIED,
+        source="ubiquiti",
+        timing_classification=TimingClassification.UNKNOWN,
+        occurred_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
+    )
+
+    facts = service._notification_facts(
+        event,
+        person=None,
+        vehicle=None,
+        message="Unauthorised Plate, Access Denied",
+        dvla_enrichment={"make": "Tesla", "colour": "White"},
+    )
+
+    assert facts["vehicle_make"] == "Tesla"
+    assert facts["vehicle_colour"] == "Grey"
+    assert facts["vehicle_type"] == "Car"
+    assert facts["detected_vehicle_colour"] == "Grey"
