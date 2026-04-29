@@ -155,19 +155,34 @@ class VisitorPassService:
         visitor_name: str,
         expected_time: datetime,
         window_minutes: int = DEFAULT_WINDOW_MINUTES,
+        valid_from: datetime | None = None,
+        valid_until: datetime | None = None,
         source: str = "ui",
+        source_reference: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
         created_by_user_id: uuid.UUID | str | None = None,
         actor: str = "System",
     ) -> VisitorPass:
         name = _clean_visitor_name(visitor_name)
         expected = _ensure_aware(expected_time)
         window = _bounded_window_minutes(window_minutes)
+        explicit_valid_from, explicit_valid_until = _valid_window(valid_from, valid_until)
         visitor_pass = VisitorPass(
             visitor_name=name,
             expected_time=expected,
             window_minutes=window,
-            status=status_for_values(expected, window, datetime.now(tz=UTC)),
+            valid_from=explicit_valid_from,
+            valid_until=explicit_valid_until,
+            status=status_for_values(
+                expected,
+                window,
+                datetime.now(tz=UTC),
+                valid_from=explicit_valid_from,
+                valid_until=explicit_valid_until,
+            ),
             creation_source=_clean_source(source),
+            source_reference=_optional_text(source_reference),
+            source_metadata=source_metadata or None,
             created_by_user_id=_coerce_uuid(created_by_user_id),
         )
         session.add(visitor_pass)
@@ -191,6 +206,9 @@ class VisitorPassService:
         visitor_name: str | None = None,
         expected_time: datetime | None = None,
         window_minutes: int | None = None,
+        valid_from: datetime | None = None,
+        valid_until: datetime | None = None,
+        source_metadata: dict[str, Any] | None = None,
         actor: str = "System",
         actor_user_id: uuid.UUID | str | None = None,
     ) -> VisitorPass:
@@ -203,10 +221,19 @@ class VisitorPassService:
             visitor_pass.expected_time = _ensure_aware(expected_time)
         if window_minutes is not None:
             visitor_pass.window_minutes = _bounded_window_minutes(window_minutes)
+        if valid_from is not None or valid_until is not None:
+            visitor_pass.valid_from, visitor_pass.valid_until = _valid_window(
+                valid_from if valid_from is not None else visitor_pass.valid_from,
+                valid_until if valid_until is not None else visitor_pass.valid_until,
+            )
+        if source_metadata is not None:
+            visitor_pass.source_metadata = source_metadata or None
         visitor_pass.status = status_for_values(
             visitor_pass.expected_time,
             visitor_pass.window_minutes,
             datetime.now(tz=UTC),
+            valid_from=visitor_pass.valid_from,
+            valid_until=visitor_pass.valid_until,
         )
         await self._audit_change(
             session,
@@ -412,13 +439,19 @@ class VisitorPassService:
         return visitor_pass
 
     def window_start(self, visitor_pass: VisitorPass) -> datetime:
+        if visitor_pass.valid_from:
+            return _ensure_aware(visitor_pass.valid_from)
         return _ensure_aware(visitor_pass.expected_time) - timedelta(minutes=visitor_pass.window_minutes)
 
     def window_end(self, visitor_pass: VisitorPass) -> datetime:
+        if visitor_pass.valid_until:
+            return _ensure_aware(visitor_pass.valid_until)
         return _ensure_aware(visitor_pass.expected_time) + timedelta(minutes=visitor_pass.window_minutes)
 
     def is_within_window(self, visitor_pass: VisitorPass, checked_at: datetime) -> bool:
         checked = _ensure_aware(checked_at)
+        if visitor_pass.valid_until:
+            return self.window_start(visitor_pass) <= checked < self.window_end(visitor_pass)
         return self.window_start(visitor_pass) <= checked <= self.window_end(visitor_pass)
 
     def select_best_active_match(
@@ -449,6 +482,8 @@ class VisitorPassService:
             visitor_pass.expected_time,
             visitor_pass.window_minutes,
             checked_at,
+            valid_from=visitor_pass.valid_from,
+            valid_until=visitor_pass.valid_until,
         )
 
     async def _audit_change(
@@ -481,9 +516,19 @@ def status_for_values(
     expected_time: datetime,
     window_minutes: int,
     checked_at: datetime,
+    *,
+    valid_from: datetime | None = None,
+    valid_until: datetime | None = None,
 ) -> VisitorPassStatus:
     expected = _ensure_aware(expected_time)
     checked = _ensure_aware(checked_at)
+    explicit_valid_from, explicit_valid_until = _valid_window(valid_from, valid_until, require_pair=False)
+    if explicit_valid_from and explicit_valid_until:
+        if checked >= explicit_valid_until:
+            return VisitorPassStatus.EXPIRED
+        if explicit_valid_from <= checked < explicit_valid_until:
+            return VisitorPassStatus.ACTIVE
+        return VisitorPassStatus.SCHEDULED
     window = timedelta(minutes=_bounded_window_minutes(window_minutes))
     if checked > expected + window:
         return VisitorPassStatus.EXPIRED
@@ -499,8 +544,8 @@ def serialize_visitor_pass(
 ) -> dict[str, Any]:
     timezone = _timezone(timezone_name)
     duration = visitor_pass.duration_on_site_seconds
-    window_start = _ensure_aware(visitor_pass.expected_time) - timedelta(minutes=visitor_pass.window_minutes)
-    window_end = _ensure_aware(visitor_pass.expected_time) + timedelta(minutes=visitor_pass.window_minutes)
+    window_start = _window_start_for_pass(visitor_pass)
+    window_end = _window_end_for_pass(visitor_pass)
     created_by = _loaded_relationship(visitor_pass, "created_by")
     return {
         "id": str(visitor_pass.id),
@@ -509,6 +554,8 @@ def serialize_visitor_pass(
         "window_minutes": visitor_pass.window_minutes,
         "window_start": _datetime_iso(window_start, timezone),
         "window_end": _datetime_iso(window_end, timezone),
+        "valid_from": _datetime_iso(visitor_pass.valid_from, timezone) if visitor_pass.valid_from else None,
+        "valid_until": _datetime_iso(visitor_pass.valid_until, timezone) if visitor_pass.valid_until else None,
         "status": visitor_pass.status.value,
         "creation_source": visitor_pass.creation_source,
         "created_by_user_id": str(visitor_pass.created_by_user_id) if visitor_pass.created_by_user_id else None,
@@ -523,6 +570,8 @@ def serialize_visitor_pass(
         "arrival_event_id": str(visitor_pass.arrival_event_id) if visitor_pass.arrival_event_id else None,
         "departure_event_id": str(visitor_pass.departure_event_id) if visitor_pass.departure_event_id else None,
         "telemetry_trace_id": visitor_pass.telemetry_trace_id,
+        "source_reference": visitor_pass.source_reference,
+        "source_metadata": visitor_pass.source_metadata or None,
         "created_at": _datetime_iso(visitor_pass.created_at, timezone),
         "updated_at": _datetime_iso(visitor_pass.updated_at, timezone),
     }
@@ -541,6 +590,8 @@ def visitor_pass_audit_snapshot(visitor_pass: VisitorPass) -> dict[str, Any]:
         "visitor_name": visitor_pass.visitor_name,
         "expected_time": _ensure_aware(visitor_pass.expected_time).isoformat() if visitor_pass.expected_time else None,
         "window_minutes": visitor_pass.window_minutes,
+        "valid_from": _ensure_aware(visitor_pass.valid_from).isoformat() if visitor_pass.valid_from else None,
+        "valid_until": _ensure_aware(visitor_pass.valid_until).isoformat() if visitor_pass.valid_until else None,
         "status": visitor_pass.status.value if visitor_pass.status else None,
         "creation_source": visitor_pass.creation_source,
         "created_by_user_id": str(visitor_pass.created_by_user_id) if visitor_pass.created_by_user_id else None,
@@ -553,6 +604,8 @@ def visitor_pass_audit_snapshot(visitor_pass: VisitorPass) -> dict[str, Any]:
         "arrival_event_id": str(visitor_pass.arrival_event_id) if visitor_pass.arrival_event_id else None,
         "departure_event_id": str(visitor_pass.departure_event_id) if visitor_pass.departure_event_id else None,
         "telemetry_trace_id": visitor_pass.telemetry_trace_id,
+        "source_reference": visitor_pass.source_reference,
+        "source_metadata": visitor_pass.source_metadata,
     }
 
 
@@ -591,6 +644,37 @@ def _ensure_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _window_start_for_pass(visitor_pass: VisitorPass) -> datetime:
+    if visitor_pass.valid_from:
+        return _ensure_aware(visitor_pass.valid_from)
+    return _ensure_aware(visitor_pass.expected_time) - timedelta(minutes=visitor_pass.window_minutes)
+
+
+def _window_end_for_pass(visitor_pass: VisitorPass) -> datetime:
+    if visitor_pass.valid_until:
+        return _ensure_aware(visitor_pass.valid_until)
+    return _ensure_aware(visitor_pass.expected_time) + timedelta(minutes=visitor_pass.window_minutes)
+
+
+def _valid_window(
+    valid_from: datetime | None,
+    valid_until: datetime | None,
+    *,
+    require_pair: bool = True,
+) -> tuple[datetime | None, datetime | None]:
+    if valid_from is None and valid_until is None:
+        return None, None
+    if valid_from is None or valid_until is None:
+        if require_pair:
+            raise VisitorPassError("Both valid_from and valid_until are required for explicit Visitor Pass windows.")
+        return None, None
+    starts_at = _ensure_aware(valid_from)
+    ends_at = _ensure_aware(valid_until)
+    if ends_at <= starts_at:
+        raise VisitorPassError("Visitor Pass valid_until must be after valid_from.")
+    return starts_at, ends_at
 
 
 def _coerce_uuid(value: uuid.UUID | str | None) -> uuid.UUID | None:

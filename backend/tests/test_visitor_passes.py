@@ -48,6 +48,23 @@ def test_visitor_pass_lifecycle_statuses() -> None:
     assert service.status_for(row, expected + timedelta(days=1)) == VisitorPassStatus.USED
 
 
+def test_calendar_visitor_pass_uses_asymmetric_valid_window() -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 4, 29, 11, 0, tzinfo=UTC)
+    end = datetime(2026, 4, 29, 12, 15, tzinfo=UTC)
+    row = visitor_pass(expected_time=start, window_minutes=30)
+    row.valid_from = start - timedelta(minutes=30)
+    row.valid_until = end
+
+    assert service.window_start(row) == datetime(2026, 4, 29, 10, 30, tzinfo=UTC)
+    assert service.window_end(row) == end
+    assert service.status_for(row, start - timedelta(minutes=31)) == VisitorPassStatus.SCHEDULED
+    assert service.status_for(row, start - timedelta(minutes=30)) == VisitorPassStatus.ACTIVE
+    assert service.status_for(row, end - timedelta(seconds=1)) == VisitorPassStatus.ACTIVE
+    assert service.status_for(row, end) == VisitorPassStatus.EXPIRED
+    assert not service.is_within_window(row, end)
+
+
 def test_overlap_matching_prefers_closest_expected_time_then_oldest_created() -> None:
     service = VisitorPassService()
     now = datetime(2026, 4, 29, 15, 0, tzinfo=UTC)

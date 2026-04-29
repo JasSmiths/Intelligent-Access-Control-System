@@ -47,6 +47,8 @@ class VisitorPassResponse(BaseModel):
     window_minutes: int
     window_start: str
     window_end: str
+    valid_from: str | None
+    valid_until: str | None
     status: VisitorPassStatus
     creation_source: str
     created_by_user_id: str | None
@@ -61,6 +63,8 @@ class VisitorPassResponse(BaseModel):
     arrival_event_id: str | None
     departure_event_id: str | None
     telemetry_trace_id: str | None
+    source_reference: str | None
+    source_metadata: dict[str, Any] | None
     created_at: str
     updated_at: str
 

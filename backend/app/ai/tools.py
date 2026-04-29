@@ -45,6 +45,7 @@ from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enq
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.home_assistant import get_home_assistant_service
+from app.services.icloud_calendar import ICloudCalendarError, get_icloud_calendar_service
 from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.maintenance import (
@@ -560,6 +561,22 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "additionalProperties": False,
             },
             handler=cancel_visitor_pass,
+        ),
+        AgentTool(
+            name="trigger_icloud_sync",
+            description=(
+                "Manually sync connected iCloud Calendars and generate Visitor Passes for events "
+                "whose notes or description contain Open Gate. Requires confirm=true."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "confirm": {"type": "boolean", "description": "Must be true before calendar sync runs."},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=trigger_icloud_sync,
         ),
         AgentTool(
             name="query_access_events",
@@ -1280,6 +1297,7 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "create_visitor_pass": ("Visitor_Passes",),
         "update_visitor_pass": ("Visitor_Passes",),
         "cancel_visitor_pass": ("Visitor_Passes",),
+        "trigger_icloud_sync": ("Calendar_Integrations", "Visitor_Passes"),
     }
     state_changing = {
         "assign_schedule_to_entity",
@@ -1287,6 +1305,7 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "create_notification_workflow",
         "create_schedule",
         "create_visitor_pass",
+        "trigger_icloud_sync",
         "delete_notification_workflow",
         "delete_schedule",
         "disable_maintenance_mode",
@@ -2200,6 +2219,39 @@ async def cancel_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
 
     await event_bus.publish("visitor_pass.cancelled", {"visitor_pass": payload, "source": "alfred"})
     return {"cancelled": True, "visitor_pass": payload, "visitor_pass_id": payload["id"]}
+
+
+async def trigger_icloud_sync(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "synced": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": "iCloud Calendar",
+            "detail": "Sync connected iCloud Calendars and create or update Visitor Passes for Open Gate events?",
+        }
+    context = get_chat_tool_context()
+    service = get_icloud_calendar_service()
+    try:
+        result = await service.sync_all(
+            trigger_source="alfred",
+            triggered_by_user_id=_uuid_from_value(context.get("user_id")),
+            actor="Alfred_AI",
+        )
+    except ICloudCalendarError as exc:
+        return {"synced": False, "error": str(exc)}
+    return {
+        "synced": True,
+        "sync": result,
+        "account_count": result.get("account_count", 0),
+        "events_scanned": result.get("events_scanned", 0),
+        "events_matched": result.get("events_matched", 0),
+        "passes_created": result.get("passes_created", 0),
+        "passes_updated": result.get("passes_updated", 0),
+        "passes_cancelled": result.get("passes_cancelled", 0),
+        "passes_skipped": result.get("passes_skipped", 0),
+        "account_results": result.get("account_results", []),
+    }
 
 
 async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -6187,7 +6239,10 @@ def _visitor_pass_agent_payload(visitor_pass: VisitorPass, timezone_name: str) -
     if payload.get("number_plate"):
         vehicle_summary = f"{vehicle_summary} - {payload['number_plate']}".strip(" -")
     payload["expected_time_display"] = _agent_datetime_display(visitor_pass.expected_time, timezone_name)
-    payload["window_summary"] = f"+/- {visitor_pass.window_minutes} minutes"
+    if payload.get("valid_from") and payload.get("valid_until"):
+        payload["window_summary"] = f"{payload['window_start']} to {payload['window_end']}"
+    else:
+        payload["window_summary"] = f"+/- {visitor_pass.window_minutes} minutes"
     payload["vehicle_summary"] = vehicle_summary or None
     if payload.get("duration_human"):
         payload["visit_summary"] = f"On site for {payload['duration_human']}"

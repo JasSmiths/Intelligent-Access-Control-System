@@ -208,6 +208,23 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS valid_from TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS valid_until TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS source_reference VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS source_metadata JSONB"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_valid_from ON visitor_passes (valid_from)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_valid_until ON visitor_passes (valid_until)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_source_reference ON visitor_passes (source_reference)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_status_valid_until ON visitor_passes (status, valid_until)"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_visitor_passes_source_reference
+                    ON visitor_passes (source_reference)
+                    WHERE source_reference IS NOT NULL
+                    """
+                )
+            )
         logger.info("database_schema_ready")
 
     await seed_dynamic_settings()

@@ -771,7 +771,7 @@ h2 {
 }
 
 .refresh-button {
-  display: none;
+  display: inline-flex;
 }
 
 .theme-button {
@@ -2640,10 +2640,6 @@ tr:last-child td {
 
 .integration-icon svg {
   display: block;
-}
-
-.compact-command-card {
-  max-width: 420px;
 }
 
 .protect-section {
@@ -4682,6 +4678,198 @@ tr:last-child td {
   place-items: center;
   color: var(--muted);
   font-size: 13px;
+}
+
+.icloud-calendar-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.icloud-overview {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.icloud-overview-icon,
+.icloud-account-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.icloud-overview-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+}
+
+.icloud-overview-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.icloud-overview-copy strong,
+.icloud-section-heading strong,
+.icloud-auth-heading strong,
+.icloud-account-main strong {
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.icloud-overview-copy span,
+.icloud-section-heading span,
+.icloud-auth-heading span,
+.icloud-account-main span,
+.icloud-account-status span,
+.icloud-account-status small,
+.icloud-sync-summary span,
+.icloud-sync-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.icloud-overview .badge,
+.icloud-account-status .badge,
+.icloud-sync-summary .badge {
+  width: max-content;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  line-height: 1;
+}
+
+.icloud-actions,
+.icloud-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.icloud-auth-panel,
+.icloud-section,
+.icloud-sync-summary {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.icloud-auth-panel {
+  border-color: color-mix(in srgb, var(--blue) 25%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 32%, var(--surface));
+}
+
+.icloud-auth-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.icloud-auth-heading > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--blue);
+}
+
+.icloud-auth-heading > div,
+.icloud-section-heading,
+.icloud-account-main > div,
+.icloud-account-status,
+.icloud-sync-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.icloud-auth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.icloud-code-field {
+  max-width: 320px;
+}
+
+.icloud-section-heading {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+}
+
+.icloud-account-list {
+  display: grid;
+  gap: 10px;
+}
+
+.icloud-account-card {
+  min-height: 70px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, max-content) 36px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.icloud-account-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icloud-account-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+
+.icloud-account-status {
+  justify-items: start;
+}
+
+.icloud-account-status small,
+.icloud-sync-summary small {
+  color: var(--red);
+}
+
+.icloud-sync-summary {
+  background: var(--surface-soft);
+}
+
+.icloud-sync-summary > div {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.icloud-empty {
+  min-height: 70px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
 }
 
 .integration-feedback {
@@ -9888,13 +10076,38 @@ tr:last-child td {
   }
 
   .apprise-manager-header,
-  .apprise-add-actions {
+  .apprise-add-actions,
+  .icloud-actions,
+  .icloud-form-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .apprise-manager-header .primary-button {
+  .apprise-manager-header .primary-button,
+  .icloud-actions .primary-button,
+  .icloud-actions .secondary-button,
+  .icloud-form-actions .primary-button,
+  .icloud-form-actions .secondary-button {
     width: 100%;
+  }
+
+  .icloud-overview {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .icloud-overview .badge {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .icloud-auth-grid,
+  .icloud-account-card,
+  .icloud-sync-summary > div {
+    grid-template-columns: 1fr;
+  }
+
+  .icloud-account-card .icon-button {
+    justify-self: start;
   }
 
   .users-hero.passes-hero,

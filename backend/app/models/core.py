@@ -411,6 +411,8 @@ class VisitorPass(Base, TimestampMixin):
     visitor_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     expected_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     window_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[VisitorPassStatus] = mapped_column(
         Enum(VisitorPassStatus),
         default=VisitorPassStatus.SCHEDULED,
@@ -437,6 +439,8 @@ class VisitorPass(Base, TimestampMixin):
         index=True,
     )
     telemetry_trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    source_reference: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    source_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     created_by: Mapped[User | None] = relationship()
     arrival_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[arrival_event_id])
@@ -445,6 +449,54 @@ class VisitorPass(Base, TimestampMixin):
 
 Index("ix_visitor_passes_status_expected_time", VisitorPass.status, VisitorPass.expected_time)
 Index("ix_visitor_passes_number_plate_status", VisitorPass.number_plate, VisitorPass.status)
+Index("ix_visitor_passes_status_valid_until", VisitorPass.status, VisitorPass.valid_until)
+
+
+class ICloudCalendarAccount(Base, TimestampMixin):
+    __tablename__ = "icloud_calendar_accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    apple_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(40), default="connected", nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    encrypted_session_bundle: Mapped[str | None] = mapped_column(Text)
+    last_auth_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_sync_status: Mapped[str | None] = mapped_column(String(40), index=True)
+    last_sync_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+
+    created_by: Mapped[User | None] = relationship()
+
+
+class ICloudCalendarSyncRun(Base, TimestampMixin):
+    __tablename__ = "icloud_calendar_sync_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
+    trigger_source: Mapped[str] = mapped_column(String(80), default="ui", nullable=False, index=True)
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    account_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    events_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    events_matched: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passes_created: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passes_updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passes_cancelled: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passes_skipped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    account_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    triggered_by: Mapped[User | None] = relationship()
 
 
 class Anomaly(Base, TimestampMixin):

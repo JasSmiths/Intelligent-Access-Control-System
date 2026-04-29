@@ -36,7 +36,6 @@ import {
   HardHat,
   Home,
   Key,
-  KeyRound,
   LayoutDashboard,
   Lock,
   LogIn,
@@ -112,10 +111,14 @@ type VisitorPass = {
   visitor_name: string;
   expected_time: string;
   window_minutes: number;
+  valid_from: string | null;
+  valid_until: string | null;
   window_start: string;
   window_end: string;
   status: VisitorPassStatus;
   creation_source: string;
+  source_reference: string | null;
+  source_metadata: Record<string, unknown> | null;
   created_by_user_id: string | null;
   created_by: string | null;
   arrival_time: string | null;
@@ -348,6 +351,59 @@ type IntegrationStatus = {
   back_door_state?: string;
   main_garage_door_state?: string;
   mums_garage_door_state?: string;
+};
+
+type ICloudCalendarAccount = {
+  id: string;
+  apple_id: string;
+  display_name: string;
+  status: string;
+  is_active: boolean;
+  last_auth_at: string | null;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_summary: Record<string, unknown> | null;
+  last_error: string | null;
+  created_by_user_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type ICloudCalendarSyncRun = {
+  id: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  trigger_source: string;
+  triggered_by_user_id: string | null;
+  account_count: number;
+  events_scanned: number;
+  events_matched: number;
+  passes_created: number;
+  passes_updated: number;
+  passes_cancelled: number;
+  passes_skipped: number;
+  account_results: Record<string, unknown>[];
+  error: string | null;
+};
+
+type ICloudCalendarPayload = {
+  accounts: ICloudCalendarAccount[];
+  recent_sync_runs: ICloudCalendarSyncRun[];
+};
+
+type ICloudAuthStartResponse = {
+  status: "connected" | "requires_2fa";
+  requires_2fa?: boolean;
+  handshake_id?: string;
+  apple_id?: string;
+  detail?: string;
+  account?: ICloudCalendarAccount;
+};
+
+type ICloudAuthVerifyResponse = {
+  status: "connected";
+  account: ICloudCalendarAccount;
 };
 
 type MaintenanceStatus = {
@@ -1564,6 +1620,7 @@ function App() {
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
@@ -1644,6 +1701,16 @@ function App() {
   const refreshIntegrationStatus = React.useCallback(async () => {
     setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"));
   }, []);
+
+  const refreshDashboard = React.useCallback(async () => {
+    setDashboardRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setDashboardRefreshing(false);
+    }
+  }, [refresh]);
+
   const realtimeRefreshLastRunRef = React.useRef(0);
 
   const refreshFromRealtime = React.useCallback(() => {
@@ -2021,7 +2088,7 @@ function App() {
           <div className="topbar-actions">
             <label className="search">
               <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people, vehicles, events..." />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Anything..." />
             </label>
             <div className="alert-tray-shell">
               <button
@@ -2049,8 +2116,8 @@ function App() {
                 />
               ) : null}
             </div>
-            <button className="icon-button refresh-button" onClick={() => refresh()} type="button" aria-label="Refresh">
-              <RefreshCcw size={17} />
+            <button className="icon-button refresh-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button" aria-label="Refresh" disabled={dashboardRefreshing}>
+              <RefreshCcw className={dashboardRefreshing ? "spin" : undefined} size={17} />
             </button>
             <ThemeControl theme={theme} setTheme={setTheme} />
           </div>
@@ -2735,7 +2802,7 @@ function View(props: {
     case "reports":
       return <ReportsView events={props.events} presence={props.presence} />;
     case "integrations":
-      return <IntegrationsView schedules={props.schedules} status={props.integrationStatus} refresh={props.refresh} />;
+      return <IntegrationsView schedules={props.schedules} status={props.integrationStatus} />;
     case "logs":
       return <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
     case "settings_general":
@@ -4228,6 +4295,8 @@ function VisitorPassCard({
 }) {
   const editable = visitorPass.status === "active" || visitorPass.status === "scheduled";
   const vehicleSummary = visitorPassVehicleSummary(visitorPass);
+  const windowLabel = visitorPassWindowLabel(visitorPass);
+  const sourceLabel = visitorPassSourceLabel(visitorPass.creation_source);
   return (
     <article className={`card visitor-pass-card ${visitorPass.status}`}>
       <div className="visitor-pass-card-head">
@@ -4236,7 +4305,7 @@ function VisitorPassCard({
         </div>
         <div>
           <strong>{visitorPass.visitor_name}</strong>
-          <span>{formatDate(visitorPass.expected_time)} · +/- {visitorPass.window_minutes}m</span>
+          <span>{formatDate(visitorPass.expected_time)} · {windowLabel}</span>
         </div>
         <Badge tone={visitorPassStatusTone(visitorPass.status)}>{titleCase(visitorPass.status)}</Badge>
       </div>
@@ -4248,7 +4317,7 @@ function VisitorPassCard({
         </div>
         <div>
           <GitBranch size={15} />
-          <span>{titleCase(visitorPass.creation_source)}{visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}</span>
+          <span>{sourceLabel}{visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}</span>
         </div>
       </div>
 
@@ -6623,7 +6692,7 @@ function ReportsView({ events, presence }: { events: AccessEvent[]; presence: Pr
   );
 }
 
-function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[]; status: IntegrationStatus | null; refresh: () => Promise<void> }) {
+function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
@@ -6634,6 +6703,9 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
   const [protectUpdateStatus, setProtectUpdateStatus] = React.useState<UnifiProtectUpdateStatus | null>(null);
   const [protectLoading, setProtectLoading] = React.useState(false);
   const [protectError, setProtectError] = React.useState("");
+  const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
+  const [icloudLoading, setIcloudLoading] = React.useState(false);
+  const [icloudError, setIcloudError] = React.useState("");
   const loadProtect = React.useCallback(async (forceRefresh = false) => {
     setProtectLoading(true);
     setProtectError("");
@@ -6661,18 +6733,31 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
       setProtectUpdateStatus(null);
     }
   }, []);
+  const loadICloudCalendar = React.useCallback(async () => {
+    setIcloudLoading(true);
+    setIcloudError("");
+    try {
+      setIcloudPayload(await api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts"));
+    } catch (error) {
+      setIcloudError(error instanceof Error ? error.message : "Unable to load iCloud Calendar accounts.");
+    } finally {
+      setIcloudLoading(false);
+    }
+  }, []);
   const reloadSettingsAndProtect = React.useCallback(async () => {
     await reload();
     await loadProtect(true);
     await loadProtectUpdateStatus();
-  }, [loadProtect, loadProtectUpdateStatus, reload]);
+    await loadICloudCalendar();
+  }, [loadICloudCalendar, loadProtect, loadProtectUpdateStatus, reload]);
 
   React.useEffect(() => {
     loadProtect(false).catch(() => undefined);
     loadProtectUpdateStatus().catch(() => undefined);
-  }, [loadProtect, loadProtectUpdateStatus]);
+    loadICloudCalendar().catch(() => undefined);
+  }, [loadICloudCalendar, loadProtect, loadProtectUpdateStatus]);
 
-  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus);
+  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -6740,12 +6825,6 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
           </section>
         ))}
       </div>
-      <div className="card compact-command-card">
-        <CardHeader icon={DoorOpen} title="Gate Command" />
-        <button className="primary-button full" onClick={() => api.post("/api/v1/integrations/gate/open", { reason: "Dashboard command" }).finally(refresh)} type="button">
-          <KeyRound size={16} /> Open Gate
-        </button>
-      </div>
       {active ? (
         <IntegrationModal
           definition={active}
@@ -6756,9 +6835,13 @@ function IntegrationsView({ schedules, status, refresh }: { schedules: Schedule[
           protectLoading={protectLoading}
           protectStatus={protectStatus}
           protectUpdateStatus={protectUpdateStatus}
+          icloudError={icloudError}
+          icloudLoading={icloudLoading}
+          icloudPayload={icloudPayload}
           schedules={schedules}
           values={values}
           onClose={() => setActive(null)}
+          onICloudChanged={loadICloudCalendar}
           onProtectUpdateChanged={async () => {
             await loadProtectUpdateStatus();
             await loadProtect(true);
@@ -6895,7 +6978,9 @@ function integrationDefinitions(
   status: IntegrationStatus | null,
   values: SettingsMap,
   protectStatus: UnifiProtectStatus | null,
-  protectUpdateStatus: UnifiProtectUpdateStatus | null
+  protectUpdateStatus: UnifiProtectUpdateStatus | null,
+  icloudAccounts: ICloudCalendarAccount[],
+  icloudError: string
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
@@ -6906,6 +6991,8 @@ function integrationDefinitions(
   };
 
   const protectUpdateAvailable = Boolean(protectStatus?.connected && protectUpdateStatus?.update_available);
+  const activeIcloudAccounts = icloudAccounts.filter((account) => account.is_active);
+  const icloudNeedsAttention = activeIcloudAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
 
   return [
     {
@@ -6926,6 +7013,22 @@ function integrationDefinitions(
         { key: "home_assistant_tts_service", label: "TTS service" },
         { key: "home_assistant_default_media_player", label: "Default media player" }
       ]
+    },
+    {
+      key: "icloud_calendar",
+      title: "iCloud Calendar",
+      description: "Create Visitor Passes from calendar events marked Open Gate.",
+      category: "access",
+      icon: CalendarDays,
+      statusLabel: icloudError
+        ? "Error"
+        : icloudNeedsAttention
+          ? "Needs Attention"
+          : activeIcloudAccounts.length
+            ? `${activeIcloudAccounts.length} Connected`
+            : "Not Configured",
+      statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "green" : "gray",
+      fields: []
     },
     {
       key: "apprise",
@@ -7792,8 +7895,12 @@ function IntegrationModal({
   protectLoading,
   protectStatus,
   protectUpdateStatus,
+  icloudError,
+  icloudLoading,
+  icloudPayload,
   schedules,
   onClose,
+  onICloudChanged,
   onProtectUpdateChanged,
   onProtectRefresh,
   onSettingsChanged,
@@ -7808,8 +7915,12 @@ function IntegrationModal({
   protectLoading?: boolean;
   protectStatus?: UnifiProtectStatus | null;
   protectUpdateStatus?: UnifiProtectUpdateStatus | null;
+  icloudError?: string;
+  icloudLoading?: boolean;
+  icloudPayload?: ICloudCalendarPayload;
   schedules: Schedule[];
   onClose: () => void;
+  onICloudChanged?: () => Promise<void>;
   onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
@@ -7829,6 +7940,7 @@ function IntegrationModal({
   const isHomeAssistant = definition.key === "home_assistant";
   const isApprise = definition.key === "apprise";
   const isUnifiProtect = definition.key === "unifi_protect";
+  const isICloudCalendar = definition.key === "icloud_calendar";
 
   React.useEffect(() => {
     setForm(integrationInitialValues(definition, values));
@@ -8024,7 +8136,14 @@ function IntegrationModal({
             </button>
           </div>
         ) : null}
-        {isUnifiProtect && activeTab === "exposes" ? (
+        {isICloudCalendar ? (
+          <ICloudCalendarModal
+            error={icloudError ?? ""}
+            loading={Boolean(icloudLoading)}
+            payload={icloudPayload ?? { accounts: [], recent_sync_runs: [] }}
+            onChanged={onICloudChanged ?? onSettingsChanged}
+          />
+        ) : isUnifiProtect && activeTab === "exposes" ? (
           <UnifiProtectExposesPanel
             cameras={protectCameras ?? []}
             error={protectError ?? ""}
@@ -8108,6 +8227,359 @@ function IntegrationModal({
       </div>
     </div>
   );
+}
+
+function ICloudCalendarModal({
+  payload,
+  loading,
+  error,
+  onChanged
+}: {
+  payload: ICloudCalendarPayload;
+  loading: boolean;
+  error: string;
+  onChanged: () => Promise<void>;
+}) {
+  const [adding, setAdding] = React.useState(false);
+  const [step, setStep] = React.useState<"credentials" | "verify">("credentials");
+  const [appleId, setAppleId] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [code, setCode] = React.useState("");
+  const [handshakeId, setHandshakeId] = React.useState("");
+  const [handshakeAppleId, setHandshakeAppleId] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [syncing, setSyncing] = React.useState(false);
+  const [removingId, setRemovingId] = React.useState<string | null>(null);
+  const [feedback, setFeedback] = React.useState<IntegrationFeedback | null>(null);
+  const activeAccounts = payload.accounts.filter((account) => account.is_active);
+  const latestRun = payload.recent_sync_runs[0] ?? null;
+  const hasAttention = activeAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
+
+  const resetAddFlow = () => {
+    setAdding(false);
+    setStep("credentials");
+    setAppleId("");
+    setPassword("");
+    setCode("");
+    setHandshakeId("");
+    setHandshakeAppleId("");
+  };
+
+  const startAuth = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const result = await api.post<ICloudAuthStartResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/start", {
+        apple_id: appleId.trim(),
+        password
+      });
+      setPassword("");
+      if (result.status === "requires_2fa" && result.handshake_id) {
+        setHandshakeId(result.handshake_id);
+        setHandshakeAppleId(result.apple_id || appleId.trim());
+        setStep("verify");
+        setFeedback({
+          tone: "info",
+          title: "Verification code required",
+          detail: result.detail || "Enter the six-digit Apple verification code to finish connecting this account."
+        });
+      } else {
+        resetAddFlow();
+        await onChanged();
+        setFeedback({
+          tone: "success",
+          title: "iCloud Calendar connected",
+          detail: `${result.account?.display_name || appleId.trim()} is ready for calendar sync.`
+        });
+      }
+    } catch (authError) {
+      setFeedback({
+        tone: "error",
+        title: "Unable to connect iCloud Calendar",
+        detail: authError instanceof Error ? authError.message : "Unable to connect iCloud Calendar."
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const verifyCode = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!handshakeId) return;
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const result = await api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", {
+        handshake_id: handshakeId,
+        code: code.trim()
+      });
+      resetAddFlow();
+      await onChanged();
+      setFeedback({
+        tone: "success",
+        title: "iCloud Calendar connected",
+        detail: `${result.account.display_name} is ready for calendar sync.`
+      });
+    } catch (verifyError) {
+      setFeedback({
+        tone: "error",
+        title: "Verification failed",
+        detail: verifyError instanceof Error ? verifyError.message : "Unable to verify that code."
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const syncNow = async () => {
+    setSyncing(true);
+    setFeedback({
+      tone: "progress",
+      title: "Syncing calendars",
+      detail: "Scanning connected accounts for Open Gate events.",
+      activeStep: 1
+    });
+    try {
+      const run = await api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync");
+      await onChanged();
+      setFeedback({
+        tone: run.status === "ok" ? "success" : "info",
+        title: run.status === "ok" ? "Calendar sync complete" : "Calendar sync complete with notes",
+        detail: icloudSyncRunSummary(run)
+      });
+    } catch (syncError) {
+      setFeedback({
+        tone: "error",
+        title: "Calendar sync failed",
+        detail: syncError instanceof Error ? syncError.message : "Unable to sync iCloud Calendars."
+      });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const removeAccount = async (account: ICloudCalendarAccount) => {
+    if (!window.confirm(`Remove iCloud Calendar account ${account.display_name}? Future unused calendar passes from this account will be cancelled.`)) return;
+    setRemovingId(account.id);
+    setFeedback(null);
+    try {
+      await api.delete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${account.id}`);
+      await onChanged();
+      setFeedback({
+        tone: "success",
+        title: "Account removed",
+        detail: `${account.display_name} is no longer connected.`
+      });
+    } catch (removeError) {
+      setFeedback({
+        tone: "error",
+        title: "Unable to remove account",
+        detail: removeError instanceof Error ? removeError.message : "Unable to remove that iCloud Calendar account."
+      });
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  return (
+    <div className="icloud-calendar-panel">
+      <section className="icloud-overview">
+        <div className="icloud-overview-icon">
+          <CalendarDays size={20} />
+        </div>
+        <div className="icloud-overview-copy">
+          <strong>Automated Visitor Passes</strong>
+          <span>Events with Open Gate in their notes create or update Visitor Passes for the next 14 days.</span>
+        </div>
+        <Badge tone={error ? "red" : hasAttention ? "amber" : activeAccounts.length ? "green" : "gray"}>
+          {error ? "Error" : hasAttention ? "Needs Attention" : activeAccounts.length ? `${activeAccounts.length} Connected` : "Not Configured"}
+        </Badge>
+      </section>
+
+      <div className="icloud-actions">
+        <button className="primary-button" onClick={() => setAdding((current) => !current)} disabled={submitting || syncing} type="button">
+          <Plus size={15} /> {adding ? "Close Add Account" : "Add Account"}
+        </button>
+        <button className="secondary-button" onClick={syncNow} disabled={loading || syncing || !activeAccounts.length} type="button">
+          {syncing ? <Loader2 className="spin" size={15} /> : <RefreshCcw size={15} />}
+          {syncing ? "Syncing..." : "Sync Calendars Now"}
+        </button>
+      </div>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
+
+      {adding ? (
+        step === "credentials" ? (
+          <form className="icloud-auth-panel" onSubmit={startAuth}>
+            <div className="icloud-auth-heading">
+              <Key size={17} />
+              <div>
+                <strong>Add iCloud account</strong>
+                <span>Enter the Apple ID details once; only the trusted session is stored.</span>
+              </div>
+            </div>
+            <div className="icloud-auth-grid">
+              <label className="field">
+                <span>Apple ID</span>
+                <div className="field-control">
+                  <UserRound size={15} />
+                  <input
+                    autoComplete="username"
+                    autoFocus
+                    inputMode="email"
+                    onChange={(event) => setAppleId(event.target.value)}
+                    placeholder="name@example.com"
+                    type="email"
+                    value={appleId}
+                  />
+                </div>
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <div className="field-control">
+                  <Lock size={15} />
+                  <input
+                    autoComplete="current-password"
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="App-specific or account password"
+                    type="password"
+                    value={password}
+                  />
+                </div>
+              </label>
+            </div>
+            <div className="icloud-form-actions">
+              <button className="secondary-button" onClick={resetAddFlow} disabled={submitting} type="button">Cancel</button>
+              <button className="primary-button" disabled={submitting || !appleId.trim() || !password} type="submit">
+                {submitting ? "Connecting..." : "Connect"}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form className="icloud-auth-panel" onSubmit={verifyCode}>
+            <div className="icloud-auth-heading">
+              <ShieldCheck size={17} />
+              <div>
+                <strong>Enter verification code</strong>
+                <span>{handshakeAppleId || "Apple"} is waiting for the six-digit code.</span>
+              </div>
+            </div>
+            <label className="field icloud-code-field">
+              <span>Verification code</span>
+              <div className="field-control">
+                <ShieldCheck size={15} />
+                <input
+                  autoComplete="one-time-code"
+                  autoFocus
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  pattern="[0-9]{6}"
+                  placeholder="123456"
+                  type="text"
+                  value={code}
+                />
+              </div>
+            </label>
+            <div className="icloud-form-actions">
+              <button className="secondary-button" onClick={resetAddFlow} disabled={submitting} type="button">Cancel</button>
+              <button className="primary-button" disabled={submitting || code.length !== 6} type="submit">
+                {submitting ? "Verifying..." : "Verify and Connect"}
+              </button>
+            </div>
+          </form>
+        )
+      ) : null}
+
+      <section className="icloud-section">
+        <div className="icloud-section-heading">
+          <strong>Connected Accounts</strong>
+          <span>{loading ? "Refreshing accounts" : `${activeAccounts.length} active`}</span>
+        </div>
+        <div className="icloud-account-list">
+          {activeAccounts.length ? (
+            activeAccounts.map((account) => (
+              <article className="icloud-account-card" key={account.id}>
+                <div className="icloud-account-main">
+                  <span className="icloud-account-icon"><CalendarDays size={16} /></span>
+                  <div>
+                    <strong>{account.display_name}</strong>
+                    <span>{account.apple_id}</span>
+                  </div>
+                </div>
+                <div className="icloud-account-status">
+                  <Badge tone={icloudAccountStatusTone(account.status)}>{icloudAccountStatusLabel(account.status)}</Badge>
+                  <span>{account.last_sync_at ? `Last sync ${formatDate(account.last_sync_at)}` : "Not synced yet"}</span>
+                  {account.last_error ? <small>{account.last_error}</small> : null}
+                </div>
+                <button
+                  aria-label={`Remove ${account.display_name}`}
+                  className="icon-button danger"
+                  disabled={removingId === account.id}
+                  onClick={() => removeAccount(account)}
+                  type="button"
+                >
+                  {removingId === account.id ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+                </button>
+              </article>
+            ))
+          ) : (
+            <div className="icloud-empty">No iCloud Calendar accounts connected</div>
+          )}
+        </div>
+      </section>
+
+      <section className="icloud-section">
+        <div className="icloud-section-heading">
+          <strong>Recent Sync</strong>
+          <span>{latestRun ? formatOptionalDate(latestRun.started_at || latestRun.finished_at) : "No syncs yet"}</span>
+        </div>
+        {latestRun ? (
+          <div className="icloud-sync-summary">
+            <div>
+              <Badge tone={latestRun.status === "ok" ? "green" : latestRun.status === "error" ? "red" : "amber"}>{titleCase(latestRun.status)}</Badge>
+              <span>{icloudSyncRunSummary(latestRun)}</span>
+            </div>
+            {latestRun.error ? <small>{latestRun.error}</small> : null}
+          </div>
+        ) : (
+          <div className="icloud-empty">Run a manual sync after connecting an account</div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function icloudAccountStatusLabel(status: string) {
+  if (status === "requires_reauth") return "Reconnect";
+  if (status === "connected") return "Connected";
+  if (status === "error") return "Error";
+  if (status === "removed") return "Removed";
+  return titleCase(status || "unknown");
+}
+
+function icloudAccountStatusTone(status: string): BadgeTone {
+  if (status === "connected") return "green";
+  if (status === "requires_reauth") return "amber";
+  if (status === "error") return "red";
+  return "gray";
+}
+
+function icloudSyncRunSummary(run: ICloudCalendarSyncRun) {
+  const changes = [
+    `${run.events_matched} matched`,
+    `${run.passes_created} created`,
+    `${run.passes_updated} updated`,
+    `${run.passes_cancelled} cancelled`,
+    `${run.passes_skipped} skipped`
+  ];
+  return `${run.account_count} account${run.account_count === 1 ? "" : "s"} scanned, ${run.events_scanned} event${run.events_scanned === 1 ? "" : "s"} read, ${changes.join(", ")}.`;
+}
+
+function formatOptionalDate(value: string | null | undefined) {
+  return value ? formatDate(value) : "Pending";
 }
 
 function IntegrationFeedbackPanel({ feedback }: { feedback: IntegrationFeedback }) {
@@ -13323,10 +13795,14 @@ function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
     visitor_name: visitorName,
     expected_time: expectedTime,
     window_minutes: numberPayload(candidate.window_minutes) || 30,
+    valid_from: stringPayload(candidate.valid_from) || null,
+    valid_until: stringPayload(candidate.valid_until) || null,
     window_start: stringPayload(candidate.window_start),
     window_end: stringPayload(candidate.window_end),
     status,
     creation_source: stringPayload(candidate.creation_source) || "unknown",
+    source_reference: stringPayload(candidate.source_reference) || null,
+    source_metadata: isRecord(candidate.source_metadata) ? candidate.source_metadata : null,
     created_by_user_id: stringPayload(candidate.created_by_user_id) || null,
     created_by: stringPayload(candidate.created_by) || null,
     arrival_time: stringPayload(candidate.arrival_time) || null,
@@ -13350,6 +13826,15 @@ function visitorPassStatusTone(status: VisitorPassStatus): BadgeTone {
   if (status === "used") return "purple";
   if (status === "cancelled") return "red";
   return "gray";
+}
+
+function visitorPassWindowLabel(visitorPass: VisitorPass) {
+  return visitorPass.creation_source === "icloud_calendar" ? "Calendar Sync" : `+/- ${visitorPass.window_minutes}m`;
+}
+
+function visitorPassSourceLabel(source: string) {
+  if (source === "icloud_calendar") return "iCloud Calendar";
+  return titleCase(source);
 }
 
 function visitorPassVehicleSummary(visitorPass: VisitorPass) {

@@ -145,6 +145,7 @@ Rules of engagement:
 - If no Visitor Pass time window is specified, use the default +/- 30 minute window.
 - Do not ask for vehicle plate, make, or colour when creating a Visitor Pass. The LPR/DVLA pipeline fills those details on arrival.
 - Use Visitor Pass tools for expected unknown visitors and for follow-ups such as what car a visitor arrived in or how long they stayed.
+- For iCloud Calendar requests, use trigger_icloud_sync when the user asks to check or sync calendars for Open Gate events. This is state-changing and must use confirmation.
 - For MOT, tax, or vehicle identity questions, use DVLA/vehicle tools and report compliance as advisory unless a tool says access was denied for another reason.
 - For state-changing tools, call the tool with confirmation set to false when confirmation is required so the UI can render a confirmation button. Do not claim an action has happened until a confirmed tool result says it happened.
 - Do not expose internal entity IDs, Home Assistant entity IDs, raw JSON, tool protocol, or hidden reasoning unless the user explicitly asks for diagnostics.
@@ -157,10 +158,11 @@ Return only compact JSON with this exact shape:
 
 Allowed categories:
 Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
-Visitor_Passes, Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
+Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
 
 Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions, missing access events, "nothing logged", and notification failures.
 Use Visitor_Passes for expected visitors, guest passes, visitor pass CRUD, and visitor telemetry follow-ups.
+Use Calendar_Integrations for iCloud Calendar setup/sync requests and requests to check calendars for gate passes.
 Use General only when no operational category is clear."""
 
 REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
@@ -188,6 +190,7 @@ SUPPORTED_INTENTS = {
     "Access_Diagnostics",
     "Schedules",
     "Visitor_Passes",
+    "Calendar_Integrations",
     "Maintenance",
     "Compliance_DVLA",
     "Notifications",
@@ -560,7 +563,7 @@ class ChatService:
         )
 
     def _confirmed_tool_finishes_without_resume(self, tool_name: str) -> bool:
-        return tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}
+        return tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass", "trigger_icloud_sync"}
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
@@ -747,6 +750,8 @@ class ChatService:
             intents.append("Maintenance")
         if self._looks_like_visitor_pass_request(lower) or memory.get("pending_visitor_pass_create"):
             intents.append("Visitor_Passes")
+        if self._looks_like_calendar_integration_request(lower):
+            intents.append("Calendar_Integrations")
         if any(word in lower for word in ["schedule", "schedules", "timeframe", "allowed", "access window"]):
             intents.append("Schedules")
         if any(word in lower for word in ["dvla", "mot", "tax", "compliance", "registration", "plate", "vehicle", "tesla", "car"]):
@@ -834,6 +839,8 @@ class ChatService:
             names.update({"query_schedules", "query_schedule_targets", "verify_schedule_access"})
         if "Visitor_Passes" in intents:
             names.update(VISITOR_PASS_TOOL_NAMES)
+        if "Calendar_Integrations" in intents:
+            names.add("trigger_icloud_sync")
         if "Reports_Files" in intents and attachments:
             names.add("read_chat_attachment")
         return [tool for name, tool in self._tools.items() if name in names]
@@ -1227,6 +1234,15 @@ class ChatService:
                     )
                 elif "get_maintenance_status" in allowed:
                     calls.append(ToolCall("react-maintenance-status", "get_maintenance_status", {}))
+            elif "Calendar_Integrations" in intents:
+                if "trigger_icloud_sync" in allowed:
+                    calls.append(
+                        ToolCall(
+                            "react-trigger-icloud-sync",
+                            "trigger_icloud_sync",
+                            {"confirm": self._is_confirmation_message(lower)},
+                        )
+                    )
             elif "Visitor_Passes" in intents:
                 visitor_name = self._visitor_name_from_message(message) or str(memory.get("last_visitor_name") or "")
                 expected_time = self._visitor_expected_time_from_message(message)
@@ -1972,6 +1988,16 @@ class ChatService:
                 visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
                 return f"Cancelled the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
             return str(output.get("detail") or output.get("error") or "I did not cancel the Visitor Pass.")
+        if tool_name == "trigger_icloud_sync":
+            if output.get("synced"):
+                return (
+                    "iCloud Calendar sync finished: "
+                    f"{output.get('events_matched', 0)} Open Gate events matched, "
+                    f"{output.get('passes_created', 0)} passes created, "
+                    f"{output.get('passes_updated', 0)} updated, "
+                    f"{output.get('passes_cancelled', 0)} cancelled."
+                )
+            return str(output.get("detail") or output.get("error") or "I did not sync iCloud Calendar.")
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
             if output.get("changed") or output.get("enabled") or output.get("disabled"):
                 state = output.get("state") or ("enabled" if output.get("enabled") else "disabled")
@@ -3186,6 +3212,8 @@ class ChatService:
             return f"Update Visitor Pass for {target or 'visitor'}?"
         if tool_name == "cancel_visitor_pass":
             return f"Cancel Visitor Pass for {target or 'visitor'}?"
+        if tool_name == "trigger_icloud_sync":
+            return "Sync iCloud Calendar?"
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
             state = str(output.get("state") or "").strip()
             return f"{'Enable' if state in {'enabled', 'on', 'true'} or tool_name == 'enable_maintenance_mode' else 'Disable'} Maintenance Mode?"
@@ -3203,6 +3231,8 @@ class ChatService:
             return "Update pass"
         if tool_name == "cancel_visitor_pass":
             return "Cancel pass"
+        if tool_name == "trigger_icloud_sync":
+            return "Sync calendars"
         if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
             return "Backfill event"
         if tool_name == "test_unifi_alarm_webhook":
@@ -3351,6 +3381,7 @@ class ChatService:
             "create_visitor_pass": "Preparing Visitor Pass...",
             "update_visitor_pass": "Preparing Visitor Pass update...",
             "cancel_visitor_pass": "Preparing Visitor Pass cancellation...",
+            "trigger_icloud_sync": "Preparing iCloud Calendar sync...",
         }
         return {"tool": tool_name, "label": labels.get(tool_name, "Running system tool...")}
 
@@ -3369,6 +3400,12 @@ class ChatService:
             or "expected guest" in lower
             or bool(re.search(r"\b(visitor|guest)\b.*\b(pass|coming|arriving|expect|expected|cancel|delete|remove|revoke|visit)\b", lower))
         )
+
+    def _looks_like_calendar_integration_request(self, lower: str) -> bool:
+        calendar_reference = "icloud" in lower or "calendar" in lower or "calendars" in lower
+        sync_reference = any(word in lower for word in ["sync", "check", "scan", "refresh", "update", "pull"])
+        gate_reference = any(phrase in lower for phrase in ["open gate", "gate pass", "visitor pass", "passes"])
+        return calendar_reference and (sync_reference or gate_reference)
 
     def _looks_like_visitor_pass_create_request(self, lower: str) -> bool:
         if self._looks_like_visitor_pass_cancel_request(lower):
@@ -4061,6 +4098,10 @@ class ChatService:
         if tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}:
             if output.get("requires_confirmation"):
                 return str(output.get("detail") or "That Visitor Pass change needs confirmation.")
+            return self._confirmation_result_text(tool_name, output)
+        if tool_name == "trigger_icloud_sync":
+            if output.get("requires_confirmation"):
+                return str(output.get("detail") or "That calendar sync needs confirmation.")
             return self._confirmation_result_text(tool_name, output)
         incident_result = next(
             (

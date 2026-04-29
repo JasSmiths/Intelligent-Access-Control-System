@@ -8,6 +8,7 @@ from app.api.v1 import (
     events,
     gate_malfunctions,
     health,
+    icloud_calendar,
     integrations,
     leaderboard,
     maintenance,
@@ -32,6 +33,7 @@ api_router.include_router(directory.router, tags=["Directory"])
 api_router.include_router(events.router, tags=["Access Events"])
 api_router.include_router(gate_malfunctions.router, prefix="/gate-malfunctions", tags=["Gate Telemetry"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
+api_router.include_router(icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"])
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])

@@ -78,7 +78,7 @@ app = FastAPI(
         {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
         {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
         {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
-        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, gate, cover, and announcement operations."},
+        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
         {"name": "UniFi Protect", "description": "UniFi Protect cameras, media, managed package updates, and backups."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},

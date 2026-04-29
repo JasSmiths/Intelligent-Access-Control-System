@@ -197,7 +197,14 @@ Main tables:
   status (`active`, `scheduled`, `used`, `expired`, `cancelled`), creation
   source (`ui`, `alfred`, future Discord/Slack/Calendar, etc.), creating user,
   arrival/departure event links, trace ID, plate, DVLA/visual vehicle details,
-  and calculated duration on site.
+  calculated duration on site, optional explicit `valid_from`/`valid_until`
+  windows for asymmetric sources, source reference IDs, and source metadata.
+- `icloud_calendar_accounts`: multiple connected Apple iCloud Calendar
+  accounts. Stores Apple ID/display label, active/status state, encrypted
+  trusted session/cookie bundle, auth/sync timestamps, last sync summary/error,
+  and creating Admin user. Apple passwords are never stored long-term.
+- `icloud_calendar_sync_runs`: durable manual/Alfred-triggered iCloud Calendar
+  sync history with per-account results and pass create/update/cancel counts.
 - `notification_rules`: DB-backed notification workflows with triggers,
   conditions, actions, active state, and templated content.
 - `presence`: current person presence state.
@@ -392,6 +399,12 @@ Lifecycle rules:
 
 - Pass windows are `expected_time +/- window_minutes`; default window is 30
   minutes.
+- Sources that need asymmetric validity can set `valid_from` and `valid_until`.
+  Calendar-created passes use `expected_time` for the event start, `valid_from`
+  for 30 minutes before the event, and `valid_until` for the event end.
+- Matching, lifecycle refresh, API serialization, and filters use
+  `valid_from`/`valid_until` when both fields are present; otherwise they fall
+  back to `expected_time +/- window_minutes`.
 - `scheduled` becomes `active` once the current time enters the window.
 - `active` or still-`scheduled` passes become `expired` once the window has
   elapsed without a detection.
@@ -411,8 +424,11 @@ Extensibility:
 
 - Creation must go through `VisitorPassService.create_pass(..., source=...)`.
   Keep source values lower-case strings such as `ui`, `alfred`, `discord`,
-  `slack`, or `calendar` so future modules can hook in without changing the
-  core matching logic.
+  `slack`, or `icloud_calendar` so future modules can hook in without changing
+  the core matching logic.
+- Source integrations should set `source_reference` when they can provide a
+  stable upstream event ID; iCloud Calendar uses
+  `icloud:<account_id>:<calendar_id>:<event_id>` for idempotent sync.
 - Do not model Visitor Pass vehicles as `vehicles` rows. Unknown-visitor DVLA
   and visual telemetry belongs on `visitor_passes`, not the directory.
 
@@ -778,6 +794,62 @@ Rules:
 - If a package update verification fails, restore the previous package state and
   restart the UniFi Protect service.
 
+## iCloud Calendar Integration
+
+Client/module:
+
+- `backend/app/modules/icloud_calendar/client.py`
+- `backend/app/services/icloud_calendar.py`
+- `backend/app/api/v1/icloud_calendar.py`
+
+Runtime behavior:
+
+- Multiple active iCloud Calendar accounts can be connected by Admin users.
+- Setup uses `pyicloud` with a pause-and-resume six-digit verification flow.
+  The backend returns `requires_2fa` plus a short-lived `handshake_id` when a
+  code is needed; verify stores the encrypted trusted session bundle and clears
+  the pending handshake.
+- Submitted Apple passwords are used only to establish the session and must not
+  be persisted.
+- Trusted session/cookie bundles are encrypted with the same dynamic-secret
+  crypto boundary used for other integration secrets.
+- Manual sync scans all active connected accounts from today through the next
+  14 days.
+- Only event notes/descriptions containing the exact phrase `Open Gate`,
+  case-insensitive, are processed. Event titles alone must not trigger passes.
+- Matched events create/update Visitor Passes with
+  `creation_source="icloud_calendar"`, visitor name from the event title,
+  `expected_time` from event start, `valid_from` 30 minutes before event start,
+  and `valid_until` at event end.
+- Sync is idempotent through
+  `source_reference="icloud:<account_id>:<calendar_id>:<event_id>"`.
+- Re-sync updates future scheduled/active calendar passes, creates new ones,
+  and cancels future scheduled/active calendar passes when the source event
+  disappears or loses the marker. Used and manually cancelled passes are not
+  overwritten.
+- Account add/remove and sync actions write audit rows and publish realtime
+  `icloud_calendar.*` events. Visitor Pass changes caused by sync also publish
+  the usual `visitor_pass.*` realtime events.
+
+Routes:
+
+- `GET /api/v1/integrations/icloud-calendar/accounts`
+- `POST /api/v1/integrations/icloud-calendar/accounts/auth/start`
+- `POST /api/v1/integrations/icloud-calendar/accounts/auth/verify`
+- `DELETE /api/v1/integrations/icloud-calendar/accounts/{account_id}`
+- `POST /api/v1/integrations/icloud-calendar/sync`
+
+Rules:
+
+- All iCloud Calendar routes are Admin-only.
+- Return descriptive `detail` errors for authentication, unsupported challenge,
+  reconnect-required, sync, and provider failures.
+- Security-key-only and older two-step challenges should fail clearly rather
+  than pretending setup succeeded.
+- Keep all iCloud setup, verification, account management, status, and manual
+  sync UI inside the API & Integrations iCloud Calendar tile modal. Do not add
+  a separate Settings page or detached setup flow for this integration.
+
 ## Telemetry, Audit, Alerts, and Top Charts
 
 Telemetry service:
@@ -892,6 +964,10 @@ Alfred 2.0 behavior:
 - For questions like "What car did Sarah arrive in?" or "How long was Sarah
   here?", Alfred should use `query_visitor_passes` or `get_visitor_pass` and
   answer from the linked pass telemetry.
+- For requests like "check my calendar for gate passes" or "sync iCloud
+  Calendar", Alfred should use `trigger_icloud_sync`. The tool is
+  state-changing because it can create, update, or cancel Visitor Passes, so it
+  must return a confirmation card before running.
 - State-changing tools return `requires_confirmation` first. The chat UI stores
   a pending action in chat session context, renders confirm/cancel controls,
   and calls `/api/v1/ai/chat/confirm` or sends `tool_confirmation` on the chat
@@ -928,6 +1004,7 @@ Current Alfred tools:
   `override_schedule`.
 - Visitor Passes: `query_visitor_passes`, `get_visitor_pass`,
   `create_visitor_pass`, `update_visitor_pass`, `cancel_visitor_pass`.
+- Calendar integrations: `trigger_icloud_sync`.
 - Notifications: `query_notification_catalog`,
   `query_notification_workflows`, `get_notification_workflow`,
   `create_notification_workflow`, `update_notification_workflow`,
@@ -1118,6 +1195,11 @@ Integrations:
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
 - `POST /api/v1/integrations/dvla/lookup`
+- `GET /api/v1/integrations/icloud-calendar/accounts`
+- `POST /api/v1/integrations/icloud-calendar/accounts/auth/start`
+- `POST /api/v1/integrations/icloud-calendar/accounts/auth/verify`
+- `DELETE /api/v1/integrations/icloud-calendar/accounts/{account_id}`
+- `POST /api/v1/integrations/icloud-calendar/sync`
 
 UniFi Protect:
 
@@ -1191,8 +1273,13 @@ Current frontend views:
 
 Current frontend integration/editor surfaces:
 
-- API & Integrations manages Home Assistant, Apprise, DVLA, UniFi Protect, and
-  LLM providers.
+- API & Integrations manages Home Assistant, iCloud Calendar, Apprise, DVLA,
+  UniFi Protect, and LLM providers.
+- The iCloud Calendar tile opens `ICloudCalendarModal` behavior inside the
+  existing integration modal shell. It contains the overview/status header,
+  connected account list, inline Add Account stepper, six-digit code step,
+  remove action, manual Sync Calendars Now action, and recent sync summary.
+  Keep future iCloud Calendar setup/account management inside this tile modal.
 - Home Assistant settings include setup/discovery, gates, garage doors, media
   players, and mobile-app notification service discovery. Do not add a Home
   Assistant presence-mapping UI; IACS presence is LPR-derived.
@@ -1511,6 +1598,9 @@ Completed:
 - UniFi Protect dynamic settings, camera/event discovery, media endpoints,
   Alfred and access-pipeline snapshot analysis, realtime update events, and
   managed `uiprotect` package update/backup workflow.
+- iCloud Calendar integration with multi-account encrypted sessions, six-digit
+  verification handshake, modal-contained setup, manual/Alfred sync, and
+  automated asymmetric-window Visitor Pass creation.
 - Alfred 2.0 providers, intent routing, tools, memory, file attachments,
   generated reports, confirmation cards, audit logging, and WebSocket streaming.
 - Telemetry & Audit: traces, spans, audit logs, sanitized payloads, artifacts,
