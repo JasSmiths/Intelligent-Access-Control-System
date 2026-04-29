@@ -9,7 +9,8 @@ extension rules, API surface, and UI design constraints.
 The system is a modular Intelligent Access Control and Presence System for a
 family/private site. It ingests License Plate Recognition events, resolves noisy
 reads, tracks presence, detects anomalies, coordinates gate/audio/notification
-integrations, and exposes a realtime dashboard plus AI chat agent.
+integrations, and exposes a realtime dashboard plus Alfred, the AI operations
+agent.
 
 Primary goals:
 
@@ -18,6 +19,8 @@ Primary goals:
 - Keep hardware and third-party I/O modular and swappable.
 - Keep dashboards, logs, presence, and chat realtime through WebSockets.
 - Make the frontend a usable operational console, not a marketing page.
+- Keep real-world actions such as gate/door commands, notification sends, and
+  schedule overrides explicit, confirmed, audited, and traceable.
 
 ## Current Stack
 
@@ -26,12 +29,17 @@ Primary goals:
 - Frontend: React 18, TypeScript, Vite, Nginx.
 - Icons: `lucide-react`.
 - Rich notification-template editing: Tiptap.
-- Notifications: Apprise.
+- Frontend interaction helpers: Framer Motion, TanStack Virtual, Monaco, and
+  jsondiffpatch.
+- Notifications: Apprise, Home Assistant mobile app notify services, in-app
+  realtime notifications, and Home Assistant TTS.
 - Home Assistant: REST service calls plus WebSocket state listener.
 - DVLA: Vehicle Enquiry Service API lookup integration.
 - UniFi Protect: `uiprotect` camera/event/snapshot integration plus managed
   package update overlays.
 - LLM providers: local fallback, OpenAI Responses API, Gemini, Claude, Ollama.
+- Telemetry: database-backed traces, spans, audit logs, artifacts, and a
+  dashboard Telemetry & Audit console.
 
 ## Ports and Access
 
@@ -70,6 +78,7 @@ only when the backend is intentionally mounted under a URL subpath.
 The project intentionally uses bind mounts:
 
 - `./data/backend:/app/data`
+- `./data/chat_attachments:/app/data/chat_attachments`
 - `./logs/backend:/app/logs`
 - `./backend/app:/app/app:ro`
 - `./logs/frontend:/var/log/nginx`
@@ -92,7 +101,8 @@ Do not add Docker named volumes. Keep any new persistent runtime data under
 │   ├── phase-2.md
 │   ├── phase-3.md
 │   ├── phase-4.md
-│   └── phase-5.md
+│   ├── phase-5.md
+│   └── phase-6.md
 ├── backend/
 │   ├── Dockerfile
 │   ├── pyproject.toml
@@ -142,7 +152,8 @@ Important packages:
 - `app/services`: core orchestration and business logic.
 - `app/ai`: provider wrappers and tool registry.
 - `app/simulation`: hardware-free test endpoints.
-- `app/workers`: future worker package placeholder.
+- `app/workers`: future worker package placeholder; runtime background
+  services are currently started from the FastAPI lifespan.
 
 ### Hard Modularity Rule
 
@@ -172,23 +183,52 @@ Current SQLAlchemy models are in `backend/app/models/core.py`.
 Main tables:
 
 - `groups`: Family, Friends, Visitors, Contractors, subtype support.
-- `people`: driver/person profiles.
+- `people`: driver/person profiles, assigned garage doors, and optional Home
+  Assistant mobile app notify service.
 - `vehicles`: one person to many vehicles. Stores canonical UI make/model/color
   plus DVLA compliance/cache fields `mot_status`, `tax_status`, `mot_expiry`,
   `tax_expiry`, and `last_dvla_lookup_date`.
 - `schedules`: reusable weekly access windows assigned directly to people,
   vehicles, notification conditions, and configured door entities.
+- `schedule_overrides`: one-off temporary access allowances, currently created
+  by Alfred with confirmation.
 - `notification_rules`: DB-backed notification workflows with triggers,
   conditions, actions, active state, and templated content.
 - `presence`: current person presence state.
-- `access_events`: final entry/exit/denial records.
+- `access_events`: final entry/exit/denial records with timing classification
+  and trace linkage in `raw_payload.telemetry.trace_id`.
 - `anomalies`: unauthorized plates, duplicate states, outside schedule.
 - `users`: local dashboard accounts, roles, status, hashed passwords, UI
-  preferences.
+  preferences, and optional linked person.
 - `system_settings`: database-backed dynamic settings. Secret values are
   encrypted at rest with a Fernet key derived from `IACS_AUTH_SECRET_KEY`.
+- `maintenance_mode_state`: global automation kill-switch state, actor, reason,
+  source, and Home Assistant sync identity.
+- `audit_logs`: CRUD, integration, Alfred, maintenance, and alert action audit
+  rows.
+- `telemetry_traces` and `telemetry_spans`: sanitized operational traces and
+  waterfall steps for LPR, APIs, integrations, Alfred, maintenance, and gate
+  malfunction flows.
+- `gate_state_observations`: persisted Home Assistant gate/door state changes.
+- `gate_malfunction_states`, `gate_malfunction_timeline_events`, and
+  `gate_malfunction_notification_outbox`: stuck-open gate detection, recovery,
+  milestone notifications, and timeline state.
+- `leaderboard_state`: persisted top-known-plate state used to detect Top
+  Charts overtakes.
 - `chat_sessions`: persistent AI chat sessions.
 - `chat_messages`: persisted AI chat messages.
+
+Filesystem runtime data:
+
+- `data/chat_attachments/`: user uploads and Alfred-generated CSV/PDF/snapshot
+  attachments, keyed by file ID and protected by owner-user checks.
+- `data/backend/alert-snapshots/`: compact unresolved unauthorized-plate
+  snapshots.
+- `data/backend/telemetry-artifacts/`: bounded trace artifacts such as camera
+  snapshots.
+- `data/backend/unifi-protect-package/` and
+  `data/backend/unifi-protect-backups/`: managed UniFi Protect package overlays
+  and rollback backups.
 
 Startup schema creation is currently handled by `app/db/bootstrap.py` through
 `Base.metadata.create_all`, plus a small set of idempotent transitional column
@@ -247,6 +287,10 @@ and UI instead. Secret setting keys must be added to `SECRET_KEYS`; current
 secret dynamic settings include Home Assistant token, Apprise URLs, DVLA API
 key, UniFi Protect username/password/API key, and LLM provider API keys.
 
+Startup prunes obsolete dynamic settings including `notification_rules` and
+`home_assistant_presence_entities`; do not reintroduce either as
+`system_settings` JSON.
+
 ## Authentication and Users
 
 Auth service:
@@ -300,9 +344,13 @@ Current behavior:
 - Person and vehicle records can reference a reusable schedule through
   `schedule_id`; vehicle schedule takes precedence over owner schedule.
 - People can store profile photos, notes, active state, group, schedule, linked
-  vehicles, and assigned garage-door entity IDs.
+  vehicles, assigned garage-door entity IDs, and a linked Home Assistant mobile
+  app notify service (`notify.mobile_app_*`).
 - Vehicles can store photo data, make, model, colour, description, active state,
   owner, and schedule.
+- Vehicles can be manually DVLA-refreshed through
+  `POST /api/v1/vehicles/{vehicle_id}/dvla-refresh`; this updates official
+  make/colour and compliance cache fields for that stored vehicle.
 - Vehicles can be deleted; people and groups currently have create/update flows
   but no delete/archive endpoint.
 - Schedule deletion is blocked while the schedule is referenced by people,
@@ -312,6 +360,8 @@ Schedule rules:
 
 - `schedules.time_blocks` stores Monday-first weekly intervals normalized to
   30-minute boundaries.
+- Active `schedule_overrides` take precedence for the matching person and,
+  when supplied, vehicle.
 - If no schedule applies, `schedule_default_policy` controls allow/deny.
 - There is no legacy time-slot fallback.
 
@@ -338,9 +388,16 @@ Access service:
 
 Current behavior:
 
+- Maintenance Mode is a global kill-switch for automation. When it is active,
+  Ubiquiti LPR webhooks return accepted/ignored, queued and pending plate reads
+  are discarded, and no access event, presence update, gate command, or garage
+  command is produced from LPR.
 - Queue every plate read.
 - Accept Ubiquiti Alarm Manager test webhook payloads and publish
   `webhook.test.received` without creating an access event.
+- Record raw LPR timing diagnostics from Ubiquiti webhooks and UniFi Protect
+  websocket/track probes in an in-memory feed exposed by
+  `/api/v1/diagnostics/lpr-timing`.
 - Capture the current top-gate state as soon as each plate read is queued and
   store that observation in the read payload. This state is the source of truth
   for arrival/exit decisions when it is known.
@@ -362,6 +419,8 @@ Current behavior:
 - Select the best candidate, preferring exact active stored-plate matches, then
   highest confidence, then latest captured time.
 - Determine authorization from vehicle/person/schedule.
+- Classify presence timing as `earlier_than_usual`, `normal`,
+  `later_than_usual`, or `unknown` from recent matching historical events.
 - Infer direction primarily from the captured top-gate state:
   - `closed` means the vehicle/person is arriving and the event is an entry.
   - `open`, `opening`, or `closing` means the ground exit loop has already
@@ -392,8 +451,12 @@ Current behavior:
   workflow triggers but must not deny access or block gate/garage commands.
 - Persist one final `access_event`.
 - Update presence if access is granted.
-- Create anomalies for unauthorized plates, outside schedule, duplicate entry,
-  and duplicate exit.
+- Create anomalies/alerts for unauthorized plates, outside schedule, duplicate
+  entry, and duplicate exit. Unauthorized-plate alerts attempt to attach a
+  compact live `camera.gate` snapshot for unresolved alert review.
+- Record sanitized telemetry traces/spans for webhook/API ingress, debounce,
+  vehicle verification, schedule evaluation, direction resolution, DVLA,
+  persistence, gate/garage commands, notifications, and vision tie-breakers.
 - Broadcast realtime events.
 - On granted entry, request gate open only when the captured top-gate state at
   plate-read time was `closed`.
@@ -411,6 +474,52 @@ Relevant dynamic settings:
 - `lpr_similarity_threshold`
 - `site_timezone`
 - `schedule_default_policy`
+
+## Maintenance Mode and Gate Malfunctions
+
+Maintenance service:
+
+- `backend/app/services/maintenance.py`
+- `backend/app/api/v1/maintenance.py`
+
+Gate malfunction service:
+
+- `backend/app/services/gate_malfunctions.py`
+- `backend/app/api/v1/gate_malfunctions.py`
+
+Runtime behavior:
+
+- Maintenance Mode is persisted in `maintenance_mode_state`, published as
+  `maintenance_mode.changed`, audited, notifies through the workflow engine, and
+  syncs to `input_boolean.top_gate_maintenance_mode`.
+- While Maintenance Mode is active, LPR automation is ignored/cleared and gate
+  malfunction recovery attempts are paused. Manual UI/API hardware commands
+  remain explicit user actions with confirmation where the frontend requires it.
+- The gate malfunction scheduler starts from FastAPI lifespan, listens to Home
+  Assistant gate state changes, declares a malfunction after the primary gate
+  has remained in an unsafe open/opening/closing state for five minutes, and
+  resolves it when the gate closes.
+- Recovery attempts are scheduled at increasing offsets, claim-protected to
+  avoid duplicate workers, and bypass normal gate schedules because they are
+  safety recovery commands.
+- Milestone notifications are queued for initial, 30-minute, 60-minute,
+  2-hour, and FUBAR states. Notification dispatch is tracked in a persistent
+  outbox.
+- Gate malfunction timelines include declaration, preceding access event,
+  recovery attempts, notifications, manual overrides, FUBAR, and resolution.
+- Admin-only manual overrides can recheck live state, run an attempt now, mark
+  resolved, or mark FUBAR.
+- Alfred can inspect maintenance/malfunction state and prepare confirmed
+  maintenance toggles or admin-only malfunction overrides.
+
+Rules:
+
+- Do not create a second kill-switch mechanism. Use `maintenance.py`.
+- Do not send recovery commands while Maintenance Mode is active.
+- Keep gate malfunction state persistent and auditable; do not replace it with
+  a purely in-memory timer.
+- Do not mark a gate malfunction resolved unless a live/observed closed state
+  or explicit admin override supports that outcome.
 
 ## Home Assistant Integration
 
@@ -434,7 +543,11 @@ Cover helpers:
 
 - `backend/app/modules/home_assistant/covers.py`
 
-Configuration lives in dynamic encrypted settings:
+Mobile notification sender:
+
+- `backend/app/modules/notifications/home_assistant_mobile.py`
+
+Configuration lives in dynamic settings; token values are encrypted:
 
 - `home_assistant_url`
 - `home_assistant_token`
@@ -457,10 +570,16 @@ Rules:
 - Do not use Home Assistant `person.*` geofence/entity states as IACS
   presence. Presence is derived from LPR access events because HA person state
   is already `home` by the time a vehicle reaches the gate.
+- Home Assistant discovery can suggest `notify.mobile_app_*` services and
+  person-to-mobile mappings, but those are notification endpoints only, not
+  presence sources.
 - Do not call HA directly from API route handlers except through services or
   integration modules.
 - Gate and garage door opens can be schedule-gated through `schedule_id`; closed
   commands are allowed for configured garage doors.
+- Maintenance Mode syncs to
+  `input_boolean.top_gate_maintenance_mode` when toggled through the UI/API or
+  Alfred.
 - Home Assistant entity discovery and auto-detect endpoints are Admin-only.
 
 ## Notifications
@@ -484,10 +603,11 @@ Notification workflows:
   Notifications UI.
 - Trigger catalog currently covers authorised entry, unauthorised plate,
   outside schedule, duplicate entry/exit, expired MOT/tax detected, gate open
-  failure, garage door open failure, leaderboard overtake, AI anomaly alert,
-  and integration tests.
-- Supported action channels are mobile/Apprise, in-app realtime dashboard
-  notifications, and Home Assistant voice/TTS.
+  failure, garage door open failure, gate malfunction initial/30m/60m/2hrs/FUBAR,
+  leaderboard overtake, Maintenance Mode enabled/disabled, and AI anomaly alert.
+- Supported action channels are mobile (Apprise and Home Assistant mobile app
+  notify services), in-app realtime dashboard notifications, and Home Assistant
+  voice/TTS.
 - Supported conditions currently include schedule windows and presence state.
 - Templates use `@Variable` tokens in the Tiptap editor. Legacy `[Variable]`
   tokens are accepted by the renderer but should not be used for new UI.
@@ -495,11 +615,20 @@ Notification workflows:
   `@VehicleColour`, `@MotStatus`, `@MotExpiry`, `@TaxStatus`, and
   `@TaxExpiry`. `@VehicleColor` and `@VehicleColour` resolve from the same
   unified colour fact.
+- Maintenance, malfunction, and leaderboard variables include
+  `@MaintenanceModeReason`, `@MaintenanceModeDuration`,
+  `@MalfunctionDuration`, `@MalfunctionOpenedTime`,
+  `@MalfunctionFixAttemptTime`, `@MalfunctionFixAttempts`,
+  `@MalfunctionResolutionTime`, `@LastKnownVehicle`, `@NewWinnerName`,
+  `@OvertakenName`, and `@ReadCount`.
+- Mobile and in-app notification actions can attach a UniFi Protect camera
+  snapshot when the selected action media has `attach_camera_snapshot`.
+- Voice/TTS messages run through `apply_vehicle_tts_phonetics` before delivery.
 
 Rules:
 
 - Always compose notifications from structured facts.
-- Phase 4+ AI naturalization should operate on `NotificationContext`, not raw
+- Alfred AI naturalization should operate on `NotificationContext`, not raw
   logs or invented context.
 - `apprise_urls` lives in encrypted dynamic settings and may be comma-separated
   or newline-separated.
@@ -516,7 +645,7 @@ Service wrapper:
 
 - `backend/app/services/dvla.py`
 
-Configuration lives in dynamic encrypted settings:
+Configuration lives in dynamic settings; the API key is encrypted:
 
 - `dvla_api_key`
 - `dvla_vehicle_enquiry_url`
@@ -557,7 +686,7 @@ Managed `uiprotect` package overlays:
 - `backend/app/modules/unifi_protect/package.py`
 - `backend/app/services/unifi_protect_updates.py`
 
-Configuration lives in dynamic encrypted settings:
+Configuration lives in dynamic settings; credentials and API keys are encrypted:
 
 - `unifi_protect_host`
 - `unifi_protect_port`
@@ -587,7 +716,56 @@ Rules:
 - If a package update verification fails, restore the previous package state and
   restart the UniFi Protect service.
 
-## AI Agent
+## Telemetry, Audit, Alerts, and Top Charts
+
+Telemetry service:
+
+- `backend/app/services/telemetry.py`
+- `backend/app/api/v1/telemetry.py`
+
+Alert snapshot service:
+
+- `backend/app/services/alert_snapshots.py`
+
+Leaderboard service:
+
+- `backend/app/services/leaderboard.py`
+
+Runtime behavior:
+
+- Telemetry traces/spans are stored in `telemetry_traces` and
+  `telemetry_spans`; audit rows are stored in `audit_logs`.
+- Categories currently include LPR Telemetry, Alfred AI Audit, System CRUD,
+  Webhooks & API, Integrations, Gate Events, Maintenance Mode, and Access &
+  Presence.
+- HTTP middleware traces non-read-only `/api/v1/*` requests except telemetry
+  endpoints, plus all webhook ingress, and emits `X-IACS-Request-ID`.
+- Telemetry payloads are sanitized for secrets and large media. Raw API keys,
+  auth tokens, cookies, data URLs, thumbnails, videos, and large snapshot data
+  must not be stored in trace payloads.
+- Telemetry artifacts can store bounded files such as camera snapshots under
+  `/app/data/telemetry-artifacts` in the backend container
+  (`data/backend/telemetry-artifacts/` on the host) and are served by
+  admin-only artifact endpoints.
+- Alerts are anomaly records with resolve/reopen actions. Unauthorized-plate
+  alerts are grouped by plate/day in the API/UI and can carry compact
+  `camera.gate` snapshots while unresolved.
+- Top Charts aggregates known granted entries and unknown denied plates. Known
+  top-spot changes publish `leaderboard_overtake` and can trigger notification
+  workflows. Unknown leaderboard rows may be DVLA-enriched on read without
+  persisting unknown-vehicle details.
+
+Rules:
+
+- Add meaningful spans around new cross-system work, especially hardware,
+  provider, notification, and state-changing paths.
+- Always sanitize telemetry/audit metadata before storing it.
+- Use audit logs for user/Admin/Alfred-visible state changes; realtime logs are
+  not durable audit history.
+- Keep alert snapshots compact and unresolved-only unless a retention feature is
+  explicitly added.
+
+## Alfred 2.0 AI Agent
 
 Provider wrappers:
 
@@ -600,6 +778,10 @@ Agent tools:
 Chat orchestration:
 
 - `backend/app/services/chat.py`
+
+Chat attachments:
+
+- `backend/app/services/chat_attachments.py`
 
 Supported provider names:
 
@@ -615,39 +797,95 @@ Default provider:
 - `llm_provider=local` by default. `IACS_LLM_PROVIDER` only seeds the initial
   dynamic setting on a fresh database.
 
-The local provider is deterministic and requires no API keys. It summarizes
-tool outputs and is meant to keep the UI and agent tool pipeline usable during
-development.
+The public providers endpoint lists `local`, `openai`, `gemini`, `claude`, and
+`ollama`; `anthropic` is accepted internally as an alias for Claude. The local
+provider is deterministic and requires no API keys. It summarizes tool outputs
+and is meant to keep the UI and agent tool pipeline usable during development.
 
-AI tools:
+Alfred 2.0 behavior:
 
-- `query_presence`
-- `query_access_events`
-- `query_anomalies`
-- `summarize_access_rhythm`
-- `calculate_visit_duration`
-- `trigger_anomaly_alert`
-- `get_system_users`
-- `lookup_dvla_vehicle`
-- `analyze_camera_snapshot`
+- Alfred is the named AI operations agent in the chat UI and system prompt.
+- Tool results are the source of truth for live access state, device state,
+  schedules, DVLA records, telemetry, notifications, reports, and files.
+- Alfred must not invent people, vehicles, schedules, events, device states,
+  IDs, telemetry, or DVLA records.
+- Fuzzy references should go through `resolve_human_entity` before using exact
+  person, vehicle, group, or device identifiers.
+- Access causality questions should prefer `diagnose_access_event` over shallow
+  event lists.
+- State-changing tools return `requires_confirmation` first. The chat UI stores
+  a pending action in chat session context, renders confirm/cancel controls,
+  and calls `/api/v1/ai/chat/confirm` or sends `tool_confirmation` on the chat
+  WebSocket before the tool runs with `confirm=true` or `confirm_send=true`.
+- Pending action confirmations expire after 10 minutes and are bound to the
+  session/user that created them.
+- Alfred tool calls are audited as `alfred.tool.<tool>` with actor
+  `Alfred_AI`, provider/model/session context, sanitized arguments, and
+  outcomes including `pending_confirmation`.
+- Alfred can upload/read attachments. Uploads are limited to 25 MB and currently
+  accept images, text/CSV/Markdown/XML/HTML/JSON, PDFs, and DOCX files.
+- Alfred-generated CSV/PDF/snapshot outputs are returned as secure chat
+  attachments and stored under `data/chat_attachments/`.
+- Camera image analysis and camera snapshots must fetch live media through the
+  UniFi Protect service. Snapshot attachments may be stored as chat or telemetry
+  artifacts; do not add broad snapshot retention without an explicit feature.
+
+Current Alfred tools:
+
+- General/entity resolution: `resolve_human_entity`, `get_system_users`.
+- Access and diagnostics: `query_presence`, `query_access_events`,
+  `diagnose_access_event`, `query_lpr_timing`,
+  `query_vehicle_detection_history`, `get_telemetry_trace`,
+  `query_anomalies`, `summarize_access_rhythm`,
+  `calculate_visit_duration`, `query_leaderboard`.
+- Gate/hardware and maintenance: `query_device_states`,
+  `get_maintenance_status`, `get_active_malfunctions`,
+  `get_malfunction_history`, `trigger_manual_malfunction_override`,
+  `open_device`, `command_device`, `open_gate`, `enable_maintenance_mode`,
+  `disable_maintenance_mode`, `toggle_maintenance_mode`.
+- Schedules: `query_schedules`, `get_schedule`, `create_schedule`,
+  `update_schedule`, `delete_schedule`, `query_schedule_targets`,
+  `assign_schedule_to_entity`, `verify_schedule_access`,
+  `override_schedule`.
+- Notifications: `query_notification_catalog`,
+  `query_notification_workflows`, `get_notification_workflow`,
+  `create_notification_workflow`, `update_notification_workflow`,
+  `delete_notification_workflow`, `preview_notification_workflow`,
+  `test_notification_workflow`, `trigger_anomaly_alert`.
+- Compliance and cameras: `lookup_dvla_vehicle`, `analyze_camera_snapshot`,
+  `get_camera_snapshot`.
+- Files and reports: `read_chat_attachment`, `export_presence_report_csv`,
+  `generate_contractor_invoice_pdf`.
+
+State-changing Alfred tools:
+
+- `assign_schedule_to_entity`, `create_notification_workflow`,
+  `create_schedule`, `delete_notification_workflow`, `delete_schedule`,
+  `disable_maintenance_mode`, `enable_maintenance_mode`, `command_device`,
+  `open_gate`, `open_device`, `override_schedule`, `trigger_anomaly_alert`,
+  `trigger_manual_malfunction_override`, `test_notification_workflow`,
+  `toggle_maintenance_mode`, `update_notification_workflow`, and
+  `update_schedule`.
 
 Memory:
 
 - Chat sessions persist in `chat_sessions`.
 - Chat messages persist in `chat_messages`.
-- Session context tracks recent subject/person/group for follow-up resolution.
+- Session context tracks recent subject/person/group, guided schedule-edit
+  state, and pending confirmation actions.
 - Example: after "Did the gardener arrive today?", "How long did they stay?"
   resolves to the gardener context.
 
 Rules:
 
-- Tool results are the source of truth for live access state.
-- Do not let LLM providers invent access records.
-- Add new tools in `app/ai/tools.py` with a clear JSON schema and handler.
-- Keep high-risk actions such as gate control as explicit tools/endpoints with
-  clear audit context before exposing them to AI automation.
-- Camera image analysis must fetch live media through the UniFi Protect service;
-  do not persist snapshots unless a future feature explicitly adds retention.
+- Add new tools in `app/ai/tools.py` with a strict JSON schema, compact
+  JSON-serializable output, categories, and accurate read-only/confirmation
+  metadata.
+- Keep high-risk actions such as gate/door control, maintenance changes,
+  workflow edits, notification sends, and schedule overrides explicit,
+  confirmed, and audited before exposing them as casual chat actions.
+- Keep providers from seeing secrets or large raw payloads. Use telemetry
+  sanitization and compact tool outputs.
 
 ## API Surface
 
@@ -688,6 +926,7 @@ Directory:
 - `GET /api/v1/vehicles`
 - `POST /api/v1/vehicles`
 - `PATCH /api/v1/vehicles/{vehicle_id}`
+- `POST /api/v1/vehicles/{vehicle_id}/dvla-refresh`
 - `DELETE /api/v1/vehicles/{vehicle_id}`
 - `GET /api/v1/groups`
 - `POST /api/v1/groups`
@@ -725,7 +964,41 @@ Events and presence:
 
 - `GET /api/v1/events`
 - `GET /api/v1/presence`
+- `GET /api/v1/alerts`
+- `PATCH /api/v1/alerts/action`
+- `GET /api/v1/alerts/{alert_id}/snapshot`
 - `GET /api/v1/anomalies`
+
+Top Charts:
+
+- `GET /api/v1/leaderboard`
+
+Diagnostics:
+
+- `GET /api/v1/diagnostics/lpr-timing`
+- `DELETE /api/v1/diagnostics/lpr-timing`
+
+Maintenance:
+
+- `GET /api/v1/maintenance/status`
+- `POST /api/v1/maintenance/enable`
+- `POST /api/v1/maintenance/disable`
+
+Gate malfunctions:
+
+- `GET /api/v1/gate-malfunctions/active`
+- `GET /api/v1/gate-malfunctions/history`
+- `GET /api/v1/gate-malfunctions/{malfunction_id}/trace`
+- `POST /api/v1/gate-malfunctions/{malfunction_id}/override`
+
+Telemetry and audit:
+
+- `GET /api/v1/telemetry/categories`
+- `GET /api/v1/telemetry/traces`
+- `GET /api/v1/telemetry/traces/{trace_id}`
+- `GET /api/v1/telemetry/audit`
+- `DELETE /api/v1/telemetry/purge`
+- `GET /api/v1/telemetry/artifacts/{artifact_id}`
 
 Webhooks:
 
@@ -749,6 +1022,7 @@ Integrations:
 - `GET /api/v1/integrations/apprise/urls`
 - `POST /api/v1/integrations/apprise/urls`
 - `DELETE /api/v1/integrations/apprise/urls/{index}`
+- `POST /api/v1/integrations/home-assistant/mobile-notifications/test`
 - `POST /api/v1/integrations/gate/open`
 - `POST /api/v1/integrations/cover/command`
 - `POST /api/v1/integrations/announcements/say`
@@ -778,6 +1052,9 @@ AI:
 - `GET /api/v1/ai/providers`
 - `GET /api/v1/ai/tools`
 - `POST /api/v1/ai/chat`
+- `POST /api/v1/ai/chat/confirm`
+- `POST /api/v1/ai/chat/upload`
+- `GET /api/v1/ai/chat/files/{file_id}`
 - `WS /api/v1/ai/chat/ws`
 
 Frontend Nginx proxies these under the same host at `:8089`.
@@ -808,10 +1085,12 @@ Current frontend views:
 - Groups
 - Schedules
 - Vehicles
+- Top Charts
 - Events
+- Alerts
 - Reports
 - API & Integrations
-- Logs
+- Logs / Telemetry & Audit
 - Settings
 - Settings / General
 - Settings / Auth & Security
@@ -823,22 +1102,40 @@ Current frontend integration/editor surfaces:
 
 - API & Integrations manages Home Assistant, Apprise, DVLA, UniFi Protect, and
   LLM providers.
-- Home Assistant settings include discovery, gates, garage doors, and presence
-  mapping tabs.
+- Home Assistant settings include setup/discovery, gates, garage doors, media
+  players, and mobile-app notification service discovery. Do not add a Home
+  Assistant presence-mapping UI; IACS presence is LPR-derived.
 - UniFi Protect settings include general config, exposed camera/entity state,
   camera media/snapshot analysis, and managed update/backup controls.
 - Settings / Notifications is the notification workflow builder with
-  trigger/condition/action editing and Tiptap `@Variable` insertion.
+  trigger/condition/action editing, endpoint pickers, snapshot-media toggles,
+  live preview, and Tiptap `@Variable` insertion.
 - Vehicles edit modal includes a display-only DVLA Compliance card for MOT
   status/expiry, tax status/expiry, and last DVLA sync date. Make and colour
-  remain on the main vehicle details fields, and registration edits still use
-  the manual DVLA auto-fill flow.
+  remain on the main vehicle details fields. Registration edits still use the
+  manual DVLA auto-fill flow, and saved vehicles have a manual DVLA refresh
+  action.
+- People edit modal supports assigned garage doors and Home Assistant
+  `notify.mobile_app_*` linking with a test-send action.
+- Dashboard includes Maintenance Mode state/control, configured gate and garage
+  door controls with confirmation modals, alert summary, and live site status.
+- Alerts view groups same-day unresolved unauthorized-plate alerts by
+  registration, supports resolve/reopen actions, and displays captured
+  snapshots when available.
+- Top Charts shows known granted-entry leaders and denied unknown Mystery Guest
+  leaders, with optional DVLA enrichment for unknown plates.
+- Logs includes realtime event logs plus Telemetry & Audit tabs for LPR, gate
+  events, maintenance, AI audit, CRUD, API, integrations, and access traces.
 
 Current realtime behavior:
 
 - `WebSocket /api/v1/realtime/ws` receives system events and refreshes data.
 - Logs view displays event bus messages.
-- Global chat uses `WebSocket /api/v1/ai/chat/ws`.
+- Global Alfred chat uses `WebSocket /api/v1/ai/chat/ws`, streams thinking,
+  tool batch/status, confirmation-required, response-delta, response, and error
+  events, and supports attachment upload/download through HTTP endpoints.
+- In-app notification rules publish realtime toast payloads; the header alert
+  tray tracks unresolved alert-style anomalies.
 - WebSockets authenticate with the same HTTP-only session cookie or an explicit
   Bearer/query token.
 
@@ -941,10 +1238,17 @@ topology. Do not replace it with a marketing dashboard style.
 
 1. Add an `AgentTool` in `backend/app/ai/tools.py`.
 2. Provide a strict JSON schema in `parameters`.
-3. Keep side effects explicit and auditable.
-4. Return compact JSON-serializable output.
-5. If the tool sends alerts, opens the gate, or changes state, make the user
-   flow explicit in the UI before exposing it as a casual chat action.
+3. Add category, `read_only`, confirmation, and default-limit metadata through
+   `_with_tool_metadata`.
+4. Keep side effects explicit and auditable. If the tool changes state, sends
+   alerts/tests, opens/closes hardware, or edits workflows/schedules, return
+   `requires_confirmation` before acting and support a clear confirmation flag.
+5. Return compact JSON-serializable output; summarize, redact, or omit large
+   raw payloads and media.
+6. Update the local-provider summarizer and chat confirmation display helpers
+   when the tool has a user-facing result or confirmation card.
+7. Add/adjust tests in `backend/tests/test_chat_agent.py` and telemetry/audit
+   tests when routing, confirmation, or auditing changes.
 
 ## Development Commands
 
@@ -952,7 +1256,7 @@ Run the full system:
 
 ```bash
 cp .env.example .env
-mkdir -p data/backend data/postgres data/redis logs/backend logs/frontend
+mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backend logs/frontend
 docker compose up --build
 ```
 
@@ -1001,6 +1305,8 @@ curl -fsS http://localhost:8089/setup
 curl -fsS http://localhost:8089/api/v1/presence
 curl -fsS http://localhost:8089/api/v1/events?limit=5
 curl -fsS http://localhost:8089/api/v1/schedules
+curl -fsS http://localhost:8089/api/v1/maintenance/status
+curl -fsS http://localhost:8089/api/v1/leaderboard
 curl -fsS -X POST http://localhost:8089/api/v1/simulation/misread-sequence/TEST123
 curl -fsS -X POST http://localhost:8089/api/v1/ai/chat \
   -H 'Content-Type: application/json' \
@@ -1086,36 +1392,44 @@ Frontend rules:
 - Treat `{ ok: false }` responses and non-2xx responses as failures and show the
   provider message.
 
-## Current Phase State
+## Implementation State
 
 Completed:
 
-- Phase 1: Compose and backend scaffold.
-- Phase 2: data models and Ubiquiti debounce.
-- Phase 3: Home Assistant, TTS, Apprise.
-- Phase 4: LLM providers, tools, memory, chat.
-- Phase 5: frontend UI, realtime dashboard, chat panel.
-- Phase 6: this `AGENTS.md`.
+- Compose deployment, backend scaffold, bind-mounted runtime storage, and
+  versioned `/api/v1` API surface.
+- SQLAlchemy models, auto-create bootstrap, transitional column/index additions,
+  and legacy schedule-table cleanup.
+- Ubiquiti LPR ingestion, debounce/canonicalization, top-gate-state direction
+  inference, timing diagnostics, telemetry, DVLA enrichment, presence, alerts,
+  and notification dispatch.
+- Home Assistant gate/garage/door state sync, TTS, mobile app notifications,
+  Maintenance Mode sync, and schedule-gated cover commands.
+- Apprise, in-app, Home Assistant mobile, and Home Assistant voice notification
+  workflows with DB-backed rules, Tiptap variables, conditions, media snapshots,
+  preview, and test sends.
+- DVLA encrypted settings, connection tests, manual lookup, saved-vehicle
+  refresh, Alfred tool access, LPR compliance refresh, and Top Charts
+  enrichment.
+- UniFi Protect dynamic settings, camera/event discovery, media endpoints,
+  Alfred and access-pipeline snapshot analysis, realtime update events, and
+  managed `uiprotect` package update/backup workflow.
+- Alfred 2.0 providers, intent routing, tools, memory, file attachments,
+  generated reports, confirmation cards, audit logging, and WebSocket streaming.
+- Telemetry & Audit: traces, spans, audit logs, sanitized payloads, artifacts,
+  API/webhook middleware, gate malfunction traces, and dashboard review UI.
+- Maintenance Mode and gate malfunction detection/recovery with persistent
+  timelines, milestone notifications, retry outbox, and admin overrides.
+- Top Charts, grouped Alerts review, resolve/reopen flows, and compact alert
+  snapshots.
 - User Management & Auth: first-run Admin setup, login/logout/me,
   admin-protected user CRUD, protected APIs/WebSockets, and `get_system_users`
   AI tool.
 - Dynamic Configuration: database-backed settings, encrypted secrets,
   settings pages, integration tiles, and connection-test API.
-- DVLA Lookup: encrypted API-key setting, connection test, lookup endpoint, and
-  AI tool access to the Vehicle Enquiry Service API.
 - Directory Management: CRUD for people, vehicles, groups, reusable schedules,
-  profile/vehicle photos, notes/descriptions, and garage-door assignment.
-- Notification Workflows: DB-backed rules, trigger catalog, conditions,
-  Apprise/in-app/voice actions, rich template variables, preview, and test send.
-- UniFi Protect: dynamic settings, camera/event discovery, media endpoints,
-  AI snapshot analysis, realtime update events, and managed `uiprotect` package
-  update/backup workflow.
-- Access Pipeline Direction: top-gate-state arrival/exit inference, known-plate
-  misread canonicalization, exact stored-plate debounce short-circuiting,
-  garage-door opening only after an accepted gate-open command, and
-  `camera.gate` OpenAI vision tie-breaking for double-arrival conflicts.
-- Legacy Cleanup: old `time_slots` / `schedule_assignments` tables, endpoint,
-  enum, and scheduler fallback have been removed.
+  profile/vehicle photos, notes/descriptions, garage-door assignment, mobile
+  app notify mapping, schedule overrides, and saved-vehicle DVLA refresh.
 
 Still pending or intentionally incomplete:
 
@@ -1125,7 +1439,8 @@ Still pending or intentionally incomplete:
 - Real log rotation controls in UI.
 - Optional dedicated entry/exit camera support beyond the current top-gate-state
   inference and `camera.gate` tie-breaker.
-- Fine-grained AI action authorization for state-changing tools.
+- Fine-grained per-tool policy controls beyond the current authenticated-user,
+  Admin-only endpoint, confirmation-card, and audit-log protections.
 
 ## Documentation Map
 
@@ -1135,4 +1450,5 @@ Still pending or intentionally incomplete:
 - `docs/phase-3.md`: Home Assistant and notifications.
 - `docs/phase-4.md`: AI providers, tools, memory.
 - `docs/phase-5.md`: frontend, NPM target, UI verification.
+- `docs/phase-6.md`: original agent-guide phase note.
 - `AGENTS.md`: authoritative orientation for future agents.
