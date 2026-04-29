@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -120,6 +120,138 @@ class SystemSetting(Base, TimestampMixin):
     value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+
+
+class ExternalDependency(Base, TimestampMixin):
+    __tablename__ = "external_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "ecosystem",
+            "normalized_name",
+            "manifest_path",
+            "manifest_section",
+            name="ux_external_dependency_manifest_identity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    ecosystem: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    package_name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    normalized_name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    current_version: Mapped[str | None] = mapped_column(String(120))
+    latest_version: Mapped[str | None] = mapped_column(String(120))
+    dependant_area: Mapped[str] = mapped_column(String(160), default="System Core", nullable=False, index=True)
+    manifest_path: Mapped[str | None] = mapped_column(String(320), index=True)
+    manifest_section: Mapped[str | None] = mapped_column(String(120))
+    requirement_spec: Mapped[str | None] = mapped_column(Text)
+    is_direct: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    update_available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    risk_status: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    latest_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dependency_update_analyses.id", ondelete="SET NULL")
+    )
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    analyses: Mapped[list["DependencyUpdateAnalysis"]] = relationship(
+        back_populates="dependency",
+        cascade="all, delete-orphan",
+        foreign_keys="DependencyUpdateAnalysis.dependency_id",
+    )
+    latest_analysis: Mapped["DependencyUpdateAnalysis | None"] = relationship(
+        foreign_keys=[latest_analysis_id],
+        post_update=True,
+    )
+    backups: Mapped[list["DependencyUpdateBackup"]] = relationship(back_populates="dependency")
+    jobs: Mapped[list["DependencyUpdateJob"]] = relationship(back_populates="dependency")
+
+
+class DependencyUpdateAnalysis(Base, TimestampMixin):
+    __tablename__ = "dependency_update_analyses"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dependency_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("external_dependencies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_version: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(160))
+    verdict: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    summary_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    changelog_source: Mapped[str | None] = mapped_column(Text)
+    changelog_markdown: Mapped[str | None] = mapped_column(Text)
+    usage_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    breaking_changes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    verification_steps: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    suggested_diff: Mapped[str | None] = mapped_column(Text)
+    raw_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    dependency: Mapped[ExternalDependency] = relationship(
+        back_populates="analyses",
+        foreign_keys=[dependency_id],
+    )
+
+
+class DependencyUpdateBackup(Base, TimestampMixin):
+    __tablename__ = "dependency_update_backups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dependency_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("external_dependencies.id", ondelete="SET NULL"), index=True
+    )
+    package_name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    ecosystem: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    version: Mapped[str | None] = mapped_column(String(120), index=True)
+    reason: Mapped[str] = mapped_column(String(160), nullable=False)
+    archive_path: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_root: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    manifest_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    config_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    restored_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+
+    dependency: Mapped[ExternalDependency | None] = relationship(back_populates="backups")
+    created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
+    restored_by: Mapped[User | None] = relationship(foreign_keys=[restored_by_user_id])
+
+
+class DependencyUpdateJob(Base, TimestampMixin):
+    __tablename__ = "dependency_update_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dependency_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("external_dependencies.id", ondelete="SET NULL"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False, index=True)
+    phase: Mapped[str | None] = mapped_column(String(120))
+    actor: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    target_version: Mapped[str | None] = mapped_column(String(120))
+    backup_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dependency_update_backups.id", ondelete="SET NULL"), index=True
+    )
+    stdout_log_path: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+
+    dependency: Mapped[ExternalDependency | None] = relationship(back_populates="jobs")
+    actor_user: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
+    backup: Mapped[DependencyUpdateBackup | None] = relationship()
 
 
 class MaintenanceModeState(Base, TimestampMixin):
@@ -450,6 +582,28 @@ class VisitorPass(Base, TimestampMixin):
 Index("ix_visitor_passes_status_expected_time", VisitorPass.status, VisitorPass.expected_time)
 Index("ix_visitor_passes_number_plate_status", VisitorPass.number_plate, VisitorPass.status)
 Index("ix_visitor_passes_status_valid_until", VisitorPass.status, VisitorPass.valid_until)
+Index(
+    "ix_visitor_passes_open_departure_lookup",
+    VisitorPass.number_plate,
+    VisitorPass.arrival_time.desc(),
+    VisitorPass.created_at.desc(),
+    postgresql_where=(
+        (VisitorPass.status == VisitorPassStatus.USED)
+        & VisitorPass.departure_time.is_(None)
+        & VisitorPass.number_plate.is_not(None)
+    ),
+)
+Index(
+    "ix_visitor_passes_calendar_active_source",
+    VisitorPass.creation_source,
+    VisitorPass.source_reference,
+    VisitorPass.status,
+    postgresql_where=(
+        (VisitorPass.creation_source == "icloud_calendar")
+        & VisitorPass.status.in_([VisitorPassStatus.SCHEDULED, VisitorPassStatus.ACTIVE])
+        & VisitorPass.source_reference.is_not(None)
+    ),
+)
 
 
 class ICloudCalendarAccount(Base, TimestampMixin):

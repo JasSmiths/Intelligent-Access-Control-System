@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.api.dependencies import admin_user, current_user
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.services.dependency_updates import get_dependency_update_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config, list_settings, update_settings
@@ -79,6 +80,11 @@ async def patch_settings(
         await service.start()
     if any(key.startswith("unifi_protect_") for key in request.values):
         await get_unifi_protect_service().restart()
+    if any(
+        key.startswith(("home_assistant_", "apprise_", "dvla_", "unifi_protect_", "llm_", "openai_", "gemini_", "anthropic_", "ollama_"))
+        for key in request.values
+    ):
+        await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
     return rows
 
 

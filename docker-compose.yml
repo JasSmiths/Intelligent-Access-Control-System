@@ -25,6 +25,7 @@ services:
       IACS_REDIS_URL: redis://redis:6379/0
       IACS_DATA_DIR: /app/data
       IACS_LOG_DIR: /app/logs
+      IACS_WORKSPACE_DIR: /workspace
       IACS_CORS_ORIGINS: ${IACS_CORS_ORIGINS:-http://localhost:5173,http://localhost:3000,http://localhost:8088}
       IACS_TRUSTED_HOSTS: ${IACS_TRUSTED_HOSTS:-*}
       IACS_PUBLIC_BASE_URL: ${IACS_PUBLIC_BASE_URL:-}
@@ -51,12 +52,30 @@ services:
       # Bind mounts only. These paths are intentionally visible on the host.
       - ./data/backend:/app/data
       - ./data/chat_attachments:/app/data/chat_attachments
+      - ./:/workspace
+      - ./data/backend/dependency-update-backups:/app/update-backups
       - ./logs/backend:/app/logs
       - ./backend/app:/app/app:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  updater:
+    image: docker:27-cli
+    container_name: iacs-updater
+    working_dir: /workspace
+    command: ["sh", "-c", "while sleep 3600; do :; done"]
+    volumes:
+      - ./:/workspace
+      - ./data/backend/dependency-update-cache:/app/data/dependency-update-cache
+      - ./data/backend/dependency-update-backups:/app/update-backups
+      - ./logs/backend:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      backend:
         condition: service_healthy
     restart: unless-stopped
 

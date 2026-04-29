@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -73,14 +74,55 @@ async def build_unifi_protect_client(config: RuntimeConfig):
 
 
 async def close_unifi_protect_client(api: Any) -> None:
-    for method_name in ("async_disconnect_ws", "close_session", "close_public_api_session"):
-        method = getattr(api, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            await method()
-        except Exception as exc:
-            logger.debug("unifi_protect_close_failed", extra={"method": method_name, "error": str(exc)})
+    seen: set[int] = set()
+    for method_name in (
+        "async_disconnect_ws",
+        "disconnect_ws",
+        "close_session",
+        "close_public_api_session",
+        "async_close",
+        "close",
+        "async_logout",
+        "logout",
+    ):
+        await _call_unifi_cleanup(api, method_name, f"api.{method_name}")
+
+    for attr_name in (
+        "session",
+        "_session",
+        "public_api_session",
+        "_public_api_session",
+        "aiohttp_session",
+        "_aiohttp_session",
+        "ws",
+        "_ws",
+        "websocket",
+        "_websocket",
+    ):
+        await _close_unifi_resource(getattr(api, attr_name, None), attr_name, seen)
+
+
+async def _close_unifi_resource(resource: Any, label: str, seen: set[int]) -> None:
+    if resource is None:
+        return
+    identity = id(resource)
+    if identity in seen:
+        return
+    seen.add(identity)
+    for method_name in ("async_close", "close", "disconnect", "release"):
+        await _call_unifi_cleanup(resource, method_name, f"{label}.{method_name}")
+
+
+async def _call_unifi_cleanup(owner: Any, method_name: str, label: str) -> None:
+    method = getattr(owner, method_name, None)
+    if not callable(method):
+        return
+    try:
+        result = method()
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        logger.debug("unifi_protect_close_failed", extra={"method": label, "error": str(exc)})
 
 
 async def load_unifi_protect_bootstrap(api: Any) -> None:

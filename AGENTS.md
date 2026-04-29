@@ -26,10 +26,10 @@ Primary goals:
 
 - Deployment: Docker Compose.
 - Backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis.
-- Frontend: React 18, TypeScript, Vite, Nginx.
+- Frontend: React 19, TypeScript, Vite, Nginx.
 - Icons: `lucide-react`.
 - Rich notification-template editing: Tiptap.
-- Frontend interaction helpers: Framer Motion, TanStack Virtual, Monaco, and
+- Frontend interaction helpers: `motion`, TanStack Virtual, Monaco, and
   jsondiffpatch.
 - Notifications: Apprise, Home Assistant mobile app notify services, in-app
   realtime notifications, and Home Assistant TTS.
@@ -85,7 +85,7 @@ The project intentionally uses bind mounts:
 - `./data/postgres:/var/lib/postgresql/data`
 - `./data/redis:/data`
 
-Do not add Docker named volumes. Keep any new persistent runtime data under
+Do not add Docker named volumes. Keep new persistent runtime data under
 `./data/...` or `./logs/...` and mount it explicitly as a bind mount.
 
 ## Repository Layout
@@ -135,6 +135,24 @@ Ignore generated runtime directories:
 - `logs/`
 - `frontend/node_modules/`
 - `frontend/dist/`
+
+## Testing
+
+The backend Docker image installs the `backend/pyproject.toml` dev extras, so
+`pytest` is available inside the normal Compose backend container. Run backend
+tests from the repository bind mount, not `/app`, because `/app` contains the
+installed service package while `/workspace/backend` contains the checked-out
+tests:
+
+```bash
+docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
+```
+
+For a single file:
+
+```bash
+docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+```
 
 ## Backend Architecture
 
@@ -222,6 +240,14 @@ Main tables:
 - `telemetry_traces` and `telemetry_spans`: sanitized operational traces and
   waterfall steps for LPR, APIs, integrations, Alfred, maintenance, and gate
   malfunction flows.
+- `external_dependencies`: auto-enrolled system-wide external package records
+  from Python, npm, Dockerfile, Compose, runtime, and lockfile sources.
+- `dependency_update_analyses`: changelog/code-usage/LLM review records for
+  dependency updates with `safe`, `warning`, or `breaking` verdicts.
+- `dependency_update_backups`: offline rollback archives, storage root,
+  checksum, manifest/config snapshots, and restore metadata.
+- `dependency_update_jobs`: update/restore job state, actor, target version,
+  streamed log path, trace ID, result, and error.
 - `gate_state_observations`: persisted Home Assistant gate/door state changes.
 - `gate_malfunction_states`, `gate_malfunction_timeline_events`, and
   `gate_malfunction_notification_outbox`: stuck-open gate detection, recovery,
@@ -242,6 +268,12 @@ Filesystem runtime data:
 - `data/backend/unifi-protect-package/` and
   `data/backend/unifi-protect-backups/`: managed UniFi Protect package overlays
   and rollback backups.
+- `data/backend/dependency-update-cache/`: update-engine temporary package
+  downloads and cache files.
+- `data/backend/dependency-update-backups/`: bind-mounted offline update
+  rollback archives.
+- `logs/backend/dependency-updates/`: bounded stdout/stderr logs for update and
+  restore jobs.
 
 Startup schema creation is currently handled by `app/db/bootstrap.py` through
 `Base.metadata.create_all`, plus a small set of idempotent transitional column
@@ -419,6 +451,10 @@ Lifecycle rules:
   `VisitorPassService.start()`.
 - All creates, updates, cancels, lifecycle status changes, pass claims, and
   telemetry links write audit rows.
+- Visitor Pass departure lookups must use the indexed same-plate, `used`,
+  no-departure path ordered by latest arrival. Calendar reconciliation must use
+  `creation_source="icloud_calendar"`, active/scheduled status, and
+  `source_reference`; do not replace these hot paths with per-row scans.
 
 Extensibility:
 
@@ -793,6 +829,57 @@ Rules:
 - Always create/keep a backup before applying a managed package update.
 - If a package update verification fails, restore the previous package state and
   restart the UniFi Protect service.
+- On service shutdown or restart, `close_unifi_protect_client` must close the
+  Protect WebSocket plus every available async or sync aiohttp/session cleanup
+  method. Do not leave `aiohttp` client sessions or connectors open.
+
+## Dependency Update & Rollback Engine
+
+Service:
+
+- `backend/app/services/dependency_updates.py`
+- `backend/app/api/v1/dependency_updates.py`
+
+Runtime behavior:
+
+- `packaging` is a direct backend dependency because the update service parses
+  Python requirements and versions at runtime.
+- The update manager is system-wide, not integration-scoped. It auto-enrolls
+  external dependencies from `backend/pyproject.toml`, installed backend Python
+  distributions, `frontend/package.json`, `frontend/package-lock.json`,
+  Dockerfiles, and Compose.
+- Enrollment runs on backend boot, after integration settings changes, and
+  before manual update workflows where needed.
+- Update analysis fetches registry metadata/release notes, scans local code
+  usage with `rg` and parser-aware helpers, and asks the configured LLM for a
+  `safe`, `warning`, or `breaking` verdict. The local provider falls back to
+  conservative heuristics.
+- Before any apply or restore job, the engine writes a local offline backup
+  archive with manifest snapshots, encrypted dynamic setting rows, package
+  artifact cache attempts, checksums, and restore metadata.
+- Restore jobs first checksum and extract the archive into a temporary
+  directory, then validate `backup.json`, manifest snapshots, settings
+  snapshots, and offline package artifacts without network access. Live
+  manifest restore only runs after that validation passes.
+- Backup storage is bind-mounted in containers at `/app/update-backups` from
+  `./data/backend/dependency-update-backups`.
+- Remote backup storage should be mounted on the host under that bind-mounted
+  path; do not introduce Docker named volumes for NFS/Samba storage.
+- Update and restore jobs stream stdout/stderr over
+  `WS /api/v1/dependency-updates/jobs/{job_id}/ws`, write durable logs under
+  `logs/backend/dependency-updates/`, and emit telemetry/audit records in the
+  `dependency_updates` category.
+
+Rules:
+
+- Keep update application Admin-confirmed and never silent.
+- Do not expose package manager output that contains secrets; sanitize telemetry
+  and audit metadata before storage.
+- Verify frontend dependency updates from a clean Linux install or Docker build
+  (`npm ci`/`docker compose build frontend`). Do not rely on host-mounted
+  `frontend/node_modules` from inside the backend container; optional native npm
+  bindings can be platform-specific.
+- Do not add Docker named volumes.
 
 ## iCloud Calendar Integration
 
@@ -939,6 +1026,9 @@ and is meant to keep the UI and agent tool pipeline usable during development.
 Alfred 2.0 behavior:
 
 - Alfred is the named AI operations agent in the chat UI and system prompt.
+- Alfred chat is ReAct-only. Do not add legacy naive `/api/chat` handlers,
+  compatibility monkeypatches, or direct prompt-to-answer shortcuts around
+  `ChatService`.
 - Tool results are the source of truth for live access state, device state,
   schedules, DVLA records, telemetry, notifications, reports, and files.
 - Alfred must not invent people, vehicles, schedules, events, device states,
@@ -977,6 +1067,9 @@ Alfred 2.0 behavior:
 - Alfred tool calls are audited as `alfred.tool.<tool>` with actor
   `Alfred_AI`, provider/model/session context, sanitized arguments, and
   outcomes including `pending_confirmation`.
+- Parallel tool batches must await every tool with a per-tool timeout and
+  return failed tool results for slow integrations rather than hanging the whole
+  response.
 - Alfred can upload/read attachments. Uploads are limited to 25 MB and currently
   accept images, text/CSV/Markdown/XML/HTML/JSON, PDFs, and DOCX files.
 - Alfred-generated CSV/PDF/snapshot outputs are returned as secure chat
@@ -1028,8 +1121,10 @@ State-changing Alfred tools:
 
 Memory:
 
-- Chat sessions persist in `chat_sessions`.
-- Chat messages persist in `chat_messages`.
+- Chat sessions persist in `chat_sessions`; this is active Alfred/ReAct memory,
+  not legacy dead code.
+- Chat messages persist in `chat_messages`; this is active Alfred/ReAct memory,
+  not legacy dead code.
 - Session context tracks recent subject/person/group/visitor, guided schedule
   and Visitor Pass setup state, and pending confirmation actions.
 - Example: after "Did the gardener arrive today?", "How long did they stay?"
@@ -1167,6 +1262,22 @@ Telemetry and audit:
 - `DELETE /api/v1/telemetry/purge`
 - `GET /api/v1/telemetry/artifacts/{artifact_id}`
 
+Dependency updates:
+
+- `GET /api/v1/dependency-updates/packages`
+- `POST /api/v1/dependency-updates/sync`
+- `POST /api/v1/dependency-updates/packages/{dependency_id}/check`
+- `POST /api/v1/dependency-updates/packages/{dependency_id}/analyze`
+- `POST /api/v1/dependency-updates/packages/{dependency_id}/apply`
+- `GET /api/v1/dependency-updates/packages/{dependency_id}/backups`
+- `GET /api/v1/dependency-updates/backups`
+- `POST /api/v1/dependency-updates/backups/{backup_id}/restore`
+- `GET /api/v1/dependency-updates/jobs/{job_id}`
+- `GET /api/v1/dependency-updates/storage/status`
+- `POST /api/v1/dependency-updates/storage/validate`
+- `POST /api/v1/dependency-updates/storage/config`
+- `WS /api/v1/dependency-updates/jobs/{job_id}/ws`
+
 Webhooks:
 
 - `POST /api/v1/webhooks/ubiquiti/lpr`
@@ -1231,8 +1342,10 @@ AI:
 
 Frontend Nginx proxies these under the same host at `:8089`.
 
-Legacy non-versioned API aliases have been removed. New routes and clients must
-use `/api/v1/...` so OpenAPI and runtime routing have a single source of truth.
+Legacy non-versioned API aliases have been removed; the latest route audit found
+no active `/api/...` aliases outside versioned `/api/v1/...` paths. New routes
+and clients must use `/api/v1/...` so OpenAPI and runtime routing have a single
+source of truth.
 
 ## Frontend Architecture
 
@@ -1274,7 +1387,10 @@ Current frontend views:
 Current frontend integration/editor surfaces:
 
 - API & Integrations manages Home Assistant, iCloud Calendar, Apprise, DVLA,
-  UniFi Protect, and LLM providers.
+  UniFi Protect, LLM providers, and the system-wide dependency update hub.
+- API & Integrations has top-level `Integrations` and `Updates` tabs. The
+  `Updates` tab lists enrolled dependencies, LLM analysis, backup history,
+  storage status/configuration, and live update/restore job output.
 - The iCloud Calendar tile opens `ICloudCalendarModal` behavior inside the
   existing integration modal shell. It contains the overview/status header,
   connected account list, inline Add Account stepper, six-digit code step,
@@ -1309,7 +1425,8 @@ Current frontend integration/editor surfaces:
   minute windows. Used pass cards must show captured vehicle summary such as
   `Silver Ford - PE70DHX` plus duration/departure data when available.
 - Logs includes realtime event logs plus Telemetry & Audit tabs for LPR, gate
-  events, maintenance, AI audit, CRUD, API, integrations, and access traces.
+  events, maintenance, AI audit, CRUD, API, integrations, Updates & Rollbacks,
+  and access traces.
 
 Current realtime behavior:
 
@@ -1318,6 +1435,10 @@ Current realtime behavior:
 - Global Alfred chat uses `WebSocket /api/v1/ai/chat/ws`, streams thinking,
   tool batch/status, confirmation-required, response-delta, response, and error
   events, and supports attachment upload/download through HTTP endpoints.
+- Dependency update job panels keep one managed
+  `WS /api/v1/dependency-updates/jobs/{job_id}/ws` connection per active job,
+  close it on job completion, job change, or component unmount, and retain only
+  bounded/truncated job events in React state.
 - In-app notification rules publish realtime toast payloads; the header alert
   tray tracks unresolved alert-style anomalies.
 - WebSockets authenticate with the same HTTP-only session cookie or an explicit
@@ -1603,6 +1724,8 @@ Completed:
   automated asymmetric-window Visitor Pass creation.
 - Alfred 2.0 providers, intent routing, tools, memory, file attachments,
   generated reports, confirmation cards, audit logging, and WebSocket streaming.
+- ReAct-only chat cleanup with no legacy naive chat route aliases; the
+  `chat_sessions` and `chat_messages` tables remain active memory stores.
 - Telemetry & Audit: traces, spans, audit logs, sanitized payloads, artifacts,
   API/webhook middleware, gate malfunction traces, and dashboard review UI.
 - Maintenance Mode and gate malfunction detection/recovery with persistent
@@ -1617,6 +1740,12 @@ Completed:
 - Directory Management: CRUD for people, vehicles, groups, reusable schedules,
   profile/vehicle photos, notes/descriptions, garage-door assignment, mobile
   app notify mapping, schedule overrides, and saved-vehicle DVLA refresh.
+- Dependency Update stock check: direct `packaging` dependency, clean Linux
+  frontend verification requirement, backup validation before restore, and
+  bounded job WebSocket handling.
+- Visitor Pass index coverage for open departure lookups and iCloud Calendar
+  active/scheduled reconciliation.
+- UniFi Protect shutdown cleanup for WebSocket/session/aiohttp resources.
 
 Still pending or intentionally incomplete:
 

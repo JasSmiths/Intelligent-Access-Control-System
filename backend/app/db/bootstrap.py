@@ -219,6 +219,28 @@ async def init_database() -> None:
             await conn.execute(
                 text(
                     """
+                    CREATE INDEX IF NOT EXISTS ix_visitor_passes_open_departure_lookup
+                    ON visitor_passes (number_plate, arrival_time DESC, created_at DESC)
+                    WHERE status = 'USED'
+                        AND departure_time IS NULL
+                        AND number_plate IS NOT NULL
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_visitor_passes_calendar_active_source
+                    ON visitor_passes (creation_source, source_reference, status)
+                    WHERE creation_source = 'icloud_calendar'
+                        AND status IN ('SCHEDULED', 'ACTIVE')
+                        AND source_reference IS NOT NULL
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS ux_visitor_passes_source_reference
                     ON visitor_passes (source_reference)
                     WHERE source_reference IS NOT NULL

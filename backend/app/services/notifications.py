@@ -910,11 +910,18 @@ class NotificationService:
             raise NotificationDeliveryError("No Home Assistant media player is configured or selected.")
         announcer = HomeAssistantTtsAnnouncer()
         spoken_message = apply_vehicle_tts_phonetics(str(action.get("message") or ""))
+        failures: list[str] = []
+        delivered_any = False
         for target in targets:
             try:
                 await announcer.announce(AnnouncementTarget(target), spoken_message)
+                delivered_any = True
             except Exception as exc:
-                raise NotificationDeliveryError(str(exc)) from exc
+                failures.append(f"{target}: {exc}")
+        if failures:
+            raise NotificationDeliveryError("; ".join(failures))
+        if not delivered_any:
+            raise NotificationDeliveryError("No Home Assistant media player endpoints were delivered.")
 
     def _select_apprise_urls(self, configured: str, action: dict[str, Any]) -> list[str]:
         urls = [normalize_apprise_url(url) for url in split_apprise_urls(configured)]

@@ -13,6 +13,7 @@ from app.db.session import AsyncSessionLocal
 from app.services.auth import authenticate_request, count_users
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
+from app.services.dependency_updates import get_dependency_update_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.maintenance import is_maintenance_mode_active
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     )
     await init_database()
     await event_bus.start()
+    await get_dependency_update_service().start()
     await get_notification_service().start()
     await get_visitor_pass_service().start()
     await get_access_event_service().start()
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await get_dependency_update_service().stop()
         await get_unifi_protect_service().stop()
         await get_gate_malfunction_service().stop()
         await get_home_assistant_service().stop()
@@ -75,6 +78,7 @@ app = FastAPI(
         {"name": "Authentication", "description": "First-run setup, login, logout, and current-user preferences."},
         {"name": "AI Agents", "description": "Provider discovery, agent tooling, chat, uploads, and chat realtime."},
         {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
+        {"name": "Dependency Updates", "description": "System-wide dependency enrollment, analysis, backups, update jobs, and rollback."},
         {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
         {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
         {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},

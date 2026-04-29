@@ -32,6 +32,7 @@ MAX_AGENT_TOOL_ITERATIONS = 5
 RELEVANT_HISTORY_SCAN_LIMIT = 24
 RECENT_HISTORY_LIMIT = 6
 MAX_RELEVANT_HISTORY_MESSAGES = 8
+DEFAULT_AGENT_TOOL_TIMEOUT_SECONDS = 45.0
 
 DEFAULT_AGENT_TOOL_NAMES = (
     "query_presence",
@@ -1407,18 +1408,13 @@ class ChatService:
         *,
         actor_context: dict[str, Any] | None = None,
     ) -> list[ChatMessageInput]:
-        try:
-            return await self._build_messages(
-                session_id,
-                tool_results,
-                selected_tools,
-                route=route,
-                actor_context=actor_context,
-            )
-        except TypeError as exc:
-            if "route" not in str(exc) and "actor_context" not in str(exc):
-                raise
-            return await self._build_messages(session_id, tool_results, selected_tools)
+        return await self._build_messages(
+            session_id,
+            tool_results,
+            selected_tools,
+            route=route,
+            actor_context=actor_context,
+        )
 
     async def _handle_guided_visitor_pass_flow(
         self,
@@ -2960,6 +2956,8 @@ class ChatService:
         tool_by_name = {tool.name: tool for tool in selected_tools}
         batch_id = f"batch-{uuid.uuid4().hex[:10]}"
         parallel = len(calls) > 1 and all(tool_by_name.get(call.name) and tool_by_name[call.name].read_only for call in calls)
+        runtime = await get_runtime_config()
+        tool_timeout = max(0.1, float(getattr(runtime, "llm_timeout_seconds", DEFAULT_AGENT_TOOL_TIMEOUT_SECONDS) or DEFAULT_AGENT_TOOL_TIMEOUT_SECONDS))
         tools_payload = [
             {
                 "call_id": call.id,
@@ -2983,21 +2981,35 @@ class ChatService:
 
         async def run(call: ToolCall) -> dict[str, Any]:
             try:
-                try:
-                    return await self._execute_tool_call(
+                return await asyncio.wait_for(
+                    self._execute_tool_call(
                         session_id,
                         call,
                         status_callback=status_callback,
                         batch_id=batch_id,
+                    ),
+                    timeout=tool_timeout,
+                )
+            except asyncio.TimeoutError:
+                message = f"Timed out after {tool_timeout:g} seconds."
+                logger.warning("agent_tool_timed_out", extra={"tool": call.name, "timeout_seconds": tool_timeout})
+                if status_callback:
+                    await status_callback(
+                        {
+                            "batch_id": batch_id,
+                            "call_id": call.id,
+                            "tool": call.name,
+                            "label": self._tool_status(call.name).get("label"),
+                            "status": "failed",
+                            "error": message,
+                        }
                     )
-                except TypeError as exc:
-                    if "batch_id" not in str(exc):
-                        raise
-                    return await self._execute_tool_call(
-                        session_id,
-                        call,
-                        status_callback=status_callback,
-                    )
+                return {
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "output": {"error": message},
+                }
             except Exception as exc:
                 logger.warning("agent_tool_failed", extra={"tool": call.name, "error": str(exc)[:240]})
                 if status_callback:

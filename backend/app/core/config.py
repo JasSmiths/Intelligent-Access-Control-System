@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("/app/data")
     log_dir: Path = Path("/app/logs")
+    workspace_dir: Path = Path("/workspace")
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])

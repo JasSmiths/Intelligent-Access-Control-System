@@ -726,6 +726,33 @@ async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch
     assert action["message"] == original_message
 
 
+async def test_voice_action_attempts_all_targets_before_reporting_failures(monkeypatch) -> None:
+    calls = []
+
+    class FakeTtsAnnouncer:
+        async def announce(self, target, message: str) -> None:
+            calls.append((target.entity_id, message))
+            if target.entity_id == "media_player.offline":
+                raise RuntimeError("speaker offline")
+
+    service = NotificationService()
+
+    async def fake_select_voice_targets(_config, _action):
+        return ["media_player.offline", "media_player.kitchen"]
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+
+    with pytest.raises(NotificationDeliveryError) as excinfo:
+        await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
+
+    assert calls == [
+        ("media_player.offline", "bee em double you arrived"),
+        ("media_player.kitchen", "bee em double you arrived"),
+    ]
+    assert "media_player.offline: speaker offline" in str(excinfo.value)
+
+
 async def test_process_context_with_result_reports_delivery_status(monkeypatch) -> None:
     async def fake_runtime_config():
         return SimpleNamespace()

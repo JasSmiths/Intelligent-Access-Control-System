@@ -7,8 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai import tools as ai_tools
-from app.ai.providers import ChatMessageInput, LlmResult
+from app.ai.providers import ChatMessageInput, LlmResult, ToolCall
 from app.services.chat import ChatService, IntentRoute
+
+
+@pytest.fixture(autouse=True)
+def runtime_config_stub(monkeypatch):
+    async def fake_runtime_config():
+        return SimpleNamespace(llm_timeout_seconds=30)
+
+    monkeypatch.setattr("app.services.chat.get_runtime_config", fake_runtime_config)
 
 
 class ProtocolProvider:
@@ -94,7 +102,7 @@ async def test_provider_neutral_tool_protocol_runs_tools(monkeypatch) -> None:
     provider = ProtocolProvider()
     executed = []
 
-    async def fake_execute_tool_call(session_id, call, *, status_callback=None):
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
         executed.append(call)
         return {
             "call_id": call.id,
@@ -103,7 +111,7 @@ async def test_provider_neutral_tool_protocol_runs_tools(monkeypatch) -> None:
             "output": {"presence": [{"person": "Jason", "state": "present"}]},
         }
 
-    async def fake_build_messages(session_id, tool_results, selected_tools):
+    async def fake_build_messages(session_id, tool_results, selected_tools, route=None, actor_context=None):
         return [
             ChatMessageInput("system", "test"),
             ChatMessageInput("user", f"Tool results: {tool_results}"),
@@ -195,7 +203,7 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
     provider = CountingToolProvider()
     executed = []
 
-    async def fake_execute_tool_call(session_id, call, *, status_callback=None):
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
         executed.append(call)
         return {
             "call_id": call.id,
@@ -209,7 +217,7 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
 
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
-    async def fake_build_messages(session_id, tool_results, selected_tools, route=None):
+    async def fake_build_messages(session_id, tool_results, selected_tools, route=None, actor_context=None):
         return [ChatMessageInput("system", "test")]
 
     monkeypatch.setattr(service, "_build_messages", fake_build_messages)
@@ -384,6 +392,40 @@ async def test_react_loop_executes_read_tools_in_parallel(monkeypatch) -> None:
     assert abs(started[0] - started[1]) < 0.03
     assert elapsed < 0.09
     assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
+
+
+@pytest.mark.asyncio
+async def test_react_tool_batch_returns_timeout_result(monkeypatch) -> None:
+    service = ChatService()
+    statuses: list[dict] = []
+
+    async def fake_runtime_config():
+        return SimpleNamespace(llm_timeout_seconds=0.1)
+
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
+        await asyncio.sleep(0.2)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {"ok": True},
+        }
+
+    async def status_callback(status):
+        statuses.append(status)
+
+    monkeypatch.setattr("app.services.chat.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+
+    results = await service._execute_tool_batch(
+        uuid.uuid4(),
+        [ToolCall("slow-call", "query_presence", {})],
+        [service._tools["query_presence"]],
+        status_callback=status_callback,
+    )
+
+    assert results[0]["output"]["error"] == "Timed out after 0.1 seconds."
+    assert any(status.get("status") == "failed" and status.get("call_id") == "slow-call" for status in statuses)
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,21 @@ frontend Nginx service serves the React app and proxies `/api/*` plus WebSocket
 upgrades to the backend container. Use backend port `8088` only for API-only
 debugging.
 
+## Tests
+
+The backend image installs the project dev extras, including `pytest` and
+`pytest-asyncio`, so tests can be run from the live Compose container:
+
+```bash
+docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
+```
+
+For a focused test file:
+
+```bash
+docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+```
+
 ## Architecture Shape
 
 - `backend/app/core`: configuration, logging, lifecycle wiring.
