@@ -417,6 +417,7 @@ class LocalProvider:
         user_message = next((message.content for message in reversed(messages) if message.role == "user"), "")
         return LlmResult(
             text=(
+                "I'm Alfred: warm gatehouse brain, sensible clipboard, occasional dry remark. "
                 "I can help with presence, access events, anomalies, site rhythm summaries, "
                 f"and alert notifications. You asked: {user_message}"
             )
@@ -500,6 +501,17 @@ class LocalProvider:
                 "test_notification_workflow",
             }:
                 summaries.append(self._summarize_notification_tool(tool_name, output))
+            elif tool_name in {
+                "query_automation_catalog",
+                "query_automations",
+                "get_automation",
+                "create_automation",
+                "edit_automation",
+                "delete_automation",
+                "enable_automation",
+                "disable_automation",
+            }:
+                summaries.append(self._summarize_automation_tool(tool_name, output))
             else:
                 summaries.append(f"{tool_name}: {json.dumps(output, default=str)}")
         return "\n".join(summaries)
@@ -509,7 +521,7 @@ class LocalProvider:
         if status == "unique" and isinstance(output.get("match"), dict):
             match = output["match"]
             label = match.get("display_name") or match.get("name") or match.get("registration_number")
-            return f"Resolved {output.get('query')} to {match.get('type')} {label}."
+            return f"Resolved {output.get('query')} to {match.get('type')} {label}. Neatly pinned to the board."
         if status == "ambiguous":
             matches = output.get("matches") if isinstance(output.get("matches"), list) else []
             labels = [
@@ -518,7 +530,7 @@ class LocalProvider:
                 if isinstance(match, dict)
             ]
             return f"That reference is ambiguous: {', '.join(labels)}."
-        return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity."
+        return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity. I will not guess; that way lies nonsense."
 
     def _summarize_telemetry_trace(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
@@ -532,7 +544,7 @@ class LocalProvider:
     def _summarize_events(self, output: dict[str, Any]) -> str:
         events = output.get("events", [])
         if not events:
-            return "I found no matching access events."
+            return "I found no matching access events. The logbook is politely blank."
         latest = events[0]
         person = latest.get("person") or latest.get("registration_number")
         decision = latest.get("decision")
@@ -544,7 +556,7 @@ class LocalProvider:
 
     def _summarize_access_diagnostic(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
-            return f"Access diagnostic: {output.get('error') or 'no matching event found'}"
+            return f"Access diagnostic: {output.get('error') or 'no matching event found'}. I checked the usual cupboards."
         event = output.get("event") if isinstance(output.get("event"), dict) else {}
         recognition = output.get("recognition") if isinstance(output.get("recognition"), dict) else {}
         gate = output.get("gate") if isinstance(output.get("gate"), dict) else {}
@@ -568,7 +580,7 @@ class LocalProvider:
     def _summarize_lpr_timing(self, output: dict[str, Any]) -> str:
         observations = output.get("observations") if isinstance(output.get("observations"), list) else []
         if not observations:
-            return "No recent raw LPR timing observations matched."
+            return "No recent raw LPR timing observations matched. The stopwatch drawer is empty."
         latest = observations[0]
         delay = latest.get("captured_to_received_ms")
         if delay is not None:
@@ -593,7 +605,7 @@ class LocalProvider:
     def _summarize_presence(self, output: dict[str, Any]) -> str:
         records = output.get("presence", [])
         if not records:
-            return "I found no matching presence records."
+            return "I found no matching presence records. Nobody is waving from the ledger."
         return "; ".join(f"{row['person']} is {row['state']}" for row in records)
 
     def _summarize_device_states(self, output: dict[str, Any]) -> str:
@@ -603,8 +615,8 @@ class LocalProvider:
         if not devices:
             target = output.get("target")
             if target:
-                return f"I found no configured device matching {target}."
-            return "I found no configured gate, door, or garage-door states."
+                return f"I found no configured device matching {target}. No labelled lever for that one, alas."
+            return "I found no configured gate, door, or garage-door states. The control panel is looking unusually minimalist."
         return "; ".join(
             f"{device.get('name') or device.get('entity_id')} is {device.get('state', 'unknown')}"
             for device in devices
@@ -617,12 +629,12 @@ class LocalProvider:
         if output.get("requires_confirmation"):
             device = output.get("device") if isinstance(output.get("device"), dict) else {}
             target = device.get("name") or output.get("target") or "that device"
-            return f"Please use the confirmation button before I {action} {target}."
+            return f"Please use the confirmation button before I {action} {target}. Safety first; cape later."
         device = output.get("device") if isinstance(output.get("device"), dict) else {}
         name = device.get("name") or output.get("target") or "the device"
         success = bool(output.get("opened") if action == "open" else output.get("closed"))
         if success:
-            return f"{'Opened' if action == 'open' else 'Closed'} {name}. This was logged as an Alfred agent action."
+            return f"{'Opened' if action == 'open' else 'Closed'} {name}. Logged, tidy, and pleasingly uneventful."
         return f"I could not {action} {name}: {output.get('detail') or output.get('error') or 'command failed'}"
 
     def _summarize_maintenance_tool(self, tool_name: str, output: dict[str, Any]) -> str:
@@ -643,19 +655,19 @@ class LocalProvider:
             duration = status.get("duration_label") or "less than a minute"
             actor = status.get("enabled_by") or "System"
             return f"Maintenance Mode is enabled by {actor}; active for {duration}."
-        return "Maintenance Mode is disabled. Automated actions are available."
+        return "Maintenance Mode is disabled. Automated actions are available; the machinery may proceed with dignity."
 
     def _summarize_anomalies(self, output: dict[str, Any]) -> str:
         anomalies = output.get("anomalies", [])
         if not anomalies:
-            return "There are no matching anomalies."
+            return "There are no matching anomalies. A rare case of nothing being exactly what we wanted."
         return "; ".join(
             f"{row['severity']} {row['type']}: {row['message']}" for row in anomalies[:5]
         )
 
     def _summarize_duration(self, output: dict[str, Any]) -> str:
         if not output.get("matched_events"):
-            return "I found no matching visit events to calculate a duration."
+            return "I found no matching visit events to calculate a duration. No timestamps, no stopwatch theatrics."
         return f"The matched visit duration is {output.get('duration_human')}."
 
     def _summarize_rhythm(self, output: dict[str, Any]) -> str:
@@ -675,7 +687,7 @@ class LocalProvider:
         if top:
             lines.append(
                 f"Top Charts leader: {top.get('display_name') or top.get('registration_number')} "
-                f"with {top.get('read_count')} Detectiions."
+                f"with {top.get('read_count')} detections."
             )
         if known:
             vip = "; ".join(
@@ -693,7 +705,7 @@ class LocalProvider:
             )
             if mystery:
                 lines.append(f"Mystery Guests: {mystery}.")
-        return " ".join(lines) if lines else "I found no leaderboard entries yet."
+        return " ".join(lines) if lines else "I found no leaderboard entries yet. The podium is spotless."
 
     def _summarize_dvla_vehicle(self, output: dict[str, Any]) -> str:
         if output.get("error"):
@@ -724,7 +736,7 @@ class LocalProvider:
         lines = [f"{label}: {value}" for label, value in details if value not in {None, ""}]
         if not lines:
             return "DVLA returned a vehicle record, but it did not include displayable details."
-        return "DVLA vehicle details:\n" + "\n".join(f"- {line}" for line in lines)
+        return "DVLA vehicle details, freshly polished:\n" + "\n".join(f"- {line}" for line in lines)
 
     def _summarize_camera_analysis(self, output: dict[str, Any]) -> str:
         if output.get("error"):
@@ -739,7 +751,7 @@ class LocalProvider:
             return f"Attachment analysis for {filename}: {output.get('analysis')}"
         text = str(output.get("text") or "").strip()
         if not text:
-            return f"I read {filename}, but found no text to summarize."
+            return f"I read {filename}, but found no text to summarize. A very quiet document."
         preview = text[:800].rstrip()
         return f"I read {filename}. Content preview:\n{preview}"
 
@@ -748,12 +760,12 @@ class LocalProvider:
             return f"File generation failed: {output.get('error')}"
         attachment = output.get("attachment") if isinstance(output.get("attachment"), dict) else {}
         filename = attachment.get("filename") or "the file"
-        return f"I generated {filename} and attached it here."
+        return f"I generated {filename} and attached it here. Paperwork, but make it useful."
 
     def _summarize_camera_attachment(self, output: dict[str, Any]) -> str:
         if output.get("error"):
             return f"Camera snapshot failed: {output.get('error')}"
-        return "I fetched the latest camera snapshot and attached it here."
+        return "I fetched the latest camera snapshot and attached it here. Fresh from the lens."
 
     def _summarize_schedule_tool(self, tool_name: str, output: dict[str, Any]) -> str:
         if output.get("requires_details"):
@@ -769,24 +781,24 @@ class LocalProvider:
 
         if tool_name == "query_schedules":
             count = output.get("count", 0)
-            return f"I found {count} schedule{'s' if count != 1 else ''}."
+            return f"I found {count} schedule{'s' if count != 1 else ''}. The calendar cabinet has spoken."
         if tool_name == "get_schedule":
             return f"{name}: {summary or 'schedule details returned'}."
         if tool_name == "create_schedule":
             if output.get("created"):
-                return f"Created {name} with {summary or 'the requested allowed time'}."
+                return f"Created {name} with {summary or 'the requested allowed time'}. Calendar tucked in neatly."
             return str(output.get("detail") or "I did not create the schedule.")
         if tool_name == "update_schedule":
             if output.get("updated"):
-                return f"Updated {name}."
+                return f"Updated {name}. Calendar tidied."
             return "I did not update the schedule."
         if tool_name == "delete_schedule":
             if output.get("deleted"):
-                return f"Deleted {name}."
+                return f"Deleted {name}. Calendar shelf cleared."
             return str(output.get("detail") or "I did not delete the schedule.")
         if tool_name == "assign_schedule_to_entity":
             if output.get("assigned"):
-                return f"Assigned {name}."
+                return f"Assigned {name}. Schedule paperwork clipped into place."
             return "I did not assign the schedule."
         if tool_name == "verify_schedule_access":
             return str(output.get("reason") or "Schedule access verification completed.")
@@ -821,7 +833,7 @@ class LocalProvider:
         if tool_name == "query_notification_workflows":
             workflows = output.get("workflows", [])
             if not workflows:
-                return "I found no notification workflows."
+                return "I found no notification workflows. The notification desk is pristine."
             names = ", ".join(str(workflow.get("name")) for workflow in workflows[:5] if isinstance(workflow, dict))
             return f"I found {output.get('count', len(workflows))} notification workflow(s): {names}."
 
@@ -832,7 +844,7 @@ class LocalProvider:
                 return f"{name} is a notification workflow for {workflow.get('trigger_event') or 'the selected trigger'}."
             return "I could not find that notification workflow."
         if tool_name == "create_notification_workflow":
-            return f"Created notification workflow {name}." if output.get("created") else str(output.get("detail") or "I did not create the notification workflow.")
+            return f"Created notification workflow {name}. Neatly filed." if output.get("created") else str(output.get("detail") or "I did not create the notification workflow.")
         if tool_name == "update_notification_workflow":
             return f"Updated notification workflow {name}." if output.get("updated") else str(output.get("detail") or "I did not update the notification workflow.")
         if tool_name == "delete_notification_workflow":
@@ -842,8 +854,37 @@ class LocalProvider:
             action_count = len(preview.get("actions", [])) if isinstance(preview.get("actions"), list) else 0
             return f"Previewed the notification workflow with {action_count} action(s)."
         if tool_name == "test_notification_workflow":
-            return "Sent the notification workflow test." if output.get("sent") else str(output.get("detail") or "I did not send the notification workflow test.")
+            return "Sent the notification workflow test. Tiny paper plane launched." if output.get("sent") else str(output.get("detail") or "I did not send the notification workflow test.")
         return "Notification workflow action completed."
+
+    def _summarize_automation_tool(self, tool_name: str, output: dict[str, Any]) -> str:
+        if output.get("requires_confirmation"):
+            return str(output.get("detail") or "Please confirm before I change that automation.")
+        if output.get("error"):
+            return f"Automation action failed: {output.get('error')}"
+        if tool_name == "query_automation_catalog":
+            return "Automation options are available for time, vehicle, visitor pass, maintenance, Alfred, and webhook triggers."
+        if tool_name == "query_automations":
+            automations = output.get("automations", [])
+            if not automations:
+                return "I found no automation rules."
+            names = ", ".join(str(item.get("name")) for item in automations[:5] if isinstance(item, dict))
+            return f"I found {output.get('count', len(automations))} automation rule(s): {names}."
+        automation = output.get("automation") if isinstance(output.get("automation"), dict) else {}
+        name = automation.get("name") or output.get("automation_name") or "automation"
+        if tool_name == "get_automation":
+            return f"{name} is an automation rule." if output.get("found") else "I could not find that automation."
+        if tool_name == "create_automation":
+            return f"Created automation {name}." if output.get("created") else str(output.get("detail") or "I did not create the automation.")
+        if tool_name == "edit_automation":
+            return f"Updated automation {name}." if output.get("updated") else str(output.get("detail") or "I did not update the automation.")
+        if tool_name == "delete_automation":
+            return f"Deleted automation {name}." if output.get("deleted") else str(output.get("detail") or "I did not delete the automation.")
+        if tool_name == "enable_automation":
+            return f"Enabled automation {name}." if output.get("updated") else str(output.get("detail") or "I did not enable the automation.")
+        if tool_name == "disable_automation":
+            return f"Disabled automation {name}." if output.get("updated") else str(output.get("detail") or "I did not disable the automation.")
+        return "Automation action completed."
 
 
 def _format_engine_capacity(value: Any) -> str | None:

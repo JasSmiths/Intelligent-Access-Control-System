@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -46,6 +47,7 @@ ICLOUD_CALENDAR_SOURCE = "icloud_calendar"
 ICLOUD_OPEN_GATE_MARKER = "Open Gate"
 ICLOUD_SYNC_LOOKAHEAD_DAYS = 14
 ICLOUD_AUTH_HANDSHAKE_TTL_SECONDS = 10 * 60
+ICLOUD_VISITOR_NAME_MAX_CHARS = 160
 
 
 class ICloudCalendarError(ValueError):
@@ -62,6 +64,12 @@ class PendingICloudAuth:
     def expired(self, now: datetime | None = None) -> bool:
         checked = now or datetime.now(tz=UTC)
         return (checked - self.created_at).total_seconds() > ICLOUD_AUTH_HANDSHAKE_TTL_SECONDS
+
+
+@dataclass(frozen=True)
+class CalendarVisitorName:
+    visitor_name: str
+    source: str
 
 
 class ICloudCalendarService:
@@ -264,7 +272,11 @@ class ICloudCalendarService:
                     await failure_session.commit()
                 raise
 
+        async with AsyncSessionLocal() as session:
+            accounts = await self.list_accounts(session)
+            accounts_payload = [serialize_icloud_account(account) for account in accounts]
         await event_bus.publish("icloud_calendar.sync_completed", {"sync": result})
+        await event_bus.publish("icloud_calendar.accounts_changed", {"accounts": accounts_payload})
         for event_type, payload in visitor_events:
             await event_bus.publish(event_type, payload)
         return result
@@ -402,11 +414,17 @@ class ICloudCalendarService:
             .limit(1)
         )
         valid_from, valid_until = visitor_window_for_event(event)
-        metadata = source_metadata_for_event(account, event)
+        extracted_name = await calendar_visitor_name_for_event(event)
+        metadata = source_metadata_for_event(
+            account,
+            event,
+            visitor_name=extracted_name.visitor_name,
+            visitor_name_source=extracted_name.source,
+        )
         if existing is None:
             visitor_pass = await visitor_service.create_pass(
                 session,
-                visitor_name=event.title,
+                visitor_name=extracted_name.visitor_name,
                 expected_time=event.starts_at,
                 window_minutes=DEFAULT_WINDOW_MINUTES,
                 valid_from=valid_from,
@@ -430,7 +448,7 @@ class ICloudCalendarService:
         await visitor_service.update_pass(
             session,
             existing,
-            visitor_name=event.title,
+            visitor_name=extracted_name.visitor_name,
             expected_time=event.starts_at,
             window_minutes=DEFAULT_WINDOW_MINUTES,
             valid_from=valid_from,
@@ -624,8 +642,85 @@ def source_reference_for_event(account_id: uuid.UUID | str, event: ICloudCalenda
     return f"icloud:{account_id}:{event.calendar_id}:{event.event_id}"[:255]
 
 
-def source_metadata_for_event(account: ICloudCalendarAccount, event: ICloudCalendarEvent) -> dict[str, Any]:
-    return {
+async def calendar_visitor_name_for_event(event: ICloudCalendarEvent) -> CalendarVisitorName:
+    fallback = fallback_visitor_name_from_calendar_title(event.title)
+    try:
+        config = await get_runtime_config()
+        provider_name = _visitor_name_provider_name(config)
+        if not provider_name:
+            return CalendarVisitorName(visitor_name=fallback, source="fallback")
+        provider = get_llm_provider(provider_name)
+        result = await provider.complete(
+            [
+                ChatMessageInput(
+                    role="system",
+                    content=(
+                        "Extract the visitor or person name from an iCloud Calendar event title for a gate "
+                        "visitor pass. Return only JSON in this shape: {\"visitor_name\":\"Name\"}. "
+                        "Remove appointment, clinic, reminder, meeting, or location prefixes. If no person "
+                        "is named, return the shortest useful visitor label from the title."
+                    ),
+                ),
+                ChatMessageInput(
+                    role="user",
+                    content=f"Calendar event title: {event.title!r}",
+                ),
+            ]
+        )
+        visitor_name = _clean_calendar_visitor_name(_visitor_name_from_llm_text(result.text))
+        if visitor_name:
+            return CalendarVisitorName(visitor_name=visitor_name, source="llm")
+    except ProviderNotConfiguredError:
+        logger.info("icloud_calendar_visitor_name_provider_not_configured")
+    except Exception as exc:
+        logger.warning(
+            "icloud_calendar_visitor_name_extraction_failed",
+            extra={"event_id": event.event_id, "calendar_id": event.calendar_id, "error": str(exc)},
+        )
+    return CalendarVisitorName(visitor_name=fallback, source="fallback")
+
+
+def fallback_visitor_name_from_calendar_title(title: str) -> str:
+    clean_title = _clean_calendar_visitor_name(title)
+    if not clean_title:
+        return "Calendar Visitor"
+
+    separator_patterns = (
+        r":",
+        r"\s+-\s+",
+        r"\s+[\u2013\u2014]\s+",
+        r"\s+\|\s+",
+        r"\s+/\s+",
+    )
+    for pattern in separator_patterns:
+        parts = [_clean_calendar_visitor_name(part) for part in re.split(pattern, clean_title) if part.strip()]
+        if len(parts) < 2:
+            continue
+        candidate = parts[-1]
+        if _looks_like_calendar_visitor_name(candidate):
+            return candidate
+
+    for pattern in (
+        r"\b(?:for|with|visitor)\s+(.+)$",
+        r"\b(?:appointment|meeting|clinic)\s+(.+)$",
+    ):
+        match = re.search(pattern, clean_title, flags=re.IGNORECASE)
+        if match:
+            candidate = _clean_calendar_visitor_name(match.group(1))
+            if _looks_like_calendar_visitor_name(candidate):
+                return candidate
+
+    return clean_title[:ICLOUD_VISITOR_NAME_MAX_CHARS]
+
+
+def source_metadata_for_event(
+    account: ICloudCalendarAccount,
+    event: ICloudCalendarEvent,
+    *,
+    visitor_name: str | None = None,
+    visitor_name_source: str | None = None,
+) -> dict[str, Any]:
+    metadata = {
         "account_id": str(account.id),
         "apple_id": account.apple_id,
         "calendar_id": event.calendar_id,
@@ -635,6 +730,11 @@ def source_metadata_for_event(account: ICloudCalendarAccount, event: ICloudCalen
         "event_end": event.ends_at.isoformat(),
         "marker": ICLOUD_OPEN_GATE_MARKER,
     }
+    if visitor_name:
+        metadata["visitor_name"] = visitor_name
+    if visitor_name_source:
+        metadata["visitor_name_source"] = visitor_name_source
+    return metadata
 
 
 def calendar_pass_can_be_reconciled(visitor_pass: VisitorPass) -> bool:
@@ -759,6 +859,63 @@ def _clean_apple_id(value: str) -> str:
 def _clean_source(value: str) -> str:
     source = str(value or "ui").strip().lower().replace(" ", "_")
     return source[:80] or "ui"
+
+
+def _visitor_name_provider_name(config: Any) -> str | None:
+    provider_name = str(getattr(config, "llm_provider", "") or "").strip().lower()
+    if provider_name and provider_name != "local":
+        return provider_name
+    if getattr(config, "openai_api_key", ""):
+        return "openai"
+    if getattr(config, "gemini_api_key", ""):
+        return "gemini"
+    if getattr(config, "anthropic_api_key", ""):
+        return "claude"
+    return None
+
+
+def _visitor_name_from_llm_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    json_match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if json_match:
+        try:
+            payload = json.loads(json_match.group(0))
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("visitor_name", "name", "person"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return cleaned
+
+
+def _clean_calendar_visitor_name(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+    cleaned = cleaned.strip(" \t\r\n'\"`")
+    cleaned = re.sub(r"^(?:visitor_name|visitor name|person|name)\s*[:=-]\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bopen\s+gate\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" \t\r\n'\"`:-|/.,;\u2013\u2014")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if cleaned.lower() in {"unknown", "none", "n/a", "na", "not sure", "no name"}:
+        return ""
+    if len(cleaned) <= ICLOUD_VISITOR_NAME_MAX_CHARS:
+        return cleaned
+    return cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS].rsplit(" ", 1)[0].strip() or cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS]
+
+
+def _looks_like_calendar_visitor_name(value: str) -> bool:
+    cleaned = _clean_calendar_visitor_name(value)
+    if not cleaned:
+        return False
+    if cleaned.lower() in {"clinic", "appointment", "meeting", "reminder", "calendar", "visitor"}:
+        return False
+    return bool(re.search(r"[A-Za-z]", cleaned))
 
 
 def _coerce_uuid(value: uuid.UUID | str | None) -> uuid.UUID | None:

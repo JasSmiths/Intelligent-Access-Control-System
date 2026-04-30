@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { diff as jsonDiff } from "jsondiffpatch";
@@ -30,7 +31,6 @@ import {
   File as FileIcon,
   FileImage,
   FileText,
-  Filter,
   Gauge,
   GitBranch,
   HardHat,
@@ -61,6 +61,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Save,
+  Split,
   Sparkles,
   Sun,
   Terminal,
@@ -200,6 +201,9 @@ type AccessEvent = {
   occurred_at: string;
   timing_classification: string;
   anomaly_count: number;
+  visitor_pass_id: string | null;
+  visitor_name: string | null;
+  visitor_pass_mode: string | null;
 };
 
 type AlertSeverity = "info" | "warning" | "critical";
@@ -634,7 +638,38 @@ type AppriseUrlSummary = {
   preview: string;
 };
 
-type NotificationChannelId = "mobile" | "in_app" | "voice";
+type DiscordStatus = {
+  configured: boolean;
+  connected: boolean;
+  library_available: boolean;
+  guild_count: number;
+  channel_count: number;
+  default_notification_channel_id: string;
+  allow_direct_messages: boolean;
+  require_mention: boolean;
+  last_error: string | null;
+  ready_at: string | null;
+};
+
+type DiscordChannel = {
+  id: string;
+  guild_id: string;
+  name: string;
+  label: string;
+};
+
+type DiscordIdentity = {
+  id: string;
+  provider_user_id: string;
+  provider_display_name: string;
+  user_id: string | null;
+  user_label: string | null;
+  person_id: string | null;
+  person_label: string | null;
+  last_seen_at: string | null;
+};
+
+type NotificationChannelId = "mobile" | "in_app" | "voice" | "discord";
 type NotificationActionType = NotificationChannelId;
 type NotificationConditionType = "schedule" | "presence";
 type PresenceConditionMode = "no_one_home" | "someone_home" | "person_home";
@@ -717,6 +752,119 @@ type NotificationCatalogResponse = {
   variables: NotificationVariableGroup[];
   integrations: NotificationIntegration[];
   mock_context: Record<string, string>;
+};
+
+type NotificationStatusFilter = "all" | "active" | "inactive";
+
+type NotificationFilterCounts = Record<NotificationStatusFilter, number>;
+
+type NotificationRuleCategory = {
+  id: string;
+  label: string;
+  icon: React.ElementType;
+  rules: NotificationRule[];
+};
+
+type WorkflowRuleMenuState = {
+  id: string;
+  left: number;
+  top: number;
+};
+
+type NotificationConfigTooltipState = {
+  left: number;
+  placement: "top" | "bottom";
+  top: number;
+};
+
+type WorkflowRuleStatusFeedback = {
+  nonce: number;
+  ruleId: string;
+  status: "paused" | "resumed";
+};
+
+type AutomationNode = {
+  id: string;
+  type: string;
+  config: Record<string, unknown>;
+};
+
+type AutomationAction = AutomationNode & {
+  reason_template?: string;
+};
+
+type AutomationRule = {
+  id: string;
+  name: string;
+  description: string;
+  is_active: boolean;
+  triggers: AutomationNode[];
+  trigger_keys: string[];
+  conditions: AutomationNode[];
+  actions: AutomationAction[];
+  next_run_at?: string | null;
+  last_fired_at?: string | null;
+  run_count: number;
+  last_run_status?: string | null;
+  last_error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type AutomationCatalogItem = {
+  type: string;
+  label: string;
+  description?: string;
+  scopes?: string[];
+  integration_action?: boolean;
+  integration_provider?: string;
+  integration_provider_label?: string;
+  integration_action_key?: string;
+  default_config?: Record<string, unknown>;
+};
+
+type AutomationIntegrationCatalog = {
+  id: string;
+  label: string;
+  description?: string;
+  actions: AutomationCatalogItem[];
+};
+
+type AutomationCatalogGroup = {
+  id: string;
+  label: string;
+  triggers?: AutomationCatalogItem[];
+  conditions?: AutomationCatalogItem[];
+  actions?: AutomationCatalogItem[];
+  integrations?: AutomationIntegrationCatalog[];
+};
+
+type AutomationVariable = NotificationVariable & {
+  scope?: string;
+  trigger_types?: string[];
+};
+
+type AutomationVariableGroup = {
+  group: string;
+  scope?: string;
+  items: AutomationVariable[];
+};
+
+type AutomationCatalogResponse = {
+  triggers: AutomationCatalogGroup[];
+  conditions: AutomationCatalogGroup[];
+  actions: AutomationCatalogGroup[];
+  variables: AutomationVariableGroup[];
+  notification_rules: Array<{ id: string; name: string; trigger_event: string }>;
+  garage_doors: Array<{ entity_id: string; name: string; schedule_id?: string | null }>;
+  mock_context: Record<string, string>;
+};
+
+type AutomationRuleCategory = {
+  id: string;
+  label: string;
+  icon: React.ElementType;
+  rules: AutomationRule[];
 };
 
 type TwoPaneCategory = {
@@ -1153,6 +1301,7 @@ type ViewKey =
   | "settings"
   | "settings_general"
   | "settings_auth"
+  | "settings_automations"
   | "settings_notifications"
   | "settings_lpr"
   | "users";
@@ -1184,6 +1333,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
 const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
+  { key: "settings_automations", label: "Automations", icon: GitBranch },
   { key: "settings_notifications", label: "Notifications", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "users", label: "Users", icon: Users }
@@ -1205,6 +1355,7 @@ const viewPaths: Record<ViewKey, string> = {
   settings: "/settings",
   settings_general: "/settings/general",
   settings_auth: "/settings/auth-security",
+  settings_automations: "/settings/automations",
   settings_notifications: "/settings/notifications",
   settings_lpr: "/settings/lpr-tuning",
   users: "/settings/users"
@@ -1672,7 +1823,10 @@ function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
     source,
     occurred_at: occurredAt,
     timing_classification: timingClassification || "unknown",
-    anomaly_count: numberPayload(event.payload.anomaly_count)
+    anomaly_count: numberPayload(event.payload.anomaly_count),
+    visitor_pass_id: stringPayload(event.payload.visitor_pass_id) || null,
+    visitor_name: stringPayload(event.payload.visitor_name) || null,
+    visitor_pass_mode: stringPayload(event.payload.visitor_pass_mode) || null
   };
 }
 
@@ -2942,7 +3096,7 @@ function View(props: {
     case "reports":
       return <ReportsView events={props.events} presence={props.presence} />;
     case "integrations":
-      return <IntegrationsView schedules={props.schedules} status={props.integrationStatus} />;
+      return <IntegrationsView people={props.people} realtime={props.realtime} schedules={props.schedules} status={props.integrationStatus} />;
     case "logs":
       return <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
     case "settings_general":
@@ -2957,6 +3111,8 @@ function View(props: {
       );
     case "settings_auth":
       return <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} />;
+    case "settings_automations":
+      return <AutomationsView people={props.people} vehicles={props.vehicles} />;
     case "settings_notifications":
       return <NotificationsView currentUser={props.currentUser} people={props.people} schedules={props.schedules} />;
     case "settings_lpr":
@@ -3570,13 +3726,14 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
     const vehicle = vehiclesByRegistration.get(event.registration_number.toUpperCase());
     const owner = vehicle?.person_id ? peopleById.get(vehicle.person_id) : undefined;
     const ownerFirstName = owner?.first_name || vehicle?.owner?.split(" ")[0] || "";
+    const visitorName = visitorEventDisplayName(event);
     const isDenied = event.decision === "denied" || event.direction === "denied";
 
     return {
       id: event.id,
       time: formatTime(event.occurred_at),
-      label: ownerFirstName || "Unknown",
-      subtitle: `${event.registration_number}  •  LPR`,
+      label: visitorName || ownerFirstName || "Unknown",
+      subtitle: `${event.registration_number}  •  ${event.visitor_pass_id ? "Visitor Pass" : "LPR"}`,
       status: event.direction === "exit" ? "OUT" : "IN",
       statusTone: isDenied ? "amber" : event.direction === "entry" ? "green" : "gray",
       statusIcon: isDenied ? Lock : undefined,
@@ -3585,6 +3742,13 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
       icon: event.direction === "exit" ? LogOut : isDenied ? AlertTriangle : Car
     };
   });
+}
+
+function visitorEventDisplayName(event: Pick<AccessEvent, "visitor_name">) {
+  const name = (event.visitor_name || "").trim();
+  if (!name) return "";
+  const parts = name.split(":").map((part) => part.trim()).filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 1] : name;
 }
 
 function EventStatusBadge({ event }: { event: DashboardEvent }) {
@@ -3733,8 +3897,10 @@ function EventTimeline({ events }: { events: AccessEvent[] }) {
         <div className="timeline-row" key={event.id}>
           <span className={`event-dot ${event.decision}`} />
           <div>
-            <strong>{event.registration_number}</strong>
-            <span>{event.direction} · {event.source}</span>
+            <strong>{visitorEventDisplayName(event) || event.registration_number}</strong>
+            <span>
+              {event.visitor_pass_id ? `${event.registration_number} · ${event.direction} · Visitor Pass` : `${event.direction} · ${event.source}`}
+            </span>
           </div>
           <Badge tone={event.decision === "granted" ? "green" : "red"}>{event.decision}</Badge>
           <time>{formatDate(event.occurred_at)}</time>
@@ -6535,7 +6701,9 @@ function mysteryGuestQuip(rank: number) {
 }
 
 function EventsView({ events, query }: { events: AccessEvent[]; query: string }) {
-  const filtered = events.filter((item) => matches(item.registration_number, query) || matches(item.source, query));
+  const filtered = events.filter(
+    (item) => matches(item.registration_number, query) || matches(item.source, query) || matches(item.visitor_name || "", query)
+  );
   return (
     <section className="view-stack">
       <Toolbar title="Timeline" count={filtered.length} icon={Clock3} />
@@ -6554,7 +6722,10 @@ function EventsView({ events, query }: { events: AccessEvent[]; query: string })
           <tbody>
             {filtered.map((event) => (
               <tr key={event.id}>
-                <td><strong>{event.registration_number}</strong></td>
+                <td>
+                  <strong>{event.registration_number}</strong>
+                  {event.visitor_name ? <span className="table-muted-line">{visitorEventDisplayName(event)}</span> : null}
+                </td>
                 <td>{event.direction}</td>
                 <td><Badge tone={event.decision === "granted" ? "green" : "red"}>{event.decision}</Badge></td>
                 <td>{Math.round(event.confidence * 100)}%</td>
@@ -6832,7 +7003,7 @@ function ReportsView({ events, presence }: { events: AccessEvent[]; presence: Pr
   );
 }
 
-function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status: IntegrationStatus | null }) {
+function IntegrationsView({ people, realtime, schedules, status }: { people: Person[]; realtime: RealtimeMessage[]; schedules: Schedule[]; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
   const [pageTab, setPageTab] = React.useState<IntegrationsPageTab>("integrations");
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
@@ -6848,10 +7019,16 @@ function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status
   const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
   const [icloudLoading, setIcloudLoading] = React.useState(false);
   const [icloudError, setIcloudError] = React.useState("");
+  const [discordStatus, setDiscordStatus] = React.useState<DiscordStatus | null>(null);
+  const [discordChannels, setDiscordChannels] = React.useState<DiscordChannel[]>([]);
+  const [discordIdentities, setDiscordIdentities] = React.useState<DiscordIdentity[]>([]);
+  const [discordLoading, setDiscordLoading] = React.useState(false);
+  const [discordError, setDiscordError] = React.useState("");
   const [dependencyPackages, setDependencyPackages] = React.useState<DependencyPackage[]>([]);
   const [dependencyStorage, setDependencyStorage] = React.useState<DependencyStorageStatus | null>(null);
   const [dependencyLoading, setDependencyLoading] = React.useState(false);
   const [dependencyError, setDependencyError] = React.useState("");
+  const processedIcloudRealtimeRef = React.useRef(new Set<string>());
   const loadProtect = React.useCallback(async (forceRefresh = false) => {
     setProtectLoading(true);
     setProtectError("");
@@ -6890,6 +7067,43 @@ function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status
       setIcloudLoading(false);
     }
   }, []);
+
+  React.useEffect(() => {
+    for (const message of realtime.slice(0, 20).reverse()) {
+      const key = `${message.type}-${message.created_at ?? ""}`;
+      if (processedIcloudRealtimeRef.current.has(key)) continue;
+      if (message.type !== "icloud_calendar.accounts_changed" && message.type !== "icloud_calendar.sync_completed") continue;
+      processedIcloudRealtimeRef.current.add(key);
+      if (message.type === "icloud_calendar.accounts_changed" && Array.isArray(message.payload.accounts)) {
+        setIcloudPayload((current) => ({ ...current, accounts: message.payload.accounts as ICloudCalendarAccount[] }));
+      }
+      if (message.type === "icloud_calendar.sync_completed" && isRecord(message.payload.sync)) {
+        const run = message.payload.sync as ICloudCalendarSyncRun;
+        setIcloudPayload((current) => ({
+          ...current,
+          recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5)
+        }));
+      }
+    }
+  }, [realtime]);
+  const loadDiscord = React.useCallback(async () => {
+    setDiscordLoading(true);
+    setDiscordError("");
+    try {
+      const [statusResult, channelResult, identityResult] = await Promise.all([
+        api.get<DiscordStatus>("/api/v1/integrations/discord/status"),
+        api.get<{ channels: DiscordChannel[] }>("/api/v1/integrations/discord/channels"),
+        api.get<{ identities: DiscordIdentity[] }>("/api/v1/integrations/discord/identities")
+      ]);
+      setDiscordStatus(statusResult);
+      setDiscordChannels(channelResult.channels);
+      setDiscordIdentities(identityResult.identities);
+    } catch (error) {
+      setDiscordError(error instanceof Error ? error.message : "Unable to load Discord integration.");
+    } finally {
+      setDiscordLoading(false);
+    }
+  }, []);
   const loadDependencyUpdates = React.useCallback(async () => {
     setDependencyLoading(true);
     setDependencyError("");
@@ -6911,18 +7125,20 @@ function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status
     await loadProtect(true);
     await loadProtectUpdateStatus();
     await loadICloudCalendar();
+    await loadDiscord();
     await loadDependencyUpdates();
-  }, [loadDependencyUpdates, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, reload]);
+  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, reload]);
 
   React.useEffect(() => {
     loadProtect(false).catch(() => undefined);
     loadProtectUpdateStatus().catch(() => undefined);
     loadICloudCalendar().catch(() => undefined);
+    loadDiscord().catch(() => undefined);
     loadDependencyUpdates().catch(() => undefined);
-  }, [loadDependencyUpdates, loadICloudCalendar, loadProtect, loadProtectUpdateStatus]);
+  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus]);
 
   const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
-  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, dependencyPackages);
+  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, dependencyPackages);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -7026,10 +7242,17 @@ function IntegrationsView({ schedules, status }: { schedules: Schedule[]; status
           icloudError={icloudError}
           icloudLoading={icloudLoading}
           icloudPayload={icloudPayload}
+          discordChannels={discordChannels}
+          discordError={discordError}
+          discordIdentities={discordIdentities}
+          discordLoading={discordLoading}
+          discordStatus={discordStatus}
+          people={people}
           schedules={schedules}
           values={values}
           onClose={() => setActive(null)}
           onICloudChanged={loadICloudCalendar}
+          onDiscordChanged={loadDiscord}
           onProtectUpdateChanged={async () => {
             await loadProtectUpdateStatus();
             await loadProtect(true);
@@ -7181,6 +7404,7 @@ function dependenciesForIntegrationKey(key: string, dependencies: DependencyPack
     home_assistant: ["home assistant", "home-assistant"],
     icloud_calendar: ["icloud", "pyicloud"],
     apprise: ["apprise", "notifications"],
+    discord: ["discord", "discord.py", "discord messaging"],
     dvla: ["dvla"],
     unifi_protect: ["unifi", "uiprotect"],
     openai: ["openai"],
@@ -7207,6 +7431,8 @@ function integrationDefinitions(
   protectUpdateStatus: UnifiProtectUpdateStatus | null,
   icloudAccounts: ICloudCalendarAccount[],
   icloudError: string,
+  discordStatus: DiscordStatus | null,
+  discordError: string,
   dependencies: DependencyPackage[] = []
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
@@ -7277,6 +7503,34 @@ function integrationDefinitions(
         href: "https://github.com/caronc/apprise/wiki",
         help: "For Pushover use pover://USER_KEY@APP_TOKEN. The app also accepts pushover://USER_KEY/APP_TOKEN and normalizes it."
       }]
+    },
+    {
+      key: "discord",
+      title: "Discord",
+      description: "Bidirectional Alfred chat and Discord notification channels.",
+      category: "notifications",
+      icon: MessageCircle,
+      statusLabel: discordError
+        ? "Error"
+        : discordStatus?.connected
+          ? "Connected"
+          : discordStatus?.configured || values.discord_bot_token
+            ? "Configured"
+            : "Not Configured",
+      statusTone: discordError ? "red" : discordStatus?.connected ? "green" : discordStatus?.configured || values.discord_bot_token ? "blue" : "gray",
+      updateAvailable: hasDependencyUpdate("discord"),
+      notificationChannels: ["discord"],
+      fields: [
+        { key: "discord_bot_token", label: "Bot token", type: "password" },
+        { key: "discord_guild_allowlist", label: "Guild allowlist", type: "textarea", help: "One Discord server ID per line." },
+        { key: "discord_channel_allowlist", label: "Channel allowlist", type: "textarea", help: "One channel ID per line. Empty denies guild-channel messages." },
+        { key: "discord_user_allowlist", label: "User allowlist", type: "textarea", help: "One Discord user ID per line." },
+        { key: "discord_role_allowlist", label: "Role allowlist", type: "textarea", help: "One Discord role ID per line." },
+        { key: "discord_admin_role_ids", label: "Admin role IDs", type: "textarea", help: "Members with these roles can resolve Alfred confirmations." },
+        { key: "discord_default_notification_channel_id", label: "Default notification channel" },
+        { key: "discord_allow_direct_messages", label: "Allow direct messages", type: "select", options: ["false", "true"] },
+        { key: "discord_require_mention", label: "Require mention", type: "select", options: ["true", "false"] }
+      ]
     },
     {
       key: "dvla",
@@ -9076,8 +9330,15 @@ function IntegrationModal({
   icloudError,
   icloudLoading,
   icloudPayload,
+  discordChannels,
+  discordError,
+  discordIdentities,
+  discordLoading,
+  discordStatus,
+  people,
   schedules,
   onClose,
+  onDiscordChanged,
   onICloudChanged,
   onProtectUpdateChanged,
   onProtectRefresh,
@@ -9098,8 +9359,15 @@ function IntegrationModal({
   icloudError?: string;
   icloudLoading?: boolean;
   icloudPayload?: ICloudCalendarPayload;
+  discordChannels?: DiscordChannel[];
+  discordError?: string;
+  discordIdentities?: DiscordIdentity[];
+  discordLoading?: boolean;
+  discordStatus?: DiscordStatus | null;
+  people: Person[];
   schedules: Schedule[];
   onClose: () => void;
+  onDiscordChanged?: () => Promise<void>;
   onICloudChanged?: () => Promise<void>;
   onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
@@ -9121,6 +9389,7 @@ function IntegrationModal({
   const isApprise = definition.key === "apprise";
   const isUnifiProtect = definition.key === "unifi_protect";
   const isICloudCalendar = definition.key === "icloud_calendar";
+  const isDiscord = definition.key === "discord";
   const hasDependencyUpdates = dependencyPackages.length > 0;
 
   React.useEffect(() => {
@@ -9235,18 +9504,25 @@ function IntegrationModal({
       setFeedback({
         tone: "progress",
         title: "Sending test notification",
-        detail: "Delivering through Apprise.",
+        detail: `Delivering through ${isDiscord ? "Discord" : "Apprise"}.`,
         activeStep: 1
       });
-      await api.post("/api/v1/integrations/notifications/test", {
-        subject: "IACS test notification",
-        severity: "info",
-        message: "This is a test notification from API & Integrations."
-      });
+      if (isDiscord) {
+        await api.post("/api/v1/integrations/discord/test", {
+          channel_id: form.discord_default_notification_channel_id || undefined,
+          message: "This is a test Discord notification from API & Integrations."
+        });
+      } else {
+        await api.post("/api/v1/integrations/notifications/test", {
+          subject: "IACS test notification",
+          severity: "info",
+          message: "This is a test notification from API & Integrations."
+        });
+      }
       setFeedback({
         tone: "success",
         title: "Test notification sent",
-        detail: "Apprise accepted the notification request."
+        detail: `${isDiscord ? "Discord" : "Apprise"} accepted the notification request.`
       });
     } catch (error) {
       setFeedback({
@@ -9385,6 +9661,20 @@ function IntegrationModal({
               detail: error
             })}
           />
+        ) : isDiscord ? (
+          <DiscordSettingsFields
+            channels={discordChannels ?? []}
+            error={discordError ?? ""}
+            fields={definition.fields}
+            form={form}
+            identities={discordIdentities ?? []}
+            isConfiguredSecret={(key) => secretSettingKeys.has(key) && Boolean(values[key])}
+            loading={Boolean(discordLoading)}
+            onChange={update}
+            onIdentityChanged={onDiscordChanged ?? onSettingsChanged}
+            people={people}
+            status={discordStatus ?? null}
+          />
         ) : (
           <div className="settings-form-grid">
             {definition.fields.map((field) => (
@@ -9400,7 +9690,7 @@ function IntegrationModal({
         )}
         {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
         <div className="modal-actions">
-          {isApprise ? (
+          {isApprise || isDiscord ? (
             <button className="secondary-button" onClick={sendTestNotification} disabled={sendingTest} type="button">
               <Send size={15} /> {sendingTest ? "Sending..." : "Send Test"}
             </button>
@@ -9916,6 +10206,147 @@ function AppriseSettingsFields({
           <div className="apprise-empty">No notification URLs configured</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function DiscordSettingsFields({
+  channels,
+  error,
+  fields,
+  form,
+  identities,
+  isConfiguredSecret,
+  loading,
+  onChange,
+  onIdentityChanged,
+  people,
+  status
+}: {
+  channels: DiscordChannel[];
+  error: string;
+  fields: SettingFieldDefinition[];
+  form: Record<string, string>;
+  identities: DiscordIdentity[];
+  isConfiguredSecret: (key: string) => boolean;
+  loading: boolean;
+  onChange: (key: string, value: string) => void;
+  onIdentityChanged: () => Promise<void>;
+  people: Person[];
+  status: DiscordStatus | null;
+}) {
+  const [users, setUsers] = React.useState<UserAccount[]>([]);
+  const [savingIdentityId, setSavingIdentityId] = React.useState<string | null>(null);
+  const [identityError, setIdentityError] = React.useState("");
+
+  React.useEffect(() => {
+    api.get<UserAccount[]>("/api/v1/users").then(setUsers).catch(() => setUsers([]));
+  }, []);
+
+  const linkIdentity = async (identity: DiscordIdentity, field: "user_id" | "person_id", value: string) => {
+    setSavingIdentityId(identity.id);
+    setIdentityError("");
+    try {
+      await api.patch<DiscordIdentity>(`/api/v1/integrations/discord/identities/${identity.id}`, {
+        user_id: field === "user_id" ? value || null : identity.user_id,
+        person_id: field === "person_id" ? value || null : identity.person_id
+      });
+      await onIdentityChanged();
+    } catch (error) {
+      setIdentityError(error instanceof Error ? error.message : "Unable to update Discord identity.");
+    } finally {
+      setSavingIdentityId(null);
+    }
+  };
+
+  return (
+    <div className="discord-settings">
+      <section className="discord-overview">
+        <div className="discord-overview-main">
+          <span className="discord-overview-icon"><MessageCircle size={18} /></span>
+          <div>
+            <strong>{status?.connected ? "Bot connected" : status?.configured ? "Bot configured" : "Bot not configured"}</strong>
+            <span>{status?.connected ? `${status.guild_count} guilds, ${status.channel_count} channels` : status?.last_error || error || "Save a bot token and allowlists to start Alfred on Discord."}</span>
+          </div>
+        </div>
+        <Badge tone={error ? "red" : status?.connected ? "green" : status?.configured ? "blue" : "gray"}>
+          {error ? "Error" : status?.connected ? "Connected" : status?.configured ? "Configured" : "Not Configured"}
+        </Badge>
+      </section>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="settings-form-grid">
+        {fields.map((field) => (
+          <SettingField
+            field={field}
+            key={field.key}
+            isConfiguredSecret={isConfiguredSecret(field.key)}
+            value={form[field.key] ?? ""}
+            onChange={(value) => onChange(field.key, value)}
+          />
+        ))}
+      </div>
+
+      <section className="discord-section">
+        <div className="icloud-section-heading">
+          <strong>Notification Channels</strong>
+          <span>{loading ? "Refreshing" : `${channels.length} available`}</span>
+        </div>
+        <div className="discord-channel-list">
+          {channels.length ? channels.map((channel) => (
+            <button
+              className="discord-channel-row"
+              key={channel.id}
+              onClick={() => onChange("discord_default_notification_channel_id", channel.id)}
+              type="button"
+            >
+              <span><MessageCircle size={14} /> {channel.label || channel.name}</span>
+              <Badge tone={form.discord_default_notification_channel_id === channel.id ? "green" : "gray"}>
+                {form.discord_default_notification_channel_id === channel.id ? "Default" : channel.id}
+              </Badge>
+            </button>
+          )) : (
+            <div className="icloud-empty">No channels discovered yet. Save the bot token and allowlists first.</div>
+          )}
+        </div>
+      </section>
+
+      <section className="discord-section">
+        <div className="icloud-section-heading">
+          <strong>Discord Identities</strong>
+          <span>{loading ? "Refreshing" : `${identities.length} seen`}</span>
+        </div>
+        {identityError ? <div className="auth-error inline-error">{identityError}</div> : null}
+        <div className="discord-identity-list">
+          {identities.length ? identities.map((identity) => (
+            <article className="discord-identity-row" key={identity.id}>
+              <div>
+                <strong>{identity.provider_display_name}</strong>
+                <span>{identity.provider_user_id}{identity.last_seen_at ? ` · ${formatDate(identity.last_seen_at)}` : ""}</span>
+              </div>
+              <select
+                disabled={savingIdentityId === identity.id}
+                onChange={(event) => linkIdentity(identity, "user_id", event.target.value)}
+                value={identity.user_id ?? ""}
+              >
+                <option value="">No IACS user</option>
+                {users.map((user) => <option key={user.id} value={user.id}>{user.full_name || user.username}</option>)}
+              </select>
+              <select
+                disabled={savingIdentityId === identity.id}
+                onChange={(event) => linkIdentity(identity, "person_id", event.target.value)}
+                value={identity.person_id ?? ""}
+              >
+                <option value="">No person</option>
+                {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+              </select>
+            </article>
+          )) : (
+            <div className="icloud-empty">No Discord users have messaged Alfred yet</div>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -11208,6 +11639,12 @@ const notificationChannelMeta: Record<NotificationChannelId, {
     icon: Volume2,
     tone: "amber",
     description: "Home Assistant TTS announcement to media players."
+  },
+  discord: {
+    label: "Discord Notification",
+    icon: MessageCircle,
+    tone: "purple",
+    description: "Discord embed delivery to selected channels."
   }
 };
 
@@ -11269,7 +11706,19 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
       { value: "duplicate_entry", label: "Duplicate Entry", severity: "warning", description: "A person already marked home is detected entering again." },
       { value: "duplicate_exit", label: "Duplicate Exit", severity: "info", description: "A person already marked away is detected exiting again." },
       { value: "outside_schedule", label: "Outside Schedule", severity: "warning", description: "A known vehicle is denied by schedule or access policy." },
-      { value: "unauthorized_plate", label: "Unknown Vehicle Detected", severity: "warning", description: "An unknown or inactive vehicle plate is denied." }
+      { value: "unauthorized_plate", label: "Unknown Vehicle Detected", severity: "warning", description: "An unknown or inactive vehicle plate is denied." },
+      { value: "visitor_pass_vehicle_arrived", label: "Visitor Pass Vehicle Arrived", severity: "info", description: "A vehicle matched to a Visitor Pass has arrived on site." },
+      { value: "visitor_pass_vehicle_exited", label: "Visitor Pass Vehicle Exited", severity: "info", description: "A vehicle matched to a Visitor Pass has left the site." }
+    ]
+  },
+  {
+    id: "visitor_pass",
+    label: "Visitor Pass",
+    events: [
+      { value: "visitor_pass_cancelled", label: "Visitor Pass Cancelled", severity: "info", description: "A scheduled or active Visitor Pass was cancelled." },
+      { value: "visitor_pass_created", label: "Visitor Pass Created", severity: "info", description: "A new Visitor Pass was created." },
+      { value: "visitor_pass_expired", label: "Visitor Pass Expired", severity: "warning", description: "A Visitor Pass window elapsed without being used." },
+      { value: "visitor_pass_used", label: "Visitor Pass Used", severity: "info", description: "A Visitor Pass was matched to an arriving vehicle." }
     ]
   }
 ];
@@ -11305,6 +11754,15 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
       { name: "GateStatus", token: "@GateStatus", label: "Gate status" },
       { name: "Message", token: "@Message", label: "Message" },
       { name: "MaintenanceModeReason", token: "@MaintenanceModeReason", label: "Maintenance mode reason" }
+    ]
+  },
+  {
+    group: "Visitor Pass",
+    items: [
+      { name: "VisitorPassVehicleRegistration", token: "@VisitorPassVehicleRegistration", label: "Visitor Pass vehicle registration" },
+      { name: "VisitorPassVehicleMake", token: "@VisitorPassVehicleMake", label: "Visitor Pass vehicle make" },
+      { name: "VisitorPassVehicleColour", token: "@VisitorPassVehicleColour", label: "Visitor Pass vehicle colour" },
+      { name: "VisitorPassDurationOnSite", token: "@VisitorPassDurationOnSite", label: "Visitor Pass duration on site" }
     ]
   },
   {
@@ -11356,6 +11814,10 @@ const mockNotificationContext: Record<string, string> = {
   Subject: "Steph arrived at the gate",
   Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
   MaintenanceModeReason: "Enabled by Jason from UI",
+  VisitorPassVehicleRegistration: "PE70DHX",
+  VisitorPassVehicleMake: "Peugeot",
+  VisitorPassVehicleColour: "Silver",
+  VisitorPassDurationOnSite: "1h 25m",
   NewWinnerName: "Steph Smith",
   OvertakenName: "Jason Smith",
   ReadCount: "42"
@@ -11373,6 +11835,10 @@ const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<Notifi
   voice: {
     title_template: "",
     message_template: "@FirstName has arrived at the gate."
+  },
+  discord: {
+    title_template: "@FirstName arrived at the gate",
+    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
   }
 };
 
@@ -11389,6 +11855,1191 @@ const vehicleTtsPhoneticPattern = new RegExp(
   `\\b(${Object.keys(vehicleTtsPhonetics).sort((left, right) => right.length - left.length).join("|")})\\b`
 );
 
+function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Vehicle[] }) {
+  const [catalog, setCatalog] = React.useState<AutomationCatalogResponse | null>(null);
+  const [rules, setRules] = React.useState<AutomationRule[]>([]);
+  const [draft, setDraft] = React.useState<AutomationRule | null>(null);
+  const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [statusFilter, setStatusFilter] = React.useState<NotificationStatusFilter>("all");
+  const [togglingRuleIds, setTogglingRuleIds] = React.useState<Set<string>>(() => new Set());
+  const [ruleStatusFeedback, setRuleStatusFeedback] = React.useState<WorkflowRuleStatusFeedback | null>(null);
+  const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
+  const [dryRun, setDryRun] = React.useState<Record<string, unknown> | null>(null);
+  const [error, setError] = React.useState("");
+  const prefersReducedMotion = useReducedMotion();
+
+  const triggerByType = React.useMemo(() => new Map((catalog?.triggers ?? []).flatMap((group) => (group.triggers ?? []).map((item) => [item.type, item]))), [catalog]);
+  const conditionByType = React.useMemo(() => new Map((catalog?.conditions ?? []).flatMap((group) => (group.conditions ?? []).map((item) => [item.type, item]))), [catalog]);
+  const actionByType = React.useMemo(() => new Map((catalog?.actions ?? []).flatMap((group) => (group.actions ?? []).map((item) => [item.type, item]))), [catalog]);
+  const activeTriggerType = draft?.triggers[0]?.type ?? "";
+  const variables = React.useMemo(() => automationVariablesForTrigger(catalog?.variables ?? [], activeTriggerType), [catalog, activeTriggerType]);
+  const previewContext = catalog?.mock_context ?? {};
+  const renderedReasons = React.useMemo(() => (draft?.actions ?? []).map((action) => ({
+    ...action,
+    renderedReason: renderWorkflowTemplate(action.reason_template ?? "", previewContext)
+  })), [draft, previewContext]);
+  const filterCounts = React.useMemo<NotificationFilterCounts>(() => {
+    return rules.reduce<NotificationFilterCounts>((counts, rule) => {
+      counts.all += 1;
+      if (rule.is_active) counts.active += 1;
+      else counts.inactive += 1;
+      return counts;
+    }, { all: 0, active: 0, inactive: 0 });
+  }, [rules]);
+  const filteredRules = React.useMemo(() => {
+    if (statusFilter === "active") return rules.filter((rule) => rule.is_active);
+    if (statusFilter === "inactive") return rules.filter((rule) => !rule.is_active);
+    return rules;
+  }, [rules, statusFilter]);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [nextCatalog, nextRules] = await Promise.all([
+        api.get<AutomationCatalogResponse>("/api/v1/automations/catalog"),
+        api.get<AutomationRule[]>("/api/v1/automations/rules")
+      ]);
+      setCatalog(nextCatalog);
+      setRules(nextRules);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load automation rules.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load().catch(() => undefined);
+  }, [load]);
+
+  React.useEffect(() => {
+    if (!ruleStatusFeedback) return undefined;
+    const timeout = window.setTimeout(() => {
+      setRuleStatusFeedback((current) => current?.nonce === ruleStatusFeedback.nonce ? null : current);
+    }, 3600);
+    return () => window.clearTimeout(timeout);
+  }, [ruleStatusFeedback]);
+
+  const updateDraft = (updater: (rule: AutomationRule) => AutomationRule) => {
+    setDraft((current) => updater(current ?? createAutomationDraft()));
+    setDryRun(null);
+  };
+
+  const addAutomation = () => {
+    setDraft(createAutomationDraft());
+    setModal(null);
+    setFeedback(null);
+    setDryRun(null);
+  };
+
+  const save = async () => {
+    if (!draft) return;
+    if (!draft.triggers.length) {
+      setFeedback({ tone: "error", text: "Add at least one trigger before saving." });
+      return;
+    }
+    if (!draft.actions.length) {
+      setFeedback({ tone: "error", text: "Add at least one action before saving." });
+      return;
+    }
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const payload = automationRulePayload(draft);
+      const saved = draft.id.startsWith("draft-")
+        ? await api.post<AutomationRule>("/api/v1/automations/rules", payload)
+        : await api.patch<AutomationRule>(`/api/v1/automations/rules/${draft.id}`, payload);
+      await load();
+      setRules((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setDraft(null);
+      setModal(null);
+      setDryRun(null);
+      setFeedback({ tone: "success", text: "Automation saved. It will run when its trigger fires." });
+    } catch (saveError) {
+      setFeedback({ tone: "error", text: saveError instanceof Error ? saveError.message : "Unable to save automation." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteRule = async (rule: AutomationRule) => {
+    if (rule.id.startsWith("draft-")) {
+      setDraft(null);
+      return;
+    }
+    if (!window.confirm(`Delete ${rule.name}?`)) return;
+    try {
+      await api.delete(`/api/v1/automations/rules/${rule.id}`);
+      setDraft(null);
+      await load();
+      setFeedback({ tone: "success", text: "Automation deleted." });
+    } catch (deleteError) {
+      setFeedback({ tone: "error", text: deleteError instanceof Error ? deleteError.message : "Unable to delete automation." });
+    }
+  };
+
+  const toggleActive = async (rule: AutomationRule, isActive: boolean) => {
+    if (rule.id.startsWith("draft-")) return;
+    setFeedback(null);
+    setTogglingRuleIds((current) => {
+      const next = new Set(current);
+      next.add(rule.id);
+      return next;
+    });
+    try {
+      const updated = await api.patch<AutomationRule>(`/api/v1/automations/rules/${rule.id}`, { is_active: isActive });
+      setRules((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setDraft((current) => current?.id === updated.id ? updated : current);
+      setRuleStatusFeedback({
+        nonce: Date.now(),
+        ruleId: updated.id,
+        status: updated.is_active ? "resumed" : "paused",
+      });
+    } catch (toggleError) {
+      setFeedback({ tone: "error", text: toggleError instanceof Error ? toggleError.message : "Unable to update automation." });
+    } finally {
+      setTogglingRuleIds((current) => {
+        const next = new Set(current);
+        next.delete(rule.id);
+        return next;
+      });
+    }
+  };
+
+  const runDryRun = async () => {
+    if (!draft) return;
+    setFeedback({ tone: "info", text: "Running automation dry-run." });
+    try {
+      const result = await api.post<Record<string, unknown>>("/api/v1/automations/dry-run", automationRulePayload(draft));
+      setDryRun(result);
+      setFeedback({ tone: "success", text: "Dry-run complete. Actions were previewed only; no sync or device commands were executed." });
+    } catch (dryRunError) {
+      setFeedback({ tone: "error", text: dryRunError instanceof Error ? dryRunError.message : "Dry-run failed." });
+    }
+  };
+
+  const parseAiSchedule = async (trigger: AutomationNode) => {
+    const text = String(trigger.config.natural_text ?? "").trim();
+    if (!text) {
+      setFeedback({ tone: "error", text: "Enter a natural-language schedule first." });
+      return;
+    }
+    setFeedback({ tone: "info", text: "Parsing schedule text." });
+    try {
+      const parsed = await api.post<Record<string, unknown>>("/api/v1/automations/parse-schedule", { text });
+      updateDraft((rule) => ({
+        ...rule,
+        triggers: rule.triggers.map((item) => item.id === trigger.id ? {
+          ...item,
+          config: {
+            ...item.config,
+            cron_expression: parsed.cron_expression ?? "",
+            timezone: parsed.timezone ?? "Europe/London",
+            end_at: parsed.end_at ?? "",
+            summary: parsed.summary ?? text
+          }
+        } : item)
+      }));
+      setFeedback({ tone: parsed.requires_review ? "error" : "success", text: parsed.requires_review ? "Schedule parsed but needs review." : "Schedule parsed." });
+    } catch (parseError) {
+      setFeedback({ tone: "error", text: parseError instanceof Error ? parseError.message : "Schedule parsing failed." });
+    }
+  };
+
+  if (loading) {
+    return (
+      <section className="view-stack notifications-page workflow-notifications-page">
+        <Toolbar title="Automations" count={0} icon={GitBranch} />
+        <div className="loading-panel">Loading automation rules</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="view-stack notifications-page workflow-notifications-page">
+      <Toolbar title="Automations" count={rules.length} icon={GitBranch}>
+        <button className="secondary-button" onClick={addAutomation} type="button">
+          <Plus size={15} /> Add Automation
+        </button>
+      </Toolbar>
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {feedback && !draft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
+
+      <WorkflowStatusFilters
+        activeFilter={statusFilter}
+        ariaLabel="Automation status filter"
+        counts={filterCounts}
+        onFilterChange={setStatusFilter}
+      />
+
+      <div className="workflow-notification-shell list-only">
+        <AutomationWorkflowList
+          activeId={draft?.id ?? ""}
+          rules={filteredRules}
+          ruleStatusFeedback={ruleStatusFeedback}
+          statusFilter={statusFilter}
+          totalRuleCount={rules.length}
+          triggerGroups={catalog?.triggers ?? []}
+          togglingRuleIds={togglingRuleIds}
+          onDelete={deleteRule}
+          onSelect={(rule) => {
+            setDraft(cloneAutomationRule(rule));
+            setDryRun(null);
+            setFeedback(null);
+          }}
+          onToggleActive={toggleActive}
+        />
+      </div>
+
+      {draft ? (
+        <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
+          <div className={modal ? "modal-card workflow-editor-modal selector-mode" : "modal-card workflow-editor-modal"} role="dialog" aria-modal="true">
+            <AnimatePresence mode="popLayout" initial={false}>
+              <motion.div
+                animate={{ y: 0 }}
+                className={modal ? "workflow-modal-panel selector" : "workflow-modal-panel editor"}
+                exit={prefersReducedMotion ? undefined : { y: -6, transition: { duration: 0.06, ease: "easeOut" } }}
+                initial={prefersReducedMotion ? false : { y: 8 }}
+                key={modal ?? "editor"}
+                transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.13, ease: [0.2, 0, 0, 1] }}
+              >
+                {modal ? (
+                  <AutomationSelectionModal
+                    groups={catalog?.[`${modal}s` as "triggers" | "conditions" | "actions"] ?? []}
+                    kind={modal}
+                    onClose={() => setModal(null)}
+                    onSelect={(node) => {
+                      updateDraft((rule) => ({
+                        ...rule,
+                        [modal === "action" ? "actions" : `${modal}s`]: [
+                          ...(modal === "action" ? rule.actions : modal === "condition" ? rule.conditions : rule.triggers),
+                          node
+                        ]
+                      } as AutomationRule));
+                      setModal(null);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <div className="modal-header">
+                      <div>
+                        <h2>{draft.id.startsWith("draft-") ? "Add Automation" : "Edit Automation"}</h2>
+                        <p>Build the Trigger, If, and Then flow for autonomous system actions.</p>
+                      </div>
+                      <button className="icon-button" onClick={() => { setDraft(null); setModal(null); }} type="button" aria-label="Close automation editor"><X size={16} /></button>
+                    </div>
+                    <div className="workflow-editor-modal-grid">
+                      <div className="workflow-editor-column">
+                        <section className="notification-editor-panel workflow-builder-panel">
+                          <div className="notification-editor-header workflow-editor-header">
+                            <div>
+                              <span className="eyebrow">Name</span>
+                              <input aria-label="Automation name" value={draft.name} onChange={(event) => updateDraft((rule) => ({ ...rule, name: event.target.value }))} />
+                            </div>
+                            <div className="notification-editor-actions">
+                              <label className={draft.is_active ? "notification-switch active" : "notification-switch"}>
+                                <input checked={draft.is_active} onChange={(event) => updateDraft((rule) => ({ ...rule, is_active: event.target.checked }))} type="checkbox" />
+                                <span>{draft.is_active ? "Active" : "Paused"}</span>
+                              </label>
+                              <button className="icon-button danger" onClick={() => deleteRule(draft)} type="button" aria-label="Delete automation"><Trash2 size={15} /></button>
+                            </div>
+                          </div>
+                          <label className="field compact-field">
+                            <span>Description</span>
+                            <input value={draft.description} onChange={(event) => updateDraft((rule) => ({ ...rule, description: event.target.value }))} placeholder="Optional operator note" />
+                          </label>
+                          <div className="workflow-vertical">
+                            <WorkflowBlock badge="When" tone="blue" title="Trigger" required>
+                              <AutomationNodeStack
+                                actionMeta={actionByType}
+                                conditionMeta={conditionByType}
+                                garageDoors={catalog?.garage_doors ?? []}
+                                kind="trigger"
+                                nodes={draft.triggers}
+                                people={people}
+                                triggerMeta={triggerByType}
+                                vehicles={vehicles}
+                                onAdd={() => setModal("trigger")}
+                                onChange={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.map((item) => item.id === node.id ? node : item) }))}
+                                onParseAiSchedule={parseAiSchedule}
+                                onRemove={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.filter((item) => item.id !== node.id) }))}
+                              />
+                            </WorkflowBlock>
+                            <WorkflowBlock badge="If" tone="amber" title="Conditions" optional>
+                              <AutomationNodeStack
+                                actionMeta={actionByType}
+                                conditionMeta={conditionByType}
+                                garageDoors={catalog?.garage_doors ?? []}
+                                kind="condition"
+                                nodes={draft.conditions}
+                                people={people}
+                                triggerMeta={triggerByType}
+                                vehicles={vehicles}
+                                onAdd={() => setModal("condition")}
+                                onChange={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.map((item) => item.id === node.id ? node : item) }))}
+                                onRemove={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.filter((item) => item.id !== node.id) }))}
+                              />
+                            </WorkflowBlock>
+                            <WorkflowBlock badge="Then" tone="green" title="Actions" required>
+                              <AutomationNodeStack
+                                actionMeta={actionByType}
+                                conditionMeta={conditionByType}
+                                garageDoors={catalog?.garage_doors ?? []}
+                                kind="action"
+                                nodes={draft.actions}
+                                notificationRules={catalog?.notification_rules ?? []}
+                                people={people}
+                                triggerMeta={triggerByType}
+                                variables={variables}
+                                vehicles={vehicles}
+                                onAdd={() => setModal("action")}
+                                onChange={(node) => updateDraft((rule) => ({ ...rule, actions: rule.actions.map((item) => item.id === node.id ? node as AutomationAction : item) }))}
+                                onRemove={(node) => updateDraft((rule) => ({ ...rule, actions: rule.actions.filter((item) => item.id !== node.id) }))}
+                              />
+                            </WorkflowBlock>
+                          </div>
+                          <div className="modal-actions workflow-editor-footer">
+                            {feedback ? <div className={`notification-feedback workflow-editor-feedback ${feedback.tone}`} role="status">{feedback.text}</div> : null}
+                            <button className="secondary-button" onClick={runDryRun} type="button"><Play size={15} /> Dry Run</button>
+                            <button className="secondary-button" onClick={() => setDraft(null)} type="button">Cancel</button>
+                            <button className="primary-button" onClick={save} disabled={saving} type="button"><Save size={15} /> {saving ? "Saving..." : "Save"}</button>
+                          </div>
+                        </section>
+                      </div>
+                      <AutomationPreviewPanel actions={renderedReasons} dryRun={dryRun} />
+                    </div>
+                  </>
+                )}
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AutomationWorkflowList({
+  activeId,
+  rules,
+  ruleStatusFeedback,
+  statusFilter,
+  totalRuleCount,
+  triggerGroups,
+  togglingRuleIds,
+  onDelete,
+  onSelect,
+  onToggleActive
+}: {
+  activeId: string;
+  rules: AutomationRule[];
+  ruleStatusFeedback: WorkflowRuleStatusFeedback | null;
+  statusFilter: NotificationStatusFilter;
+  totalRuleCount: number;
+  triggerGroups: AutomationCatalogGroup[];
+  togglingRuleIds: Set<string>;
+  onDelete: (rule: AutomationRule) => void | Promise<void>;
+  onSelect: (rule: AutomationRule) => void;
+  onToggleActive: (rule: AutomationRule, isActive: boolean) => void | Promise<void>;
+}) {
+  const [openMenu, setOpenMenu] = React.useState<WorkflowRuleMenuState | null>(null);
+  const [collapsedCategoryIds, setCollapsedCategoryIds] = React.useState<Set<string>>(() => new Set());
+  const groupedRules = React.useMemo(() => groupAutomationRulesByTriggerCategory(rules, triggerGroups), [rules, triggerGroups]);
+
+  React.useEffect(() => {
+    if (!openMenu) return undefined;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest("[data-workflow-rule-menu]")) return;
+      setOpenMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenMenu(null);
+    };
+    const closeOnViewportChange = () => {
+      setOpenMenu(null);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
+    };
+  }, [openMenu]);
+
+  React.useEffect(() => {
+    setCollapsedCategoryIds(new Set());
+    setOpenMenu(null);
+  }, [statusFilter]);
+
+  const toggleCategory = (categoryId: string) => {
+    setCollapsedCategoryIds((current) => {
+      const next = new Set(current);
+      if (next.has(categoryId)) next.delete(categoryId);
+      else next.add(categoryId);
+      return next;
+    });
+  };
+
+  const toggleRuleMenu = (ruleId: string, button: HTMLButtonElement) => {
+    setOpenMenu((current) => {
+      if (current?.id === ruleId) return null;
+      const rect = button.getBoundingClientRect();
+      const menuWidth = 178;
+      const menuHeight = 94;
+      const gap = 7;
+      const left = Math.max(12, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 12));
+      const below = rect.bottom + gap;
+      const top = below + menuHeight > window.innerHeight - 12
+        ? Math.max(12, rect.top - menuHeight - gap)
+        : below;
+      return { id: ruleId, left, top };
+    });
+  };
+
+  return (
+    <aside className="workflow-rule-table notification-workflow-table automation-workflow-table card" aria-label="Automation rules">
+      {rules.length ? (
+        <div className="notification-category-stack">
+          {groupedRules.map((category) => {
+            const Icon = category.icon;
+            const collapsed = collapsedCategoryIds.has(category.id);
+            const tableId = `automation-category-${category.id}`;
+            return (
+              <section className="notification-category-folder" key={category.id}>
+                <button
+                  aria-controls={tableId}
+                  aria-expanded={!collapsed}
+                  className="notification-category-header"
+                  onClick={() => toggleCategory(category.id)}
+                  type="button"
+                >
+                  {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                  <Icon size={16} />
+                  <span>
+                    <strong>{category.label}</strong>
+                  </span>
+                  <Badge tone="gray">{category.rules.length}</Badge>
+                </button>
+                {!collapsed ? (
+                  <div className="notification-rule-table-wrap" id={tableId}>
+                    <table className="notification-rule-data-table">
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Configuration</th>
+                          <th>Last Fired</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {category.rules.map((rule) => {
+                          const active = activeId === rule.id;
+                          const menuOpen = openMenu?.id === rule.id;
+                          const statusFeedback = ruleStatusFeedback?.ruleId === rule.id ? ruleStatusFeedback : null;
+                          const toggling = togglingRuleIds.has(rule.id);
+                          return (
+                            <tr className={[active ? "active" : "", rule.is_active ? "" : "paused"].filter(Boolean).join(" ")} key={rule.id}>
+                              <td className="notification-rule-name-cell">
+                                <button className="notification-rule-name-button" onClick={() => onSelect(rule)} type="button">
+                                  <strong>{rule.name}</strong>
+                                </button>
+                              </td>
+                              <td>
+                                <span className="notification-config-chips" aria-label="Automation summary">
+                                  <NotificationConfigChip count={rule.triggers.length} icon={Zap} label="Triggers" />
+                                  <NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" />
+                                  <NotificationConfigChip count={rule.actions.length} icon={Play} label="Actions" />
+                                </span>
+                              </td>
+                              <td>
+                                <span className="notification-last-fired">{formatCompactLastFired(rule.last_fired_at)}</span>
+                              </td>
+                              <td className="notification-rule-actions-cell">
+                                <span className="notification-rule-actions-cluster">
+                                  <span className="notification-rule-status-pill-slot">
+                                    {statusFeedback ? (
+                                      <span
+                                        className={`notification-rule-status-pill ${statusFeedback.status}`}
+                                        key={statusFeedback.nonce}
+                                        role="status"
+                                      >
+                                        {statusFeedback.status === "paused" ? "Paused" : "Resumed"}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <label className={rule.is_active ? "workflow-rule-toggle active" : "workflow-rule-toggle"} aria-label={`${rule.is_active ? "Pause" : "Activate"} ${rule.name}`}>
+                                    <input
+                                      checked={rule.is_active}
+                                      disabled={toggling}
+                                      onChange={(event) => onToggleActive(rule, event.target.checked)}
+                                      type="checkbox"
+                                    />
+                                    <span className="workflow-rule-toggle-track" aria-hidden="true">
+                                      <span />
+                                    </span>
+                                  </label>
+                                  <span className="workflow-rule-menu" data-workflow-rule-menu>
+                                    <button
+                                      aria-expanded={menuOpen}
+                                      aria-haspopup="menu"
+                                      aria-label={`Options for ${rule.name}`}
+                                      className="icon-button workflow-rule-menu-button"
+                                      onClick={(event) => toggleRuleMenu(rule.id, event.currentTarget)}
+                                      type="button"
+                                    >
+                                      <MoreHorizontal size={16} />
+                                    </button>
+                                  </span>
+                                </span>
+                                {menuOpen ? (
+                                  <AutomationRuleMenu
+                                    left={openMenu.left}
+                                    rule={rule}
+                                    top={openMenu.top}
+                                    onClose={() => setOpenMenu(null)}
+                                    onDelete={onDelete}
+                                    onSelect={onSelect}
+                                  />
+                                ) : null}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+        </div>
+      ) : (
+        <AutomationWorkflowEmptyState statusFilter={statusFilter} totalRuleCount={totalRuleCount} />
+      )}
+    </aside>
+  );
+}
+
+function AutomationRuleMenu({
+  left,
+  rule,
+  top,
+  onClose,
+  onDelete,
+  onSelect
+}: {
+  left: number;
+  rule: AutomationRule;
+  top: number;
+  onClose: () => void;
+  onDelete: (rule: AutomationRule) => void | Promise<void>;
+  onSelect: (rule: AutomationRule) => void;
+}) {
+  return createPortal(
+    <div
+      className="workflow-rule-menu-popover notification-rule-menu-popover-fixed"
+      data-workflow-rule-menu
+      role="menu"
+      style={{ left, top }}
+    >
+      <button
+        onClick={() => {
+          onClose();
+          onSelect(rule);
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Pencil size={14} /> Edit
+      </button>
+      <button
+        className="danger"
+        onClick={() => {
+          onClose();
+          onDelete(rule);
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Trash2 size={14} /> Delete
+      </button>
+    </div>,
+    document.body
+  );
+}
+
+function AutomationWorkflowEmptyState({
+  statusFilter,
+  totalRuleCount
+}: {
+  statusFilter: NotificationStatusFilter;
+  totalRuleCount: number;
+}) {
+  const emptyTitle = totalRuleCount === 0
+    ? "No automation rules"
+    : statusFilter === "active"
+      ? "No active automation rules"
+      : "No paused automation rules";
+  const emptyDetail = totalRuleCount === 0
+    ? "Use Add Automation to create the first Trigger / If / Then rule."
+    : statusFilter === "active"
+      ? "Active automation rules will appear here as soon as they are switched on."
+      : "Paused automation rules will appear here as soon as they are switched off.";
+  return (
+    <div className="notification-empty-list workflow-empty-list">
+      <GitBranch size={20} />
+      <strong>{emptyTitle}</strong>
+      <span>{emptyDetail}</span>
+    </div>
+  );
+}
+
+function AutomationNodeStack({
+  actionMeta,
+  conditionMeta,
+  garageDoors,
+  kind,
+  nodes,
+  notificationRules = [],
+  people,
+  triggerMeta,
+  variables = [],
+  vehicles,
+  onAdd,
+  onChange,
+  onParseAiSchedule,
+  onRemove
+}: {
+  actionMeta: Map<string, AutomationCatalogItem>;
+  conditionMeta: Map<string, AutomationCatalogItem>;
+  garageDoors: Array<{ entity_id: string; name: string }>;
+  kind: "trigger" | "condition" | "action";
+  nodes: Array<AutomationNode | AutomationAction>;
+  notificationRules?: Array<{ id: string; name: string }>;
+  people: Person[];
+  triggerMeta: Map<string, AutomationCatalogItem>;
+  variables?: Array<AutomationVariable & { group: string }>;
+  vehicles: Vehicle[];
+  onAdd: () => void;
+  onChange: (node: AutomationNode | AutomationAction) => void;
+  onParseAiSchedule?: (node: AutomationNode) => void;
+  onRemove: (node: AutomationNode | AutomationAction) => void;
+}) {
+  const metaMap = kind === "trigger" ? triggerMeta : kind === "condition" ? conditionMeta : actionMeta;
+  return (
+    <div className="workflow-stack">
+      {nodes.map((node) => (
+        <AutomationNodeCard
+          garageDoors={garageDoors}
+          key={node.id}
+          kind={kind}
+          meta={metaMap.get(node.type)}
+          node={node}
+          notificationRules={notificationRules}
+          people={people}
+          variables={variables}
+          vehicles={vehicles}
+          onChange={onChange}
+          onParseAiSchedule={onParseAiSchedule}
+          onRemove={() => onRemove(node)}
+        />
+      ))}
+      <button className="workflow-add-block" onClick={onAdd} type="button">
+        <Plus size={15} /> Add {titleCase(kind)}
+      </button>
+    </div>
+  );
+}
+
+function AutomationNodeCard({
+  garageDoors,
+  kind,
+  meta,
+  node,
+  notificationRules,
+  people,
+  variables,
+  vehicles,
+  onChange,
+  onParseAiSchedule,
+  onRemove
+}: {
+  garageDoors: Array<{ entity_id: string; name: string }>;
+  kind: "trigger" | "condition" | "action";
+  meta?: AutomationCatalogItem;
+  node: AutomationNode | AutomationAction;
+  notificationRules: Array<{ id: string; name: string }>;
+  people: Person[];
+  variables: Array<AutomationVariable & { group: string }>;
+  vehicles: Vehicle[];
+  onChange: (node: AutomationNode | AutomationAction) => void;
+  onParseAiSchedule?: (node: AutomationNode) => void;
+  onRemove: () => void;
+}) {
+  const Icon = automationNodeIcon(node.type);
+  const updateConfig = (config: Record<string, unknown>) => onChange({ ...node, config: { ...node.config, ...config } });
+  return (
+    <article className="workflow-action-card automation-node-card">
+      <div className="workflow-card-title">
+        <Icon size={16} />
+        <span>
+          <strong>{meta?.label ?? titleCase(node.type)}</strong>
+          <small>{meta?.description ?? node.type}</small>
+        </span>
+        <button className="icon-button danger" onClick={onRemove} type="button" aria-label={`Remove ${kind}`}><Trash2 size={14} /></button>
+      </div>
+
+      {node.type.includes("person.") || node.type.includes("vehicle.") || node.type === "vehicle.known_plate" || node.type === "vehicle.outside_schedule" ? (
+        <div className="field-grid compact-field-grid">
+          <label className="field compact-field">
+            <span>Person</span>
+            <select value={String(node.config.person_id ?? "")} onChange={(event) => updateConfig({ person_id: event.target.value })}>
+              <option value="">From trigger context</option>
+              {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+            </select>
+          </label>
+          <label className="field compact-field">
+            <span>Vehicle</span>
+            <select value={String(node.config.vehicle_id ?? "")} onChange={(event) => updateConfig({ vehicle_id: event.target.value })}>
+              <option value="">From trigger context</option>
+              {vehicles.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.registration_number}</option>)}
+            </select>
+          </label>
+        </div>
+      ) : null}
+
+      {node.type === "vehicle.unknown_plate" || node.type === "vehicle.known_plate" ? (
+        <label className="field compact-field">
+          <span>Registration filter</span>
+          <input value={String(node.config.registration_number ?? "")} onChange={(event) => updateConfig({ registration_number: event.target.value })} placeholder="Optional plate" />
+        </label>
+      ) : null}
+
+      {node.type === "time.specific_datetime" ? (
+        <div className="field-grid compact-field-grid">
+          <label className="field compact-field"><span>Run at</span><input type="datetime-local" value={toDateTimeLocal(String(node.config.run_at ?? ""))} onChange={(event) => updateConfig({ run_at: fromDateTimeLocal(event.target.value) })} /></label>
+          <label className="field compact-field"><span>Recurrence</span><select value={String(node.config.recurrence ?? "none")} onChange={(event) => updateConfig({ recurrence: event.target.value, single_use: event.target.value === "none" })}><option value="none">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
+          <label className="field compact-field"><span>End date</span><input type="datetime-local" value={toDateTimeLocal(String(node.config.end_at ?? ""))} onChange={(event) => updateConfig({ end_at: fromDateTimeLocal(event.target.value) })} /></label>
+        </div>
+      ) : null}
+
+      {node.type === "time.every_x" ? (
+        <div className="field-grid compact-field-grid">
+          <label className="field compact-field"><span>Every</span><input min={1} type="number" value={Number(node.config.interval ?? 5)} onChange={(event) => updateConfig({ interval: Number(event.target.value) })} /></label>
+          <label className="field compact-field"><span>Unit</span><select value={String(node.config.unit ?? "minutes")} onChange={(event) => updateConfig({ unit: event.target.value })}><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></label>
+        </div>
+      ) : null}
+
+      {node.type === "time.cron" || node.type === "time.ai_text" ? (
+        <div className="field-grid compact-field-grid">
+          {node.type === "time.ai_text" ? <label className="field compact-field wide-field"><span>AI schedule text</span><input value={String(node.config.natural_text ?? "")} onChange={(event) => updateConfig({ natural_text: event.target.value })} placeholder="Every Thursday at 9pm until 4th June" /></label> : null}
+          <label className="field compact-field"><span>Cron</span><input value={String(node.config.cron_expression ?? "")} onChange={(event) => updateConfig({ cron_expression: event.target.value })} placeholder="0 21 * * 4" /></label>
+          <label className="field compact-field"><span>End date</span><input type="datetime-local" value={toDateTimeLocal(String(node.config.end_at ?? ""))} onChange={(event) => updateConfig({ end_at: fromDateTimeLocal(event.target.value) })} /></label>
+          {node.type === "time.ai_text" ? <button className="secondary-button compact" onClick={() => onParseAiSchedule?.(node)} type="button"><Sparkles size={14} /> Parse</button> : null}
+        </div>
+      ) : null}
+
+      {node.type === "ai.phrase_received" ? (
+        <div className="field-grid compact-field-grid">
+          <label className="field compact-field"><span>Phrase</span><input value={String(node.config.phrase ?? "")} onChange={(event) => updateConfig({ phrase: event.target.value })} /></label>
+          <label className="field compact-field"><span>Match</span><select value={String(node.config.match_mode ?? "contains")} onChange={(event) => updateConfig({ match_mode: event.target.value })}><option value="contains">Contains</option><option value="exact">Exact</option></select></label>
+        </div>
+      ) : null}
+
+      {node.type.startsWith("webhook.") ? (
+        <label className="field compact-field">
+          <span>Webhook key</span>
+          <input value={String(node.config.webhook_key ?? "")} onChange={(event) => updateConfig({ webhook_key: event.target.value })} placeholder="Ungguessable endpoint key" />
+        </label>
+      ) : null}
+
+      {node.type.startsWith("notification.") ? (
+        <label className="field compact-field">
+          <span>Notification rule</span>
+          <select value={String(node.config.notification_rule_id ?? "")} onChange={(event) => updateConfig({ notification_rule_id: event.target.value })}>
+            <option value="">Select notification</option>
+            {notificationRules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}
+          </select>
+        </label>
+      ) : null}
+
+      {node.type.startsWith("integration.") ? (
+        <div className="automation-integration-action-summary">
+          <PlugZap size={15} />
+          <span>
+            <strong>{String(node.config.provider ?? "Integration").replace(/_/g, " ")}</strong>
+            <small>{String(node.config.action ?? node.type).replace(/_/g, " ")}</small>
+          </span>
+        </div>
+      ) : null}
+
+      {node.type.startsWith("garage_door.") ? (
+        <div className="workflow-target-chips">
+          {garageDoors.map((door) => {
+            const selected = Array.isArray(node.config.target_entity_ids) && (node.config.target_entity_ids as unknown[]).includes(door.entity_id);
+            return (
+              <button className={selected ? "workflow-target-chip selected" : "workflow-target-chip"} key={door.entity_id} onClick={() => updateConfig({ target_entity_ids: toggleStringList(node.config.target_entity_ids, door.entity_id) })} type="button">
+                <strong>Garage</strong>{door.name}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {kind === "action" ? (
+        <PlainTemplateEditor
+          label="Audit reason"
+          multiline
+          value={(node as AutomationAction).reason_template ?? ""}
+          variables={variables}
+          onChange={(reason_template) => onChange({ ...(node as AutomationAction), reason_template })}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function AutomationSelectionModal({
+  groups,
+  kind,
+  onClose,
+  onSelect
+}: {
+  groups: AutomationCatalogGroup[];
+  kind: "trigger" | "condition" | "action";
+  onClose: () => void;
+  onSelect: (node: AutomationNode | AutomationAction) => void;
+}) {
+  const [activeCategoryId, setActiveCategoryId] = React.useState(groups[0]?.id ?? "");
+  const [activeIntegrationId, setActiveIntegrationId] = React.useState("");
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const query = searchQuery.trim().toLowerCase();
+  const itemKey = `${kind}s` as "triggers" | "conditions" | "actions";
+  const visibleGroups = groups
+    .map((group) => {
+      const categoryMatches = matchesSearchText(group.label, query);
+      const items = (group[itemKey] ?? []).filter((item) => {
+        if (!query || categoryMatches) return true;
+        return matchesSearchText(`${item.label} ${item.description ?? ""} ${item.type} ${item.integration_provider_label ?? ""}`, query);
+      });
+      const integrations = (group.integrations ?? [])
+        .map((integration) => {
+          const integrationMatches = categoryMatches || matchesSearchText(`${integration.label} ${integration.description ?? ""}`, query);
+          const actions = integration.actions.filter((item) => {
+            if (!query || integrationMatches) return true;
+            return matchesSearchText(`${item.label} ${item.description ?? ""} ${item.type}`, query);
+          });
+          return { ...integration, actions };
+        })
+        .filter((integration) => integration.actions.length || matchesSearchText(`${integration.label} ${integration.description ?? ""}`, query));
+      return { ...group, [itemKey]: items, integrations };
+    })
+    .filter((group) => (group[itemKey] ?? []).length || (group.integrations ?? []).length || matchesSearchText(group.label, query));
+  React.useEffect(() => {
+    if (!visibleGroups.some((group) => group.id === activeCategoryId)) {
+      setActiveCategoryId(visibleGroups[0]?.id ?? "");
+      setActiveIntegrationId("");
+    }
+  }, [activeCategoryId, visibleGroups]);
+  const activeGroup = visibleGroups.find((group) => group.id === activeCategoryId) ?? visibleGroups[0];
+  const activeIntegrations = activeGroup?.integrations ?? [];
+  const selectedIntegration = activeIntegrations.find((integration) => integration.id === activeIntegrationId);
+  const showIntegrationDrilldown = kind === "action" && activeGroup?.id === "integrations" && activeIntegrations.length > 0;
+  return (
+    <TwoPaneSelectionModal
+      activeCategoryId={activeGroup?.id ?? ""}
+      categories={visibleGroups.map((group) => ({
+        id: group.id,
+        label: group.label,
+        count: group.id === "integrations" && group.integrations?.length ? group.integrations.length : (group[itemKey] ?? []).length,
+        icon: automationCategoryIcon(group.id)
+      }))}
+      embedded
+      onBack={onClose}
+      onCategoryChange={(categoryId) => {
+        setActiveCategoryId(categoryId);
+        setActiveIntegrationId("");
+      }}
+      onClose={onClose}
+      onSearchChange={setSearchQuery}
+      searchPlaceholder={`Search ${kind}s`}
+      searchQuery={searchQuery}
+      subtitle={`Choose a ${kind} for this automation.`}
+      title={`Add ${titleCase(kind)}`}
+      wide
+    >
+      {showIntegrationDrilldown && !selectedIntegration ? (
+        <div className="two-pane-card-grid automation-selector-grid">
+          {activeIntegrations.map((integration) => {
+            const Icon = automationCategoryIcon(integration.id);
+            return (
+              <button className="two-pane-item-card automation-selector-card" key={integration.id} onClick={() => setActiveIntegrationId(integration.id)} type="button">
+                <Icon size={18} />
+                <span>
+                  <strong>{integration.label}</strong>
+                  <small>{integration.description ?? `${integration.actions.length} available ${pluralize("action", integration.actions.length)}`}</small>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : showIntegrationDrilldown && selectedIntegration ? (
+        <div className="automation-drilldown-stack">
+          <div className="automation-drilldown-head">
+            <button className="secondary-button compact" onClick={() => setActiveIntegrationId("")} type="button">
+              <ArrowLeft size={14} /> Integrations
+            </button>
+            <div>
+              <strong>{selectedIntegration.label}</strong>
+              <span>{selectedIntegration.description ?? "Choose an integration action."}</span>
+            </div>
+          </div>
+          <div className="two-pane-card-grid automation-selector-grid">
+            {selectedIntegration.actions.map((item) => {
+              const Icon = automationNodeIcon(item.type);
+              return (
+                <button className="two-pane-item-card automation-selector-card" key={item.type} onClick={() => onSelect(createAutomationNode(kind, item.type, item))} type="button">
+                  <Icon size={18} />
+                  <span><strong>{item.label}</strong><small>{item.description ?? item.type}</small></span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : activeGroup ? (
+        <div className="two-pane-card-grid automation-selector-grid">
+          {(activeGroup[itemKey] ?? []).map((item) => {
+            const Icon = automationNodeIcon(item.type);
+            return (
+              <button className="two-pane-item-card automation-selector-card" key={item.type} onClick={() => onSelect(createAutomationNode(kind, item.type, item))} type="button">
+                <Icon size={18} />
+                <span><strong>{item.label}</strong><small>{item.description ?? item.type}</small></span>
+              </button>
+            );
+          })}
+        </div>
+      ) : <div className="two-pane-empty">No {kind}s match this search.</div>}
+    </TwoPaneSelectionModal>
+  );
+}
+
+function AutomationPreviewPanel({
+  actions,
+  dryRun
+}: {
+  actions: Array<AutomationAction & { renderedReason: string }>;
+  dryRun: Record<string, unknown> | null;
+}) {
+  const conditionResults = Array.isArray(dryRun?.condition_results) ? dryRun.condition_results as Array<Record<string, unknown>> : [];
+  const actionPreviews = Array.isArray(dryRun?.action_previews) ? dryRun.action_previews as Array<Record<string, unknown>> : [];
+  return (
+    <aside className="notification-preview-panel" aria-label="Automation preview">
+      <div className="notification-preview-rail-head">
+        <div>
+          <strong>Automation Preview</strong>
+          <span>Dry runs validate context and conditions only; actions are not executed.</span>
+        </div>
+      </div>
+      <div className="notification-preview-stack">
+        {actions.length ? actions.map((action) => (
+          <article className="notification-preview-card-inline" key={action.id}>
+            <div><Play size={16} /><strong>{titleCase(action.type)}</strong><Badge tone="green">Then</Badge></div>
+            <p>{action.renderedReason || action.reason_template || "Default audit reason will be used."}</p>
+          </article>
+        )) : <div className="notification-endpoint-empty">Add an action to preview automation output.</div>}
+        {dryRun ? (
+          <article className="notification-preview-card-inline">
+            <div><CheckCircle2 size={16} /><strong>Dry Run</strong><Badge tone={dryRun.would_run ? "green" : "amber"}>{dryRun.would_run ? "Would Run" : "Skipped"}</Badge></div>
+            <p>{stringifyTemplateValue(dryRun.message) || "Preview only. No automation actions were executed."}</p>
+            <p>{conditionResults.length} condition result(s), {actionPreviews.length} action preview(s).</p>
+          </article>
+        ) : null}
+        {actionPreviews.map((preview) => (
+          <article className="notification-preview-card-inline" key={String(preview.id ?? preview.type)}>
+            <div>
+              <Play size={16} />
+              <strong>{titleCase(String(preview.type ?? "Action"))}</strong>
+              <Badge tone={preview.would_execute ? "blue" : "amber"}>{preview.would_execute ? "Preview Only" : "Skipped"}</Badge>
+            </div>
+            <p>
+              {Array.isArray(preview.missing_variables) && preview.missing_variables.length
+                ? `Missing ${preview.missing_variables.join(", ")}.`
+                : stringifyTemplateValue(preview.rendered_reason) || "No action was executed during this dry-run."}
+            </p>
+          </article>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function createAutomationDraft(): AutomationRule {
+  return {
+    id: draftId("automation"),
+    name: "New Automation",
+    description: "",
+    is_active: true,
+    triggers: [],
+    trigger_keys: [],
+    conditions: [],
+    actions: [],
+    run_count: 0,
+    last_run_status: null,
+    last_error: null,
+  };
+}
+
+function createAutomationNode(kind: "trigger" | "condition" | "action", type: string, meta?: AutomationCatalogItem): AutomationNode | AutomationAction {
+  const base = { id: draftId(kind), type, config: defaultAutomationConfig(type, meta) };
+  if (kind === "action") return { ...base, reason_template: defaultAutomationReason(type) };
+  return base;
+}
+
+function defaultAutomationConfig(type: string, meta?: AutomationCatalogItem): Record<string, unknown> {
+  if (meta?.default_config) return { ...meta.default_config };
+  if (type === "time.every_x") return { interval: 5, unit: "minutes" };
+  if (type === "time.specific_datetime") return { run_at: "", recurrence: "none", single_use: true, end_at: "" };
+  if (type === "time.cron") return { cron_expression: "0 9 * * *", timezone: "Europe/London", end_at: "" };
+  if (type === "time.ai_text") return { natural_text: "", cron_expression: "", timezone: "Europe/London", end_at: "" };
+  if (type === "ai.phrase_received") return { phrase: "", match_mode: "contains" };
+  if (type.startsWith("webhook.")) return { webhook_key: `webhook-${Math.random().toString(16).slice(2)}${Date.now().toString(16)}` };
+  if (type.startsWith("garage_door.")) return { target_entity_ids: [] };
+  if (type.startsWith("notification.")) return { notification_rule_id: "" };
+  if (type === "integration.icloud_calendar.sync") return { provider: "icloud_calendar", action: "sync_calendars" };
+  return {};
+}
+
+function defaultAutomationReason(type: string) {
+  if (type === "gate.open") return "Automation opened the gate for @DisplayName.";
+  if (type.startsWith("garage_door.")) return "Automation ran @EventType for @DisplayName.";
+  if (type.startsWith("maintenance_mode.")) return "Automation changed Maintenance Mode: @Subject.";
+  if (type.startsWith("integration.")) return "Automation ran integration action from @EventType.";
+  return "Automation action from @EventType.";
+}
+
+function automationRulePayload(rule: AutomationRule) {
+  return {
+    name: rule.name.trim() || "Automation Rule",
+    description: rule.description,
+    is_active: rule.is_active,
+    triggers: rule.triggers,
+    conditions: rule.conditions,
+    actions: rule.actions,
+  };
+}
+
+function cloneAutomationRule(rule: AutomationRule): AutomationRule {
+  return JSON.parse(JSON.stringify(rule)) as AutomationRule;
+}
+
+function groupAutomationRulesByTriggerCategory(
+  rules: AutomationRule[],
+  triggerGroups: AutomationCatalogGroup[]
+): AutomationRuleCategory[] {
+  const categoryByTrigger = new Map<string, { id: string; label: string; icon: React.ElementType; order: number }>();
+  triggerGroups.forEach((group, order) => {
+    const category = {
+      id: group.id,
+      label: group.label,
+      icon: automationCategoryIcon(group.id),
+      order,
+    };
+    (group.triggers ?? []).forEach((trigger) => {
+      categoryByTrigger.set(trigger.type, category);
+    });
+  });
+
+  const fallbackCategory = {
+    id: "other",
+    label: "Other",
+    icon: GitBranch,
+    order: Number.MAX_SAFE_INTEGER,
+  };
+  const grouped = new Map<string, AutomationRuleCategory & { order: number }>();
+
+  rules.forEach((rule) => {
+    const triggerType = rule.triggers[0]?.type ?? rule.trigger_keys[0] ?? "";
+    const category = categoryByTrigger.get(triggerType) ?? fallbackCategory;
+    const current = grouped.get(category.id);
+    if (current) {
+      current.rules.push(rule);
+    } else {
+      grouped.set(category.id, {
+        id: category.id,
+        label: category.label,
+        icon: category.icon,
+        order: category.order,
+        rules: [rule],
+      });
+    }
+  });
+
+  return Array.from(grouped.values())
+    .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
+    .map(({ order: _order, ...category }) => category);
+}
+
+function automationVariablesForTrigger(groups: AutomationVariableGroup[], triggerType: string) {
+  return groups.flatMap((group) => group.items
+    .filter((item) => !triggerType || !item.trigger_types?.length || item.trigger_types.includes(triggerType))
+    .map((item) => ({ ...item, group: group.group })));
+}
+
+function automationCategoryIcon(groupId: string) {
+  if (groupId.includes("time")) return Clock3;
+  if (groupId.includes("vehicle")) return Car;
+  if (groupId.includes("maintenance")) return Construction;
+  if (groupId.includes("visitor")) return UserPlus;
+  if (groupId.includes("webhook")) return PlugZap;
+  if (groupId.includes("icloud") || groupId.includes("calendar")) return CalendarDays;
+  if (groupId.includes("integration")) return PlugZap;
+  if (groupId.includes("notification")) return Bell;
+  if (groupId.includes("garage")) return Warehouse;
+  if (groupId.includes("gate")) return DoorOpen;
+  if (groupId.includes("ai")) return Bot;
+  return GitBranch;
+}
+
+function automationNodeIcon(type: string) {
+  if (type.startsWith("time.")) return Clock3;
+  if (type.startsWith("vehicle.")) return Car;
+  if (type.startsWith("maintenance_mode.")) return Construction;
+  if (type.startsWith("visitor_pass.")) return UserPlus;
+  if (type.startsWith("webhook.")) return PlugZap;
+  if (type.startsWith("integration.icloud_calendar")) return CalendarDays;
+  if (type.startsWith("integration.")) return PlugZap;
+  if (type.startsWith("notification.")) return Bell;
+  if (type.startsWith("garage_door.")) return Warehouse;
+  if (type.startsWith("gate.")) return DoorOpen;
+  if (type.startsWith("ai.")) return Bot;
+  if (type.startsWith("person.")) return UserRound;
+  return GitBranch;
+}
+
+function toggleStringList(value: unknown, item: string) {
+  const current = Array.isArray(value) ? value.map(String) : [];
+  return current.includes(item) ? current.filter((entry) => entry !== item) : [...current, item];
+}
+
+function toDateTimeLocal(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function fromDateTimeLocal(value: string) {
+  return value ? new Date(value).toISOString() : "";
+}
+
 function NotificationsView({ currentUser, people, schedules }: { currentUser: UserAccount; people: Person[]; schedules: Schedule[] }) {
   const [catalog, setCatalog] = React.useState<NotificationCatalogResponse | null>(null);
   const [rules, setRules] = React.useState<NotificationRule[]>([]);
@@ -11399,7 +13050,9 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
+  const [statusFilter, setStatusFilter] = React.useState<NotificationStatusFilter>("all");
   const [togglingRuleIds, setTogglingRuleIds] = React.useState<Set<string>>(() => new Set());
+  const [ruleStatusFeedback, setRuleStatusFeedback] = React.useState<WorkflowRuleStatusFeedback | null>(null);
   const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [error, setError] = React.useState("");
   const prefersReducedMotion = useReducedMotion();
@@ -11413,6 +13066,19 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
   const workflowModalMode: "editor" | "trigger" | "action" = modal === "trigger" || modal === "action" ? modal : "editor";
   const previewContext = catalog?.mock_context && Object.keys(catalog.mock_context).length ? catalog.mock_context : mockNotificationContext;
   const previewActions = activeDraft ? renderWorkflowPreview(activeDraft.actions, previewContext) : [];
+  const filterCounts = React.useMemo<NotificationFilterCounts>(() => {
+    return rules.reduce<NotificationFilterCounts>((counts, rule) => {
+      counts.all += 1;
+      if (rule.is_active) counts.active += 1;
+      else counts.inactive += 1;
+      return counts;
+    }, { all: 0, active: 0, inactive: 0 });
+  }, [rules]);
+  const filteredRules = React.useMemo(() => {
+    if (statusFilter === "active") return rules.filter((rule) => rule.is_active);
+    if (statusFilter === "inactive") return rules.filter((rule) => !rule.is_active);
+    return rules;
+  }, [rules, statusFilter]);
 
   const load = React.useCallback(async () => {
     setError("");
@@ -11437,6 +13103,14 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (!ruleStatusFeedback) return undefined;
+    const timeout = window.setTimeout(() => {
+      setRuleStatusFeedback((current) => current?.nonce === ruleStatusFeedback.nonce ? null : current);
+    }, 3600);
+    return () => window.clearTimeout(timeout);
+  }, [ruleStatusFeedback]);
 
   const selectRule = (rule: NotificationRule) => {
     setDraft(cloneNotificationRule(rule));
@@ -11490,7 +13164,11 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
       const updated = await api.patch<NotificationRule>(`/api/v1/notifications/rules/${rule.id}`, { is_active: isActive });
       setRules((current) => current.map((item) => item.id === updated.id ? updated : item));
       setDraft((current) => current?.id === updated.id ? cloneNotificationRule(updated) : current);
-      setFeedback({ tone: "success", text: `${updated.name} ${updated.is_active ? "activated" : "paused"}.` });
+      setRuleStatusFeedback({
+        nonce: Date.now(),
+        ruleId: updated.id,
+        status: updated.is_active ? "resumed" : "paused",
+      });
     } catch (toggleError) {
       setFeedback({ tone: "error", text: toggleError instanceof Error ? toggleError.message : "Unable to update notification workflow." });
     } finally {
@@ -11596,11 +13274,21 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {feedback && !activeDraft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
 
+      <WorkflowStatusFilters
+        activeFilter={statusFilter}
+        ariaLabel="Notification status filter"
+        counts={filterCounts}
+        onFilterChange={setStatusFilter}
+      />
+
       <div className="workflow-notification-shell list-only">
         <NotificationWorkflowList
           activeId={activeDraft?.id ?? ""}
-          rules={rules}
-          triggerByValue={triggerByValue}
+          rules={filteredRules}
+          statusFilter={statusFilter}
+          totalRuleCount={rules.length}
+          triggerGroups={triggerGroups}
+          ruleStatusFeedback={ruleStatusFeedback}
           togglingRuleIds={togglingRuleIds}
           onDelete={deleteRule}
           onDuplicate={duplicateRule}
@@ -11707,7 +13395,10 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
 function NotificationWorkflowList({
   activeId,
   rules,
-  triggerByValue,
+  ruleStatusFeedback,
+  statusFilter,
+  totalRuleCount,
+  triggerGroups,
   onDelete,
   onDuplicate,
   onSelect,
@@ -11716,127 +13407,422 @@ function NotificationWorkflowList({
 }: {
   activeId: string;
   rules: NotificationRule[];
-  triggerByValue: Map<string, NotificationTriggerOption>;
+  ruleStatusFeedback: WorkflowRuleStatusFeedback | null;
+  statusFilter: NotificationStatusFilter;
+  totalRuleCount: number;
+  triggerGroups: NotificationTriggerGroup[];
   onDelete: (rule: NotificationRule) => void | Promise<void>;
   onDuplicate: (rule: NotificationRule) => void | Promise<void>;
   onSelect: (rule: NotificationRule) => void;
   onToggleActive: (rule: NotificationRule, isActive: boolean) => void | Promise<void>;
   togglingRuleIds: Set<string>;
 }) {
-  const [openMenuId, setOpenMenuId] = React.useState<string | null>(null);
+  const [openMenu, setOpenMenu] = React.useState<WorkflowRuleMenuState | null>(null);
+  const [collapsedCategoryIds, setCollapsedCategoryIds] = React.useState<Set<string>>(() => new Set());
+  const groupedRules = React.useMemo(() => groupNotificationRulesByTriggerCategory(rules, triggerGroups), [rules, triggerGroups]);
 
   React.useEffect(() => {
-    if (!openMenuId) return undefined;
+    if (!openMenu) return undefined;
     const closeOnPointerDown = (event: PointerEvent) => {
       if ((event.target as HTMLElement | null)?.closest("[data-workflow-rule-menu]")) return;
-      setOpenMenuId(null);
+      setOpenMenu(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenMenuId(null);
+      if (event.key === "Escape") setOpenMenu(null);
+    };
+    const closeOnViewportChange = () => {
+      setOpenMenu(null);
     };
     document.addEventListener("pointerdown", closeOnPointerDown);
     document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
       document.removeEventListener("pointerdown", closeOnPointerDown);
       document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
     };
-  }, [openMenuId]);
+  }, [openMenu]);
+
+  React.useEffect(() => {
+    setCollapsedCategoryIds(new Set());
+    setOpenMenu(null);
+  }, [statusFilter]);
+
+  const toggleCategory = (categoryId: string) => {
+    setCollapsedCategoryIds((current) => {
+      const next = new Set(current);
+      if (next.has(categoryId)) next.delete(categoryId);
+      else next.add(categoryId);
+      return next;
+    });
+  };
+
+  const toggleRuleMenu = (ruleId: string, button: HTMLButtonElement) => {
+    setOpenMenu((current) => {
+      if (current?.id === ruleId) return null;
+      const rect = button.getBoundingClientRect();
+      const menuWidth = 178;
+      const menuHeight = 136;
+      const gap = 7;
+      const left = Math.max(12, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 12));
+      const below = rect.bottom + gap;
+      const top = below + menuHeight > window.innerHeight - 12
+        ? Math.max(12, rect.top - menuHeight - gap)
+        : below;
+      return { id: ruleId, left, top };
+    });
+  };
 
   return (
-    <aside className="workflow-rule-table card" aria-label="Notification workflows">
+    <aside className="workflow-rule-table notification-workflow-table card" aria-label="Notification workflows">
       {rules.length ? (
-        <div className="workflow-rule-rows">
-          {rules.map((rule) => {
-            const active = activeId === rule.id;
-            const menuOpen = openMenuId === rule.id;
-            const toggling = togglingRuleIds.has(rule.id);
+        <div className="notification-category-stack">
+          {groupedRules.map((category) => {
+            const Icon = category.icon;
+            const collapsed = collapsedCategoryIds.has(category.id);
+            const tableId = `notification-category-${category.id}`;
             return (
-              <article className={[active ? "workflow-rule-row active" : "workflow-rule-row", rule.is_active ? "" : "paused"].filter(Boolean).join(" ")} key={rule.id}>
-                <button className="workflow-rule-main" onClick={() => onSelect(rule)} type="button">
-                  <span className="workflow-rule-copy">
-                    <strong>{rule.name}</strong>
-                    <small>{notificationRuleSummary(rule, triggerByValue)}</small>
-                    <span className="workflow-rule-metrics" aria-label="Workflow summary">
-                      <span><Zap size={13} /> 1 trigger</span>
-                      <span><Filter size={13} /> {rule.conditions.length} {pluralize("condition", rule.conditions.length)}</span>
-                      <span><Play size={13} /> {rule.actions.length} {pluralize("action", rule.actions.length)}</span>
-                      <span><Clock3 size={13} /> {formatLastFired(rule.last_fired_at)}</span>
-                    </span>
+              <section className="notification-category-folder" key={category.id}>
+                <button
+                  aria-controls={tableId}
+                  aria-expanded={!collapsed}
+                  className="notification-category-header"
+                  onClick={() => toggleCategory(category.id)}
+                  type="button"
+                >
+                  {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                  <Icon size={16} />
+                  <span>
+                    <strong>{category.label}</strong>
                   </span>
+                  <Badge tone="gray">{category.rules.length}</Badge>
                 </button>
-                <div className="workflow-rule-controls">
-                  <label className={rule.is_active ? "workflow-rule-toggle active" : "workflow-rule-toggle"} aria-label={`${rule.is_active ? "Pause" : "Activate"} ${rule.name}`}>
-                    <input
-                      checked={rule.is_active}
-                      disabled={toggling}
-                      onChange={(event) => onToggleActive(rule, event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="workflow-rule-toggle-track" aria-hidden="true">
-                      <span />
-                    </span>
-                  </label>
-                  <div className="workflow-rule-menu" data-workflow-rule-menu>
-                    <button
-                      aria-expanded={menuOpen}
-                      aria-haspopup="menu"
-                      aria-label={`Options for ${rule.name}`}
-                      className="icon-button workflow-rule-menu-button"
-                      onClick={() => setOpenMenuId((current) => current === rule.id ? null : rule.id)}
-                      type="button"
-                    >
-                      <MoreHorizontal size={16} />
-                    </button>
-                    {menuOpen ? (
-                      <div className="workflow-rule-menu-popover" role="menu">
-                        <button
-                          onClick={() => {
-                            setOpenMenuId(null);
-                            onSelect(rule);
-                          }}
-                          role="menuitem"
-                          type="button"
-                        >
-                          <Pencil size={14} /> Edit
-                        </button>
-                        <button
-                          onClick={() => {
-                            setOpenMenuId(null);
-                            onDuplicate(rule);
-                          }}
-                          role="menuitem"
-                          type="button"
-                        >
-                          <Copy size={14} /> Duplicate
-                        </button>
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            setOpenMenuId(null);
-                            onDelete(rule);
-                          }}
-                          role="menuitem"
-                          type="button"
-                        >
-                          <Trash2 size={14} /> Delete
-                        </button>
-                      </div>
-                    ) : null}
+                {!collapsed ? (
+                  <div className="notification-rule-table-wrap" id={tableId}>
+                    <table className="notification-rule-data-table">
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Configuration</th>
+                          <th>Last Fired</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {category.rules.map((rule) => {
+                          const active = activeId === rule.id;
+                          const menuOpen = openMenu?.id === rule.id;
+                          const statusFeedback = ruleStatusFeedback?.ruleId === rule.id ? ruleStatusFeedback : null;
+                          const toggling = togglingRuleIds.has(rule.id);
+                          return (
+                            <tr className={[active ? "active" : "", rule.is_active ? "" : "paused"].filter(Boolean).join(" ")} key={rule.id}>
+                              <td className="notification-rule-name-cell">
+                                <button className="notification-rule-name-button" onClick={() => onSelect(rule)} type="button">
+                                  <strong>{rule.name}</strong>
+                                </button>
+                              </td>
+                              <td>
+                                <span className="notification-config-chips" aria-label="Workflow summary">
+                                  <NotificationConfigChip count={1} icon={Zap} label="Triggers" />
+                                  <NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" />
+                                  <NotificationConfigChip count={rule.actions.length} icon={Play} label="Actions" />
+                                </span>
+                              </td>
+                              <td>
+                                <span className="notification-last-fired">{formatCompactLastFired(rule.last_fired_at)}</span>
+                              </td>
+                              <td className="notification-rule-actions-cell">
+                                <span className="notification-rule-actions-cluster">
+                                  <span className="notification-rule-status-pill-slot">
+                                    {statusFeedback ? (
+                                      <span
+                                        className={`notification-rule-status-pill ${statusFeedback.status}`}
+                                        key={statusFeedback.nonce}
+                                        role="status"
+                                      >
+                                        {statusFeedback.status === "paused" ? "Paused" : "Resumed"}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <label className={rule.is_active ? "workflow-rule-toggle active" : "workflow-rule-toggle"} aria-label={`${rule.is_active ? "Pause" : "Activate"} ${rule.name}`}>
+                                    <input
+                                      checked={rule.is_active}
+                                      disabled={toggling}
+                                      onChange={(event) => onToggleActive(rule, event.target.checked)}
+                                      type="checkbox"
+                                    />
+                                    <span className="workflow-rule-toggle-track" aria-hidden="true">
+                                      <span />
+                                    </span>
+                                  </label>
+                                  <span className="workflow-rule-menu" data-workflow-rule-menu>
+                                    <button
+                                      aria-expanded={menuOpen}
+                                      aria-haspopup="menu"
+                                      aria-label={`Options for ${rule.name}`}
+                                      className="icon-button workflow-rule-menu-button"
+                                      onClick={(event) => toggleRuleMenu(rule.id, event.currentTarget)}
+                                      type="button"
+                                    >
+                                      <MoreHorizontal size={16} />
+                                    </button>
+                                  </span>
+                                </span>
+                                {menuOpen ? (
+                                  <NotificationRuleMenu
+                                    left={openMenu.left}
+                                    rule={rule}
+                                    top={openMenu.top}
+                                    onClose={() => setOpenMenu(null)}
+                                    onDelete={onDelete}
+                                    onDuplicate={onDuplicate}
+                                    onSelect={onSelect}
+                                  />
+                                ) : null}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                </div>
-              </article>
+                ) : null}
+              </section>
             );
           })}
         </div>
       ) : (
-        <div className="notification-empty-list workflow-empty-list">
-          <Bell size={20} />
-          <strong>No notification workflows</strong>
-          <span>Use Add Notification to create the first automation.</span>
-        </div>
+        <NotificationWorkflowEmptyState statusFilter={statusFilter} totalRuleCount={totalRuleCount} />
       )}
     </aside>
   );
+}
+
+function NotificationRuleMenu({
+  left,
+  rule,
+  top,
+  onClose,
+  onDelete,
+  onDuplicate,
+  onSelect
+}: {
+  left: number;
+  rule: NotificationRule;
+  top: number;
+  onClose: () => void;
+  onDelete: (rule: NotificationRule) => void | Promise<void>;
+  onDuplicate: (rule: NotificationRule) => void | Promise<void>;
+  onSelect: (rule: NotificationRule) => void;
+}) {
+  return createPortal(
+    <div
+      className="workflow-rule-menu-popover notification-rule-menu-popover-fixed"
+      data-workflow-rule-menu
+      role="menu"
+      style={{ left, top }}
+    >
+      <button
+        onClick={() => {
+          onClose();
+          onSelect(rule);
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Pencil size={14} /> Edit
+      </button>
+      <button
+        onClick={() => {
+          onClose();
+          onDuplicate(rule);
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Copy size={14} /> Duplicate
+      </button>
+      <button
+        className="danger"
+        onClick={() => {
+          onClose();
+          onDelete(rule);
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Trash2 size={14} /> Delete
+      </button>
+    </div>,
+    document.body
+  );
+}
+
+function WorkflowStatusFilters({
+  activeFilter,
+  ariaLabel,
+  counts,
+  onFilterChange
+}: {
+  activeFilter: NotificationStatusFilter;
+  ariaLabel: string;
+  counts: NotificationFilterCounts;
+  onFilterChange: (filter: NotificationStatusFilter) => void;
+}) {
+  const options: Array<{ key: NotificationStatusFilter; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "active", label: "Active" },
+    { key: "inactive", label: "Inactive" },
+  ];
+  return (
+    <div className="notification-status-tabs" role="tablist" aria-label={ariaLabel}>
+      {options.map((option) => (
+        <button
+          aria-selected={activeFilter === option.key}
+          className={activeFilter === option.key ? "active" : ""}
+          key={option.key}
+          onClick={() => onFilterChange(option.key)}
+          role="tab"
+          type="button"
+        >
+          <span>{option.label}</span>
+          <Badge tone="gray">{counts[option.key]}</Badge>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function NotificationConfigChip({ count, icon: Icon, label }: { count: number; icon: React.ElementType; label: string }) {
+  const tooltipId = React.useId();
+  const [tooltipPosition, setTooltipPosition] = React.useState<NotificationConfigTooltipState | null>(null);
+  const itemName = label === "Triggers" ? "trigger" : label === "Conditions" ? "condition" : "action";
+  const tooltip = `${count} ${pluralize(itemName, count)} configured`;
+
+  React.useEffect(() => {
+    if (!tooltipPosition) return undefined;
+    const hideTooltip = () => setTooltipPosition(null);
+    window.addEventListener("resize", hideTooltip);
+    window.addEventListener("scroll", hideTooltip, true);
+    return () => {
+      window.removeEventListener("resize", hideTooltip);
+      window.removeEventListener("scroll", hideTooltip, true);
+    };
+  }, [tooltipPosition]);
+
+  const showTooltip = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = 168;
+    const tooltipHeight = 48;
+    const gap = 8;
+    const placement = rect.bottom + gap + tooltipHeight > window.innerHeight - 8 ? "top" : "bottom";
+    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
+    const top = placement === "bottom"
+      ? rect.bottom + gap
+      : Math.max(12, rect.top - tooltipHeight - gap);
+    setTooltipPosition({ left, placement, top });
+  };
+
+  return (
+    <span
+      className="notification-config-chip"
+      aria-describedby={tooltipPosition ? tooltipId : undefined}
+      aria-label={`${label}: ${count}`}
+      onBlur={() => setTooltipPosition(null)}
+      onFocus={(event) => showTooltip(event.currentTarget)}
+      onMouseEnter={(event) => showTooltip(event.currentTarget)}
+      onMouseLeave={() => setTooltipPosition(null)}
+      tabIndex={0}
+    >
+      <Icon size={13} />
+      <span>{count}</span>
+      {tooltipPosition ? createPortal(
+        <span
+          className={`notification-config-tooltip ${tooltipPosition.placement}`}
+          id={tooltipId}
+          role="tooltip"
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+        >
+          <strong>{label}</strong>
+          <span>{tooltip}</span>
+        </span>,
+        document.body
+      ) : null}
+    </span>
+  );
+}
+
+function NotificationWorkflowEmptyState({
+  statusFilter,
+  totalRuleCount
+}: {
+  statusFilter: NotificationStatusFilter;
+  totalRuleCount: number;
+}) {
+  const emptyTitle = totalRuleCount === 0
+    ? "No notification workflows"
+    : statusFilter === "active"
+      ? "No active notification workflows"
+      : "No inactive notification workflows";
+  const emptyDetail = totalRuleCount === 0
+    ? "Use Add Notification to create the first automation."
+    : statusFilter === "active"
+      ? "Active workflows will appear here as soon as they are switched on."
+      : "Paused workflows will appear here as soon as they are switched off.";
+  return (
+    <div className="notification-empty-list workflow-empty-list">
+      <Bell size={20} />
+      <strong>{emptyTitle}</strong>
+      <span>{emptyDetail}</span>
+    </div>
+  );
+}
+
+function groupNotificationRulesByTriggerCategory(
+  rules: NotificationRule[],
+  triggerGroups: NotificationTriggerGroup[]
+): NotificationRuleCategory[] {
+  const categoryByTrigger = new Map<string, { id: string; label: string; icon: React.ElementType; order: number }>();
+  triggerGroups.forEach((group, order) => {
+    const category = {
+      id: group.id,
+      label: group.label,
+      icon: notificationTriggerGroupIcon(group.id),
+      order,
+    };
+    group.events.forEach((event) => {
+      categoryByTrigger.set(event.value, category);
+    });
+  });
+
+  const fallbackCategory = {
+    id: "other",
+    label: "Other",
+    icon: Bell,
+    order: Number.MAX_SAFE_INTEGER,
+  };
+  const groups = new Map<string, NotificationRuleCategory & { order: number }>();
+  rules.forEach((rule) => {
+    const category = categoryByTrigger.get(rule.trigger_event) ?? fallbackCategory;
+    const existing = groups.get(category.id);
+    if (existing) {
+      existing.rules.push(rule);
+      return;
+    }
+    groups.set(category.id, {
+      id: category.id,
+      label: category.label,
+      icon: category.icon,
+      order: category.order,
+      rules: [rule],
+    });
+  });
+
+  return Array.from(groups.values())
+    .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
+    .map(({ order: _order, ...category }) => category);
 }
 
 function NotificationWorkflowEditor({
@@ -12065,6 +14051,117 @@ function NotificationConditionCard({
   );
 }
 
+type TemplateEditorProps = {
+  label: string;
+  multiline?: boolean;
+  value: string;
+  variables: Array<NotificationVariable & { group: string }>;
+  onChange: (value: string) => void;
+};
+
+class TemplateEditorBoundary extends React.Component<
+  { children: React.ReactNode; fallback: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("Notification template editor failed to render", error);
+  }
+
+  render() {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; message: string }
+> {
+  state = { hasError: false, message: "" };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "The dashboard hit a rendering error.",
+    };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("Dashboard failed to render", error);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <main className="app-crash-panel">
+        <section>
+          <AlertTriangle size={22} />
+          <h1>Dashboard needs a reload</h1>
+          <p>{this.state.message}</p>
+          <div>
+            <button className="primary-button" onClick={() => window.location.reload()} type="button">
+              <RefreshCw size={15} /> Reload
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => {
+                localStorage.removeItem("iacs-active-view");
+                window.history.replaceState({ view: "dashboard" }, "", "/");
+                window.location.reload();
+              }}
+              type="button"
+            >
+              <LayoutDashboard size={15} /> Reset view
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+}
+
+function SafeVariableRichTextEditor(props: TemplateEditorProps) {
+  const safeProps = {
+    ...props,
+    value: stringifyTemplateValue(props.value),
+  };
+  return (
+    <TemplateEditorBoundary fallback={<PlainTemplateEditor {...safeProps} />}>
+      <React.Suspense fallback={<div className="loading-panel compact">Loading template editor</div>}>
+        <VariableRichTextEditor {...safeProps} />
+      </React.Suspense>
+    </TemplateEditorBoundary>
+  );
+}
+
+function PlainTemplateEditor({ label, multiline = false, value, onChange }: TemplateEditorProps) {
+  return (
+    <label className="field variable-editor-field">
+      <span>{label}</span>
+      {multiline ? (
+        <textarea
+          className="template-editor-fallback"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          rows={4}
+        />
+      ) : (
+        <input
+          className="template-editor-fallback"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+    </label>
+  );
+}
+
 function NotificationActionCard({
   action,
   cameras,
@@ -12083,8 +14180,9 @@ function NotificationActionCard({
   const meta = notificationChannelMeta[action.type];
   const Icon = meta.icon;
   const supportsTitle = action.type !== "voice";
-  const supportsMedia = action.type === "mobile" || action.type === "in_app";
-  const selectedCamera = cameras.find((camera) => camera.id === action.media.camera_id);
+  const supportsMedia = action.type === "mobile" || action.type === "in_app" || action.type === "discord";
+  const actionMedia = normalizeNotificationMedia(action.media);
+  const selectedCamera = cameras.find((camera) => camera.id === actionMedia.camera_id);
   const cameraSnapshotUrl = selectedCamera
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
     : "";
@@ -12111,36 +14209,34 @@ function NotificationActionCard({
         ))}
       </div>
 
-      <React.Suspense fallback={<div className="loading-panel compact">Loading template editor</div>}>
-        {supportsTitle ? (
-          <VariableRichTextEditor
-            label="Title"
-            value={action.title_template}
-            variables={variables}
-            onChange={(title_template) => onChange({ ...action, title_template })}
-          />
-        ) : null}
-        <VariableRichTextEditor
-          label={action.type === "voice" ? "Spoken message" : "Message"}
-          multiline
-          value={action.message_template}
+      {supportsTitle ? (
+        <SafeVariableRichTextEditor
+          label="Title"
+          value={action.title_template}
           variables={variables}
-          onChange={(message_template) => onChange({ ...action, message_template })}
+          onChange={(title_template) => onChange({ ...action, title_template })}
         />
-      </React.Suspense>
+      ) : null}
+      <SafeVariableRichTextEditor
+        label={action.type === "voice" ? "Spoken message" : "Message"}
+        multiline
+        value={action.message_template}
+        variables={variables}
+        onChange={(message_template) => onChange({ ...action, message_template })}
+      />
 
       {supportsMedia ? (
         <section className="workflow-media-row">
-          <label className={action.media.attach_camera_snapshot ? "notification-switch active" : "notification-switch"}>
+          <label className={actionMedia.attach_camera_snapshot ? "notification-switch active" : "notification-switch"}>
             <input
-              checked={action.media.attach_camera_snapshot}
-              onChange={(event) => onChange({ ...action, media: { ...action.media, attach_camera_snapshot: event.target.checked } })}
+              checked={actionMedia.attach_camera_snapshot}
+              onChange={(event) => onChange({ ...action, media: { ...actionMedia, attach_camera_snapshot: event.target.checked } })}
               type="checkbox"
             />
             <span>Camera Screenshot</span>
           </label>
-          {action.media.attach_camera_snapshot ? (
-            <select value={action.media.camera_id} onChange={(event) => onChange({ ...action, media: { ...action.media, camera_id: event.target.value } })}>
+          {actionMedia.attach_camera_snapshot ? (
+            <select value={actionMedia.camera_id} onChange={(event) => onChange({ ...action, media: { ...actionMedia, camera_id: event.target.value } })}>
               <option value="">Select camera</option>
               {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
             </select>
@@ -12664,11 +14760,12 @@ function notificationTriggerGroupIcon(groupId: string) {
   if (groupId === "leaderboard") return Trophy;
   if (groupId === "maintenance_mode") return Construction;
   if (groupId === "vehicle_detections") return Car;
+  if (groupId === "visitor_pass") return UserPlus;
   return Bell;
 }
 
 function notificationActionCategories(): TwoPaneCategory[] {
-  return (["mobile", "voice", "in_app"] as NotificationActionType[])
+  return (["mobile", "discord", "voice", "in_app"] as NotificationActionType[])
     .map((id) => {
       const meta = notificationChannelMeta[id];
       return { id, label: meta.label, count: 0, icon: meta.icon };
@@ -12684,6 +14781,7 @@ function buildNotificationActionMethods(
   const mobileIntegration = integrationById.get("mobile");
   const voiceIntegration = integrationById.get("voice");
   const inAppIntegration = integrationById.get("in_app");
+  const discordIntegration = integrationById.get("discord");
   const mobileEndpoints = concreteNotificationEndpoints(mobileIntegration?.endpoints ?? []);
   const homeAssistantMobileTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("home_assistant_mobile:"));
   const appriseTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("apprise:"));
@@ -12769,7 +14867,30 @@ function buildNotificationActionMethods(
     },
   ];
 
+  const discordTargets = concreteNotificationEndpoints(discordIntegration?.endpoints ?? []);
+  const discordDefault = discordIntegration?.endpoints.find((endpoint) => endpoint.id === "discord:*");
+  const discordMethods: NotificationActionMethod[] = [];
+  if (discordDefault || discordTargets.length || discordIntegration?.configured) {
+    discordMethods.push({
+      id: "discord",
+      actionType: "discord",
+      label: "Discord",
+      provider: "Discord",
+      detail: discordTargets.length
+        ? `${discordTargets.length} channel${discordTargets.length === 1 ? "" : "s"} available`
+        : "No Discord channels discovered",
+      icon: MessageCircle,
+      tone: "purple",
+      targets: discordTargets,
+      targetMode: "selected",
+      requiresTarget: true,
+      defaultTargetIds: discordTargets[0]?.id ? [discordTargets[0].id] : [],
+      unavailableReason: discordTargets.length ? undefined : "Discord is configured, but no channels are available yet.",
+    });
+  }
+
   return {
+    discord: discordMethods.sort(sortNotificationMethods),
     in_app: inAppMethods.sort(sortNotificationMethods),
     mobile: mobileMethods.sort(sortNotificationMethods),
     voice: voiceMethods.sort(sortNotificationMethods),
@@ -12848,6 +14969,7 @@ function notificationActionTargetChips(action: NotificationAction, integration?:
 
 function providerLabelForNotificationTarget(targetId: string, integration?: NotificationIntegration) {
   if (targetId.startsWith("apprise:")) return "Apprise";
+  if (targetId.startsWith("discord:")) return "Discord";
   if (targetId.startsWith("home_assistant_mobile:") || targetId.startsWith("home_assistant_tts:")) return "Home Assistant";
   if (targetId === "dashboard") return "Dashboard";
   return integration?.provider ?? "Target";
@@ -12886,54 +15008,89 @@ function createWorkflowAction(
 }
 
 function cloneNotificationRule(rule: NotificationRule): NotificationRule {
-  return JSON.parse(JSON.stringify(rule)) as NotificationRule;
+  return normalizeNotificationRule(JSON.parse(JSON.stringify(rule)) as Partial<NotificationRule>);
 }
 
 function workflowRulePayload(rule: NotificationRule) {
+  const normalized = normalizeNotificationRule(rule);
   return {
-    name: rule.name.trim() || "Notification Workflow",
-    trigger_event: rule.trigger_event,
-    conditions: rule.conditions,
-    actions: rule.actions,
-    is_active: rule.is_active
+    name: normalized.name.trim() || "Notification Workflow",
+    trigger_event: normalized.trigger_event,
+    conditions: normalized.conditions,
+    actions: normalized.actions,
+    is_active: normalized.is_active
   };
+}
+
+function normalizeNotificationRule(rule: Partial<NotificationRule>): NotificationRule {
+  return {
+    id: stringifyTemplateValue(rule.id) || draftId("workflow"),
+    name: stringifyTemplateValue(rule.name) || "Notification Workflow",
+    trigger_event: stringifyTemplateValue(rule.trigger_event),
+    conditions: Array.isArray(rule.conditions) ? rule.conditions.map(normalizeNotificationCondition) : [],
+    actions: Array.isArray(rule.actions) ? rule.actions.map(normalizeNotificationAction) : [],
+    is_active: rule.is_active !== false,
+    last_fired_at: rule.last_fired_at ?? null,
+    created_at: rule.created_at,
+    updated_at: rule.updated_at,
+  };
+}
+
+function normalizeNotificationCondition(condition: Partial<NotificationCondition>): NotificationCondition {
+  const rawType = stringifyTemplateValue(condition.type);
+  const type: NotificationConditionType = rawType === "presence" ? "presence" : "schedule";
+  return {
+    id: stringifyTemplateValue(condition.id) || draftId("condition"),
+    type,
+    schedule_id: stringifyTemplateValue(condition.schedule_id),
+    mode: normalizePresenceConditionMode(condition.mode),
+    person_id: stringifyTemplateValue(condition.person_id),
+  };
+}
+
+function normalizePresenceConditionMode(value: unknown): PresenceConditionMode {
+  if (value === "no_one_home" || value === "person_home" || value === "someone_home") return value;
+  return "someone_home";
+}
+
+function normalizeNotificationAction(action: Partial<NotificationAction>): NotificationAction {
+  const rawType = stringifyTemplateValue(action.type);
+  const type = isNotificationActionType(rawType) ? rawType : "in_app";
+  const templates = defaultWorkflowActionTemplates[type];
+  return {
+    id: stringifyTemplateValue(action.id) || draftId("action"),
+    type,
+    target_mode: normalizeNotificationTargetMode(action.target_mode),
+    target_ids: Array.isArray(action.target_ids) ? action.target_ids.map(stringifyTemplateValue).filter(Boolean) : [],
+    title_template: stringifyTemplateValue(action.title_template) || templates.title_template,
+    message_template: stringifyTemplateValue(action.message_template) || templates.message_template,
+    media: normalizeNotificationMedia(action.media),
+  };
+}
+
+function isNotificationActionType(value: string): value is NotificationActionType {
+  return value === "mobile" || value === "in_app" || value === "voice" || value === "discord";
+}
+
+function normalizeNotificationTargetMode(value: unknown): NotificationTargetMode {
+  if (value === "many" || value === "selected" || value === "all") return value;
+  return "all";
+}
+
+function normalizeNotificationMedia(media: unknown): NotificationAction["media"] {
+  const raw = media && typeof media === "object" ? media as Partial<NotificationAction["media"]> : {};
+  return {
+    attach_camera_snapshot: raw.attach_camera_snapshot === true,
+    camera_id: stringifyTemplateValue(raw.camera_id),
+  };
+}
+
+function stringifyTemplateValue(value: unknown) {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
 }
 
 function notificationEventLabel(value: string, triggerByValue?: Map<string, NotificationTriggerOption>) {
   return triggerByValue?.get(value)?.label ?? titleCase(value);
-}
-
-const notificationTriggerSummaryOverrides: Record<string, string> = {
-  agent_anomaly_alert: "Triggers when the AI agent raises an anomaly.",
-  authorized_entry: "Triggers when a known vehicle arrives.",
-  duplicate_entry: "Triggers when a person already home is detected entering again.",
-  duplicate_exit: "Triggers when a person already away is detected exiting again.",
-  expired_mot_detected: "Triggers when DVLA reports an expired MOT on arrival.",
-  expired_tax_detected: "Triggers when DVLA reports expired tax on arrival.",
-  garage_door_open_failed: "Triggers when a linked garage door command fails.",
-  gate_malfunction_2hrs: "Triggers when a gate malfunction reaches two hours.",
-  gate_malfunction_30m: "Triggers when a gate malfunction reaches 30 minutes.",
-  gate_malfunction_60m: "Triggers when a gate malfunction reaches 60 minutes.",
-  gate_malfunction_fubar: "Triggers when automated gate recovery is exhausted.",
-  gate_malfunction_initial: "Triggers when the primary gate stays open too long.",
-  gate_open_failed: "Triggers when a granted access event cannot open the gate.",
-  leaderboard_overtake: "Triggers when a known vehicle takes the leaderboard top spot.",
-  maintenance_mode_disabled: "Triggers when maintenance mode is disabled.",
-  maintenance_mode_enabled: "Triggers when maintenance mode is enabled.",
-  outside_schedule: "Triggers when a known vehicle is denied by schedule.",
-  unauthorized_plate: "Triggers when an unknown or inactive plate is denied.",
-};
-
-function notificationRuleSummary(rule: NotificationRule, triggerByValue?: Map<string, NotificationTriggerOption>) {
-  const trigger = triggerByValue?.get(rule.trigger_event);
-  const triggerSummary = notificationTriggerSummaryOverrides[rule.trigger_event] ?? sentenceWithPeriod(trigger?.description || `Triggers on ${notificationEventLabel(rule.trigger_event, triggerByValue).toLowerCase()}.`);
-  return `${triggerSummary} ${rule.conditions.length} ${pluralize("condition", rule.conditions.length)}. Executes ${rule.actions.length} ${pluralize("action", rule.actions.length)}.`;
-}
-
-function sentenceWithPeriod(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 function pluralize(word: string, count: number) {
@@ -12948,7 +15105,7 @@ function notificationSeverityTone(value: string): BadgeTone {
 }
 
 function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>) {
-  return actions.map((action) => {
+  return actions.map(normalizeNotificationAction).map((action) => {
     const title = renderWorkflowTemplate(action.title_template, context);
     const message = renderWorkflowTemplate(action.message_template, context);
     return {
@@ -13575,6 +15732,7 @@ type SettingFieldDefinition = {
 const secretSettingKeys = new Set([
   "home_assistant_token",
   "apprise_urls",
+  "discord_bot_token",
   "dvla_api_key",
   "unifi_protect_username",
   "unifi_protect_password",
@@ -13582,6 +15740,18 @@ const secretSettingKeys = new Set([
   "openai_api_key",
   "gemini_api_key",
   "anthropic_api_key"
+]);
+
+const discordListSettingKeys = new Set([
+  "discord_guild_allowlist",
+  "discord_channel_allowlist",
+  "discord_user_allowlist",
+  "discord_role_allowlist",
+  "discord_admin_role_ids"
+]);
+const listSettingKeys = new Set([
+  ...discordListSettingKeys,
+  "lpr_allowed_smart_zones"
 ]);
 
 function SettingField({
@@ -13687,7 +15857,13 @@ function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefin
   return [
     { key: "lpr_debounce_quiet_seconds", label: "Debounce quiet seconds", type: "number", min: 0.5, step: 0.1 },
     { key: "lpr_debounce_max_seconds", label: "Debounce max seconds", type: "number", min: 1, step: 0.1 },
-    { key: "lpr_similarity_threshold", label: "Similarity threshold", type: "number", min: 0, max: 1, step: 0.01 }
+    { key: "lpr_similarity_threshold", label: "Similarity threshold", type: "number", min: 0, max: 1, step: 0.01 },
+    {
+      key: "lpr_allowed_smart_zones",
+      label: "Accepted smart zones",
+      type: "textarea",
+      help: "One UniFi smart zone name or ID per line. Default is default. Empty or * accepts all zones."
+    }
   ];
 }
 
@@ -13709,16 +15885,26 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     unifi_protect_snapshot_width: "1280",
     unifi_protect_snapshot_height: "720",
     home_assistant_gate_entities: "[]",
-    home_assistant_garage_door_entities: "[]"
+    home_assistant_garage_door_entities: "[]",
+    discord_guild_allowlist: "",
+    discord_channel_allowlist: "",
+    discord_user_allowlist: "",
+    discord_role_allowlist: "",
+    discord_admin_role_ids: "",
+    discord_allow_direct_messages: "false",
+    discord_require_mention: "true"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
+    const currentOrDefault = current !== undefined && current !== null ? current : defaults[field.key] || "";
     if (secretSettingKeys.has(field.key)) {
       acc[field.key] = "";
+    } else if (discordListSettingKeys.has(field.key)) {
+      acc[field.key] = Array.isArray(current) ? current.map(String).join("\n") : stringifySetting(currentOrDefault);
     } else if (["home_assistant_gate_entities", "home_assistant_garage_door_entities"].includes(field.key) && typeof current === "object") {
       acc[field.key] = JSON.stringify(current ?? {}, null, 2);
     } else {
-      acc[field.key] = stringifySetting(current || defaults[field.key] || "");
+      acc[field.key] = stringifySetting(currentOrDefault);
     }
     return acc;
   }, {});
@@ -13726,6 +15912,7 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
 
 function stringifySetting(value: unknown) {
   if (typeof value === "boolean") return value ? "true" : "false";
+  if (Array.isArray(value)) return value.map((item) => String(item)).join("\n");
   if (typeof value === "object" && value !== null) return JSON.stringify(value, null, 2);
   return value == null ? "" : String(value);
 }
@@ -13885,6 +16072,7 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       key.endsWith("_api_key") ||
       key === "home_assistant_token" ||
       key === "apprise_urls" ||
+      key === "discord_bot_token" ||
       key === "unifi_protect_username" ||
       key === "unifi_protect_password"
     ) {
@@ -13897,7 +16085,9 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       } catch {
         payload[key] = [];
       }
-    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl"].includes(key)) {
+    } else if (listSettingKeys.has(key)) {
+      payload[key] = value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "discord_allow_direct_messages", "discord_require_mention"].includes(key)) {
       payload[key] = value === "true";
     } else if ([
       "auth_access_token_minutes",
@@ -15156,9 +17346,9 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-function formatLastFired(value?: string | null) {
-  if (!value) return "Last fired: never";
-  return `Last fired: ${formatRelativeTime(value)}`;
+function formatCompactLastFired(value?: string | null) {
+  if (!value) return "never";
+  return formatRelativeTime(value);
 }
 
 function formatRelativeTime(value: string) {
@@ -15273,6 +17463,8 @@ function formatSimulatorDate(value: Date) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </React.StrictMode>
 );

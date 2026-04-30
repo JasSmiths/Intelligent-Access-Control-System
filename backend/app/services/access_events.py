@@ -30,6 +30,7 @@ from app.models.enums import (
     AnomalyType,
     PresenceState,
     TimingClassification,
+    VisitorPassStatus,
 )
 from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import capture_alert_snapshot
@@ -49,6 +50,7 @@ logger = get_logger(__name__)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
+VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
@@ -75,6 +77,15 @@ def _is_exact_known_vehicle_plate_match(read: PlateRead) -> bool:
     return bool(match and match.get("exact"))
 
 
+def _visitor_pass_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
+    match = (read.raw_payload or {}).get(VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY)
+    return match if isinstance(match, dict) else None
+
+
+def _is_visitor_pass_plate_match(read: PlateRead) -> bool:
+    return bool(_visitor_pass_plate_match_from_read(read))
+
+
 def _detected_registration_number(read: PlateRead) -> str:
     match = _known_vehicle_plate_match_from_read(read)
     return str(match.get("detected_registration_number") or read.registration_number) if match else read.registration_number
@@ -92,6 +103,7 @@ class DebounceWindow:
             self.reads,
             key=lambda read: (
                 1 if _is_exact_known_vehicle_plate_match(read) else 0,
+                1 if _is_visitor_pass_plate_match(read) else 0,
                 read.confidence,
                 read.captured_at,
             ),
@@ -125,6 +137,7 @@ class AccessEventService:
         self._timezone = ZoneInfo(settings.site_timezone)
         self._runtime: RuntimeConfig | None = None
         self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
+        self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
 
     async def start(self) -> None:
         if self._worker and not self._worker.done():
@@ -220,13 +233,22 @@ class AccessEventService:
     async def _handle_queued_read(self, read: PlateRead) -> None:
         read = await self._read_with_known_vehicle_match(read)
         if self._suppress_after_exact_resolution(read):
-            await self._publish_suppressed_read(read)
+            await self._publish_suppressed_read(read, reason="exact_known_vehicle_plate_already_resolved_in_debounce_window")
+            return
+
+        if not _is_exact_known_vehicle_plate_match(read):
+            read = await self._read_with_visitor_pass_departure_match(read)
+        if self._suppress_after_visitor_pass_resolution(read):
+            await self._publish_suppressed_read(read, reason="visitor_pass_plate_already_resolved_in_debounce_window")
             return
 
         window = self._add_to_debounce_window(read)
         if _is_exact_known_vehicle_plate_match(read):
             window = self._pop_exact_known_plate_window(window)
             await self._finalize_exact_known_plate_window(window)
+        elif _is_visitor_pass_plate_match(read):
+            window = self._pop_related_read_window(window, read)
+            await self._finalize_visitor_pass_window(window, read)
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "maintenance_mode.changed" and event.payload.get("is_active") is True:
@@ -235,6 +257,7 @@ class AccessEventService:
     def _clear_pending_reads(self) -> None:
         self._pending = []
         self._recent_exact_resolutions = []
+        self._recent_visitor_pass_resolutions = []
 
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
@@ -275,6 +298,53 @@ class AccessEventService:
                 )
             ).all()
         return [str(registration) for registration in registrations]
+
+    async def _read_with_visitor_pass_departure_match(self, read: PlateRead) -> PlateRead:
+        plate = self._normalize_registration_number(read.registration_number)
+        if not plate:
+            return read
+
+        async with AsyncSessionLocal() as session:
+            row = (
+                await session.execute(
+                    select(VisitorPass.id, VisitorPass.arrival_time)
+                    .where(
+                        VisitorPass.status == VisitorPassStatus.USED,
+                        VisitorPass.number_plate == plate,
+                        VisitorPass.departure_time.is_(None),
+                        VisitorPass.arrival_time.is_not(None),
+                        VisitorPass.arrival_time <= read.captured_at,
+                    )
+                    .order_by(VisitorPass.arrival_time.desc(), VisitorPass.created_at.desc())
+                    .limit(1)
+                )
+            ).first()
+        if not row:
+            return read
+
+        visitor_pass_id, arrival_time = row
+        if arrival_time.tzinfo is None:
+            arrival_time = arrival_time.replace(tzinfo=UTC)
+        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        if (
+            self._visitor_pass_candidate_kind(read) != "departure"
+            and read.captured_at <= arrival_time + timedelta(seconds=max_seconds)
+        ):
+            return read
+
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY] = {
+            "kind": "departure",
+            "visitor_pass_id": str(visitor_pass_id),
+            "registration_number": plate,
+        }
+        return PlateRead(
+            registration_number=plate,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+        )
 
     def _known_vehicle_plate_match(
         self,
@@ -347,15 +417,18 @@ class AccessEventService:
             (read for read in window.reads if _is_exact_known_vehicle_plate_match(read)),
             window.best_read,
         )
+        return self._pop_related_read_window(window, exact_read)
+
+    def _pop_related_read_window(self, window: DebounceWindow, anchor_read: PlateRead) -> DebounceWindow:
         max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
         related: list[DebounceWindow] = []
         remaining: list[DebounceWindow] = []
         for item in self._pending:
             if item is window:
                 continue
-            if item.best_read.source == exact_read.source and self._window_overlaps_exact_read(
+            if item.best_read.source == anchor_read.source and self._window_overlaps_anchor_read(
                 item,
-                exact_read,
+                anchor_read,
                 max_seconds,
             ):
                 related.append(item)
@@ -383,8 +456,39 @@ class AccessEventService:
         exact_read: PlateRead,
         max_seconds: float,
     ) -> bool:
-        exact_at = exact_read.captured_at
-        return window.first_seen <= exact_at <= window.first_seen + timedelta(seconds=max_seconds)
+        return self._window_overlaps_anchor_read(window, exact_read, max_seconds)
+
+    def _window_overlaps_anchor_read(
+        self,
+        window: DebounceWindow,
+        anchor_read: PlateRead,
+        max_seconds: float,
+    ) -> bool:
+        anchor_at = anchor_read.captured_at
+        return window.first_seen <= anchor_at <= window.first_seen + timedelta(seconds=max_seconds)
+
+    async def _finalize_visitor_pass_window(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
+        try:
+            await self._finalize_window(window)
+        except Exception:
+            logger.exception(
+                "access_event_finalize_failed",
+                extra={
+                    "candidate_count": len(window.reads),
+                    "best_registration_number": window.best_read.registration_number,
+                    "reason": "visitor_pass_departure_plate",
+                },
+            )
+            await event_bus.publish(
+                "access_event.finalize_failed",
+                {
+                    "registration_number": window.best_read.registration_number,
+                    "candidate_count": len(window.reads),
+                    "reason": "visitor_pass_departure_plate",
+                },
+            )
+            return
+        self._remember_visitor_pass_resolution(window, anchor_read)
 
     def _remember_exact_plate_resolution(self, window: DebounceWindow) -> None:
         exact_read = next(
@@ -427,7 +531,37 @@ class AccessEventService:
             if resolution.expires_at >= now
         ]
 
-    async def _publish_suppressed_read(self, read: PlateRead) -> None:
+    def _remember_visitor_pass_resolution(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
+        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        self._recent_visitor_pass_resolutions.append(
+            ResolvedPlateWindow(
+                source=anchor_read.source,
+                registration_number=anchor_read.registration_number,
+                first_seen=window.first_seen,
+                expires_at=window.first_seen + timedelta(seconds=max_seconds),
+            )
+        )
+
+    def _suppress_after_visitor_pass_resolution(self, read: PlateRead) -> bool:
+        self._prune_recent_visitor_pass_resolutions(read.captured_at)
+        if _is_exact_known_vehicle_plate_match(read) or _is_visitor_pass_plate_match(read):
+            return False
+        for resolution in self._recent_visitor_pass_resolutions:
+            if read.source != resolution.source:
+                continue
+            if not (resolution.first_seen <= read.captured_at <= resolution.expires_at):
+                continue
+            return True
+        return False
+
+    def _prune_recent_visitor_pass_resolutions(self, now: datetime) -> None:
+        self._recent_visitor_pass_resolutions = [
+            resolution
+            for resolution in self._recent_visitor_pass_resolutions
+            if resolution.expires_at >= now
+        ]
+
+    async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
         match = _known_vehicle_plate_match_from_read(read) or {}
         await event_bus.publish(
             "plate_read.suppressed",
@@ -435,7 +569,7 @@ class AccessEventService:
                 "registration_number": read.registration_number,
                 "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
                 "source": read.source,
-                "reason": "exact_known_vehicle_plate_already_resolved_in_debounce_window",
+                "reason": reason,
             },
         )
 
@@ -507,7 +641,7 @@ class AccessEventService:
             self._clear_pending_reads()
             return
         read = window.best_read
-        direction_read = window.first_read
+        direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
         trace = telemetry.start_trace(
             f"Plate Detection - {read.registration_number}",
@@ -737,6 +871,7 @@ class AccessEventService:
                                 "confidence": item.confidence,
                                 "captured_at": item.captured_at.isoformat(),
                                 "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(item),
+                                "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(item),
                             }
                             for item in window.reads
                         ],
@@ -779,18 +914,13 @@ class AccessEventService:
             if allowed and person:
                 await self._update_presence(session, person, event)
 
-            await session.commit()
-            persistence_span.finish(
-                output_payload={
-                    "event_id": str(event.id),
-                    "anomaly_count": len(anomalies),
-                    "presence_updated": bool(allowed and person),
-                }
-            )
-
-        await event_bus.publish(
-            "access_event.finalized",
-            {
+            if visitor_pass:
+                await session.flush()
+                await session.refresh(visitor_pass)
+                visitor_pass_realtime_payload = serialize_visitor_pass(visitor_pass)
+            else:
+                visitor_pass_realtime_payload = None
+            access_event_realtime_payload = {
                 "event_id": str(event.id),
                 "registration_number": read.registration_number,
                 "direction": direction.value,
@@ -802,12 +932,26 @@ class AccessEventService:
                 "anomaly_count": len(anomalies),
                 "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
-            },
+                "visitor_pass_mode": visitor_pass_mode if visitor_pass else None,
+            }
+
+            await session.commit()
+            persistence_span.finish(
+                output_payload={
+                    "event_id": str(event.id),
+                    "anomaly_count": len(anomalies),
+                    "presence_updated": bool(allowed and person),
+                }
+            )
+
+        await event_bus.publish(
+            "access_event.finalized",
+            access_event_realtime_payload,
         )
-        if visitor_pass:
+        if visitor_pass and visitor_pass_realtime_payload:
             await event_bus.publish(
                 "visitor_pass.used" if visitor_pass_mode == "arrival" else "visitor_pass.departure_recorded",
-                {"visitor_pass": serialize_visitor_pass(visitor_pass)},
+                {"visitor_pass": visitor_pass_realtime_payload},
             )
         if dvla_enrichment:
             await self._notify_compliance_issues(event, person, vehicle, dvla_enrichment)
@@ -1538,6 +1682,13 @@ class AccessEventService:
             resolution["direction"] = AccessDirection.DENIED.value
             return AccessDirection.DENIED, resolution
 
+        visitor_pass_match = _visitor_pass_plate_match_from_read(read)
+        if isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure":
+            resolution["source"] = "visitor_pass_presence"
+            resolution["direction"] = AccessDirection.EXIT.value
+            resolution["visitor_pass_id"] = visitor_pass_match.get("visitor_pass_id")
+            return AccessDirection.EXIT, resolution
+
         if gate_state in ARRIVAL_GATE_STATES:
             direction = AccessDirection.ENTRY
             resolution["source"] = "gate_state"
@@ -1775,6 +1926,9 @@ class AccessEventService:
         return self._coerce_gate_state(gate_observation.get("state")) == GateState.CLOSED
 
     def _visitor_pass_candidate_kind(self, read: PlateRead) -> str:
+        visitor_pass_match = _visitor_pass_plate_match_from_read(read)
+        if isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure":
+            return "departure"
         gate_observation = self._gate_observation_from_read(read)
         gate_state = self._coerce_gate_state(gate_observation.get("state"))
         if gate_state in DEPARTURE_GATE_STATES:

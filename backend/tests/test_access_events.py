@@ -12,6 +12,7 @@ from app.services.access_events import (
     AccessEventService,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
+    VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     dvla_mot_alert_required,
     dvla_tax_alert_required,
 )
@@ -54,6 +55,22 @@ def plate_read(registration_number: str, captured_at: datetime) -> PlateRead:
     )
 
 
+def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
+    raw_payload = dict(read.raw_payload or {})
+    raw_payload[VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY] = {
+        "kind": "departure",
+        "visitor_pass_id": str(uuid.uuid4()),
+        "registration_number": read.registration_number,
+    }
+    return PlateRead(
+        registration_number=read.registration_number,
+        confidence=read.confidence,
+        source=read.source,
+        captured_at=read.captured_at,
+        raw_payload=raw_payload,
+    )
+
+
 @pytest.mark.asyncio
 async def test_closed_gate_state_resolves_allowed_read_as_entry() -> None:
     service = AccessEventService()
@@ -87,6 +104,21 @@ async def test_non_closed_gate_state_resolves_allowed_read_as_exit(state: str) -
     assert direction == AccessDirection.EXIT
     assert resolution["source"] == "gate_state"
     assert not service._automatic_open_allowed(resolution)
+
+
+@pytest.mark.asyncio
+async def test_visitor_pass_departure_match_resolves_allowed_unknown_gate_read_as_exit() -> None:
+    service = AccessEventService()
+
+    direction, resolution = await service._resolve_direction(
+        FakePresenceSession(),
+        visitor_pass_departure_read(plate_read_with_gate_state("unknown")),
+        person=None,
+        allowed=True,
+    )
+
+    assert direction == AccessDirection.EXIT
+    assert resolution["source"] == "visitor_pass_presence"
 
 
 @pytest.mark.asyncio
@@ -159,8 +191,12 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
             }
         )
 
+    async def fake_no_visitor_pass_departure_match(read):
+        return read
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     for offset, registration_number in enumerate(["MD25VMO", "MO25VNO"]):
@@ -210,8 +246,12 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
             }
         )
 
+    async def fake_no_visitor_pass_departure_match(read):
+        return read
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     await service._handle_queued_read(plate_read("ND25VN0", first_seen))
@@ -219,6 +259,72 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
 
     assert finalized == [{"candidate_count": 2, "best_registration_number": "MD25VNO"}]
     assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same_window(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=10.0,
+    )
+    finalized = []
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        if read.registration_number == "DP25MOU":
+            return visitor_pass_departure_read(read)
+        return read
+
+    async def fake_finalize_window(window):
+        finalized.append(
+            {
+                "candidate_count": len(window.reads),
+                "best_registration_number": window.best_read.registration_number,
+                "registrations": [read.registration_number for read in window.reads],
+            }
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 4, 30, 12, 23, 36, tzinfo=UTC)
+    await service._handle_queued_read(plate_read("AN08OFB", first_seen))
+    await service._handle_queued_read(plate_read("DP25MOU", first_seen + timedelta(seconds=2)))
+
+    assert finalized == [
+        {
+            "candidate_count": 2,
+            "best_registration_number": "DP25MOU",
+            "registrations": ["DP25MOU", "AN08OFB"],
+        }
+    ]
+    assert service._pending == []
+
+    await service._handle_queued_read(plate_read("FJ73XST", first_seen + timedelta(seconds=3)))
+
+    assert len(finalized) == 1
+    assert service._pending == []
+    assert published == [
+        (
+            "plate_read.suppressed",
+            {
+                "registration_number": "FJ73XST",
+                "detected_registration_number": "FJ73XST",
+                "source": "test",
+                "reason": "visitor_pass_plate_already_resolved_in_debounce_window",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

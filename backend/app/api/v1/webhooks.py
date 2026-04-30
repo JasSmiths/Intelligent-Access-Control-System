@@ -4,9 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 
 from app.core.logging import get_logger
-from app.modules.lpr.ubiquiti import UbiquitiLprAdapter, UbiquitiLprPayload
+from app.modules.lpr.ubiquiti import (
+    UbiquitiLprAdapter,
+    UbiquitiLprPayload,
+    extract_smart_zone_names,
+    smart_zone_allowed,
+)
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
+from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
 from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
@@ -89,6 +95,24 @@ async def receive_ubiquiti_lpr(
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
     await get_lpr_timing_recorder().record_webhook_plate(read)
+    smart_zones = extract_smart_zone_names(raw_payload)
+    runtime = await get_runtime_config()
+    if not smart_zone_allowed(smart_zones, runtime.lpr_allowed_smart_zones):
+        detail = {
+            "registration_number": read.registration_number,
+            "smart_zones": smart_zones,
+            "allowed_smart_zones": runtime.lpr_allowed_smart_zones,
+            "reason": "outside_lpr_smart_zone",
+        }
+        logger.info("ubiquiti_lpr_read_ignored_outside_smart_zone", extra=detail)
+        await event_bus.publish("plate_read.ignored", detail)
+        telemetry.record_span(
+            "Webhook payload ignored outside LPR smart zone",
+            category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+            output_payload=detail,
+        )
+        return {"status": "ignored", "plate": read.registration_number, "reason": "outside_lpr_smart_zone"}
+
     await get_vehicle_visual_detection_recorder().record_unifi_payload(
         raw_payload,
         registration_number=read.registration_number,
@@ -100,6 +124,7 @@ async def receive_ubiquiti_lpr(
             "registration_number": read.registration_number,
             "confidence": read.confidence,
             "source": read.source,
+            "smart_zones": smart_zones,
         },
     )
     await service.enqueue_plate_read(read)

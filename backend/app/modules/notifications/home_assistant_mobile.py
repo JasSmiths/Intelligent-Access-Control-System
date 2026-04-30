@@ -21,9 +21,23 @@ class HomeAssistantMobileAppNotifier:
         title: str,
         body: str,
         context: NotificationContext,
+        *,
+        image_url: str | None = None,
+        image_content_type: str | None = None,
     ) -> None:
         if not target.service_name.startswith("notify.mobile_app_"):
             raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.")
+
+        data = {
+            "tag": f"iacs-{context.event_type}",
+            "group": "iacs",
+        }
+        if image_url:
+            data["image"] = image_url
+            data["attachment"] = {
+                "url": image_url,
+                "content-type": _attachment_content_type(image_content_type),
+            }
 
         try:
             await self._client.call_service(
@@ -31,11 +45,17 @@ class HomeAssistantMobileAppNotifier:
                 {
                     "title": title or context.subject,
                     "message": body or context.subject,
-                    "data": {
-                        "tag": f"iacs-{context.event_type}",
-                        "group": "iacs",
-                    },
+                    "data": data,
                 },
             )
         except HomeAssistantError as exc:
             raise NotificationDeliveryError(str(exc)) from exc
+
+
+def _attachment_content_type(content_type: str | None) -> str:
+    normalized = (content_type or "").lower()
+    if "png" in normalized:
+        return "png"
+    if "gif" in normalized:
+        return "gif"
+    return "jpeg"

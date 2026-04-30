@@ -72,6 +72,29 @@ dev = ["pytest>=8.3.0"]
     assert ("docker_image", "redis", True) in identities
 
 
+def test_discord_dependency_enrolls_with_discord_messaging_area(tmp_path, monkeypatch) -> None:
+    root = tmp_path
+    monkeypatch.setenv("IACS_WORKSPACE_DIR", str(root))
+    (root / "backend").mkdir()
+    (root / "frontend").mkdir()
+    (root / "backend" / "pyproject.toml").write_text(
+        """
+[project]
+dependencies = [
+  "discord.py>=2.4.0",
+]
+"""
+    )
+    (root / "frontend" / "package.json").write_text(json.dumps({"dependencies": {}}))
+
+    rows = DependencyUpdateService()._discover_dependencies()
+    discord_row = next(row for row in rows if row.package_name == "discord.py")
+
+    assert discord_row.ecosystem == "python"
+    assert discord_row.is_direct is True
+    assert discord_row.dependant_area == "Discord Messaging"
+
+
 def test_generated_compose_override_records_host_mounted_remote_storage(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
     service = DependencyUpdateService()

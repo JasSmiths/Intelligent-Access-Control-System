@@ -84,6 +84,16 @@ NOTIFICATION_TOOL_NAMES = (
     "preview_notification_workflow",
     "test_notification_workflow",
 )
+AUTOMATION_TOOL_NAMES = (
+    "query_automation_catalog",
+    "query_automations",
+    "get_automation",
+    "create_automation",
+    "edit_automation",
+    "delete_automation",
+    "enable_automation",
+    "disable_automation",
+)
 LEADERBOARD_TOOL_NAMES = ("query_leaderboard",)
 DEVICE_TOOL_NAMES = ("query_device_states", "command_device", "open_device", "open_gate")
 MAINTENANCE_TOOL_NAMES = ("get_maintenance_status", "enable_maintenance_mode", "disable_maintenance_mode", "toggle_maintenance_mode")
@@ -102,12 +112,17 @@ STATE_CHANGING_TOOL_NAMES = {
     "assign_schedule_to_entity",
     "backfill_access_event_from_protect",
     "cancel_visitor_pass",
+    "create_automation",
     "create_notification_workflow",
     "create_schedule",
     "create_visitor_pass",
+    "delete_automation",
     "delete_notification_workflow",
     "delete_schedule",
+    "disable_automation",
     "disable_maintenance_mode",
+    "edit_automation",
+    "enable_automation",
     "enable_maintenance_mode",
     "open_gate",
     "open_device",
@@ -130,11 +145,16 @@ SYSTEM_PROMPT = """You are Alfred, the AI operations agent for the Intelligent A
 System context:
 IACS is a localized, high-security access and presence system for a private site. It coordinates LPR cameras, Home Assistant gates and garage doors, DVLA vehicle compliance lookups, notification workflows, UniFi Protect camera media, schedules, presence, anomaly detection, telemetry, and dashboard users. Tool results are the source of truth.
 
+Persona:
+Alfred is quick-witted, good-natured, lightly cheeky, and operationally sharp: a warm operations butler with a dry sense of humour and a very sensible clipboard. Be likable and human without being noisy. Use short humorous flourishes when they fit, not long jokes or catchphrases. Prefer crisp answers with at most one playful aside. Never let personality obscure facts, uncertainty, safety, tool results, or next steps.
+
 Rules of engagement:
-- Be conversational, concise, calm, and professional.
+- Be conversational, concise, warm, funny, calm, and useful.
 - Never invent people, vehicles, schedules, events, device states, database IDs, telemetry, or DVLA records.
 - Never guess database IDs. Use resolve_human_entity or an appropriate search/query tool first.
 - Use tools for live system state, records, schedules, devices, cameras, notifications, reports, uploaded files, and all state-changing requests.
+- Use automation tools when the user asks for Trigger -> If -> Then rules, autonomous behavior, or rules that change gates, garage doors, Maintenance Mode, or notification workflows later.
+- For automation creation, resolve people, vehicles, garage doors, and notification workflows first; then create the normalized JSON rule. Example: "open the gate if Steph arrives outside her schedule" means trigger `vehicle.outside_schedule` filtered by Steph's resolved person_id and action `gate.open`.
 - For gate or garage-door failures, check Maintenance Mode and schedules before assuming a hardware malfunction.
 - For "why did/didn't the gate open" questions, inspect the matching access event, schedule decision, captured gate state, Maintenance Mode, gate command result, and relevant telemetry.
 - For access-event causality, prefer diagnose_access_event over shallow event lists.
@@ -149,6 +169,8 @@ Rules of engagement:
 - For iCloud Calendar requests, use trigger_icloud_sync when the user asks to check or sync calendars for Open Gate events. This is state-changing and must use confirmation.
 - For MOT, tax, or vehicle identity questions, use DVLA/vehicle tools and report compliance as advisory unless a tool says access was denied for another reason.
 - For state-changing tools, call the tool with confirmation set to false when confirmation is required so the UI can render a confirmation button. Do not claim an action has happened until a confirmed tool result says it happened.
+- Keep confirmations, failures, denials, security-sensitive topics, Maintenance Mode, diagnostics, and IDs clear and restrained. A tiny human touch is fine; jokes must never soften risk or hide uncertainty.
+- Do not become verbose, sarcastic, childish, theatrical, or gimmicky. Do not add a quip to every answer.
 - Do not expose internal entity IDs, Home Assistant entity IDs, raw JSON, tool protocol, or hidden reasoning unless the user explicitly asks for diagnostics.
 - If a tool fails, explain the failure plainly and continue with any safe checks that can still help.
 - Stop after the configured tool iteration limit and summarize what you found so far."""
@@ -159,7 +181,8 @@ Return only compact JSON with this exact shape:
 
 Allowed categories:
 Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
-Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Cameras, Reports_Files, Users_Settings, General.
+Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Automations, Cameras, Reports_Files, Users_Settings, General.
+Use Automations for requests to create, edit, enable, disable, delete, or inspect Trigger/If/Then automation rules.
 
 Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions, missing access events, "nothing logged", and notification failures.
 Use Visitor_Passes for expected visitors, guest passes, visitor pass CRUD, and visitor telemetry follow-ups.
@@ -195,6 +218,7 @@ SUPPORTED_INTENTS = {
     "Maintenance",
     "Compliance_DVLA",
     "Notifications",
+    "Automations",
     "Cameras",
     "Reports_Files",
     "Users_Settings",
@@ -254,6 +278,10 @@ class IntentRoute:
     source: str = "deterministic"
 
 
+class IntentRouterError(RuntimeError):
+    """Raised when free-form chat cannot be routed through the configured LLM."""
+
+
 StatusCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -281,6 +309,16 @@ class ChatService:
             self._message_with_attachments(message, attachment_refs),
             tool_payload={"attachments": attachment_refs} if attachment_refs else None,
         )
+        await event_bus.publish(
+            "ai.phrase_received",
+            {
+                "phrase": message,
+                "message": message,
+                "session_id": str(session_uuid),
+                "user_id": user_id,
+                "source": "alfred",
+            },
+        )
 
         memory = await self._load_memory(session_uuid)
         runtime = await get_runtime_config()
@@ -304,25 +342,14 @@ class ChatService:
         )
         try:
             tool_results: list[dict[str, Any]] = []
-            guided_visitor_pass = await self._handle_guided_visitor_pass_flow(
-                session_uuid,
-                message,
-                memory,
-                actor_context=actor_context,
-                provider_name=provider.name,
-                status_callback=status_callback,
-            )
-            if guided_visitor_pass:
-                return guided_visitor_pass
-            guided_schedule = await self._handle_guided_schedule_flow(
-                session_uuid,
-                message,
-                memory,
-                status_callback=status_callback,
-            )
-            if guided_schedule:
-                return guided_schedule
-            route = await self._classify_intent(provider, message, memory, attachment_refs, actor_context=actor_context)
+            try:
+                route = await self._classify_intent(provider, message, memory, attachment_refs, actor_context=actor_context)
+            except IntentRouterError as exc:
+                logger.warning(
+                    "intent_router_failed_closed",
+                    extra={"provider": provider.name, "error": str(exc)[:240]},
+                )
+                return await self._provider_error_response(session_uuid, provider.name, exc)
             selected_tools = self._select_tools_for_route(route, attachment_refs)
             messages = await self._build_agent_messages(
                 session_uuid,
@@ -415,7 +442,7 @@ class ChatService:
 
         return await self._direct_response(
             session_uuid,
-            "That confirmation is no longer available. Please ask Alfred to prepare the action again.",
+            "That confirmation is no longer available. Ask me to prepare the action again and I'll lay out a fresh button.",
         )
 
     async def _handle_pending_action_decision(
@@ -437,14 +464,14 @@ class ChatService:
         if not pending:
             return await self._direct_response(
                 session_uuid,
-                "That confirmation has expired or was already handled. Please ask me to prepare it again.",
+                "That confirmation has expired or was already handled. Sensible safety paperwork; ask me to prepare it again.",
             )
 
         tool_name = str(pending.get("tool_name") or "")
         if decision.strip().lower() != "confirm":
             await self._clear_pending_agent_action(session_uuid)
             await self._append_message(session_uuid, "user", f"Cancelled action {confirmation_id}")
-            return await self._direct_response(session_uuid, "Okay, I cancelled that action. Nothing was changed.")
+            return await self._direct_response(session_uuid, "Okay, I cancelled that action. Nothing changed; the levers remain un-pulled.")
 
         runtime = await get_runtime_config()
         provider = get_llm_provider(str(pending.get("provider") or runtime.llm_provider))
@@ -564,7 +591,16 @@ class ChatService:
         )
 
     def _confirmed_tool_finishes_without_resume(self, tool_name: str) -> bool:
-        return tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass", "trigger_icloud_sync"}
+        return tool_name in {
+            "create_schedule",
+            "update_schedule",
+            "delete_schedule",
+            "create_visitor_pass",
+            "update_visitor_pass",
+            "cancel_visitor_pass",
+            "test_notification_workflow",
+            "trigger_icloud_sync",
+        }
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
@@ -600,6 +636,17 @@ class ChatService:
             "person": None,
             "vehicles": [],
         }
+        if str(client_context.get("source") or "") == "messaging":
+            context["messaging"] = {
+                key: value
+                for key, value in {
+                    "provider": client_context.get("messaging_provider"),
+                    "channel_id": client_context.get("provider_channel_id"),
+                    "guild_id": client_context.get("provider_guild_id"),
+                    "is_direct_message": client_context.get("is_direct_message"),
+                }.items()
+                if value not in {None, ""}
+            }
         if not user_id:
             return context
         try:
@@ -676,9 +723,8 @@ class ChatService:
         *,
         actor_context: dict[str, Any] | None = None,
     ) -> IntentRoute:
-        fallback = self._deterministic_intent_route(message, memory, attachments, actor_context=actor_context)
         if provider.name == "local":
-            return fallback
+            raise IntentRouterError("The local provider cannot classify free-form chat intent.")
 
         try:
             result = await provider.complete(
@@ -701,14 +747,14 @@ class ChatService:
             )
         except Exception as exc:
             logger.info(
-                "intent_router_fallback",
+                "intent_router_request_failed",
                 extra={"provider": getattr(provider, "name", "unknown"), "error": str(exc)[:240]},
             )
-            return fallback
+            raise IntentRouterError(f"Intent router request failed: {self._safe_provider_error(exc)}") from exc
 
         payload = self._extract_tool_call_payload(result.text)
         if not isinstance(payload, dict):
-            return fallback
+            raise IntentRouterError("Intent router returned an invalid response.")
         raw_intents = payload.get("intents")
         intents = tuple(
             intent
@@ -716,18 +762,18 @@ class ChatService:
             if intent in SUPPORTED_INTENTS
         )
         if not intents:
-            intents = fallback.intents
+            raise IntentRouterError("Intent router returned no supported intents.")
+        if "requires_entity_resolution" not in payload:
+            raise IntentRouterError("Intent router omitted entity-resolution guidance.")
         try:
             confidence = max(0.0, min(1.0, float(payload.get("confidence"))))
         except (TypeError, ValueError):
-            confidence = fallback.confidence
+            confidence = 0.5
         return IntentRoute(
             intents=intents,
             confidence=confidence,
-            requires_entity_resolution=bool(
-                payload.get("requires_entity_resolution", fallback.requires_entity_resolution)
-            ),
-            reason=str(payload.get("reason") or fallback.reason)[:240],
+            requires_entity_resolution=bool(payload.get("requires_entity_resolution")),
+            reason=str(payload.get("reason") or "LLM intent route")[:240],
             source=f"{provider.name}_classifier",
         )
 
@@ -747,6 +793,8 @@ class ChatService:
             intents.append("Cameras")
         if any(word in lower for word in ["notification", "notifications", "workflow", "workflows", "template", "apprise"]):
             intents.append("Notifications")
+        if any(word in lower for word in ["automation", "automations", "trigger", "condition", "then action", "rule to", "if steph", "if "]):
+            intents.append("Automations")
         if any(word in lower for word in ["maintenance", "kill-switch", "kill switch", "disable automation", "resume automation"]):
             intents.append("Maintenance")
         if self._looks_like_visitor_pass_request(lower) or memory.get("pending_visitor_pass_create"):
@@ -972,7 +1020,7 @@ class ChatService:
 
         return LlmResult(
             text=(
-                "I hit my five-step safety limit while checking this. "
+                "I hit my five-step safety limit while checking this, so I'm stopping before I start inventing plot twists. "
                 f"{self._fallback_text(tool_results)}"
             ),
             raw=result.raw,
@@ -1274,7 +1322,7 @@ class ChatService:
                     )
                 elif "query_visitor_passes" in allowed:
                     query_args: dict[str, Any] = {"limit": 10}
-                    if visitor_name:
+                    if visitor_name and not self._looks_like_visitor_pass_query_request(lower):
                         query_args["search"] = visitor_name
                     elif not any(phrase in lower for phrase in ["what car", "which car", "how long", "duration", "stayed", "arrived in"]):
                         query_args["statuses"] = ["active", "scheduled"]
@@ -1438,37 +1486,7 @@ class ChatService:
                 status_callback=status_callback,
             )
 
-        lower = message.lower()
-        if not self._looks_like_visitor_pass_create_request(lower):
-            return None
-
-        runtime = await get_runtime_config()
-        visitor_name = self._visitor_name_from_message(message)
-        expected_time = self._visitor_expected_time_from_message(message, runtime.site_timezone)
-        window_minutes = self._visitor_window_from_message(lower) or 30
-        if not visitor_name or not expected_time:
-            memory["pending_visitor_pass_create"] = {
-                "visitor_name": visitor_name,
-                "expected_time": expected_time,
-                "window_minutes": window_minutes,
-            }
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(
-                session_id,
-                self._visitor_pass_missing_details_text(visitor_name, expected_time),
-            )
-
-        return await self._prepare_visitor_pass_confirmation(
-            session_id,
-            memory,
-            visitor_name=visitor_name,
-            expected_time=expected_time,
-            window_minutes=window_minutes,
-            actor_context=actor_context,
-            provider_name=provider_name,
-            user_message=message,
-            status_callback=status_callback,
-        )
+        return None
 
     async def _continue_visitor_pass_create(
         self,
@@ -1480,12 +1498,16 @@ class ChatService:
         actor_context: dict[str, Any] | None,
         provider_name: str,
         status_callback: StatusCallback | None,
-    ) -> ChatTurnResult:
+    ) -> ChatTurnResult | None:
         lower = message.lower().strip()
-        if lower in {"cancel", "stop", "never mind", "nevermind"}:
+        if self._is_pending_visitor_pass_create_cancel_message(lower):
             memory.pop("pending_visitor_pass_create", None)
             await self._save_memory(session_id, memory)
             return await self._direct_response(session_id, "No problem - I cancelled that Visitor Pass setup.")
+        if self._looks_like_visitor_pass_cancel_request(lower) or self._should_abandon_pending_visitor_pass_create(lower):
+            memory.pop("pending_visitor_pass_create", None)
+            await self._save_memory(session_id, memory)
+            return None
 
         runtime = await get_runtime_config()
         visitor_name = (
@@ -1599,34 +1621,7 @@ class ChatService:
         if isinstance(pending, dict):
             return await self._continue_schedule_create(session_id, message, memory, pending, status_callback=status_callback)
 
-        if not self._looks_like_schedule_create_request(message.lower()):
-            return None
-
-        name = self._schedule_name_from_message(message)
-        time_blocks = self._parse_schedule_time_blocks(message)
-        if not name:
-            memory["pending_schedule_create"] = {"stage": "name"}
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(
-                session_id,
-                "Sure - what would you like to name the new schedule?",
-            )
-
-        if not time_blocks:
-            memory["pending_schedule_create"] = {"stage": "time_blocks", "name": name}
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(
-                session_id,
-                f"Great. What days and times should {name} allow? For example: Monday to Friday 08:00-17:00, weekends 10:00-14:00, or 24/7.",
-            )
-
-        return await self._create_schedule_from_chat(
-            session_id,
-            name=name,
-            time_blocks=time_blocks,
-            status_callback=status_callback,
-            memory=memory,
-        )
+        return None
 
     async def _continue_schedule_create(
         self,
@@ -1964,11 +1959,16 @@ class ChatService:
             action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
             past = "Opened" if action == "open" else "Closed"
             success = bool(output.get("opened") if action == "open" else output.get("closed"))
-            return f"{past} {name}. This was logged as an Alfred action." if success else f"I could not {action} {name}."
+            return f"{past} {name}. Logged, tidy, and pleasingly uneventful." if success else f"I could not {action} {name}."
         if tool_name == "override_schedule":
             if output.get("created"):
                 return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
             return str(output.get("detail") or "I did not create the schedule override.")
+        if tool_name == "create_schedule":
+            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
+            summary = schedule.get("summary")
+            return f"Created {name}{f' with {summary}' if summary else ''}." if output.get("created") else str(output.get("detail") or f"I did not create {name}.")
         if tool_name == "create_visitor_pass":
             if output.get("created"):
                 visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
@@ -2010,7 +2010,7 @@ class ChatService:
             return f"Deleted {name}." if output.get("deleted") else str(output.get("detail") or f"I did not delete {name}.")
         if tool_name == "create_notification_workflow":
             workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
-            return f"Created notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
+            return f"Created notification workflow {workflow.get('name') or output.get('workflow_name') or ''}. Neatly filed.".strip()
         if tool_name == "update_notification_workflow":
             workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
             return f"Updated notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
@@ -2019,7 +2019,7 @@ class ChatService:
             return f"Deleted notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
         if tool_name == "test_notification_workflow":
             if output.get("sent"):
-                return "Sent the notification workflow test."
+                return "Sent the notification workflow test. Tiny paper plane launched."
             return str(output.get("detail") or "I did not send the notification workflow test.")
         if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
             if output.get("backfilled"):
@@ -2316,6 +2316,9 @@ class ChatService:
         if any(word in lower for word in ["notification", "notifications", "workflow", "workflows", "template", "apprise"]):
             names.update(NOTIFICATION_TOOL_NAMES)
 
+        if any(word in lower for word in ["automation", "automations", "trigger", "condition", "then action", "rule to"]):
+            names.update(AUTOMATION_TOOL_NAMES)
+
         if any(word in lower for word in ["vehicle", "registration", "reg", "plate", "dvla", "mot", "tax"]):
             names.update(("lookup_dvla_vehicle", "query_access_events"))
 
@@ -2346,6 +2349,8 @@ class ChatService:
                     names.update(VISITOR_PASS_TOOL_NAMES)
                 elif name in NOTIFICATION_TOOL_NAMES:
                     names.update(NOTIFICATION_TOOL_NAMES)
+                elif name in AUTOMATION_TOOL_NAMES:
+                    names.update(AUTOMATION_TOOL_NAMES)
 
         if not names:
             names.update(DEFAULT_AGENT_TOOL_NAMES)
@@ -2710,10 +2715,10 @@ class ChatService:
         if output.get("requires_details"):
             return str(output.get("detail") or f"Which gate or garage door should I {action}?")
         if output.get("requires_confirmation"):
-            return f"Please confirm before I {action} {name}."
+            return f"Please confirm before I {action} {name}. I'll keep the cape off this one until you press the button."
         success = bool(output.get("opened") if action == "open" else output.get("closed"))
         if success:
-            return f"{'Opened' if action == 'open' else 'Closed'} {name}. This was logged as an Alfred action."
+            return f"{'Opened' if action == 'open' else 'Closed'} {name}. Logged, tidy, and pleasingly uneventful."
         return str(output.get("detail") or output.get("error") or f"I could not {action} {name}.")
 
     def _schedule_delete_direct_text(self, output: dict[str, Any]) -> str:
@@ -3218,6 +3223,8 @@ class ChatService:
             return f"{'Close' if action == 'close' else 'Open'} {target or 'gate'}?"
         if tool_name == "override_schedule":
             return f"Override schedule for {target or 'person'}?"
+        if tool_name == "create_schedule":
+            return f"Create schedule {target or ''}?".strip()
         if tool_name == "create_visitor_pass":
             return f"Create Visitor Pass for {target or 'visitor'}?"
         if tool_name == "update_visitor_pass":
@@ -3237,6 +3244,8 @@ class ChatService:
             return "Close" if action == "close" else "Open"
         if tool_name == "override_schedule":
             return "Create override"
+        if tool_name == "create_schedule":
+            return "Create schedule"
         if tool_name == "create_visitor_pass":
             return "Create pass"
         if tool_name == "update_visitor_pass":
@@ -3422,6 +3431,8 @@ class ChatService:
     def _looks_like_visitor_pass_create_request(self, lower: str) -> bool:
         if self._looks_like_visitor_pass_cancel_request(lower):
             return False
+        if self._looks_like_visitor_pass_query_request(lower):
+            return False
         return self._looks_like_visitor_pass_request(lower) and any(
             phrase in lower
             for phrase in [
@@ -3442,6 +3453,33 @@ class ChatService:
 
     def _looks_like_visitor_pass_cancel_request(self, lower: str) -> bool:
         return self._looks_like_visitor_pass_request(lower) and bool(re.search(r"\b(cancel|delete|remove|revoke)\b", lower))
+
+    def _looks_like_visitor_pass_query_request(self, lower: str) -> bool:
+        if not self._looks_like_visitor_pass_request(lower):
+            return False
+        if re.search(r"\b(?:are there|any|do we have|have we got|show|list|check|find|lookup|what|which)\b", lower):
+            return True
+        status_query = re.search(
+            r"\b(?:visitor passes|guest passes|passes)\b.*\b(?:today|tomorrow|tonight|active|scheduled|setup|set up)\b",
+            lower,
+        )
+        create_marker = re.search(r"\b(?:create|make|add|book|set\s*up|setup|expect|expecting)\b", lower)
+        return bool(status_query and not create_marker)
+
+    def _is_pending_visitor_pass_create_cancel_message(self, lower: str) -> bool:
+        return bool(re.fullmatch(r"(?:no|cancel|cancel that|cancel this|stop|never mind|nevermind|forget it|abort)", lower))
+
+    def _should_abandon_pending_visitor_pass_create(self, lower: str) -> bool:
+        if self._looks_like_visitor_pass_query_request(lower):
+            return True
+        if self._looks_like_device_action_request(lower) or self._looks_like_device_state_request(lower):
+            return True
+        if self._looks_like_schedule_create_request(lower) or self._looks_like_calendar_integration_request(lower):
+            return True
+        return bool(
+            re.search(r"\b(?:status|help|show|list|check|what|why|when|where|open|close|shut)\b", lower)
+            and not self._looks_like_visitor_pass_create_request(lower)
+        )
 
     def _visitor_name_from_message(self, message: str) -> str | None:
         patterns = [
@@ -3471,7 +3509,20 @@ class ChatService:
         )[0]
         name = re.sub(r"\b(?:a|an|the|visitor|guest|is|will|be|called|named)\b", " ", name, flags=re.IGNORECASE)
         name = " ".join(name.strip(" .,!?'\"").split())
-        if not name or name.lower() in {"coming", "arriving", "visiting", "today", "tomorrow", "tonight"}:
+        if not name or name.lower() in {
+            "coming",
+            "arriving",
+            "visiting",
+            "today",
+            "tomorrow",
+            "tonight",
+            "pass",
+            "passes",
+            "pass setup",
+            "passes setup",
+            "setup",
+            "set up",
+        }:
             return None
         return name[:80]
 
@@ -4083,7 +4134,7 @@ class ChatService:
 
     def _fallback_text(self, tool_results: list[dict[str, Any]]) -> str:
         if not tool_results:
-            return "I could not find any live system context for that request."
+            return "I don't have live system context for that yet. Point me at a person, vehicle, gate, or schedule and I'll take it from there."
         latest = tool_results[-1]
         tool_name = str(latest.get("name") or "")
         output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
@@ -4098,7 +4149,7 @@ class ChatService:
             if not passes and isinstance(output.get("visitor_pass"), dict):
                 passes = [output["visitor_pass"]]
             if not passes:
-                return str(output.get("error") or "I couldn't find any matching Visitor Passes.")
+                return str(output.get("error") or "I couldn't find any matching Visitor Passes. The visitor ledger is politely blank.")
             visitor_pass = passes[0]
             name = visitor_pass.get("visitor_name") or "The visitor"
             if visitor_pass.get("vehicle_summary"):
@@ -4109,11 +4160,11 @@ class ChatService:
             return f"{name} has a {visitor_pass.get('status') or 'visitor'} pass for {visitor_pass.get('expected_time_display') or visitor_pass.get('expected_time')}."
         if tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}:
             if output.get("requires_confirmation"):
-                return str(output.get("detail") or "That Visitor Pass change needs confirmation.")
+                return str(output.get("detail") or "That Visitor Pass change needs confirmation first. Sensible paperwork, not theatrics.")
             return self._confirmation_result_text(tool_name, output)
         if tool_name == "trigger_icloud_sync":
             if output.get("requires_confirmation"):
-                return str(output.get("detail") or "That calendar sync needs confirmation.")
+                return str(output.get("detail") or "That calendar sync needs confirmation first. Calendars are small chaos engines; I prefer a button press.")
             return self._confirmation_result_text(tool_name, output)
         incident_result = next(
             (
@@ -4138,7 +4189,7 @@ class ChatService:
         if tool_name == "query_access_events":
             events = output.get("events") if isinstance(output.get("events"), list) else []
             if not events:
-                return "I couldn't find any matching recent access events."
+                return "I couldn't find any matching recent access events. The logbook is politely blank."
             event = events[0]
             person_name = event.get("person") or event.get("registration_number") or "The matched subject"
             verb = "left" if event.get("direction") == "exit" else "arrived"
@@ -4146,12 +4197,12 @@ class ChatService:
             return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
         if tool_name == "diagnose_access_event":
             if not output.get("found"):
-                return str(output.get("error") or "I could not find a matching access event to diagnose.")
+                return str(output.get("error") or "I could not find a matching access event to diagnose. I checked the usual cupboards; next stop is incident investigation.")
             hints = output.get("answer_hints") if isinstance(output.get("answer_hints"), list) else []
             return " ".join(str(hint) for hint in hints[:3] if hint) or "I found the diagnostic record."
         if tool_name in {"investigate_access_incident", "backfill_access_event_from_protect", "test_unifi_alarm_webhook"}:
             if output.get("requires_confirmation"):
-                return str(output.get("detail") or "This needs confirmation before I change anything.")
+                return str(output.get("detail") or "This needs confirmation before I change anything. Safety first; dramatic button second.")
             return self._confirmation_result_text(tool_name, output)
         if tool_name == "query_vehicle_detection_history":
             if not output.get("found"):
@@ -4162,7 +4213,7 @@ class ChatService:
         if tool_name == "query_device_states":
             devices = output.get("devices") if isinstance(output.get("devices"), list) else []
             if not devices:
-                return "I couldn't find a matching configured device."
+                return "I couldn't find a matching configured device. No labelled lever for that one, alas."
             return "; ".join(
                 f"{device.get('name') or 'Device'} is {device.get('state') or 'unknown'}"
                 for device in devices[:5]
@@ -4170,10 +4221,10 @@ class ChatService:
         if tool_name in {"open_device", "command_device", "open_gate"}:
             return self._device_open_direct_text(output)
         if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"} and output.get("requires_confirmation"):
-            return str(output.get("detail") or "Maintenance Mode needs confirmation before I change it.")
+            return str(output.get("detail") or "Maintenance Mode needs confirmation before I change it. That switch deserves a proper nod.")
         if tool_name == "override_schedule":
             if output.get("requires_confirmation"):
-                return str(output.get("detail") or "The temporary schedule override needs confirmation.")
+                return str(output.get("detail") or "The temporary schedule override needs confirmation. A tiny calendar exception, properly witnessed.")
             if output.get("created"):
                 return f"Created the temporary schedule override until {output.get('ends_at_display') or output.get('ends_at')}."
         if tool_name == "query_leaderboard":
@@ -4183,7 +4234,7 @@ class ChatService:
             if top:
                 return (
                     f"{top.get('display_name') or top.get('registration_number')} is leading Top Charts "
-                    f"with {top.get('read_count')} Detectiions."
+                    f"with {top.get('read_count')} detections. Very much the driveway headliner."
                 )
             if known:
                 first = known[0]
@@ -4191,7 +4242,7 @@ class ChatService:
             if unknown:
                 first = unknown[0]
                 return f"{first.get('registration_number')} leads the Mystery Guests list."
-            return "I found no leaderboard entries yet."
+            return "I found no leaderboard entries yet. The podium is spotless."
         if tool_name == "delete_schedule":
             return self._schedule_delete_direct_text(output)
         return json.dumps([result["output"] for result in tool_results], default=str)

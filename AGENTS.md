@@ -73,6 +73,11 @@ Enable WebSocket support in NPM. The frontend Nginx container proxies `/api/*`,
 Leave `IACS_ROOT_PATH` blank for normal subdomain-style NPM deployments. Set it
 only when the backend is intentionally mounted under a URL subpath.
 
+The SPA shell (`/` and `/index.html`) must be served with `Cache-Control:
+no-store`, while hashed `/assets/*` files can be immutable. Keep this split so
+frontend rebuilds do not leave browsers with a stale `index.html` pointing at
+removed chunks, which presents as the whole page failing to load.
+
 ## Docker and Storage Rules
 
 The project intentionally uses bind mounts:
@@ -225,6 +230,16 @@ Main tables:
   sync history with per-account results and pass create/update/cancel counts.
 - `notification_rules`: DB-backed notification workflows with triggers,
   conditions, actions, active state, and templated content.
+- `automation_rules`: DB-backed Trigger / If / Then automation rules. Stores
+  metadata, active state, trigger JSON, indexed `trigger_keys`, condition JSON,
+  action JSON, scheduler fields (`next_run_at`, `last_fired_at`, `run_count`),
+  last status/error, creating user, and timestamps.
+- `automation_runs`: durable execution history for every matched automation
+  evaluation. Stores trigger key/payload, normalized runtime context, condition
+  results, action results, trace ID, actor/source, status, error, and timing.
+- `automation_webhook_senders`: source-IP tracking for public automation
+  webhook keys, including first/last seen, event count, and payload shape. New
+  key/IP pairs emit the `webhook.new_sender` trigger.
 - `presence`: current person presence state.
 - `access_events`: final entry/exit/denial records with timing classification
   and trace linkage in `raw_payload.telemetry.trace_id`.
@@ -495,9 +510,15 @@ Current behavior:
   Ubiquiti LPR webhooks return accepted/ignored, queued and pending plate reads
   are discarded, and no access event, presence update, gate command, or garage
   command is produced from LPR.
-- Queue every plate read.
 - Accept Ubiquiti Alarm Manager test webhook payloads and publish
   `webhook.test.received` without creating an access event.
+- Ubiquiti LPR webhooks that name a UniFi smart zone are filtered before access
+  processing. Only zones listed in `lpr_allowed_smart_zones` are allowed to
+  enqueue a `PlateRead`; default is `default`. Payloads with no zone metadata
+  remain accepted for compatibility. Ignored reads publish `plate_read.ignored`
+  with `reason="outside_lpr_smart_zone"` and never create access events,
+  alerts, notifications, visitor-pass matches, or gate commands.
+- Queue every accepted plate read.
 - Record raw LPR timing diagnostics from Ubiquiti webhooks and UniFi Protect
   websocket/track probes in an in-memory feed exposed by
   `/api/v1/diagnostics/lpr-timing`.
@@ -586,6 +607,7 @@ Relevant dynamic settings:
 - `lpr_debounce_quiet_seconds`
 - `lpr_debounce_max_seconds`
 - `lpr_similarity_threshold`
+- `lpr_allowed_smart_zones`
 - `site_timezone`
 - `schedule_default_policy`
 
@@ -609,6 +631,10 @@ Runtime behavior:
 - While Maintenance Mode is active, LPR automation is ignored/cleared and gate
   malfunction recovery attempts are paused. Manual UI/API hardware commands
   remain explicit user actions with confirmation where the frontend requires it.
+- Maintenance Mode is also the global kill-switch for Automation Engine
+  runtime actions. Hardware actions and notification workflow toggles are
+  skipped while active; `maintenance_mode.disable` is the only runtime exception
+  so scheduled rules can turn Maintenance Mode off.
 - The gate malfunction scheduler starts from FastAPI lifespan, listens to Home
   Assistant gate state changes, declares a malfunction after the primary gate
   has remained in an unsafe open/opening/closing state for five minutes, and
@@ -748,6 +774,108 @@ Rules:
   or newline-separated.
 - The obsolete `notification_rules` dynamic setting is pruned at startup; do
   not store notification workflow JSON in `system_settings`.
+
+## Automation Engine
+
+Automation service:
+
+- `backend/app/services/automations.py`
+- `backend/app/api/v1/automations.py`
+
+Runtime behavior:
+
+- Automations are stored in `automation_rules` as `triggers`, `conditions`, and
+  `actions` JSON arrays shaped like `{id,type,config}`. Actions may also carry
+  `reason_template`.
+- Matching executions create `automation_runs` with sanitized trigger payload,
+  normalized context, condition results, action results, telemetry trace ID,
+  actor/source, status, and error details.
+- Runtime rules are enabled only after explicit Admin UI/API actions or
+  Alfred-confirmed create/edit/enable tools. State-changing Alfred automation
+  tools must require confirmation.
+- The scheduler starts from FastAPI lifespan, wakes every 15 seconds, selects
+  due active rules with row locks, fires once per overdue rule, recomputes
+  `next_run_at`, and disables single-use or expired time-only rules.
+- AI schedule parsing uses the active LLM provider with a JSON-only prompt to
+  produce `cron_expression`, optional `run_at`/`start_at`/`end_at`, timezone,
+  summary, confidence, and ambiguity notes. Output is validated with `croniter`,
+  timezone parsing, future next-run checks, end-date checks, and a confidence
+  threshold; ambiguous output returns `requires_review`.
+- Public webhook ingestion is
+  `POST /api/v1/automations/webhooks/{webhook_key}`. Keys must be unguessable;
+  sender IPs are tracked in `automation_webhook_senders`.
+- Automation dry-runs are previews only: they build context, evaluate
+  conditions, and render action reasons, but they must not execute actions,
+  update iCloud Calendar sync timestamps, send notifications, or command
+  hardware.
+
+Trigger registry:
+
+- Time & Date: `time.specific_datetime`, `time.every_x`, `time.cron`,
+  `time.ai_text`.
+- Vehicle Detections: `vehicle.known_plate`, `vehicle.unknown_plate`,
+  `vehicle.outside_schedule`.
+- Maintenance Mode: `maintenance_mode.enabled`, `maintenance_mode.disabled`.
+- Visitor Pass: `visitor_pass.created`, `visitor_pass.detected`,
+  `visitor_pass.used`, `visitor_pass.expired`.
+- AI Agent: `ai.phrase_received`, `ai.issue_detected`.
+- Webhook: `webhook.received`, `webhook.unrecognized`, `webhook.new_sender`.
+
+Condition registry:
+
+- Person: `person.on_site`, `person.off_site`.
+- Vehicles: `vehicle.on_site`, `vehicle.off_site`.
+- Maintenance Mode: `maintenance_mode.enabled`, `maintenance_mode.disabled`.
+
+Action registry:
+
+- Notifications: `notification.enable`, `notification.disable`.
+- Gate Actions: `gate.open`.
+- Garage Door Actions: `garage_door.open`, `garage_door.close`.
+- Maintenance Mode: `maintenance_mode.enable`, `maintenance_mode.disable`.
+- Integrations: dynamically supplied by
+  `backend/app/services/automation_integration_actions.py`. Integration action
+  payloads use provider/action config, for example
+  `integration.icloud_calendar.sync` with
+  `{provider:"icloud_calendar", action:"sync_calendars"}`.
+
+Context variable pipeline:
+
+- Every trigger is normalized into an `AutomationContext` with `trigger`,
+  `entities`, `facts`, `variables`, `missing_required_variables`, and warnings.
+- Trigger definitions declare available scopes: `time`, `person`, `vehicle`,
+  `visitor_pass`, `maintenance`, `ai`, `webhook`, and `event`.
+- Visitor Pass triggers serialize the pass payload and refresh from the database
+  when a pass ID is available. For `visitor_pass.used`,
+  `@VisitorPassVehicleRegistration` maps from `visitor_pass.number_plate`.
+- Variables render as strings only. Unknown or unavailable tokens render as an
+  empty string and produce a validation warning.
+- Before evaluating a condition or action, scan config/templates for `@Variable`
+  references. If a referenced variable is unavailable for the trigger scope or
+  resolves empty, skip that condition/action with `context_missing` rather than
+  executing with null context.
+- The automation catalog returns variable groups with scopes and trigger type
+  filters. The frontend `@` menu must filter variables from the selected
+  trigger so irrelevant tokens are hidden.
+
+Execution loop:
+
+- A normalized trigger is received from the scheduler, event bus, Alfred, or a
+  webhook.
+- Active matching `automation_rules` are selected by `trigger_keys`, then
+  trigger-specific config filters are applied.
+- A telemetry trace and `automation_runs` row are created.
+- Conditions are evaluated as AND. The rule skips on the first false or missing
+  condition.
+- Actions execute sequentially and record individual results. Maintenance Mode
+  skips hardware and notification-toggle actions, except
+  `maintenance_mode.disable`.
+- Integration actions are routed through the integration action registry rather
+  than hardcoded in the core execution loop. The first registered integration
+  action is iCloud Calendar `Sync Calendars Now`, which calls
+  `ICloudCalendarService.sync_all(trigger_source="automation")`.
+- The run row, rule `last_fired_at`, `next_run_at`, status/error, audit log,
+  and realtime `automation.run.*` event are updated.
 
 ## DVLA Vehicle Enquiry Integration
 
@@ -905,9 +1033,13 @@ Runtime behavior:
 - Only event notes/descriptions containing the exact phrase `Open Gate`,
   case-insensitive, are processed. Event titles alone must not trigger passes.
 - Matched events create/update Visitor Passes with
-  `creation_source="icloud_calendar"`, visitor name from the event title,
+  `creation_source="icloud_calendar"`, visitor name extracted from the event
+  title by the configured LLM with deterministic fallback parsing,
   `expected_time` from event start, `valid_from` 30 minutes before event start,
   and `valid_until` at event end.
+- The original calendar title must remain in `source_metadata.event_title`; the
+  extracted pass name and extraction source are stored as
+  `source_metadata.visitor_name` and `source_metadata.visitor_name_source`.
 - Sync is idempotent through
   `source_reference="icloud:<account_id>:<calendar_id>:<event_id>"`.
 - Re-sync updates future scheduled/active calendar passes, creates new ones,
@@ -957,8 +1089,8 @@ Runtime behavior:
 - Telemetry traces/spans are stored in `telemetry_traces` and
   `telemetry_spans`; audit rows are stored in `audit_logs`.
 - Categories currently include LPR Telemetry, Alfred AI Audit, System CRUD,
-  Webhooks & API, Integrations, Gate Events, Maintenance Mode, and Access &
-  Presence.
+  Webhooks & API, Integrations, Gate Events, Maintenance Mode, Automations, and
+  Access & Presence.
 - HTTP middleware traces non-read-only `/api/v1/*` requests except telemetry
   endpoints, plus all webhook ingress, and emits `X-IACS-Request-ID`.
 - Telemetry payloads are sanitized for secrets and large media. Raw API keys,
@@ -1020,8 +1152,10 @@ Default provider:
 
 The public providers endpoint lists `local`, `openai`, `gemini`, `claude`, and
 `ollama`; `anthropic` is accepted internally as an alias for Claude. The local
-provider is deterministic and requires no API keys. It summarizes tool outputs
-and is meant to keep the UI and agent tool pipeline usable during development.
+provider is deterministic and requires no API keys, but it must not route
+free-form Alfred chat because all chat intent/tool selection must be LLM-first.
+Use it only for direct development of tool-output summarization or other
+explicitly non-chat fallback tests.
 
 Alfred 2.0 behavior:
 
@@ -1029,6 +1163,16 @@ Alfred 2.0 behavior:
 - Alfred chat is ReAct-only. Do not add legacy naive `/api/chat` handlers,
   compatibility monkeypatches, or direct prompt-to-answer shortcuts around
   `ChatService`.
+- All free-form chat, regardless of entrypoint (dashboard, WebSocket, Discord,
+  Slack, WhatsApp, or future providers), must run through the LLM intent router
+  first so the model decides the user's intent and the tool catalog to load.
+  Do not add keyword-first guided flows, slash-command shortcuts, provider
+  conditionals, or deterministic phrase routers that bypass this LLM-first
+  intent/tool selection path. If no LLM provider is available or the router
+  fails, chat must fail closed with a clear configuration/retry message rather
+  than selecting tools by phrase matching. Deterministic logic is only
+  acceptable as a narrow safety guard after the LLM-selected path has produced
+  a state-changing action requiring confirmation.
 - Tool results are the source of truth for live access state, device state,
   schedules, DVLA records, telemetry, notifications, reports, and files.
 - Alfred must not invent people, vehicles, schedules, events, device states,
@@ -1058,6 +1202,14 @@ Alfred 2.0 behavior:
   Calendar", Alfred should use `trigger_icloud_sync`. The tool is
   state-changing because it can create, update, or cancel Visitor Passes, so it
   must return a confirmation card before running.
+- Automation intent (`Automations`) handles Trigger / If / Then rules. Alfred
+  should use `query_automation_catalog` before creating or editing rules, then
+  resolve referenced people, vehicles, devices, and notification workflows
+  before writing automation JSON.
+- For a request like "create a rule to open the gate if Steph arrives outside
+  her schedule", Alfred should resolve Steph, create a
+  `vehicle.outside_schedule` trigger filtered by `person_id` or `vehicle_id`,
+  and add a `gate.open` action with an operator-readable `reason_template`.
 - State-changing tools return `requires_confirmation` first. The chat UI stores
   a pending action in chat session context, renders confirm/cancel controls,
   and calls `/api/v1/ai/chat/confirm` or sends `tool_confirmation` on the chat
@@ -1103,6 +1255,9 @@ Current Alfred tools:
   `create_notification_workflow`, `update_notification_workflow`,
   `delete_notification_workflow`, `preview_notification_workflow`,
   `test_notification_workflow`, `trigger_anomaly_alert`.
+- Automations: `query_automation_catalog`, `query_automations`,
+  `get_automation`, `create_automation`, `edit_automation`,
+  `delete_automation`, `enable_automation`, `disable_automation`.
 - Compliance and cameras: `lookup_dvla_vehicle`, `analyze_camera_snapshot`,
   `get_camera_snapshot`.
 - Files and reports: `read_chat_attachment`, `export_presence_report_csv`,
@@ -1111,10 +1266,12 @@ Current Alfred tools:
 State-changing Alfred tools:
 
 - `assign_schedule_to_entity`, `create_notification_workflow`,
-  `create_schedule`, `create_visitor_pass`, `cancel_visitor_pass`,
-  `delete_notification_workflow`, `delete_schedule`, `disable_maintenance_mode`,
-  `enable_maintenance_mode`, `command_device`, `open_gate`, `open_device`,
-  `override_schedule`, `trigger_anomaly_alert`,
+  `create_automation`, `create_schedule`, `create_visitor_pass`,
+  `cancel_visitor_pass`, `delete_automation`, `delete_notification_workflow`,
+  `delete_schedule`, `disable_automation`, `disable_maintenance_mode`,
+  `edit_automation`, `enable_automation`, `enable_maintenance_mode`,
+  `command_device`, `open_gate`, `open_device`, `override_schedule`,
+  `trigger_anomaly_alert`,
   `trigger_manual_malfunction_override`, `test_notification_workflow`,
   `toggle_maintenance_mode`, `update_notification_workflow`, `update_schedule`,
   and `update_visitor_pass`.
@@ -1221,6 +1378,19 @@ Notifications:
 - `POST /api/v1/notifications/rules/preview`
 - `POST /api/v1/notifications/rules/test`
 - `POST /api/v1/notifications/rules/{rule_id}/test`
+
+Automations:
+
+- `GET /api/v1/automations/catalog`
+- `GET /api/v1/automations/rules`
+- `POST /api/v1/automations/rules`
+- `GET /api/v1/automations/rules/{rule_id}`
+- `PATCH /api/v1/automations/rules/{rule_id}`
+- `DELETE /api/v1/automations/rules/{rule_id}`
+- `POST /api/v1/automations/rules/{rule_id}/dry-run`
+- `POST /api/v1/automations/dry-run`
+- `POST /api/v1/automations/parse-schedule`
+- `POST /api/v1/automations/webhooks/{webhook_key}` public webhook ingress
 
 Events and presence:
 
@@ -1381,6 +1551,7 @@ Current frontend views:
 - Settings / General
 - Settings / Auth & Security
 - Settings / Notifications
+- Settings / Automations
 - Settings / LPR Tuning
 - Settings / Users
 
@@ -1404,6 +1575,19 @@ Current frontend integration/editor surfaces:
 - Settings / Notifications is the notification workflow builder with
   trigger/condition/action editing, endpoint pickers, snapshot-media toggles,
   live preview, and Tiptap `@Variable` insertion.
+- Settings / Automations is the Automation Engine builder. Keep it visually
+  aligned with Settings / Notifications: vertical When / If / Then flow,
+  categorized trigger/condition/action modals, dry-run preview, and trigger
+  scoped `@Variable` insertion.
+- Automation builder template/reason fields must use
+  `PlainTemplateEditor`, `SafeVariableRichTextEditor`, or an equivalent error
+  boundary with the plain text fallback. Do not mount the lazy
+  `VariableRichTextEditor` directly inside automation cards or modals; editor
+  render failures previously blanked the app when selecting actions such as
+  iCloud Calendar Sync Calendars Now.
+- The Automations action picker includes an Integrations category. It drills
+  down from Integrations to enabled providers such as iCloud Calendar, then to
+  registered provider actions such as Sync Calendars Now.
 - Vehicles edit modal includes a display-only DVLA Compliance card for MOT
   status/expiry, tax status/expiry, and last DVLA sync date. Make and colour
   remain on the main vehicle details fields. Registration edits still use the

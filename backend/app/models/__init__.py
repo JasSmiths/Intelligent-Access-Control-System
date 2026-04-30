@@ -2,6 +2,9 @@
 
 from app.models.core import (
     AccessEvent,
+    AutomationRule,
+    AutomationRun,
+    AutomationWebhookSender,
     AuditLog,
     Anomaly,
     ChatMessage,
@@ -19,6 +22,7 @@ from app.models.core import (
     ICloudCalendarSyncRun,
     LeaderboardState,
     MaintenanceModeState,
+    MessagingIdentity,
     NotificationRule,
     Person,
     Presence,
@@ -34,6 +38,9 @@ from app.models.core import (
 
 __all__ = [
     "AccessEvent",
+    "AutomationRule",
+    "AutomationRun",
+    "AutomationWebhookSender",
     "AuditLog",
     "Anomaly",
     "ChatMessage",
@@ -51,6 +58,7 @@ __all__ = [
     "ICloudCalendarSyncRun",
     "LeaderboardState",
     "MaintenanceModeState",
+    "MessagingIdentity",
     "NotificationRule",
     "Person",
     "Presence",

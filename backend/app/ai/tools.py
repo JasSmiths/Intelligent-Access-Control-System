@@ -18,6 +18,7 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
+    AutomationRule,
     AuditLog,
     Anomaly,
     GateStateObservation,
@@ -41,6 +42,14 @@ from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_ve
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
+from app.services.automations import (
+    AutomationError,
+    get_automation_service,
+    normalize_actions as normalize_automation_actions,
+    normalize_conditions as normalize_automation_conditions,
+    normalize_triggers as normalize_automation_triggers,
+    serialize_rule as serialize_automation_rule,
+)
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
@@ -160,12 +169,16 @@ NOTIFICATION_CONDITION_SCHEMA: dict[str, Any] = {
 
 NOTIFICATION_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Workflow action. type is mobile for Apprise, voice for Home Assistant TTS, or in_app for dashboard alerts.",
+    "description": "Workflow action. type is mobile for Apprise, voice for Home Assistant TTS, in_app for dashboard alerts, or discord for Discord channel alerts.",
     "properties": {
         "id": {"type": "string"},
-        "type": {"type": "string", "enum": ["mobile", "voice", "in_app"]},
+        "type": {"type": "string", "enum": ["mobile", "voice", "in_app", "discord"]},
         "target_mode": {"type": "string", "enum": ["all", "many", "selected"]},
-        "target_ids": {"type": "array", "items": {"type": "string"}},
+        "target_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "For Discord actions, use endpoint ids in the form discord:<channel_id>.",
+        },
         "title_template": {"type": "string", "description": "Title template supporting @ variables such as @FirstName."},
         "message_template": {"type": "string", "description": "Message template supporting @ variables such as @VehicleName."},
         "media": {
@@ -190,6 +203,71 @@ NOTIFICATION_RULE_PAYLOAD_SCHEMA: dict[str, Any] = {
         "trigger_event": {"type": "string"},
         "conditions": {"type": "array", "items": NOTIFICATION_CONDITION_SCHEMA},
         "actions": {"type": "array", "items": NOTIFICATION_ACTION_SCHEMA},
+        "is_active": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
+
+AUTOMATION_RULE_LOOKUP_PROPERTIES: dict[str, Any] = {
+    "automation_id": {"type": "string", "description": "Automation rule UUID."},
+    "automation_name": {"type": "string", "description": "Automation rule name or unique partial name."},
+}
+
+AUTOMATION_TRIGGER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "Automation trigger object. type is one of the automation catalog trigger keys; config holds trigger-specific filters or schedule settings.",
+    "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "config": {"type": "object", "additionalProperties": True},
+    },
+    "required": ["type"],
+    "additionalProperties": False,
+}
+
+AUTOMATION_CONDITION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "Automation condition object. Supported types include person.on_site, person.off_site, vehicle.on_site, vehicle.off_site, maintenance_mode.enabled, and maintenance_mode.disabled.",
+    "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "config": {"type": "object", "additionalProperties": True},
+    },
+    "required": ["type"],
+    "additionalProperties": False,
+}
+
+AUTOMATION_ACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Automation action object. Hardware, maintenance, notification, and integration actions run later "
+        "when the saved rule fires. Integration actions use catalog types such as "
+        "integration.icloud_calendar.sync with config {provider:'icloud_calendar', action:'sync_calendars'}."
+    ),
+    "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "config": {"type": "object", "additionalProperties": True},
+        "reason_template": {"type": "string", "description": "Optional audit reason template supporting @ variables."},
+    },
+    "required": ["type"],
+    "additionalProperties": False,
+}
+
+AUTOMATION_RULE_PAYLOAD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Unsaved automation rule. Example: open the gate if Steph arrives outside schedule -> "
+        "triggers=[{type:'vehicle.outside_schedule',config:{person_id:'...'}}], "
+        "conditions=[], actions=[{type:'gate.open',reason_template:'@DisplayName arrived outside schedule'}]."
+    ),
+    "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "triggers": {"type": "array", "items": AUTOMATION_TRIGGER_SCHEMA},
+        "conditions": {"type": "array", "items": AUTOMATION_CONDITION_SCHEMA},
+        "actions": {"type": "array", "items": AUTOMATION_ACTION_SCHEMA},
         "is_active": {"type": "boolean"},
     },
     "additionalProperties": False,
@@ -1101,6 +1179,128 @@ def build_agent_tools() -> dict[str, AgentTool]:
             handler=test_notification_workflow,
         ),
         AgentTool(
+            name="query_automation_catalog",
+            description="Return automation building blocks: trigger, condition, action, variable, notification-rule, and garage-door catalogs.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=query_automation_catalog,
+        ),
+        AgentTool(
+            name="query_automations",
+            description="List DB-backed automation rules, optionally filtered by trigger, active status, or search text.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "trigger_key": {"type": "string"},
+                    "is_active": {"type": "boolean"},
+                    "search": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "additionalProperties": False,
+            },
+            handler=query_automations,
+        ),
+        AgentTool(
+            name="get_automation",
+            description="Get one automation rule by ID or name, including normalized triggers, conditions, actions, and optional dry-run preview.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    **AUTOMATION_RULE_LOOKUP_PROPERTIES,
+                    "include_dry_run": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+            handler=get_automation,
+        ),
+        AgentTool(
+            name="create_automation",
+            description=(
+                "Create a system automation rule. Requires confirm=true because saved active rules may later command gates, "
+                "garage doors, maintenance mode, or notification states. Resolve people, vehicles, and notification rules first."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "triggers": {"type": "array", "items": AUTOMATION_TRIGGER_SCHEMA},
+                    "conditions": {"type": "array", "items": AUTOMATION_CONDITION_SCHEMA},
+                    "actions": {"type": "array", "items": AUTOMATION_ACTION_SCHEMA},
+                    "is_active": {"type": "boolean"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["name", "triggers", "actions", "confirm"],
+                "additionalProperties": False,
+            },
+            handler=create_automation,
+        ),
+        AgentTool(
+            name="edit_automation",
+            description="Edit an existing automation rule. Requires confirm=true because future matching events may perform changed actions.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    **AUTOMATION_RULE_LOOKUP_PROPERTIES,
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "triggers": {"type": "array", "items": AUTOMATION_TRIGGER_SCHEMA},
+                    "conditions": {"type": "array", "items": AUTOMATION_CONDITION_SCHEMA},
+                    "actions": {"type": "array", "items": AUTOMATION_ACTION_SCHEMA},
+                    "is_active": {"type": "boolean"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=edit_automation,
+        ),
+        AgentTool(
+            name="delete_automation",
+            description="Delete an automation rule by ID or name. Requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    **AUTOMATION_RULE_LOOKUP_PROPERTIES,
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=delete_automation,
+        ),
+        AgentTool(
+            name="enable_automation",
+            description="Enable a saved automation rule. Requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    **AUTOMATION_RULE_LOOKUP_PROPERTIES,
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=enable_automation,
+        ),
+        AgentTool(
+            name="disable_automation",
+            description="Disable a saved automation rule. Requires confirm=true.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    **AUTOMATION_RULE_LOOKUP_PROPERTIES,
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["confirm"],
+                "additionalProperties": False,
+            },
+            handler=disable_automation,
+        ),
+        AgentTool(
             name="query_schedules",
             description="List reusable access schedules, optionally filtered by name/description and with dependency counts.",
             parameters={
@@ -1136,8 +1336,12 @@ def build_agent_tools() -> dict[str, AgentTool]:
                         "description": "Natural-language allowed time, for example Wednesdays and Fridays 6am to 7pm.",
                     },
                     "time_blocks": SCHEDULE_TIME_BLOCKS_SCHEMA,
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true before the schedule will be created.",
+                    },
                 },
-                "required": ["name"],
+                "required": ["name", "confirm"],
                 "additionalProperties": False,
             },
             handler=create_schedule,
@@ -1282,6 +1486,14 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "delete_notification_workflow": ("Notifications",),
         "preview_notification_workflow": ("Notifications",),
         "test_notification_workflow": ("Notifications",),
+        "query_automation_catalog": ("Automations", "Notifications", "Gate_Hardware", "Maintenance"),
+        "query_automations": ("Automations",),
+        "get_automation": ("Automations",),
+        "create_automation": ("Automations",),
+        "edit_automation": ("Automations",),
+        "delete_automation": ("Automations",),
+        "enable_automation": ("Automations",),
+        "disable_automation": ("Automations",),
         "query_schedules": ("Schedules", "Access_Diagnostics"),
         "get_schedule": ("Schedules", "Access_Diagnostics"),
         "create_schedule": ("Schedules",),
@@ -1303,12 +1515,17 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "assign_schedule_to_entity",
         "cancel_visitor_pass",
         "create_notification_workflow",
+        "create_automation",
         "create_schedule",
         "create_visitor_pass",
         "trigger_icloud_sync",
         "delete_notification_workflow",
+        "delete_automation",
         "delete_schedule",
+        "disable_automation",
         "disable_maintenance_mode",
+        "edit_automation",
+        "enable_automation",
         "enable_maintenance_mode",
         "command_device",
         "backfill_access_event_from_protect",
@@ -1332,6 +1549,7 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "query_lpr_timing": 25,
         "query_unifi_protect_events": 25,
         "query_notification_workflows": 20,
+        "query_automations": 20,
         "query_schedule_targets": 25,
         "query_visitor_passes": 20,
         "get_telemetry_trace": 20,
@@ -3066,6 +3284,16 @@ async def trigger_anomaly_alert(arguments: dict[str, Any]) -> dict[str, Any]:
         )
     except NotificationDeliveryError as exc:
         return {"sent": False, "error": str(exc)}
+    await event_bus.publish(
+        "ai.issue_detected",
+        {
+            "subject": str(arguments["subject"]),
+            "severity": str(arguments["severity"]),
+            "message": str(arguments["message"]),
+            "issue": str(arguments["message"]),
+            "source": "alfred",
+        },
+    )
     return {"sent": True, "title": notification.title, "body": notification.body}
 
 
@@ -3591,6 +3819,202 @@ async def test_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any
     }
 
 
+async def query_automation_catalog(_arguments: dict[str, Any]) -> dict[str, Any]:
+    catalog = await get_automation_service().catalog()
+    return {
+        **catalog,
+        "rule_shape": {
+            "triggers": [{"type": "vehicle.outside_schedule", "config": {"person_id": "<resolved-person-id>"}}],
+            "conditions": [{"type": "maintenance_mode.disabled", "config": {}}],
+                "actions": [{"type": "gate.open", "config": {}, "reason_template": "@DisplayName arrived outside schedule."}],
+                "integration_action_example": [
+                    {
+                        "type": "integration.icloud_calendar.sync",
+                        "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
+                        "reason_template": "Automation synced iCloud Calendar.",
+                    }
+                ],
+            },
+        "example": (
+            "For 'open the gate if Steph arrives outside her schedule', resolve Steph first, then create "
+            "a rule with trigger vehicle.outside_schedule filtered by person_id and action gate.open."
+        ),
+    }
+
+
+async def query_automations(arguments: dict[str, Any]) -> dict[str, Any]:
+    trigger_filter = str(arguments.get("trigger_key") or "").strip()
+    active_filter = arguments.get("is_active")
+    search = _normalize(arguments.get("search"))
+    limit = _bounded_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
+    async with AsyncSessionLocal() as session:
+        rules = (
+            await session.scalars(
+                select(AutomationRule).order_by(AutomationRule.created_at.desc(), AutomationRule.name)
+            )
+        ).all()
+
+    automations = []
+    for rule in rules:
+        serialized = serialize_automation_rule(rule)
+        if trigger_filter and trigger_filter not in serialized["trigger_keys"]:
+            continue
+        if isinstance(active_filter, bool) and serialized["is_active"] is not active_filter:
+            continue
+        haystack = f"{serialized['name']} {serialized.get('description') or ''} {' '.join(serialized['trigger_keys'])}".lower()
+        if search and search not in haystack:
+            continue
+        automations.append(serialized)
+        if len(automations) >= limit:
+            break
+    return {"automations": automations, "count": len(automations)}
+
+
+async def get_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    include_dry_run = bool(arguments.get("include_dry_run", True))
+    async with AsyncSessionLocal() as session:
+        rule = await _resolve_automation_rule(session, arguments)
+        if not rule:
+            return {"found": False, "error": "Automation rule not found."}
+        serialized = serialize_automation_rule(rule)
+    result: dict[str, Any] = {"found": True, "automation": serialized}
+    if include_dry_run:
+        result["dry_run"] = await get_automation_service().dry_run_rule(serialized)
+    return result
+
+
+async def create_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "created": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "automation_name": str(arguments.get("name") or "automation").strip(),
+            "detail": "Create this automation? Active rules may later perform real system actions.",
+        }
+    name = str(arguments.get("name") or "").strip()
+    triggers = normalize_automation_triggers(arguments.get("triggers"))
+    actions = normalize_automation_actions(arguments.get("actions"))
+    if not name:
+        return {"created": False, "error": "Automation name is required."}
+    if not triggers:
+        return {"created": False, "error": "At least one automation trigger is required."}
+    if not actions:
+        return {"created": False, "error": "At least one automation action is required."}
+
+    user = await _chat_context_user()
+    async with AsyncSessionLocal() as session:
+        try:
+            rule = await get_automation_service().create_rule(
+                session,
+                name=name,
+                description=_optional_text(arguments.get("description")),
+                triggers=triggers,
+                conditions=normalize_automation_conditions(arguments.get("conditions")),
+                actions=actions,
+                is_active=arguments.get("is_active", True) is not False,
+                created_by=user,
+            )
+            await session.commit()
+            await session.refresh(rule)
+        except (AutomationError, IntegrityError) as exc:
+            await session.rollback()
+            return {"created": False, "error": str(exc)}
+        serialized = serialize_automation_rule(rule)
+    return {
+        "created": True,
+        "automation": serialized,
+        "dry_run": await get_automation_service().dry_run_rule(serialized),
+    }
+
+
+async def edit_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "updated": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "automation_name": str(arguments.get("automation_name") or arguments.get("name") or "automation").strip(),
+            "detail": "Update this automation? Future matching events may use the changed rule.",
+        }
+    user = await _chat_context_user()
+    async with AsyncSessionLocal() as session:
+        rule = await _resolve_automation_rule(session, arguments)
+        if not rule:
+            return {"updated": False, "error": "Automation rule not found."}
+        try:
+            await get_automation_service().update_rule(
+                session,
+                rule,
+                actor=user,
+                name=str(arguments["name"]).strip() if "name" in arguments else None,
+                description=str(arguments.get("description") or "").strip() if "description" in arguments else None,
+                triggers=normalize_automation_triggers(arguments.get("triggers")) if "triggers" in arguments else None,
+                conditions=normalize_automation_conditions(arguments.get("conditions")) if "conditions" in arguments else None,
+                actions=normalize_automation_actions(arguments.get("actions")) if "actions" in arguments else None,
+                is_active=bool(arguments.get("is_active")) if "is_active" in arguments else None,
+            )
+            await session.commit()
+            await session.refresh(rule)
+        except (AutomationError, IntegrityError) as exc:
+            await session.rollback()
+            return {"updated": False, "error": str(exc)}
+        serialized = serialize_automation_rule(rule)
+    return {
+        "updated": True,
+        "automation": serialized,
+        "dry_run": await get_automation_service().dry_run_rule(serialized),
+    }
+
+
+async def delete_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "deleted": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "automation_name": str(arguments.get("automation_name") or arguments.get("automation_id") or "automation").strip(),
+            "detail": "Delete this automation rule?",
+        }
+    user = await _chat_context_user()
+    async with AsyncSessionLocal() as session:
+        rule = await _resolve_automation_rule(session, arguments)
+        if not rule:
+            return {"deleted": False, "error": "Automation rule not found."}
+        serialized = serialize_automation_rule(rule)
+        await get_automation_service().delete_rule(session, rule, actor=user)
+        await session.commit()
+    return {"deleted": True, "automation": serialized}
+
+
+async def enable_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    return await _set_automation_active(arguments, active=True)
+
+
+async def disable_automation(arguments: dict[str, Any]) -> dict[str, Any]:
+    return await _set_automation_active(arguments, active=False)
+
+
+async def _set_automation_active(arguments: dict[str, Any], *, active: bool) -> dict[str, Any]:
+    if not bool(arguments.get("confirm")):
+        return {
+            "updated": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "automation_name": str(arguments.get("automation_name") or arguments.get("automation_id") or "automation").strip(),
+            "detail": f"{'Enable' if active else 'Disable'} this automation rule?",
+        }
+    user = await _chat_context_user()
+    async with AsyncSessionLocal() as session:
+        rule = await _resolve_automation_rule(session, arguments)
+        if not rule:
+            return {"updated": False, "error": "Automation rule not found."}
+        await get_automation_service().update_rule(session, rule, actor=user, is_active=active)
+        await session.commit()
+        await session.refresh(rule)
+        return {"updated": True, "automation": serialize_automation_rule(rule)}
+
+
 async def query_schedules(arguments: dict[str, Any]) -> dict[str, Any]:
     search = _normalize(arguments.get("search"))
     include_dependencies = bool(arguments.get("include_dependencies"))
@@ -3636,6 +4060,14 @@ async def create_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
             "created": False,
             "requires_details": True,
             "detail": "I need at least one allowed day and time before I create a schedule.",
+        }
+    if not bool(arguments.get("confirm")):
+        return {
+            "created": False,
+            "requires_confirmation": True,
+            "confirmation_field": "confirm",
+            "target": name,
+            "detail": f"Create schedule {name}?",
         }
 
     async with AsyncSessionLocal() as session:
@@ -3987,6 +4419,41 @@ def _notification_context_for_agent(value: Any, trigger_event: str) -> Notificat
             }
         return notification_context_from_payload(payload)
     return sample_notification_context(trigger_event or "integration_test")
+
+
+async def _resolve_automation_rule(session, arguments: dict[str, Any]) -> AutomationRule | None:
+    rule_id = _uuid_from_value(
+        arguments.get("automation_id")
+        or arguments.get("automation_rule_id")
+        or arguments.get("rule_id")
+        or arguments.get("id")
+    )
+    if rule_id:
+        return await session.get(AutomationRule, rule_id)
+
+    rule_name = _normalize(
+        arguments.get("automation_name")
+        or arguments.get("automation_rule_name")
+        or arguments.get("rule_name")
+        or arguments.get("name")
+    )
+    if not rule_name:
+        return None
+    rules = (await session.scalars(select(AutomationRule).order_by(AutomationRule.name))).all()
+    exact = [rule for rule in rules if rule.name.lower() == rule_name]
+    if exact:
+        return exact[0]
+    partial = [rule for rule in rules if rule_name in f"{rule.name} {rule.description or ''}".lower()]
+    return partial[0] if len(partial) == 1 else None
+
+
+async def _chat_context_user() -> User | None:
+    context = get_chat_tool_context()
+    user_id = _uuid_from_value(context.get("user_id"))
+    if not user_id:
+        return None
+    async with AsyncSessionLocal() as session:
+        return await session.get(User, user_id)
 
 
 def _access_event_load_options() -> tuple[Any, ...]:

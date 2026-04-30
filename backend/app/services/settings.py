@@ -15,6 +15,7 @@ from app.modules.home_assistant.covers import legacy_gate_entities, normalize_co
 SECRET_KEYS = {
     "home_assistant_token",
     "apprise_urls",
+    "discord_bot_token",
     "dvla_api_key",
     "unifi_protect_username",
     "unifi_protect_password",
@@ -45,6 +46,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "lpr_debounce_quiet_seconds": ("lpr", settings.lpr_debounce_quiet_seconds, "Quiet period before resolving LPR reads."),
     "lpr_debounce_max_seconds": ("lpr", settings.lpr_debounce_max_seconds, "Maximum LPR debounce window."),
     "lpr_similarity_threshold": ("lpr", settings.lpr_similarity_threshold, "Plate similarity threshold."),
+    "lpr_allowed_smart_zones": (
+        "lpr",
+        ["default"],
+        "UniFi smart zone names or IDs allowed to produce access events. Empty or * accepts every zone.",
+    ),
     "schedule_default_policy": (
         "access",
         "allow",
@@ -67,6 +73,19 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "home_assistant_tts_service": ("integrations", settings.home_assistant_tts_service, "TTS service name."),
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
+    "discord_bot_token": ("integrations", "", "Discord bot token."),
+    "discord_guild_allowlist": ("integrations", [], "Allowed Discord guild/server IDs."),
+    "discord_channel_allowlist": ("integrations", [], "Allowed Discord channel IDs."),
+    "discord_user_allowlist": ("integrations", [], "Allowed Discord user IDs."),
+    "discord_role_allowlist": ("integrations", [], "Allowed Discord role IDs."),
+    "discord_admin_role_ids": ("integrations", [], "Discord role IDs allowed to confirm Admin actions."),
+    "discord_default_notification_channel_id": (
+        "integrations",
+        "",
+        "Default Discord channel ID for notification workflows.",
+    ),
+    "discord_allow_direct_messages": ("integrations", False, "Allow direct messages to Alfred from allowed users."),
+    "discord_require_mention": ("integrations", True, "Require @Alfred mentions for guild channel messages."),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -141,6 +160,7 @@ class RuntimeConfig:
     lpr_debounce_quiet_seconds: float
     lpr_debounce_max_seconds: float
     lpr_similarity_threshold: float
+    lpr_allowed_smart_zones: list[str]
     schedule_default_policy: str
     home_assistant_url: str
     home_assistant_token: str
@@ -151,6 +171,15 @@ class RuntimeConfig:
     home_assistant_tts_service: str
     home_assistant_default_media_player: str
     apprise_urls: str
+    discord_bot_token: str
+    discord_guild_allowlist: list[str]
+    discord_channel_allowlist: list[str]
+    discord_user_allowlist: list[str]
+    discord_role_allowlist: list[str]
+    discord_admin_role_ids: list[str]
+    discord_default_notification_channel_id: str
+    discord_allow_direct_messages: bool
+    discord_require_mention: bool
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -222,6 +251,21 @@ def bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def string_list_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    raw = str(value).strip()
+    if not raw:
+        return []
+    return [
+        item.strip()
+        for item in raw.replace(",", "\n").splitlines()
+        if item.strip()
+    ]
 
 
 async def seed_dynamic_settings() -> None:
@@ -309,6 +353,7 @@ async def get_runtime_config() -> RuntimeConfig:
         lpr_debounce_quiet_seconds=float(values["lpr_debounce_quiet_seconds"]),
         lpr_debounce_max_seconds=float(values["lpr_debounce_max_seconds"]),
         lpr_similarity_threshold=float(values["lpr_similarity_threshold"]),
+        lpr_allowed_smart_zones=string_list_value(values["lpr_allowed_smart_zones"]),
         schedule_default_policy=(
             "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
         ),
@@ -327,6 +372,15 @@ async def get_runtime_config() -> RuntimeConfig:
         home_assistant_tts_service=str(values["home_assistant_tts_service"]),
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
         apprise_urls=str(values["apprise_urls"] or ""),
+        discord_bot_token=str(values["discord_bot_token"] or ""),
+        discord_guild_allowlist=string_list_value(values["discord_guild_allowlist"]),
+        discord_channel_allowlist=string_list_value(values["discord_channel_allowlist"]),
+        discord_user_allowlist=string_list_value(values["discord_user_allowlist"]),
+        discord_role_allowlist=string_list_value(values["discord_role_allowlist"]),
+        discord_admin_role_ids=string_list_value(values["discord_admin_role_ids"]),
+        discord_default_notification_channel_id=str(values["discord_default_notification_channel_id"] or ""),
+        discord_allow_direct_messages=bool_value(values["discord_allow_direct_messages"]),
+        discord_require_mention=bool_value(values["discord_require_mention"]),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),

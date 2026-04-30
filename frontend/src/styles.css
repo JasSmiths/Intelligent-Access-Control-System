@@ -852,6 +852,49 @@ h2 {
   box-shadow: var(--shadow);
 }
 
+.app-crash-panel {
+  min-height: var(--app-viewport-height);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.app-crash-panel section {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.app-crash-panel svg {
+  color: var(--amber);
+}
+
+.app-crash-panel h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.app-crash-panel p {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.app-crash-panel div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .lpr-test-page {
   min-height: var(--app-viewport-height);
   display: grid;
@@ -2243,6 +2286,14 @@ th {
 
 tr:last-child td {
   border-bottom: 0;
+}
+
+.table-muted-line {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
 }
 
 .bento-list,
@@ -5297,6 +5348,131 @@ tr:last-child td {
   font-size: 13px;
 }
 
+.discord-settings {
+  display: grid;
+  gap: 13px;
+}
+
+.discord-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.discord-overview-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.discord-overview-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.discord-overview-main strong,
+.discord-overview-main span,
+.discord-identity-row strong,
+.discord-identity-row span {
+  display: block;
+  min-width: 0;
+}
+
+.discord-overview-main strong,
+.discord-section .icloud-section-heading strong,
+.discord-identity-row strong {
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.discord-overview-main span,
+.discord-section .icloud-section-heading span,
+.discord-identity-row span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.discord-section {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.discord-channel-list,
+.discord-identity-list {
+  display: grid;
+  gap: 9px;
+}
+
+.discord-channel-row,
+.discord-identity-row {
+  min-width: 0;
+  min-height: 50px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.discord-channel-row {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text);
+  text-align: left;
+}
+
+.discord-channel-row:hover {
+  border-color: color-mix(in srgb, var(--violet) 30%, var(--line));
+  background: color-mix(in srgb, var(--violet) 10%, var(--surface));
+}
+
+.discord-channel-row > span:first-child {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discord-channel-row svg {
+  flex: 0 0 auto;
+  color: var(--violet);
+}
+
+.discord-channel-row .badge {
+  max-width: 210px;
+}
+
+.discord-identity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.6fr) minmax(150px, 0.6fr);
+}
+
+.discord-identity-row select {
+  min-width: 0;
+}
+
 .icloud-calendar-panel {
   display: grid;
   gap: 14px;
@@ -6082,6 +6258,10 @@ tr:last-child td {
   grid-template-columns: minmax(0, 1fr) max-content;
 }
 
+.two-pane-item-card > span {
+  min-width: 0;
+}
+
 .action-method-grid .two-pane-item-card {
   grid-template-columns: 22px minmax(0, 1fr) max-content;
 }
@@ -6145,6 +6325,111 @@ tr:last-child td {
   font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.automation-selector-grid {
+  grid-template-columns: repeat(auto-fill, minmax(250px, 320px));
+  justify-content: start;
+  align-items: start;
+  gap: 10px;
+}
+
+.automation-selector-card {
+  min-height: 82px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+}
+
+.automation-selector-card > svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--blue);
+}
+
+.automation-selector-card > span {
+  display: grid;
+  gap: 4px;
+}
+
+.automation-selector-card strong,
+.automation-selector-card small {
+  margin: 0;
+  min-width: 0;
+}
+
+.automation-selector-card small {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.automation-drilldown-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.automation-drilldown-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 2px 2px;
+}
+
+.automation-drilldown-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.automation-drilldown-head strong,
+.automation-drilldown-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-drilldown-head span {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.automation-integration-action-summary {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+}
+
+.automation-integration-action-summary svg {
+  color: var(--blue);
+}
+
+.automation-integration-action-summary span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.automation-integration-action-summary strong {
+  color: var(--text);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.automation-integration-action-summary small {
+  font-size: 12px;
+  text-transform: capitalize;
 }
 
 .target-tile-copy {
@@ -7037,6 +7322,13 @@ tr:last-child td {
   backdrop-filter: blur(14px);
 }
 
+.notification-rule-menu-popover-fixed {
+  position: fixed;
+  top: auto;
+  right: auto;
+  z-index: 220;
+}
+
 .workflow-rule-menu-popover button {
   width: 100%;
   min-height: 36px;
@@ -7080,6 +7372,409 @@ tr:last-child td {
 .workflow-rule-menu-popover button.danger:hover,
 .workflow-rule-menu-popover button.danger:focus-visible {
   background: var(--red-soft);
+}
+
+.notification-status-tabs {
+  width: max-content;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.notification-status-tabs button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.notification-status-tabs button.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.notification-status-tabs button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.notification-workflow-table.card {
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.notification-category-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.notification-category-folder {
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.notification-category-header {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 18px 18px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-category-header[aria-expanded="false"] {
+  border-radius: 8px;
+}
+
+.notification-category-header:hover,
+.notification-category-header:focus-visible {
+  background: color-mix(in srgb, var(--blue-soft) 52%, var(--surface-soft));
+  outline: 0;
+}
+
+.notification-category-header > svg {
+  color: var(--muted);
+}
+
+.notification-category-header > span {
+  min-width: 0;
+}
+
+.notification-category-header strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-rule-table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  background: var(--surface);
+}
+
+.notification-rule-data-table {
+  min-width: 820px;
+  table-layout: fixed;
+}
+
+.notification-rule-data-table th,
+.notification-rule-data-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  vertical-align: middle;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.notification-rule-data-table th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.notification-rule-data-table th:first-child,
+.notification-rule-data-table td:first-child {
+  width: 40%;
+}
+
+.notification-rule-data-table th:nth-child(2),
+.notification-rule-data-table td:nth-child(2) {
+  width: 22%;
+}
+
+.notification-rule-data-table th:nth-child(3),
+.notification-rule-data-table td:nth-child(3) {
+  width: 17%;
+}
+
+.notification-rule-data-table th:nth-child(4),
+.notification-rule-data-table td:nth-child(4) {
+  width: 21%;
+  text-align: right;
+}
+
+.notification-rule-data-table tbody tr {
+  transition: background 140ms ease;
+}
+
+.notification-rule-data-table tbody tr:hover,
+.notification-rule-data-table tbody tr.active {
+  background: color-mix(in srgb, var(--blue-soft) 32%, var(--surface));
+}
+
+.notification-rule-data-table tbody tr.paused {
+  background: color-mix(in srgb, var(--surface-soft) 58%, var(--surface));
+}
+
+.notification-rule-data-table tbody tr.paused .notification-rule-name-button strong {
+  color: var(--muted-strong);
+}
+
+.notification-rule-name-cell {
+  min-width: 0;
+}
+
+.notification-rule-name-button {
+  max-width: 100%;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.notification-rule-name-button strong {
+  display: block;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-rule-name-button:hover strong,
+.notification-rule-name-button:focus-visible strong {
+  color: var(--blue);
+}
+
+.notification-rule-name-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 60%, transparent);
+  outline-offset: 3px;
+}
+
+.notification-config-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.notification-config-chip {
+  position: relative;
+  height: 23px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.notification-config-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 58%, transparent);
+  outline-offset: 2px;
+}
+
+.notification-config-chip svg {
+  color: var(--muted);
+}
+
+.notification-config-tooltip {
+  position: fixed;
+  z-index: 230;
+  width: 168px;
+  display: grid;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 97%, transparent);
+  box-shadow: var(--shadow-strong);
+  color: var(--text);
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%);
+}
+
+.notification-config-tooltip::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.notification-config-tooltip.bottom::before {
+  top: -5px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.notification-config-tooltip.top::before {
+  bottom: -5px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.notification-config-tooltip strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.notification-config-tooltip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.notification-last-fired {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.notification-rule-actions-cell {
+  position: relative;
+  white-space: nowrap;
+}
+
+.notification-rule-actions-cluster {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.notification-rule-status-pill-slot {
+  width: 72px;
+  min-width: 72px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.notification-rule-status-pill {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 740;
+  line-height: 1;
+  white-space: nowrap;
+  animation: notification-status-pill-fade 3.4s ease forwards;
+}
+
+.notification-rule-status-pill.resumed {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 76%, var(--surface));
+  color: var(--green-strong);
+}
+
+.notification-rule-status-pill.paused {
+  border-color: color-mix(in srgb, var(--gray) 28%, var(--line));
+  background: color-mix(in srgb, var(--gray-soft) 82%, var(--surface));
+  color: var(--muted-strong);
+}
+
+@keyframes notification-status-pill-fade {
+  0% {
+    opacity: 0;
+    transform: translateX(5px) scale(0.96);
+  }
+
+  12%,
+  84% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(0) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notification-rule-status-pill {
+    animation: notification-status-pill-fade-reduced 3.4s linear forwards;
+  }
+}
+
+@keyframes notification-status-pill-fade-reduced {
+  0%,
+  84% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.notification-rule-actions-cell .workflow-rule-menu {
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.notification-rule-actions-cell .workflow-rule-menu-popover {
+  text-align: left;
+}
+
+@media (max-width: 720px) {
+  .notification-status-tabs {
+    width: 100%;
+  }
+
+  .notification-status-tabs button {
+    flex: 1;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .notification-category-header {
+    grid-template-columns: 18px 18px minmax(0, 1fr) max-content;
+    padding-inline: 10px;
+  }
 }
 
 .workflow-empty-list {
@@ -7424,6 +8119,23 @@ tr:last-child td {
 
 .variable-editor-content.multiline .ProseMirror {
   min-height: 88px;
+}
+
+.template-editor-fallback {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+textarea.template-editor-fallback {
+  min-height: 112px;
+  resize: vertical;
 }
 
 .variable-pill {
@@ -10694,6 +11406,8 @@ tr:last-child td {
 
   .apprise-manager-header,
   .apprise-add-actions,
+  .discord-overview,
+  .discord-channel-row,
   .icloud-actions,
   .icloud-form-actions {
     align-items: stretch;
@@ -10712,13 +11426,19 @@ tr:last-child td {
     grid-template-columns: 42px minmax(0, 1fr);
   }
 
-  .icloud-overview .badge {
+  .discord-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .icloud-overview .badge,
+  .discord-overview .badge {
     grid-column: 1 / -1;
     justify-self: start;
   }
 
   .icloud-auth-grid,
   .icloud-account-card,
+  .discord-identity-row,
   .icloud-sync-summary > div {
     grid-template-columns: 1fr;
   }

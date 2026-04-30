@@ -1,6 +1,4 @@
-import os
 import re
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +30,12 @@ from app.modules.notifications.base import (
     NotificationDeliveryError,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.discord_messaging import get_discord_messaging_service
+from app.services.notification_snapshots import (
+    delete_notification_snapshot,
+    notification_snapshot_absolute_url,
+    store_notification_snapshot,
+)
 from app.services.schedules import schedule_allows_at
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
@@ -42,6 +46,10 @@ logger = get_logger(__name__)
 
 AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 LEGACY_TOKEN_PATTERN = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
+HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID = "input_boolean.announcements"
+VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE = (
+    "Voice Notification suppressed: `input_boolean.announcements` is disabled."
+)
 
 
 @dataclass
@@ -60,6 +68,22 @@ class NotificationWorkflowResult:
         if self.failed_count > 0 or self.failures:
             return "failed"
         return "skipped"
+
+
+@dataclass(frozen=True)
+class NotificationActionOutcome:
+    delivered: bool
+    skipped: bool = False
+    reason: str = ""
+    message: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NotificationSnapshotAttachment:
+    path: str
+    content_type: str
+    public_url: str | None
 
 TRIGGER_CATALOG: list[dict[str, Any]] = [
     {
@@ -210,6 +234,48 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "severity": "warning",
                 "description": "An unknown or inactive vehicle plate is denied.",
             },
+            {
+                "value": "visitor_pass_vehicle_arrived",
+                "label": "Visitor Pass Vehicle Arrived",
+                "severity": "info",
+                "description": "A vehicle matched to a Visitor Pass has arrived on site.",
+            },
+            {
+                "value": "visitor_pass_vehicle_exited",
+                "label": "Visitor Pass Vehicle Exited",
+                "severity": "info",
+                "description": "A vehicle matched to a Visitor Pass has left the site.",
+            },
+        ],
+    },
+    {
+        "id": "visitor_pass",
+        "label": "Visitor Pass",
+        "events": [
+            {
+                "value": "visitor_pass_cancelled",
+                "label": "Visitor Pass Cancelled",
+                "severity": "info",
+                "description": "A scheduled or active Visitor Pass was cancelled.",
+            },
+            {
+                "value": "visitor_pass_created",
+                "label": "Visitor Pass Created",
+                "severity": "info",
+                "description": "A new Visitor Pass was created.",
+            },
+            {
+                "value": "visitor_pass_expired",
+                "label": "Visitor Pass Expired",
+                "severity": "warning",
+                "description": "A Visitor Pass window elapsed without being used.",
+            },
+            {
+                "value": "visitor_pass_used",
+                "label": "Visitor Pass Used",
+                "severity": "info",
+                "description": "A Visitor Pass was matched to an arriving vehicle.",
+            },
         ],
     },
 ]
@@ -267,6 +333,31 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
         "items": [
             {"name": "GarageDoor", "token": "@GarageDoor", "label": "Garage door"},
             {"name": "EntityId", "token": "@EntityId", "label": "Entity ID"},
+        ],
+    },
+    {
+        "group": "Visitor Pass",
+        "items": [
+            {
+                "name": "VisitorPassVehicleRegistration",
+                "token": "@VisitorPassVehicleRegistration",
+                "label": "Visitor Pass vehicle registration",
+            },
+            {
+                "name": "VisitorPassVehicleMake",
+                "token": "@VisitorPassVehicleMake",
+                "label": "Visitor Pass vehicle make",
+            },
+            {
+                "name": "VisitorPassVehicleColour",
+                "token": "@VisitorPassVehicleColour",
+                "label": "Visitor Pass vehicle colour",
+            },
+            {
+                "name": "VisitorPassDurationOnSite",
+                "token": "@VisitorPassDurationOnSite",
+                "label": "Visitor Pass duration on site",
+            },
         ],
     },
     {
@@ -333,6 +424,13 @@ MOCK_FACTS = {
     "malfunction_fix_attempts": "2",
     "malfunction_resolution_time": "",
     "last_known_vehicle": "Steph Smith exited in 2026 Tesla Model Y",
+    "visitor_name": "Sarah",
+    "visitor_pass_id": "visitor-pass-1",
+    "visitor_pass_status": "used",
+    "visitor_pass_vehicle_registration": "PE70DHX",
+    "visitor_pass_vehicle_make": "Peugeot",
+    "visitor_pass_vehicle_colour": "Silver",
+    "visitor_pass_duration_on_site": "1h 25m",
 }
 
 
@@ -402,6 +500,7 @@ class NotificationService:
         mobile_endpoints.extend(home_assistant_mobile_endpoints)
 
         voice_endpoints = await self._voice_endpoint_catalog(config)
+        discord_endpoints = await self._discord_endpoint_catalog()
         return [
             {
                 "id": "mobile",
@@ -430,6 +529,13 @@ class NotificationService:
                 "provider": "Home Assistant TTS",
                 "configured": bool(voice_endpoints),
                 "endpoints": voice_endpoints,
+            },
+            {
+                "id": "discord",
+                "name": "Discord",
+                "provider": "Discord",
+                "configured": bool(discord_endpoints),
+                "endpoints": discord_endpoints,
             },
         ]
 
@@ -564,7 +670,9 @@ class NotificationService:
                 first_notification = first_notification or result.notification
                 delivered_count += result.delivered_count
                 failed_count += result.failed_count
+                skipped_count += result.skipped_count
                 failures.extend(result.failures)
+                skipped_reasons.extend(result.skipped_reasons)
                 if result.delivered_count > 0:
                     await self._mark_rule_fired(rule)
             except NotificationDeliveryError as exc:
@@ -689,6 +797,8 @@ class NotificationService:
         failures: list[str] = []
         delivered_count = 0
         failed_count = 0
+        skipped_count = 0
+        skipped_reasons: list[str] = []
 
         for action in rendered["actions"]:
             if first_notification is None:
@@ -697,7 +807,7 @@ class NotificationService:
                     body=str(action.get("message") or ""),
                 )
             try:
-                await self._deliver_action(action, context, config, rendered)
+                outcome = await self._deliver_action(action, context, config, rendered)
             except NotificationDeliveryError as exc:
                 failed_count += 1
                 failures.append(f"{action.get('type')}: {exc}")
@@ -717,6 +827,22 @@ class NotificationService:
                 )
                 if raise_on_failure:
                     raise
+                continue
+            if outcome.skipped:
+                skipped_count += 1
+                skipped_reasons.append(outcome.reason)
+                skipped_payload = {
+                    **self._event_payload(rendered, action, context, False, ""),
+                    **outcome.metadata,
+                    "reason": outcome.reason,
+                    "message": outcome.message,
+                }
+                self._record_notification_span(
+                    "Notification Action Suppressed",
+                    context,
+                    output_payload=skipped_payload,
+                )
+                await event_bus.publish("notification.skipped", skipped_payload)
                 continue
             self._record_notification_span(
                 "Notification Action Sent",
@@ -742,7 +868,9 @@ class NotificationService:
             notification=first_notification,
             delivered_count=delivered_count,
             failed_count=failed_count,
+            skipped_count=skipped_count,
             failures=failures,
+            skipped_reasons=skipped_reasons,
         )
 
     def render_rule(
@@ -789,9 +917,11 @@ class NotificationService:
         return self.render_rule(rule, context or sample_notification_context(rule_trigger_event(rule)))
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
-        if event.type != "notification.trigger":
+        if event.type == "notification.trigger":
+            await self.process_context(notification_context_from_payload(event.payload))
             return
-        await self.process_context(notification_context_from_payload(event.payload))
+        for context in visitor_pass_notification_contexts_from_event(event):
+            await self.process_context(context)
 
     async def _condition_matches(
         self,
@@ -836,11 +966,11 @@ class NotificationService:
         context: NotificationContext,
         config,
         rendered_rule: dict[str, Any],
-    ) -> None:
+    ) -> NotificationActionOutcome:
         action_type = str(action.get("type") or "")
         if action_type == "mobile":
             await self._send_mobile(action, context, config)
-            return
+            return NotificationActionOutcome(delivered=True)
         if action_type == "in_app":
             await event_bus.publish(
                 "notification.in_app",
@@ -853,10 +983,12 @@ class NotificationService:
                     "snapshot": action.get("snapshot") or None,
                 },
             )
-            return
+            return NotificationActionOutcome(delivered=True)
         if action_type == "voice":
-            await self._send_voice(action, config)
-            return
+            return await self._send_voice(action, config)
+        if action_type == "discord":
+            await self._send_discord(action, context)
+            return NotificationActionOutcome(delivered=True)
         raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
 
     async def _send_mobile(self, action: dict[str, Any], context: NotificationContext, config) -> None:
@@ -864,7 +996,8 @@ class NotificationService:
         home_assistant_targets = await self._select_home_assistant_mobile_targets(config, action)
         if not urls and not home_assistant_targets:
             raise NotificationDeliveryError("No mobile notification endpoints are configured or selected.")
-        attachments = await self._snapshot_attachments(action.get("media") or {})
+        snapshot = await self._snapshot_attachment(action.get("media") or {})
+        attachments = [snapshot.path] if snapshot else []
         failures: list[str] = []
         delivered_any = False
         try:
@@ -881,35 +1014,57 @@ class NotificationService:
                 except NotificationDeliveryError as exc:
                     failures.append(f"Apprise: {exc}")
             if home_assistant_targets:
-                notifier = HomeAssistantMobileAppNotifier()
-                for target in home_assistant_targets:
-                    try:
-                        await notifier.send(
-                            HomeAssistantMobileAppTarget(target),
-                            str(action.get("title") or context.subject),
-                            str(action.get("message") or ""),
-                            context,
-                        )
-                        delivered_any = True
-                    except NotificationDeliveryError as exc:
-                        failures.append(f"{target}: {exc}")
+                if snapshot and not snapshot.public_url:
+                    failures.append(
+                        "Home Assistant: IACS_PUBLIC_BASE_URL must be configured to attach camera snapshots."
+                    )
+                else:
+                    home_assistant_image_url = snapshot.public_url if snapshot else None
+                    home_assistant_image_content_type = snapshot.content_type if snapshot else None
+                    notifier = HomeAssistantMobileAppNotifier()
+                    for target in home_assistant_targets:
+                        try:
+                            await notifier.send(
+                                HomeAssistantMobileAppTarget(target),
+                                str(action.get("title") or context.subject),
+                                str(action.get("message") or ""),
+                                context,
+                                image_url=home_assistant_image_url,
+                                image_content_type=home_assistant_image_content_type,
+                            )
+                            delivered_any = True
+                        except NotificationDeliveryError as exc:
+                            failures.append(f"{target}: {exc}")
         finally:
-            for path in attachments:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    logger.debug("notification_snapshot_cleanup_failed", extra={"path": path})
+            if snapshot and not (home_assistant_targets and snapshot.public_url):
+                delete_notification_snapshot(snapshot.path)
         if failures:
             raise NotificationDeliveryError("; ".join(failures))
         if not delivered_any:
             raise NotificationDeliveryError("No mobile notification endpoints were delivered.")
 
-    async def _send_voice(self, action: dict[str, Any], config) -> None:
+    async def _send_discord(self, action: dict[str, Any], context: NotificationContext) -> None:
+        attachments = await self._snapshot_attachments(action.get("media") or {})
+        try:
+            await get_discord_messaging_service().send_notification_action(
+                action,
+                context,
+                attachment_paths=attachments,
+            )
+        finally:
+            for path in attachments:
+                delete_notification_snapshot(path)
+
+    async def _send_voice(self, action: dict[str, Any], config) -> NotificationActionOutcome:
         targets = await self._select_voice_targets(config, action)
         if not targets:
             raise NotificationDeliveryError("No Home Assistant media player is configured or selected.")
-        announcer = HomeAssistantTtsAnnouncer()
         spoken_message = apply_vehicle_tts_phonetics(str(action.get("message") or ""))
+        suppression = await self._voice_announcements_preflight()
+        if suppression:
+            return suppression
+
+        announcer = HomeAssistantTtsAnnouncer()
         failures: list[str] = []
         delivered_any = False
         for target in targets:
@@ -922,6 +1077,74 @@ class NotificationService:
             raise NotificationDeliveryError("; ".join(failures))
         if not delivered_any:
             raise NotificationDeliveryError("No Home Assistant media player endpoints were delivered.")
+        return NotificationActionOutcome(delivered=True)
+
+    async def _voice_announcements_preflight(self) -> NotificationActionOutcome | None:
+        try:
+            state = await HomeAssistantClient().get_state(HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID)
+        except Exception as exc:
+            logger.warning(
+                "voice_notification_announcements_state_unavailable",
+                extra={"entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID, "error": str(exc)},
+            )
+            return NotificationActionOutcome(
+                delivered=False,
+                skipped=True,
+                reason="announcements_state_unavailable",
+                message=(
+                    "Voice Notification suppressed: "
+                    f"`{HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID}` state could not be verified."
+                ),
+                metadata={
+                    "home_assistant_entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+                    "home_assistant_state": None,
+                    "fail_safe": True,
+                },
+            )
+
+        normalized_state = str(state.state or "").strip().lower()
+        if normalized_state == "on":
+            return None
+        if normalized_state == "off":
+            logger.info(
+                "voice_notification_suppressed",
+                extra={
+                    "entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+                    "state": normalized_state,
+                    "suppression_message": VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
+                },
+            )
+            return NotificationActionOutcome(
+                delivered=False,
+                skipped=True,
+                reason="announcements_disabled",
+                message=VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
+                metadata={
+                    "home_assistant_entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+                    "home_assistant_state": normalized_state,
+                },
+            )
+        logger.info(
+            "voice_notification_suppressed",
+            extra={
+                "entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+                "state": normalized_state or "unknown",
+            },
+        )
+        return NotificationActionOutcome(
+            delivered=False,
+            skipped=True,
+            reason="announcements_not_enabled",
+            message=(
+                "Voice Notification suppressed: "
+                f"`{HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID}` is not enabled."
+            ),
+            metadata={
+                "home_assistant_entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+                "home_assistant_state": normalized_state or "unknown",
+                "fail_safe": True,
+            },
+        )
 
     def _select_apprise_urls(self, configured: str, action: dict[str, Any]) -> list[str]:
         urls = [normalize_apprise_url(url) for url in split_apprise_urls(configured)]
@@ -1016,6 +1239,31 @@ class NotificationService:
             )
         return endpoints
 
+    async def _discord_endpoint_catalog(self) -> list[dict[str, Any]]:
+        try:
+            channels = await get_discord_messaging_service().available_channels()
+        except Exception as exc:
+            logger.debug("discord_endpoint_catalog_failed", extra={"error": str(exc)})
+            return []
+        endpoints = [
+            {
+                "id": "discord:*",
+                "provider": "Discord",
+                "label": "Default Discord channel",
+                "detail": "Configured Discord default notification channel",
+            }
+        ] if channels else []
+        endpoints.extend(
+            {
+                "id": f"discord:{channel['id']}",
+                "provider": "Discord",
+                "label": channel.get("label") or channel.get("name") or channel["id"],
+                "detail": f"Channel ID {channel['id']}",
+            }
+            for channel in channels
+        )
+        return endpoints
+
     async def _home_assistant_mobile_endpoint_catalog(self, config) -> list[dict[str, Any]]:
         targets = await self._all_home_assistant_mobile_targets(config)
         if not targets:
@@ -1095,22 +1343,25 @@ class NotificationService:
             return []
         return sorted(state.entity_id for state in states if state.entity_id.startswith("media_player."))
 
-    async def _snapshot_attachments(self, media: dict[str, Any]) -> list[str]:
+    async def _snapshot_attachment(self, media: dict[str, Any]) -> NotificationSnapshotAttachment | None:
         if not media.get("attach_camera_snapshot") or not media.get("camera_id"):
-            return []
+            return None
         camera_id = str(media["camera_id"])
         try:
             snapshot = await get_unifi_protect_service().snapshot(camera_id, width=960, height=540)
         except Exception as exc:
             raise NotificationDeliveryError(f"Unable to capture notification snapshot: {exc}") from exc
 
-        suffix = ".png" if "png" in snapshot.content_type else ".jpg"
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        try:
-            handle.write(snapshot.content)
-            return [handle.name]
-        finally:
-            handle.close()
+        stored = store_notification_snapshot(snapshot.content, snapshot.content_type)
+        return NotificationSnapshotAttachment(
+            path=str(stored.path),
+            content_type=stored.content_type,
+            public_url=notification_snapshot_absolute_url(stored),
+        )
+
+    async def _snapshot_attachments(self, media: dict[str, Any]) -> list[str]:
+        snapshot = await self._snapshot_attachment(media)
+        return [snapshot.path] if snapshot else []
 
     def _record_notification_span(
         self,
@@ -1170,6 +1421,167 @@ def notification_context_payload(context: NotificationContext) -> dict[str, Any]
         "severity": context.severity,
         "facts": dict(context.facts),
     }
+
+
+def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[NotificationContext]:
+    if not event.type.startswith("visitor_pass."):
+        return []
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else None
+    if not visitor_pass:
+        return []
+
+    if event.type == "visitor_pass.created":
+        event_types = ["visitor_pass_created"]
+    elif event.type == "visitor_pass.cancelled":
+        event_types = ["visitor_pass_cancelled"]
+    elif event.type == "visitor_pass.status_changed":
+        if str(visitor_pass.get("status") or "").strip().lower() != "expired":
+            return []
+        event_types = ["visitor_pass_expired"]
+    elif event.type == "visitor_pass.used":
+        event_types = ["visitor_pass_used", "visitor_pass_vehicle_arrived"]
+    elif event.type == "visitor_pass.departure_recorded":
+        event_types = ["visitor_pass_vehicle_exited"]
+    else:
+        return []
+
+    source = str(payload.get("source") or visitor_pass.get("creation_source") or "visitor_pass")
+    return [
+        NotificationContext(
+            event_type=event_type,
+            subject=_visitor_pass_notification_subject(event_type, visitor_pass),
+            severity=trigger_severity(event_type),
+            facts=_visitor_pass_notification_facts(event_type, visitor_pass, source=source),
+        )
+        for event_type in event_types
+    ]
+
+
+def _visitor_pass_notification_facts(
+    event_type: str,
+    visitor_pass: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, str]:
+    plate = _visitor_pass_text(visitor_pass.get("number_plate"))
+    make = _visitor_pass_text(visitor_pass.get("vehicle_make"))
+    colour = _visitor_pass_text(visitor_pass.get("vehicle_colour"))
+    duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
+        visitor_pass.get("duration_on_site_seconds")
+    )
+    occurred_at = _visitor_pass_occurred_at(event_type, visitor_pass)
+    access_event_id = (
+        _visitor_pass_text(visitor_pass.get("departure_event_id"))
+        if event_type == "visitor_pass_vehicle_exited"
+        else _visitor_pass_text(visitor_pass.get("arrival_event_id"))
+    )
+    return {
+        "message": _visitor_pass_notification_message(event_type, visitor_pass),
+        "subject": _visitor_pass_notification_subject(event_type, visitor_pass),
+        "visitor_name": _visitor_pass_name(visitor_pass),
+        "display_name": _visitor_pass_name(visitor_pass),
+        "visitor_pass_id": _visitor_pass_text(visitor_pass.get("id")),
+        "visitor_pass_status": _visitor_pass_text(visitor_pass.get("status")),
+        "visitor_pass_creation_source": _visitor_pass_text(visitor_pass.get("creation_source")),
+        "visitor_pass_source": source,
+        "visitor_pass_expected_time": _visitor_pass_text(visitor_pass.get("expected_time")),
+        "visitor_pass_window_start": _visitor_pass_text(visitor_pass.get("window_start")),
+        "visitor_pass_window_end": _visitor_pass_text(visitor_pass.get("window_end")),
+        "visitor_pass_valid_from": _visitor_pass_text(visitor_pass.get("valid_from")),
+        "visitor_pass_valid_until": _visitor_pass_text(visitor_pass.get("valid_until")),
+        "visitor_pass_vehicle_registration": plate,
+        "visitor_pass_vehicle_make": make,
+        "visitor_pass_vehicle_colour": colour,
+        "visitor_pass_duration_on_site": duration,
+        "visitor_pass_duration_on_site_seconds": _visitor_pass_text(visitor_pass.get("duration_on_site_seconds")),
+        "vehicle_registration_number": plate,
+        "registration_number": plate,
+        "vehicle_make": make,
+        "vehicle_color": colour,
+        "vehicle_colour": colour,
+        "duration_human": duration,
+        "duration_on_site_seconds": _visitor_pass_text(visitor_pass.get("duration_on_site_seconds")),
+        "access_event_id": access_event_id,
+        "arrival_event_id": _visitor_pass_text(visitor_pass.get("arrival_event_id")),
+        "departure_event_id": _visitor_pass_text(visitor_pass.get("departure_event_id")),
+        "telemetry_trace_id": _visitor_pass_text(visitor_pass.get("telemetry_trace_id")),
+        "occurred_at": occurred_at,
+        "source": source,
+    }
+
+
+def _visitor_pass_notification_subject(event_type: str, visitor_pass: dict[str, Any]) -> str:
+    visitor_name = _visitor_pass_name(visitor_pass)
+    if event_type == "visitor_pass_created":
+        return f"Visitor Pass created for {visitor_name}"
+    if event_type == "visitor_pass_cancelled":
+        return f"Visitor Pass cancelled for {visitor_name}"
+    if event_type == "visitor_pass_expired":
+        return f"Visitor Pass expired for {visitor_name}"
+    if event_type in {"visitor_pass_used", "visitor_pass_vehicle_arrived"}:
+        return f"Visitor Pass vehicle arrived for {visitor_name}"
+    if event_type == "visitor_pass_vehicle_exited":
+        return f"Visitor Pass vehicle exited for {visitor_name}"
+    return f"Visitor Pass update for {visitor_name}"
+
+
+def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, Any]) -> str:
+    visitor_name = _visitor_pass_name(visitor_pass)
+    vehicle = _visitor_pass_vehicle_label(visitor_pass)
+    duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
+        visitor_pass.get("duration_on_site_seconds")
+    )
+    if event_type == "visitor_pass_created":
+        return f"Visitor Pass created for {visitor_name}."
+    if event_type == "visitor_pass_cancelled":
+        return f"Visitor Pass for {visitor_name} was cancelled."
+    if event_type == "visitor_pass_expired":
+        return f"Visitor Pass for {visitor_name} expired without a matching vehicle detection."
+    if event_type == "visitor_pass_used":
+        return f"Visitor Pass for {visitor_name} was used{f' by {vehicle}' if vehicle else ''}."
+    if event_type == "visitor_pass_vehicle_arrived":
+        return f"{visitor_name} arrived{f' in {vehicle}' if vehicle else ''}."
+    if event_type == "visitor_pass_vehicle_exited":
+        duration_suffix = f" after {duration}" if duration else ""
+        return f"{visitor_name} exited{f' in {vehicle}' if vehicle else ''}{duration_suffix}."
+    return f"Visitor Pass updated for {visitor_name}."
+
+
+def _visitor_pass_occurred_at(event_type: str, visitor_pass: dict[str, Any]) -> str:
+    if event_type == "visitor_pass_created":
+        return _visitor_pass_text(visitor_pass.get("created_at"))
+    if event_type == "visitor_pass_cancelled":
+        return _visitor_pass_text(visitor_pass.get("updated_at"))
+    if event_type == "visitor_pass_expired":
+        return _visitor_pass_text(
+            visitor_pass.get("window_end")
+            or visitor_pass.get("valid_until")
+            or visitor_pass.get("updated_at")
+        )
+    if event_type in {"visitor_pass_used", "visitor_pass_vehicle_arrived"}:
+        return _visitor_pass_text(visitor_pass.get("arrival_time") or visitor_pass.get("updated_at"))
+    if event_type == "visitor_pass_vehicle_exited":
+        return _visitor_pass_text(visitor_pass.get("departure_time") or visitor_pass.get("updated_at"))
+    return _visitor_pass_text(visitor_pass.get("updated_at") or visitor_pass.get("created_at"))
+
+
+def _visitor_pass_vehicle_label(visitor_pass: dict[str, Any]) -> str:
+    plate = _visitor_pass_text(visitor_pass.get("number_plate"))
+    make = _visitor_pass_text(visitor_pass.get("vehicle_make"))
+    colour = _visitor_pass_text(visitor_pass.get("vehicle_colour"))
+    description = " ".join(part for part in [colour, make] if part)
+    if description and plate:
+        return f"{description} with registration {plate}"
+    return description or plate
+
+
+def _visitor_pass_name(visitor_pass: dict[str, Any]) -> str:
+    return _visitor_pass_text(visitor_pass.get("visitor_name")) or "Unknown visitor"
+
+
+def _visitor_pass_text(value: Any) -> str:
+    return "" if value is None else str(value)
 
 
 def notification_context_from_payload(payload: dict[str, Any]) -> NotificationContext:
@@ -1245,10 +1657,36 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
     if display_name and not last_name and " " in display_name:
         last_name = display_name.split(" ", 1)[1]
 
+    visitor_pass_registration = pick(
+        "visitor_pass_vehicle_registration",
+        "visitor_pass_registration_number",
+        "number_plate",
+        "vehicle_registration_number",
+        "registration_number",
+    )
+    visitor_pass_make = pick("visitor_pass_vehicle_make", "visitor_pass_make", "vehicle_make", "make")
+    visitor_pass_colour = pick(
+        "visitor_pass_vehicle_colour",
+        "visitor_pass_vehicle_color",
+        "visitor_pass_colour",
+        "visitor_pass_color",
+        "vehicle_colour",
+        "vehicle_color",
+        "colour",
+        "color",
+    )
+    visitor_pass_duration = pick("visitor_pass_duration_on_site", "duration_human", "duration_on_site")
+    if not visitor_pass_duration:
+        visitor_pass_duration = _duration_label_from_seconds(
+            pick("visitor_pass_duration_on_site_seconds", "duration_on_site_seconds")
+        )
+
     vehicle_name = pick(
         "vehicle_name",
         "vehicle_display_name",
         "vehicle_description",
+        "visitor_pass_vehicle_make",
+        "visitor_pass_vehicle_registration",
         "vehicle_make",
         "make",
         "registration_number",
@@ -1268,6 +1706,8 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         )
     else:
         vehicle_color = pick(
+            "visitor_pass_vehicle_colour",
+            "visitor_pass_vehicle_color",
             "vehicle_color",
             "vehicle_colour",
             "detected_vehicle_color",
@@ -1283,11 +1723,23 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "LastName": last_name,
         "DisplayName": display_name or first_name or "Unknown visitor",
         "GroupName": pick("group_name", "group"),
-        "Registration": pick("vehicle_registration_number", "registration_number", "vrn", default=context.subject),
-        "VehicleRegistrationNumber": pick("vehicle_registration_number", "registration_number", "vrn", default=context.subject),
+        "Registration": pick(
+            "visitor_pass_vehicle_registration",
+            "vehicle_registration_number",
+            "registration_number",
+            "vrn",
+            default=context.subject,
+        ),
+        "VehicleRegistrationNumber": pick(
+            "visitor_pass_vehicle_registration",
+            "vehicle_registration_number",
+            "registration_number",
+            "vrn",
+            default=context.subject,
+        ),
         "VehicleName": vehicle_name,
         "VehicleDisplayName": vehicle_name,
-        "VehicleMake": pick("vehicle_make", "make"),
+        "VehicleMake": pick("visitor_pass_vehicle_make", "vehicle_make", "make"),
         "VehicleType": pick("vehicle_type", "detected_vehicle_type", "observed_vehicle_type"),
         "VehicleModel": pick("vehicle_model", "model"),
         "VehicleColor": vehicle_color,
@@ -1309,6 +1761,10 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "GateStatus": pick("gate_status", "gate_state"),
         "GarageDoor": pick("garage_door"),
         "EntityId": pick("entity_id"),
+        "VisitorPassVehicleRegistration": visitor_pass_registration,
+        "VisitorPassVehicleMake": visitor_pass_make,
+        "VisitorPassVehicleColour": visitor_pass_colour,
+        "VisitorPassDurationOnSite": visitor_pass_duration,
         "NewWinnerName": pick("new_winner_name", "winner_name"),
         "OvertakenName": pick("overtaken_name", "previous_winner_name"),
         "ReadCount": pick("read_count", "leaderboard_read_count"),
@@ -1402,7 +1858,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         action_type = str(raw.get("type") or "")
-        if action_type not in {"mobile", "voice", "in_app"}:
+        if action_type not in {"mobile", "voice", "in_app", "discord"}:
             continue
         actions.append(
             {
@@ -1493,6 +1949,22 @@ def _time_label(value: str) -> str:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%H:%M")
     except ValueError:
         return value
+
+
+def _duration_label_from_seconds(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        total_seconds = max(0, int(value))
+    except (TypeError, ValueError):
+        return str(value)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
 
 
 @lru_cache

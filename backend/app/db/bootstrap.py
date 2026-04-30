@@ -117,6 +117,9 @@ async def init_database() -> None:
             )
             await conn.execute(text("ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_last_fired_at ON notification_rules (last_fired_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_trigger_keys_gin ON automation_rules USING gin (trigger_keys)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_next_run ON automation_rules (is_active, next_run_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_runs_rule_started ON automation_runs (rule_id, started_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_category ON audit_logs (category)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)"))
@@ -247,6 +250,11 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_provider ON messaging_identities (provider)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_provider_user_id ON messaging_identities (provider_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_user_id ON messaging_identities (user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_person_id ON messaging_identities (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_last_seen_at ON messaging_identities (last_seen_at)"))
         logger.info("database_schema_ready")
 
     await seed_dynamic_settings()

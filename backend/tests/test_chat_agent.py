@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai import tools as ai_tools
-from app.ai.providers import ChatMessageInput, LlmResult, ToolCall
-from app.services.chat import ChatService, IntentRoute
+from app.ai.providers import ChatMessageInput, LlmResult, LocalProvider, ToolCall
+from app.api.v1 import ai as ai_api
+from app.services.chat import ChatService, IntentRoute, IntentRouterError, SYSTEM_PROMPT
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +68,93 @@ class CountingToolProvider:
         )
 
 
+def test_system_prompt_sets_warm_wit_persona_and_preserves_safety_rules() -> None:
+    assert "quick-witted, good-natured, lightly cheeky" in SYSTEM_PROMPT
+    assert "warm operations butler" in SYSTEM_PROMPT
+    assert "Never invent people, vehicles, schedules" in SYSTEM_PROMPT
+    assert "Do not claim an action has happened until a confirmed tool result says it happened" in SYSTEM_PROMPT
+    assert "jokes must never soften risk or hide uncertainty" in SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_local_provider_general_response_has_warm_persona() -> None:
+    provider = LocalProvider()
+
+    result = await provider.complete([ChatMessageInput("user", "hello")])
+
+    assert "I'm Alfred" in result.text
+    assert "sensible clipboard" in result.text
+    assert "You asked: hello" in result.text
+
+
+def test_local_provider_confirmation_summary_is_warm_but_clear() -> None:
+    provider = LocalProvider()
+
+    text = provider._summarize_device_open(
+        {
+            "requires_confirmation": True,
+            "action": "open",
+            "device": {"name": "Top Gate"},
+        }
+    )
+
+    assert "confirmation button" in text
+    assert "before I open Top Gate" in text
+    assert "Safety first" in text
+
+
+def test_critical_tool_failure_stays_plain() -> None:
+    provider = LocalProvider()
+
+    text = provider._summarize_device_open(
+        {
+            "action": "open",
+            "device": {"name": "Top Gate"},
+            "opened": False,
+            "detail": "Home Assistant call failed.",
+        }
+    )
+
+    assert text == "I could not open Top Gate: Home Assistant call failed."
+
+
+def test_local_provider_no_records_reply_is_warm() -> None:
+    provider = LocalProvider()
+
+    assert provider._summarize_events({"events": []}) == "I found no matching access events. The logbook is politely blank."
+
+
+@pytest.mark.asyncio
+async def test_http_chat_api_uses_shared_chat_service(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeChatService:
+        async def handle_message(self, message, **kwargs):
+            captured["message"] = message
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(
+                session_id="session-1",
+                provider="local",
+                text="I'm Alfred: warm gatehouse brain, sensible clipboard.",
+                tool_results=[],
+                attachments=[],
+                pending_action=None,
+            )
+
+    monkeypatch.setattr(ai_api, "chat_service", FakeChatService())
+    user = SimpleNamespace(id=uuid.uuid4(), role=SimpleNamespace(value="admin"))
+    request = ai_api.ChatRequest(message="hello Alfred", client_context={"timezone": "Europe/London"})
+
+    response = await ai_api.chat(request, current_user=user)
+
+    assert response.text == "I'm Alfred: warm gatehouse brain, sensible clipboard."
+    assert captured["message"] == "hello Alfred"
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["client_context"] == {"timezone": "Europe/London"}
+    assert kwargs["user_role"] == "admin"
+
+
 class ParallelToolProvider:
     name = "parallel-tool-test"
 
@@ -94,6 +182,20 @@ class ActionToolProvider:
         return LlmResult(
             text='{"thought":"open","tool_name":"open_gate","arguments":{"target":"Top Gate","confirm":true}}'
         )
+
+
+class InvalidIntentProvider:
+    name = "invalid-intent-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(text="not json")
+
+
+class MinimalIntentProvider:
+    name = "minimal-intent-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(text='{"intents":["General"],"confidence":0.9,"reason":"missing required field"}')
 
 
 @pytest.mark.asyncio
@@ -293,6 +395,109 @@ def test_visitor_pass_create_prompt_prepares_pass_without_person_resolution() ->
     assert parsed.utcoffset() is not None
 
 
+def test_visitor_pass_query_does_not_start_guided_create_flow() -> None:
+    service = ChatService()
+    message = "Are there any visitor passes setup for today 30th?"
+    route = service._deterministic_intent_route(message, {}, [], actor_context={})
+    selected = service._select_tools_for_route(route, [])
+    calls = service._deterministic_react_calls(
+        message,
+        route,
+        {},
+        [],
+        [],
+        selected,
+        iteration=0,
+        actor_context={},
+    )
+
+    assert service._looks_like_visitor_pass_query_request(message.lower()) is True
+    assert service._looks_like_visitor_pass_create_request(message.lower()) is False
+    assert calls
+    assert calls[0].name == "query_visitor_passes"
+    assert "search" not in calls[0].arguments
+    assert calls[0].arguments["statuses"] == ["active", "scheduled"]
+
+
+def test_pending_visitor_pass_create_abandons_clear_new_gate_command() -> None:
+    service = ChatService()
+
+    assert service._should_abandon_pending_visitor_pass_create("open the top gate") is True
+    assert service._is_pending_visitor_pass_create_cancel_message("cancel that") is True
+
+
+@pytest.mark.asyncio
+async def test_guided_visitor_pass_flow_does_not_preempt_router_for_new_requests() -> None:
+    service = ChatService()
+
+    result = await service._handle_guided_visitor_pass_flow(  # noqa: SLF001
+        uuid.uuid4(),
+        "Chris Starkey is coming tomorrow at approx 11am, create a pass for him",
+        {},
+        actor_context={},
+        provider_name="protocol-test",
+        status_callback=None,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_guided_schedule_flow_does_not_preempt_router_for_new_requests() -> None:
+    service = ChatService()
+
+    result = await service._handle_guided_schedule_flow(  # noqa: SLF001
+        uuid.uuid4(),
+        "Create a gardener schedule for weekdays 8am to 5pm",
+        {},
+        status_callback=None,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_intent_router_invalid_response_fails_closed() -> None:
+    service = ChatService()
+
+    with pytest.raises(IntentRouterError):
+        await service._classify_intent(  # noqa: SLF001
+            InvalidIntentProvider(),
+            "Who is home?",
+            {},
+            [],
+            actor_context={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_intent_router_missing_required_fields_fails_closed() -> None:
+    service = ChatService()
+
+    with pytest.raises(IntentRouterError):
+        await service._classify_intent(  # noqa: SLF001
+            MinimalIntentProvider(),
+            "Who is home?",
+            {},
+            [],
+            actor_context={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_provider_cannot_route_free_form_chat() -> None:
+    service = ChatService()
+
+    with pytest.raises(IntentRouterError):
+        await service._classify_intent(  # noqa: SLF001
+            SimpleNamespace(name="local"),
+            "Who is home?",
+            {},
+            [],
+            actor_context={},
+        )
+
+
 def test_unlinked_actor_context_does_not_guess_me() -> None:
     service = ChatService()
 
@@ -316,10 +521,26 @@ def test_pending_confirmation_uses_stored_arguments() -> None:
 def test_confirmed_visitor_pass_action_does_not_resume_original_request() -> None:
     service = ChatService()
 
+    assert service._confirmed_tool_finishes_without_resume("create_schedule") is True
     assert service._confirmed_tool_finishes_without_resume("create_visitor_pass") is True
     assert service._confirmed_tool_finishes_without_resume("update_visitor_pass") is True
     assert service._confirmed_tool_finishes_without_resume("cancel_visitor_pass") is True
+    assert service._confirmed_tool_finishes_without_resume("test_notification_workflow") is True
     assert service._confirmed_tool_finishes_without_resume("open_gate") is False
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_tool_requires_confirmation() -> None:
+    result = await ai_tools.create_schedule(
+        {
+            "name": "Gardeners",
+            "time_description": "weekdays 8am to 5pm",
+            "confirm": False,
+        }
+    )
+
+    assert result["requires_confirmation"] is True
+    assert result["confirmation_field"] == "confirm"
 
 
 def test_assistant_text_cleanup_removes_local_time_label() -> None:

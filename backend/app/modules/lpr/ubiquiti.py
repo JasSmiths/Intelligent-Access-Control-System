@@ -26,6 +26,27 @@ CONFIDENCE_KEYS = {
     "plate_confidence",
     "plate confidence",
 }
+SMART_ZONE_KEYS = {
+    "zone",
+    "zone_name",
+    "zonename",
+    "smartdetectzone",
+    "smart_detect_zone",
+    "smart detect zone",
+    "smartdetectzonename",
+    "smart_detect_zone_name",
+    "smart detect zone name",
+    "smartdetectzoneid",
+    "smart_detect_zone_id",
+    "smart detect zone id",
+}
+SMART_ZONE_CONTAINER_KEYS = {
+    "zones",
+    "smartdetectzones",
+    "smart_detect_zones",
+    "smart detect zones",
+}
+SMART_ZONE_TRIGGER_MARKERS = ("zone", "smart detect zone", "smartdetectzone")
 
 
 class UbiquitiLprPayload(BaseModel):
@@ -102,6 +123,30 @@ class UbiquitiLprAdapter:
         )
 
 
+def extract_smart_zone_names(payload: Any) -> list[str]:
+    """Return UniFi smart-zone names/IDs carried by an LPR webhook payload."""
+
+    zones: list[str] = []
+    _collect_smart_zone_names(payload, zones)
+    return _dedupe_preserving_order(zones)
+
+
+def smart_zone_allowed(payload_zones: list[str], allowed_zones: list[str]) -> bool:
+    """Decide whether an LPR payload should participate in access control.
+
+    UniFi payloads without zone metadata are accepted for compatibility. If a
+    payload does name zones, at least one must match the configured allowlist.
+    An empty allowlist or "*" disables zone filtering.
+    """
+
+    if not payload_zones:
+        return True
+    allowed = {_normalize_zone_name(zone) for zone in allowed_zones if _normalize_zone_name(zone)}
+    if not allowed or "*" in allowed:
+        return True
+    return any(_normalize_zone_name(zone) in allowed for zone in payload_zones)
+
+
 def _normalize_key(key: str) -> str:
     return key.strip().lower().replace("-", "_")
 
@@ -133,6 +178,77 @@ def _extract_plate(payload: dict[str, Any]) -> str | None:
 
     nested = _find_nested_value(payload, PLATE_KEYS)
     return str(nested) if nested else None
+
+
+def _collect_smart_zone_names(value: Any, zones: list[str]) -> None:
+    if isinstance(value, dict):
+        _collect_alarm_trigger_zones(value, zones)
+        for key, item in value.items():
+            normalized = _normalize_key(str(key))
+            if normalized in SMART_ZONE_KEYS:
+                _collect_zone_value(item, zones)
+                continue
+            if normalized in SMART_ZONE_CONTAINER_KEYS:
+                _collect_zone_value(item, zones)
+                continue
+            _collect_smart_zone_names(item, zones)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_smart_zone_names(item, zones)
+
+
+def _collect_alarm_trigger_zones(payload: dict[str, Any], zones: list[str]) -> None:
+    triggers = payload.get("triggers")
+    if not isinstance(triggers, list):
+        alarm = payload.get("alarm")
+        triggers = alarm.get("triggers") if isinstance(alarm, dict) else None
+    if not isinstance(triggers, list):
+        return
+    for trigger in triggers:
+        if not isinstance(trigger, dict):
+            continue
+        descriptor = " ".join(
+            str(trigger.get(key, ""))
+            for key in ("key", "type", "source", "name", "label")
+        ).lower()
+        if not any(marker in descriptor for marker in SMART_ZONE_TRIGGER_MARKERS):
+            continue
+        _collect_zone_value(trigger.get("value") or trigger.get("zone") or trigger.get("zoneName"), zones)
+
+
+def _collect_zone_value(value: Any, zones: list[str]) -> None:
+    if value is None or value == "":
+        return
+    if isinstance(value, str):
+        zones.append(value)
+        return
+    if isinstance(value, int | float):
+        zones.append(str(value))
+        return
+    if isinstance(value, dict):
+        for key in ("name", "displayName", "display_name", "label", "id"):
+            if key in value and value[key] not in {None, ""}:
+                zones.append(str(value[key]))
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_zone_value(item, zones)
+
+
+def _normalize_zone_name(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold().replace("_", " ").replace("-", " "))
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = _normalize_zone_name(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(str(value).strip())
+    return deduped
 
 
 def _looks_like_lpr_trigger(value: str) -> bool:

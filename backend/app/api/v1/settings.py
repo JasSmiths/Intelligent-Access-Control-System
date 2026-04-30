@@ -8,6 +8,7 @@ from app.api.dependencies import admin_user, current_user
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
 from app.services.dependency_updates import get_dependency_update_service
+from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import get_runtime_config, list_settings, update_settings
@@ -80,8 +81,21 @@ async def patch_settings(
         await service.start()
     if any(key.startswith("unifi_protect_") for key in request.values):
         await get_unifi_protect_service().restart()
+    if any(key.startswith("discord_") for key in request.values):
+        await get_discord_messaging_service().restart()
     if any(
-        key.startswith(("home_assistant_", "apprise_", "dvla_", "unifi_protect_", "llm_", "openai_", "gemini_", "anthropic_", "ollama_"))
+        key.startswith((
+            "home_assistant_",
+            "apprise_",
+            "discord_",
+            "dvla_",
+            "unifi_protect_",
+            "llm_",
+            "openai_",
+            "gemini_",
+            "anthropic_",
+            "ollama_",
+        ))
         for key in request.values
     ):
         await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
@@ -100,6 +114,8 @@ async def test_connection(
             await _test_home_assistant(values)
         elif integration == "apprise":
             await _test_apprise(values)
+        elif integration == "discord":
+            await _test_discord(values)
         elif integration == "dvla":
             await _test_dvla(values)
         elif integration == "unifi_protect":
@@ -158,6 +174,10 @@ async def _test_apprise(values: dict[str, Any]) -> None:
     if not urls:
         urls = (await get_runtime_config()).apprise_urls.strip()
     validate_apprise_urls(urls)
+
+
+async def _test_discord(values: dict[str, Any]) -> None:
+    await get_discord_messaging_service().test_connection(values)
 
 
 async def _test_dvla(values: dict[str, Any]) -> None:

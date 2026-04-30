@@ -8,19 +8,27 @@ from fastapi import HTTPException
 
 from app.api.v1 import notifications as notification_api
 from app.ai import tools as ai_tools
+from app.modules.notifications.home_assistant_mobile import (
+    HomeAssistantMobileAppNotifier,
+    HomeAssistantMobileAppTarget,
+)
 from app.modules.notifications.base import ComposedNotification, NotificationContext
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notifications import (
+    HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+    NotificationSnapshotAttachment,
     NotificationWorkflowResult,
     NotificationService,
     TRIGGER_CATALOG,
+    VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
     context_variables,
     normalize_actions,
     normalize_conditions,
     presence_condition_matches,
     render_template,
+    visitor_pass_notification_contexts_from_event,
 )
-from app.services.event_bus import event_bus
+from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.schedules import schedule_allows_at
 from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, seed_dynamic_settings_for_session
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
@@ -177,6 +185,7 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "Leaderboard",
         "Maintenance Mode",
         "Vehicle Detections",
+        "Visitor Pass",
     ]
 
     for group in TRIGGER_CATALOG:
@@ -204,6 +213,12 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "maintenance_mode_enabled",
         "outside_schedule",
         "unauthorized_plate",
+        "visitor_pass_cancelled",
+        "visitor_pass_created",
+        "visitor_pass_expired",
+        "visitor_pass_used",
+        "visitor_pass_vehicle_arrived",
+        "visitor_pass_vehicle_exited",
     }.issubset(set(events))
 
 
@@ -312,6 +327,130 @@ def test_unknown_vehicle_variables_prefer_detected_visual_colour_and_type() -> N
     )
 
 
+def test_visitor_pass_triggers_and_variables_are_available() -> None:
+    events = [event for group in TRIGGER_CATALOG for event in group["events"]]
+    for trigger in [
+        "visitor_pass_created",
+        "visitor_pass_cancelled",
+        "visitor_pass_used",
+        "visitor_pass_expired",
+        "visitor_pass_vehicle_arrived",
+        "visitor_pass_vehicle_exited",
+    ]:
+        assert any(event["value"] == trigger for event in events)
+
+    variables = context_variables(
+        NotificationContext(
+            event_type="visitor_pass_vehicle_arrived",
+            subject="Sarah arrived",
+            severity="info",
+            facts={
+                "visitor_pass_vehicle_registration": "PE70DHX",
+                "registration_number": "WRONG",
+                "visitor_pass_vehicle_make": "Peugeot",
+                "vehicle_make": "Tesla",
+                "visitor_pass_vehicle_colour": "Silver",
+                "vehicle_colour": "White",
+                "visitor_pass_duration_on_site": "1h 25m",
+            },
+        )
+    )
+
+    assert variables["VisitorPassVehicleRegistration"] == "PE70DHX"
+    assert variables["VisitorPassVehicleMake"] == "Peugeot"
+    assert variables["VisitorPassVehicleColour"] == "Silver"
+    assert variables["VisitorPassDurationOnSite"] == "1h 25m"
+    assert variables["Registration"] == "PE70DHX"
+    assert variables["VehicleMake"] == "Peugeot"
+    assert variables["VehicleColour"] == "Silver"
+    assert (
+        render_template(
+            "@VisitorPassVehicleColour @VisitorPassVehicleMake @VisitorPassVehicleRegistration stayed for @VisitorPassDurationOnSite.",
+            variables,
+        )
+        == "Silver Peugeot PE70DHX stayed for 1h 25m."
+    )
+
+
+def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
+    payload = {
+        "id": "pass-1",
+        "visitor_name": "Sarah",
+        "status": "used",
+        "creation_source": "ui",
+        "number_plate": "PE70DHX",
+        "vehicle_make": "Peugeot",
+        "vehicle_colour": "Silver",
+        "arrival_time": "2026-04-29T15:03:00+01:00",
+        "departure_time": "2026-04-29T16:28:00+01:00",
+        "duration_on_site_seconds": 5100,
+        "arrival_event_id": "arrival-event",
+        "departure_event_id": "departure-event",
+        "telemetry_trace_id": "1" * 32,
+        "created_at": "2026-04-29T14:00:00+01:00",
+        "updated_at": "2026-04-29T16:28:00+01:00",
+    }
+
+    used_contexts = visitor_pass_notification_contexts_from_event(
+        RealtimeEvent(
+            type="visitor_pass.used",
+            payload={"visitor_pass": payload, "source": "alfred"},
+            created_at="2026-04-29T15:03:01+01:00",
+        )
+    )
+    assert [context.event_type for context in used_contexts] == [
+        "visitor_pass_used",
+        "visitor_pass_vehicle_arrived",
+    ]
+    assert used_contexts[1].facts["visitor_pass_vehicle_registration"] == "PE70DHX"
+    assert used_contexts[1].facts["visitor_pass_vehicle_make"] == "Peugeot"
+    assert used_contexts[1].facts["visitor_pass_vehicle_colour"] == "Silver"
+    assert used_contexts[1].facts["occurred_at"] == "2026-04-29T15:03:00+01:00"
+    assert used_contexts[1].facts["access_event_id"] == "arrival-event"
+    assert used_contexts[1].facts["telemetry_trace_id"] == "1" * 32
+
+    departed_contexts = visitor_pass_notification_contexts_from_event(
+        RealtimeEvent(
+            type="visitor_pass.departure_recorded",
+            payload={"visitor_pass": {**payload, "duration_human": None}},
+            created_at="2026-04-29T16:28:01+01:00",
+        )
+    )
+    assert [context.event_type for context in departed_contexts] == ["visitor_pass_vehicle_exited"]
+    departed_variables = context_variables(departed_contexts[0])
+    assert departed_contexts[0].facts["occurred_at"] == "2026-04-29T16:28:00+01:00"
+    assert departed_contexts[0].facts["access_event_id"] == "departure-event"
+    assert departed_variables["VisitorPassDurationOnSite"] == "1h 25m"
+
+
+def test_visitor_pass_status_changed_only_notifies_expired() -> None:
+    base_payload = {
+        "id": "pass-1",
+        "visitor_name": "Sarah",
+        "status": "active",
+        "window_end": "2026-04-29T15:30:00+01:00",
+    }
+
+    active_contexts = visitor_pass_notification_contexts_from_event(
+        RealtimeEvent(
+            type="visitor_pass.status_changed",
+            payload={"visitor_pass": base_payload},
+            created_at="2026-04-29T15:00:00+01:00",
+        )
+    )
+    expired_contexts = visitor_pass_notification_contexts_from_event(
+        RealtimeEvent(
+            type="visitor_pass.status_changed",
+            payload={"visitor_pass": {**base_payload, "status": "expired"}},
+            created_at="2026-04-29T15:30:01+01:00",
+        )
+    )
+
+    assert active_contexts == []
+    assert [context.event_type for context in expired_contexts] == ["visitor_pass_expired"]
+    assert expired_contexts[0].facts["occurred_at"] == "2026-04-29T15:30:00+01:00"
+
+
 def test_gate_malfunction_triggers_and_variables_are_available() -> None:
     events = [event for group in TRIGGER_CATALOG for event in group["events"]]
     for trigger in [
@@ -358,6 +497,14 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
                 "message_template": "@Message",
                 "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
             },
+            {
+                "type": "discord",
+                "target_mode": "selected",
+                "target_ids": ["discord:123"],
+                "title_template": "@Subject",
+                "message_template": "@Message",
+                "media": {"attach_camera_snapshot": True, "camera_id": "camera-2"},
+            },
             {"type": "unsupported"},
         ]
     )
@@ -368,8 +515,11 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
         ]
     )
 
-    assert len(actions) == 1
+    assert len(actions) == 2
     assert actions[0]["media"]["attach_camera_snapshot"] is True
+    assert actions[1]["type"] == "discord"
+    assert actions[1]["target_ids"] == ["discord:123"]
+    assert actions[1]["media"]["camera_id"] == "camera-2"
     assert len(conditions) == 1
     assert conditions[0]["mode"] == "person_home"
 
@@ -394,6 +544,101 @@ async def test_home_assistant_mobile_targets_accept_specific_notify_services() -
                 "target_mode": "selected",
                 "target_ids": ["home_assistant_mobile:notify.family_group"],
             },
+        )
+
+
+async def test_home_assistant_mobile_notifier_includes_image_attachment_payload() -> None:
+    calls = []
+
+    class FakeHomeAssistantClient:
+        async def call_service(self, service_name, payload):
+            calls.append((service_name, payload))
+            return {}
+
+    await HomeAssistantMobileAppNotifier(FakeHomeAssistantClient()).send(
+        HomeAssistantMobileAppTarget("notify.mobile_app_jason"),
+        "Gate",
+        "Snapshot attached",
+        NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+        image_url="https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
+        image_content_type="image/jpeg",
+    )
+
+    assert calls[0][0] == "notify.mobile_app_jason"
+    data = calls[0][1]["data"]
+    assert data["image"] == "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg"
+    assert data["attachment"] == {
+        "url": "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
+        "content-type": "jpeg",
+    }
+
+
+async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch) -> None:
+    service = NotificationService()
+    calls = []
+
+    async def fake_snapshot_attachment(_media):
+        return NotificationSnapshotAttachment(
+            path="/tmp/iacs-test-snapshot.jpg",
+            content_type="image/jpeg",
+            public_url="https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
+        )
+
+    class FakeHomeAssistantNotifier:
+        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None):
+            calls.append((target.service_name, title, body, image_url, image_content_type))
+
+    monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantMobileAppNotifier", FakeHomeAssistantNotifier)
+
+    await service._send_mobile(
+        {
+            "type": "mobile",
+            "target_mode": "selected",
+            "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
+            "title": "Gate",
+            "message": "Snapshot attached",
+            "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
+        },
+        NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+        SimpleNamespace(apprise_urls=""),
+    )
+
+    assert calls == [
+        (
+            "notify.mobile_app_jason",
+            "Gate",
+            "Snapshot attached",
+            "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
+            "image/jpeg",
+        )
+    ]
+
+
+async def test_mobile_workflow_requires_public_base_url_for_home_assistant_snapshots(monkeypatch) -> None:
+    service = NotificationService()
+
+    async def fake_snapshot_attachment(_media):
+        return NotificationSnapshotAttachment(
+            path="/tmp/iacs-test-snapshot.jpg",
+            content_type="image/jpeg",
+            public_url=None,
+        )
+
+    monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
+
+    with pytest.raises(NotificationDeliveryError, match="IACS_PUBLIC_BASE_URL"):
+        await service._send_mobile(
+            {
+                "type": "mobile",
+                "target_mode": "selected",
+                "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
+                "title": "Gate",
+                "message": "Snapshot attached",
+                "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
+            },
+            NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+            SimpleNamespace(apprise_urls=""),
         )
 
 
@@ -698,6 +943,40 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     assert in_app_events[0].payload["body"] == "Gate opened"
 
 
+async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(monkeypatch, tmp_path) -> None:
+    snapshot_path = tmp_path / "snapshot.jpg"
+    snapshot_path.write_bytes(b"snapshot")
+    calls = []
+
+    class FakeDiscordService:
+        async def send_notification_action(self, action, context, *, attachment_paths=None):
+            calls.append((action, context, list(attachment_paths or [])))
+
+    service = NotificationService()
+
+    async def fake_snapshot_attachments(_media):
+        return [str(snapshot_path)]
+
+    monkeypatch.setattr(service, "_snapshot_attachments", fake_snapshot_attachments)
+    monkeypatch.setattr("app.services.notifications.get_discord_messaging_service", lambda: FakeDiscordService())
+
+    await service._send_discord(
+        {
+            "type": "discord",
+            "target_mode": "selected",
+            "target_ids": ["discord:123"],
+            "title": "Gate",
+            "message": "Steph arrived",
+            "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
+        },
+        NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+    )
+
+    assert calls[0][0]["target_ids"] == ["discord:123"]
+    assert calls[0][2] == [str(snapshot_path)]
+    assert not snapshot_path.exists()
+
+
 async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch) -> None:
     calls = []
 
@@ -712,8 +991,12 @@ async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch
     async def fake_select_voice_targets(_config, _action):
         return ["media_player.kitchen"]
 
+    async def fake_voice_preflight():
+        return None
+
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
     monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service, "_voice_announcements_preflight", fake_voice_preflight)
 
     await service._send_voice(action, SimpleNamespace(home_assistant_default_media_player=""))
 
@@ -740,8 +1023,12 @@ async def test_voice_action_attempts_all_targets_before_reporting_failures(monke
     async def fake_select_voice_targets(_config, _action):
         return ["media_player.offline", "media_player.kitchen"]
 
+    async def fake_voice_preflight():
+        return None
+
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
     monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service, "_voice_announcements_preflight", fake_voice_preflight)
 
     with pytest.raises(NotificationDeliveryError) as excinfo:
         await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
@@ -751,6 +1038,200 @@ async def test_voice_action_attempts_all_targets_before_reporting_failures(monke
         ("media_player.kitchen", "bee em double you arrived"),
     ]
     assert "media_player.offline: speaker offline" in str(excinfo.value)
+
+
+async def test_voice_action_preflight_on_sends_to_targets(monkeypatch) -> None:
+    calls = []
+    state_checks = []
+
+    class FakeHomeAssistantClient:
+        async def get_state(self, entity_id: str):
+            state_checks.append(entity_id)
+            return SimpleNamespace(state="on")
+
+    class FakeTtsAnnouncer:
+        async def announce(self, target, message: str) -> None:
+            calls.append((target.entity_id, message))
+
+    service = NotificationService()
+
+    async def fake_select_voice_targets(_config, _action):
+        return ["media_player.kitchen"]
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+
+    outcome = await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
+
+    assert outcome.delivered is True
+    assert outcome.skipped is False
+    assert state_checks == [HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID]
+    assert calls == [("media_player.kitchen", "bee em double you arrived")]
+
+
+async def test_voice_action_off_suppresses_and_records_telemetry(monkeypatch) -> None:
+    calls = []
+    captured_spans = []
+    captured_events = []
+
+    class FakeHomeAssistantClient:
+        async def get_state(self, entity_id: str):
+            assert entity_id == HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID
+            return SimpleNamespace(state="off")
+
+    class FakeTtsAnnouncer:
+        async def announce(self, target, message: str) -> None:
+            calls.append((target.entity_id, message))
+
+    async def fake_runtime_config():
+        return SimpleNamespace(home_assistant_default_media_player="")
+
+    async def capture(event):
+        captured_events.append(event)
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        "app.services.notifications.telemetry.record_span",
+        lambda *args, **kwargs: captured_spans.append((args, kwargs)),
+    )
+
+    event_bus.subscribe(capture)
+    try:
+        result = await NotificationService().execute_rule_with_result(
+            {
+                "id": "rule-voice",
+                "name": "Voice alert",
+                "trigger_event": "authorized_entry",
+                "conditions": [],
+                "actions": [
+                    {
+                        "type": "voice",
+                        "target_mode": "selected",
+                        "target_ids": ["home_assistant_tts:media_player.kitchen"],
+                        "message_template": "BMW arrived",
+                    }
+                ],
+                "is_active": True,
+            },
+            NotificationContext(
+                event_type="authorized_entry",
+                subject="Steph arrived",
+                severity="info",
+                facts={"telemetry_trace_id": "1" * 32},
+            ),
+        )
+        await asyncio.sleep(0)
+    finally:
+        event_bus.unsubscribe(capture)
+
+    assert calls == []
+    assert result.status == "skipped"
+    assert result.skipped_count == 1
+    assert result.skipped_reasons == ["announcements_disabled"]
+    assert captured_spans[0][0] == ("Notification Action Suppressed",)
+    output_payload = captured_spans[0][1]["output_payload"]
+    assert output_payload["reason"] == "announcements_disabled"
+    assert output_payload["home_assistant_entity_id"] == HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID
+    assert output_payload["home_assistant_state"] == "off"
+    assert output_payload["message"] == VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE
+    skipped_events = [event for event in captured_events if event.type == "notification.skipped"]
+    assert len(skipped_events) == 1
+    assert skipped_events[0].payload["reason"] == "announcements_disabled"
+
+
+async def test_voice_action_state_lookup_failure_suppresses_without_tts(monkeypatch) -> None:
+    calls = []
+
+    class FakeHomeAssistantClient:
+        async def get_state(self, _entity_id: str):
+            raise RuntimeError("home assistant offline")
+
+    class FakeTtsAnnouncer:
+        async def announce(self, target, message: str) -> None:
+            calls.append((target.entity_id, message))
+
+    service = NotificationService()
+
+    async def fake_select_voice_targets(_config, _action):
+        return ["media_player.kitchen"]
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+
+    outcome = await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
+
+    assert calls == []
+    assert outcome.delivered is False
+    assert outcome.skipped is True
+    assert outcome.reason == "announcements_state_unavailable"
+    assert outcome.metadata["fail_safe"] is True
+
+
+async def test_suppressed_voice_action_does_not_block_other_workflow_actions(monkeypatch) -> None:
+    captured_events = []
+
+    class FakeHomeAssistantClient:
+        async def get_state(self, _entity_id: str):
+            return SimpleNamespace(state="off")
+
+    class FakeTtsAnnouncer:
+        async def announce(self, _target, _message: str) -> None:
+            raise AssertionError("TTS dispatch should be suppressed")
+
+    async def fake_runtime_config():
+        return SimpleNamespace(home_assistant_default_media_player="")
+
+    async def capture(event):
+        captured_events.append(event)
+
+    monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+
+    event_bus.subscribe(capture)
+    try:
+        result = await NotificationService().execute_rule_with_result(
+            {
+                "id": "rule-mixed",
+                "name": "Mixed alert",
+                "trigger_event": "authorized_entry",
+                "conditions": [],
+                "actions": [
+                    {
+                        "type": "voice",
+                        "target_mode": "selected",
+                        "target_ids": ["home_assistant_tts:media_player.kitchen"],
+                        "message_template": "Voice alert",
+                    },
+                    {
+                        "type": "in_app",
+                        "title_template": "Dashboard alert",
+                        "message_template": "Still delivered",
+                    },
+                ],
+                "is_active": True,
+            },
+            NotificationContext(
+                event_type="authorized_entry",
+                subject="Steph arrived",
+                severity="info",
+                facts={},
+            ),
+        )
+        await asyncio.sleep(0)
+    finally:
+        event_bus.unsubscribe(capture)
+
+    assert result.status == "sent"
+    assert result.delivered_count == 1
+    assert result.skipped_count == 1
+    assert result.skipped_reasons == ["announcements_disabled"]
+    assert [event.type for event in captured_events].count("notification.in_app") == 1
+    assert [event.type for event in captured_events].count("notification.skipped") == 1
 
 
 async def test_process_context_with_result_reports_delivery_status(monkeypatch) -> None:

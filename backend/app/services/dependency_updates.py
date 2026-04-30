@@ -1968,6 +1968,8 @@ def _dependant_area(name: str) -> str:
     mappings = {
         "uiprotect": "UniFi Protect",
         "pyicloud": "iCloud Calendar",
+        "discord-py": "Discord Messaging",
+        "discord.py": "Discord Messaging",
         "apprise": "Notifications",
         "home-assistant": "Home Assistant",
         "fastapi": "Backend API",
@@ -2393,6 +2395,7 @@ def _setting_relevant_to_dependency(key: str, dependency: ExternalDependency | N
     prefixes = {
         "unifi": "unifi_protect_",
         "icloud": "icloud_",
+        "discord": "discord_",
         "dvla": "dvla_",
         "home assistant": "home_assistant_",
         "notifications": "apprise_",

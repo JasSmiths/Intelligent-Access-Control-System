@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -41,20 +41,38 @@ async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict
             )
         ).all()
 
-    return [
-        {
-            "id": str(event.id),
-            "registration_number": event.registration_number,
-            "direction": event.direction.value,
-            "decision": event.decision.value,
-            "confidence": event.confidence,
-            "source": event.source,
-            "occurred_at": event.occurred_at.isoformat(),
-            "timing_classification": event.timing_classification.value,
-            "anomaly_count": len(event.anomalies),
-        }
-        for event in events
-    ]
+    return [_serialize_event(event) for event in events]
+
+
+def _serialize_event(event: AccessEvent) -> dict:
+    visitor_pass = _event_visitor_pass_payload(event)
+    return {
+        "id": str(event.id),
+        "registration_number": event.registration_number,
+        "direction": event.direction.value,
+        "decision": event.decision.value,
+        "confidence": event.confidence,
+        "source": event.source,
+        "occurred_at": event.occurred_at.isoformat(),
+        "timing_classification": event.timing_classification.value,
+        "anomaly_count": len(event.anomalies),
+        "visitor_pass_id": _optional_text(visitor_pass.get("id")),
+        "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
+        "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
+    }
+
+
+def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    payload = raw_payload.get("visitor_pass")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 @router.get("/presence")

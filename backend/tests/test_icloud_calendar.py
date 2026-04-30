@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+import app.services.icloud_calendar as icloud_calendar_module
 from app.ai import tools as ai_tools
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus
@@ -19,8 +20,11 @@ from app.services.icloud_calendar import (
     ICloudCalendarError,
     ICloudCalendarService,
     PendingICloudAuth,
+    calendar_visitor_name_for_event,
     calendar_pass_can_be_reconciled,
     event_contains_open_gate,
+    fallback_visitor_name_from_calendar_title,
+    source_metadata_for_event,
     source_reference_for_event,
     visitor_window_for_event,
 )
@@ -53,6 +57,47 @@ def test_calendar_event_maps_to_asymmetric_visitor_pass_window() -> None:
 
     assert valid_from == datetime(2026, 4, 30, 10, 30, tzinfo=UTC)
     assert valid_until == datetime(2026, 4, 30, 12, 15, tzinfo=UTC)
+
+
+def test_calendar_visitor_name_fallback_extracts_person_from_prefixed_title() -> None:
+    assert fallback_visitor_name_from_calendar_title("Memory Clinic: Vicky Thompson") == "Vicky Thompson"
+
+
+@pytest.mark.asyncio
+async def test_calendar_visitor_name_uses_llm_json_response(monkeypatch) -> None:
+    class FakeProvider:
+        name = "fake"
+
+        async def complete(self, messages, tools=None, tool_results=None):
+            assert "Memory Clinic: Vicky Thompson" in messages[-1].content
+            return SimpleNamespace(text='{"visitor_name":"Vicky Thompson"}')
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            llm_provider="openai",
+            openai_api_key="test-key",
+            gemini_api_key="",
+            anthropic_api_key="",
+        )
+
+    monkeypatch.setattr(icloud_calendar_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(icloud_calendar_module, "get_llm_provider", lambda provider_name: FakeProvider())
+
+    result = await calendar_visitor_name_for_event(calendar_event(title="Memory Clinic: Vicky Thompson"))
+
+    assert result.visitor_name == "Vicky Thompson"
+    assert result.source == "llm"
+
+
+def test_calendar_source_metadata_keeps_original_title_and_extracted_name() -> None:
+    account = SimpleNamespace(id=uuid.uuid4(), apple_id="jas@example.com")
+    event = calendar_event(title="Memory Clinic: Vicky Thompson")
+
+    metadata = source_metadata_for_event(account, event, visitor_name="Vicky Thompson", visitor_name_source="llm")
+
+    assert metadata["event_title"] == "Memory Clinic: Vicky Thompson"
+    assert metadata["visitor_name"] == "Vicky Thompson"
+    assert metadata["visitor_name_source"] == "llm"
 
 
 def test_icloud_event_normalizer_accepts_apple_date_arrays_and_private_comments() -> None:

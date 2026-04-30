@@ -13,7 +13,9 @@ from app.db.session import AsyncSessionLocal
 from app.services.auth import authenticate_request, count_users
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
+from app.services.automations import get_automation_service
 from app.services.dependency_updates import get_dependency_update_service
+from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.maintenance import is_maintenance_mode_active
@@ -49,6 +51,8 @@ async def lifespan(app: FastAPI):
     await event_bus.start()
     await get_dependency_update_service().start()
     await get_notification_service().start()
+    await get_automation_service().start()
+    await get_discord_messaging_service().start()
     await get_visitor_pass_service().start()
     await get_access_event_service().start()
     await get_home_assistant_service().start()
@@ -63,6 +67,8 @@ async def lifespan(app: FastAPI):
         await get_home_assistant_service().stop()
         await get_access_event_service().stop()
         await get_visitor_pass_service().stop()
+        await get_discord_messaging_service().stop()
+        await get_automation_service().stop()
         await get_notification_service().stop()
         await event_bus.stop()
         logger.info("stopped_backend")
@@ -77,12 +83,13 @@ app = FastAPI(
         {"name": "Health", "description": "Backend health and service readiness checks."},
         {"name": "Authentication", "description": "First-run setup, login, logout, and current-user preferences."},
         {"name": "AI Agents", "description": "Provider discovery, agent tooling, chat, uploads, and chat realtime."},
+        {"name": "Automations", "description": "System-wide trigger, condition, and action automation rules."},
         {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
         {"name": "Dependency Updates", "description": "System-wide dependency enrollment, analysis, backups, update jobs, and rollback."},
         {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
         {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
         {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
-        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
+        {"name": "Integrations", "description": "Home Assistant, Apprise, Discord, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
         {"name": "UniFi Protect", "description": "UniFi Protect cameras, media, managed package updates, and backups."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},
@@ -115,6 +122,10 @@ PUBLIC_AUTH_PATHS = {
     "/api/v1/auth/logout",
     "/api/v1/webhooks/ubiquiti/lpr",
 }
+PUBLIC_AUTH_PREFIXES = (
+    "/api/v1/automations/webhooks/",
+    "/api/v1/notification-snapshots/",
+)
 
 READ_ONLY_METHODS = {"GET", "HEAD"}
 ALWAYS_TRACE_API_PREFIXES = (
@@ -129,6 +140,8 @@ def _requires_auth(path: str) -> bool:
     if path in {"/", "/health", "/api/v1/health"}:
         return False
     if path in PUBLIC_AUTH_PATHS:
+        return False
+    if any(path.startswith(prefix) for prefix in PUBLIC_AUTH_PREFIXES):
         return False
     return path.startswith("/api/v1/") or path in {"/docs", "/openapi.json", "/redoc"}
 

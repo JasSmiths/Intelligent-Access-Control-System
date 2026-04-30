@@ -30,6 +30,7 @@ TELEMETRY_CATEGORY_DEPENDENCY_UPDATES = "dependency_updates"
 TELEMETRY_CATEGORY_ALFRED = "alfred_ai"
 TELEMETRY_CATEGORY_MAINTENANCE = "maintenance_mode"
 TELEMETRY_CATEGORY_GATE_MALFUNCTION = "gate_malfunction"
+TELEMETRY_CATEGORY_AUTOMATION = "automation_engine"
 
 TELEMETRY_CATEGORIES = [
     {
@@ -66,6 +67,11 @@ TELEMETRY_CATEGORIES = [
         "id": TELEMETRY_CATEGORY_GATE_MALFUNCTION,
         "label": "Gate Events",
         "description": "Gate malfunction declarations, recovery attempts, notifications, and resolution.",
+    },
+    {
+        "id": TELEMETRY_CATEGORY_AUTOMATION,
+        "label": "Automations",
+        "description": "Trigger, condition, action, and AI-authored automation workflow execution.",
     },
     {
         "id": TELEMETRY_CATEGORY_MAINTENANCE,

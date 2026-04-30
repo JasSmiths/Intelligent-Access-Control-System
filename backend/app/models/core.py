@@ -112,6 +112,25 @@ class User(Base, TimestampMixin):
     person: Mapped[Person | None] = relationship()
 
 
+class MessagingIdentity(Base, TimestampMixin):
+    __tablename__ = "messaging_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="ux_messaging_identity_provider_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    provider_user_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    provider_display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    user: Mapped[User | None] = relationship()
+    person: Mapped[Person | None] = relationship()
+
+
 class SystemSetting(Base, TimestampMixin):
     __tablename__ = "system_settings"
 
@@ -445,6 +464,77 @@ class NotificationRule(Base, TimestampMixin):
     actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AutomationRule(Base, TimestampMixin):
+    __tablename__ = "automation_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    triggers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    trigger_keys: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    conditions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_run_status: Mapped[str | None] = mapped_column(String(40), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+
+    created_by: Mapped[User | None] = relationship()
+    runs: Mapped[list["AutomationRun"]] = relationship(
+        back_populates="rule",
+        passive_deletes=True,
+    )
+
+
+class AutomationRun(Base, TimestampMixin):
+    __tablename__ = "automation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("automation_rules.id", ondelete="SET NULL"),
+        index=True,
+    )
+    trigger_key: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    trigger_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    condition_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    action_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(160), default="System", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(120), default="automation", nullable=False, index=True)
+
+    rule: Mapped[AutomationRule | None] = relationship(back_populates="runs")
+
+
+class AutomationWebhookSender(Base, TimestampMixin):
+    __tablename__ = "automation_webhook_senders"
+    __table_args__ = (
+        UniqueConstraint("webhook_key", "source_ip", name="ux_automation_webhook_sender_key_ip"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    webhook_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    source_ip: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_payload_shape: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
+Index("ix_automation_rules_active_next_run", AutomationRule.is_active, AutomationRule.next_run_at)
+Index("ix_automation_runs_rule_started", AutomationRun.rule_id, AutomationRun.started_at.desc())
 
 
 class LeaderboardState(Base, TimestampMixin):
