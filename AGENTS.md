@@ -276,8 +276,13 @@ Filesystem runtime data:
 
 - `data/chat_attachments/`: user uploads and Alfred-generated CSV/PDF/snapshot
   attachments, keyed by file ID and protected by owner-user checks.
-- `data/backend/alert-snapshots/`: compact unresolved unauthorized-plate
-  snapshots.
+- `data/backend/snapshots/access-events/`: compact access-event camera
+  snapshots owned by `SnapshotManager`.
+- `data/backend/notification-snapshots/`: short-lived notification camera
+  attachments owned and TTL-cleaned by `SnapshotManager`.
+- `data/backend/alert-snapshots/`: retained legacy unauthorized-plate snapshot
+  files from older alert rows. New alert media should reference the linked
+  access-event snapshot metadata instead of capturing new files here.
 - `data/backend/telemetry-artifacts/`: bounded trace artifacts such as camera
   snapshots.
 - `data/backend/unifi-protect-package/` and
@@ -586,9 +591,10 @@ Current behavior:
   when available. For Visitor Pass exits, set departure/duration fields.
 - Update presence if access is granted.
 - Create anomalies/alerts for unauthorized plates, outside schedule, duplicate
-  entry, and duplicate exit. Unauthorized-plate alerts attempt to attach a
-  compact live `camera.gate` snapshot for unresolved alert review. Do not
-  create unauthorized-plate anomalies for Visitor Pass matched unknown plates.
+  entry, and duplicate exit. Unauthorized-plate alerts attach compact
+  `camera.gate` snapshot metadata from the finalized access event when
+  available. Do not create unauthorized-plate anomalies for Visitor Pass
+  matched unknown plates.
 - Record sanitized telemetry traces/spans for webhook/API ingress, debounce,
   vehicle verification, schedule evaluation, direction resolution, DVLA,
   persistence, gate/garage commands, notifications, and vision tie-breakers.
@@ -775,6 +781,38 @@ Rules:
 - The obsolete `notification_rules` dynamic setting is pruned at startup; do
   not store notification workflow JSON in `system_settings`.
 
+## Unified Snapshot Service
+
+Snapshot service:
+
+- `backend/app/services/snapshots.py`
+
+Compatibility wrappers:
+
+- `backend/app/services/alert_snapshots.py`
+- `backend/app/services/notification_snapshots.py`
+
+Runtime behavior:
+
+- `SnapshotManager` is the only owner for new filesystem image snapshot writes,
+  path resolution, deletion helpers, and notification snapshot TTL cleanup.
+- Access-event snapshots are captured through
+  `SnapshotManager.capture_access_event_snapshot()`, compacted to small JPEGs,
+  stored under `snapshots/access-events/`, and linked from `access_events`
+  through `snapshot_path`, dimensions, byte count, content type, camera, and
+  capture timestamp fields.
+- Unauthorized-plate alert rows store snapshot metadata copied from the linked
+  access event. `alert_snapshots.py` remains only for legacy retained
+  `alert-snapshots` file serving/deletion and metadata compatibility.
+- Notification camera attachments use `notification_snapshots.py` as a thin
+  compatibility API, but storage, filename validation, TTL cleanup, and delete
+  operations delegate to `SnapshotManager`.
+- Do not add direct Pillow compression, `Path.write_bytes`, or ad hoc
+  filesystem cleanup for access-event, alert, or notification camera snapshots
+  outside `SnapshotManager`.
+- Future age-based snapshot purge automation should use the indexed
+  `created_at`/`snapshot_path` database fields and the manager's path resolver.
+
 ## Automation Engine
 
 Automation service:
@@ -804,6 +842,16 @@ Runtime behavior:
 - Public webhook ingestion is
   `POST /api/v1/automations/webhooks/{webhook_key}`. Keys must be unguessable;
   sender IPs are tracked in `automation_webhook_senders`.
+- Event-bus automations are bridged from direct domain events, not notification
+  workflow status events. Vehicle triggers come from `access_event.finalized`;
+  Visitor Pass triggers come from `visitor_pass.*`; Maintenance Mode triggers
+  come from `maintenance_mode.changed`; AI issue triggers come from
+  `ai.issue_detected`.
+- Cycle guard rule: the Automation Engine must ignore `notification.trigger`,
+  `notification.sent`, `notification.failed`, `notification.skipped`, and every
+  `automation.run.*` event. Notification failures can publish health/status
+  events, but they must never re-enter automation as a vehicle or notification
+  trigger.
 - Automation dry-runs are previews only: they build context, evaluate
   conditions, and render action reasons, but they must not execute actions,
   update iCloud Calendar sync timestamps, send notifications, or command
@@ -838,6 +886,10 @@ Action registry:
   payloads use provider/action config, for example
   `integration.icloud_calendar.sync` with
   `{provider:"icloud_calendar", action:"sync_calendars"}`.
+- Integration catalog entries include `enabled` and `disabled_reason`. Disabled
+  actions remain visible to explain unavailable integrations, but runtime
+  execution must return `skipped` with `reason="integration_disabled"` instead
+  of crashing the Automation Engine.
 
 Context variable pipeline:
 
@@ -848,8 +900,9 @@ Context variable pipeline:
 - Visitor Pass triggers serialize the pass payload and refresh from the database
   when a pass ID is available. For `visitor_pass.used`,
   `@VisitorPassVehicleRegistration` maps from `visitor_pass.number_plate`.
-- Variables render as strings only. Unknown or unavailable tokens render as an
-  empty string and produce a validation warning.
+- Variables render as strings only. Unknown, unavailable, or empty tokens render
+  as an empty string, produce a validation warning, and are treated as missing
+  context.
 - Before evaluating a condition or action, scan config/templates for `@Variable`
   references. If a referenced variable is unavailable for the trigger scope or
   resolves empty, skip that condition/action with `context_missing` rather than
@@ -874,6 +927,10 @@ Execution loop:
   than hardcoded in the core execution loop. The first registered integration
   action is iCloud Calendar `Sync Calendars Now`, which calls
   `ICloudCalendarService.sync_all(trigger_source="automation")`.
+- iCloud Calendar sync is enabled only when at least one active connected
+  account has a stored trusted session bundle. If all accounts are disabled,
+  disconnected, or require re-authentication, the action is cataloged as
+  disabled and stale automation runs skip with `integration_disabled`.
 - The run row, rule `last_fired_at`, `next_run_at`, status/error, audit log,
   and realtime `automation.run.*` event are updated.
 
@@ -1079,6 +1136,8 @@ Telemetry service:
 Alert snapshot service:
 
 - `backend/app/services/alert_snapshots.py`
+- Legacy compatibility over `SnapshotManager`-owned access-event snapshots and
+  retained pre-refactor alert snapshot files.
 
 Leaderboard service:
 
@@ -1101,8 +1160,9 @@ Runtime behavior:
   (`data/backend/telemetry-artifacts/` on the host) and are served by
   admin-only artifact endpoints.
 - Alerts are anomaly records with resolve/reopen actions. Unauthorized-plate
-  alerts are grouped by plate/day in the API/UI and can carry compact
-  `camera.gate` snapshots while unresolved.
+  alerts are grouped by plate/day in the API/UI and can carry retained compact
+  `camera.gate` snapshot metadata from their access event pending future TTL
+  purge automation.
 - Top Charts aggregates known granted entries and unknown denied plates. Known
   top-spot changes publish `leaderboard_overtake` and can trigger notification
   workflows. Unknown leaderboard rows may be DVLA-enriched on read without
@@ -1115,8 +1175,8 @@ Rules:
 - Always sanitize telemetry/audit metadata before storing it.
 - Use audit logs for user/Admin/Alfred-visible state changes; realtime logs are
   not durable audit history.
-- Keep alert snapshots compact and unresolved-only unless a retention feature is
-  explicitly added.
+- Keep alert snapshot display backed by `SnapshotManager` metadata or retained
+  legacy files. Do not create new alert-specific capture/compression paths.
 
 ## Alfred 2.0 AI Agent
 
@@ -1206,6 +1266,13 @@ Alfred 2.0 behavior:
   should use `query_automation_catalog` before creating or editing rules, then
   resolve referenced people, vehicles, devices, and notification workflows
   before writing automation JSON.
+- `query_automation_catalog` returns dynamic integration actions with
+  `enabled` and `disabled_reason`. Alfred may explain disabled actions to the
+  user, but should not create or enable an automation that depends on a disabled
+  integration until the integration has been connected again.
+- `query_automations` and `query_notification_workflows` push trigger, active,
+  and search filters into SQL. Use those filters instead of fetching all rows
+  and doing broad client-side scans.
 - For a request like "create a rule to open the gate if Steph arrives outside
   her schedule", Alfred should resolve Steph, create a
   `vehicle.outside_schedule` trigger filtered by `person_id` or `vehicle_id`,
@@ -1262,6 +1329,21 @@ Current Alfred tools:
   `get_camera_snapshot`.
 - Files and reports: `read_chat_attachment`, `export_presence_report_csv`,
   `generate_contractor_invoice_pdf`.
+
+Current tool behavior:
+
+- `trigger_icloud_sync` is state-changing because it can create, update, expire,
+  or cancel Visitor Pass rows from calendar events. It must require
+  confirmation before `ICloudCalendarService.sync_all()` runs.
+- Notification workflow create/update/delete/test tools must preserve DB-backed
+  `notification_rules` semantics. Test sends require confirmation because they
+  can deliver real mobile, in-app, Discord, or voice messages.
+- Automation create/edit/enable/disable/delete tools must require confirmation.
+  Dry-runs and catalog queries are read-only and must not execute actions or
+  mutate integration sync state.
+- Hardware tools (`open_gate`, `open_device`, `command_device`) and
+  Maintenance Mode toggles must include explicit target/context and
+  confirmation before real-world commands are sent.
 
 State-changing Alfred tools:
 
@@ -1586,8 +1668,9 @@ Current frontend integration/editor surfaces:
   render failures previously blanked the app when selecting actions such as
   iCloud Calendar Sync Calendars Now.
 - The Automations action picker includes an Integrations category. It drills
-  down from Integrations to enabled providers such as iCloud Calendar, then to
-  registered provider actions such as Sync Calendars Now.
+  down from Integrations to providers such as iCloud Calendar, then to
+  registered provider actions such as Sync Calendars Now. Disabled provider
+  actions remain visible with their disabled reason and cannot be selected.
 - Vehicles edit modal includes a display-only DVLA Compliance card for MOT
   status/expiry, tax status/expiry, and last DVLA sync date. Make and colour
   remain on the main vehicle details fields. Registration edits still use the
@@ -1914,8 +1997,8 @@ Completed:
   API/webhook middleware, gate malfunction traces, and dashboard review UI.
 - Maintenance Mode and gate malfunction detection/recovery with persistent
   timelines, milestone notifications, retry outbox, and admin overrides.
-- Top Charts, grouped Alerts review, resolve/reopen flows, and compact alert
-  snapshots.
+- Top Charts, grouped Alerts review, resolve/reopen flows, and retained compact
+  snapshots pending future TTL purge.
 - User Management & Auth: first-run Admin setup, login/logout/me,
   admin-protected user CRUD, protected APIs/WebSockets, and `get_system_users`
   AI tool.

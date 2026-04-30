@@ -117,8 +117,10 @@ async def init_database() -> None:
             )
             await conn.execute(text("ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_last_fired_at ON notification_rules (last_fired_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_trigger_active_created ON notification_rules (trigger_event, is_active, created_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_trigger_keys_gin ON automation_rules USING gin (trigger_keys)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_next_run ON automation_rules (is_active, next_run_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_created ON automation_rules (is_active, created_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_runs_rule_started ON automation_runs (rule_id, started_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_category ON audit_logs (category)"))
@@ -150,6 +152,23 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_step_order ON telemetry_spans (step_order)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_started_at ON telemetry_spans (started_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_status ON telemetry_spans (status)"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_path VARCHAR(512)"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_content_type VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_bytes INTEGER"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_width INTEGER"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_height INTEGER"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_captured_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_camera VARCHAR(120)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_access_events_created_at ON access_events (created_at)"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_access_events_snapshot_created_at
+                    ON access_events (created_at)
+                    WHERE snapshot_path IS NOT NULL
+                    """
+                )
+            )
             await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claim_token VARCHAR(64)"))
             await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claimed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claim_token ON gate_malfunction_states (attempt_claim_token)"))
@@ -197,6 +216,7 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_anomaly_type ON anomalies (anomaly_type)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_severity ON anomalies (severity)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_created_at ON anomalies (created_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_open_created_at ON anomalies (created_at DESC) WHERE resolved_at IS NULL"))
             await conn.execute(
                 text(
                     """

@@ -15,9 +15,10 @@ from app.db.session import AsyncSessionLocal
 from app.db.session import get_db_session
 from app.models import AccessEvent, Anomaly, Presence, User
 from app.models.enums import AnomalySeverity, AnomalyType
-from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path, delete_alert_snapshots
+from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
+from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
 
 router = APIRouter()
@@ -46,7 +47,7 @@ async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict
 
 def _serialize_event(event: AccessEvent) -> dict:
     visitor_pass = _event_visitor_pass_payload(event)
-    return {
+    payload = {
         "id": str(event.id),
         "registration_number": event.registration_number,
         "direction": event.direction.value,
@@ -60,6 +61,31 @@ def _serialize_event(event: AccessEvent) -> dict:
         "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
         "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
     }
+    payload.update(access_event_snapshot_payload(event))
+    return payload
+
+
+@router.get("/events/{event_id}/snapshot")
+async def event_snapshot(
+    event_id: uuid.UUID,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> FileResponse:
+    row = await session.get(AccessEvent, event_id)
+    if not row or not row.snapshot_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event snapshot was not found.")
+    try:
+        path = get_snapshot_manager().resolve_path(row.snapshot_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event snapshot was not found.",
+        ) from exc
+    return FileResponse(
+        path,
+        media_type=row.snapshot_content_type or "image/jpeg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
@@ -153,8 +179,6 @@ async def action_alerts(
     note = request.note.strip() if request.note else None
     now = datetime.now(tz=UTC)
     _apply_alert_action(rows, request.action, actor.id, note, now)
-    if request.action == "resolve":
-        delete_alert_snapshots(rows)
 
     await session.flush()
     await write_audit_log(
@@ -188,7 +212,7 @@ async def alert_snapshot(
     session: AsyncSession = Depends(get_db_session),
 ) -> FileResponse:
     row = await session.get(Anomaly, alert_id)
-    if not row or row.resolved_at or row.anomaly_type != AnomalyType.UNAUTHORIZED_PLATE:
+    if not row or row.anomaly_type != AnomalyType.UNAUTHORIZED_PLATE:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert snapshot was not found.")
     metadata = alert_snapshot_metadata(row)
     path = alert_snapshot_path(alert_id)

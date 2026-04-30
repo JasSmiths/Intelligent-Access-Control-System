@@ -577,45 +577,10 @@ class NotificationService:
         raise_on_failure: bool = False,
         rules_override: list[dict[str, Any]] | None = None,
     ) -> NotificationWorkflowResult:
-        rules: list[NotificationRule | dict[str, Any]]
-        if rules_override is None:
-            async with AsyncSessionLocal() as session:
-                rules = (
-                    await session.scalars(
-                        select(NotificationRule)
-                        .where(
-                            NotificationRule.trigger_event == context.event_type,
-                            NotificationRule.is_active.is_(True),
-                        )
-                        .order_by(NotificationRule.created_at)
-                    )
-                ).all()
-        else:
-            rules = [normalize_rule_payload(rule) for rule in rules_override]
+        rules = await self._rules_for_context(context, rules_override)
 
         if not rules:
-            self._record_notification_span(
-                "Notification Workflow Skipped",
-                context,
-                output_payload={
-                    "event_type": context.event_type,
-                    "severity": context.severity,
-                    "subject": context.subject,
-                    "reason": "no_matching_workflow",
-                    "delivered": False,
-                },
-            )
-            await event_bus.publish(
-                "notification.skipped",
-                {
-                    "event_type": context.event_type,
-                    "severity": context.severity,
-                    "subject": context.subject,
-                    "reason": "no_matching_workflow",
-                    "malfunction_id": context.facts.get("malfunction_id"),
-                    "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
-                },
-            )
+            await self._publish_workflow_skip(context, "no_matching_workflow")
             if raise_on_failure:
                 raise NotificationDeliveryError("No active notification workflow matched this event.")
             return NotificationWorkflowResult(
@@ -637,30 +602,7 @@ class NotificationService:
                 if not condition_passed:
                     skipped_count += 1
                     skipped_reasons.append("conditions_not_met")
-                    self._record_notification_span(
-                        "Notification Workflow Skipped",
-                        context,
-                        output_payload={
-                            "rule_id": rule_id(rule),
-                            "rule_name": rule_name(rule),
-                            "event_type": context.event_type,
-                            "severity": context.severity,
-                            "reason": "conditions_not_met",
-                            "delivered": False,
-                        },
-                    )
-                    await event_bus.publish(
-                        "notification.skipped",
-                        {
-                            "rule_id": rule_id(rule),
-                            "rule_name": rule_name(rule),
-                            "event_type": context.event_type,
-                            "severity": context.severity,
-                            "reason": "conditions_not_met",
-                            "malfunction_id": context.facts.get("malfunction_id"),
-                            "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
-                        },
-                    )
+                    await self._publish_workflow_skip(context, "conditions_not_met", rule=rule)
                     continue
                 result = await self.execute_rule_with_result(
                     rule,
@@ -695,28 +637,7 @@ class NotificationService:
                 skipped_reasons=skipped_reasons,
             )
         if not failures:
-            self._record_notification_span(
-                "Notification Workflow Skipped",
-                context,
-                output_payload={
-                    "event_type": context.event_type,
-                    "severity": context.severity,
-                    "subject": context.subject,
-                    "reason": "no_workflow_actions_delivered",
-                    "delivered": False,
-                },
-            )
-            await event_bus.publish(
-                "notification.skipped",
-                {
-                    "event_type": context.event_type,
-                    "severity": context.severity,
-                    "subject": context.subject,
-                    "reason": "no_workflow_actions_delivered",
-                    "malfunction_id": context.facts.get("malfunction_id"),
-                    "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
-                },
-            )
+            await self._publish_workflow_skip(context, "no_workflow_actions_delivered")
             skipped_count += 1
             skipped_reasons.append("no_workflow_actions_delivered")
         if failures and raise_on_failure:
@@ -730,6 +651,51 @@ class NotificationService:
             skipped_count=skipped_count,
             failures=failures,
             skipped_reasons=skipped_reasons,
+        )
+
+    async def _rules_for_context(
+        self,
+        context: NotificationContext,
+        rules_override: list[dict[str, Any]] | None,
+    ) -> list[NotificationRule | dict[str, Any]]:
+        if rules_override is not None:
+            return [normalize_rule_payload(rule) for rule in rules_override]
+        async with AsyncSessionLocal() as session:
+            return (
+                await session.scalars(
+                    select(NotificationRule)
+                    .where(
+                        NotificationRule.trigger_event == context.event_type,
+                        NotificationRule.is_active.is_(True),
+                    )
+                    .order_by(NotificationRule.created_at)
+                )
+            ).all()
+
+    async def _publish_workflow_skip(
+        self,
+        context: NotificationContext,
+        reason: str,
+        *,
+        rule: NotificationRule | dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "event_type": context.event_type,
+            "severity": context.severity,
+            "subject": context.subject,
+            "reason": reason,
+            "delivered": False,
+        }
+        if rule is not None:
+            payload.update({"rule_id": rule_id(rule), "rule_name": rule_name(rule)})
+        self._record_notification_span("Notification Workflow Skipped", context, output_payload=payload)
+        await event_bus.publish(
+            "notification.skipped",
+            {
+                **payload,
+                "malfunction_id": context.facts.get("malfunction_id"),
+                "telemetry_trace_id": context.facts.get("telemetry_trace_id"),
+            },
         )
 
     async def _mark_rule_fired(self, rule: NotificationRule | dict[str, Any]) -> None:
@@ -1001,47 +967,86 @@ class NotificationService:
         failures: list[str] = []
         delivered_any = False
         try:
-            if urls:
-                sender = AppriseNotificationSender(urls="\n".join(urls))
-                try:
-                    await sender.send(
-                        str(action.get("title") or context.subject),
-                        str(action.get("message") or ""),
-                        context,
-                        attachments=attachments,
-                    )
-                    delivered_any = True
-                except NotificationDeliveryError as exc:
-                    failures.append(f"Apprise: {exc}")
-            if home_assistant_targets:
-                if snapshot and not snapshot.public_url:
-                    failures.append(
-                        "Home Assistant: IACS_PUBLIC_BASE_URL must be configured to attach camera snapshots."
-                    )
-                else:
-                    home_assistant_image_url = snapshot.public_url if snapshot else None
-                    home_assistant_image_content_type = snapshot.content_type if snapshot else None
-                    notifier = HomeAssistantMobileAppNotifier()
-                    for target in home_assistant_targets:
-                        try:
-                            await notifier.send(
-                                HomeAssistantMobileAppTarget(target),
-                                str(action.get("title") or context.subject),
-                                str(action.get("message") or ""),
-                                context,
-                                image_url=home_assistant_image_url,
-                                image_content_type=home_assistant_image_content_type,
-                            )
-                            delivered_any = True
-                        except NotificationDeliveryError as exc:
-                            failures.append(f"{target}: {exc}")
+            delivered_any = await self._send_mobile_apprise(action, context, urls, attachments, failures)
+            delivered_any = (
+                await self._send_mobile_home_assistant(
+                    action,
+                    context,
+                    home_assistant_targets,
+                    snapshot,
+                    failures,
+                )
+                or delivered_any
+            )
         finally:
-            if snapshot and not (home_assistant_targets and snapshot.public_url):
-                delete_notification_snapshot(snapshot.path)
+            self._cleanup_mobile_snapshot(snapshot, home_assistant_targets)
         if failures:
             raise NotificationDeliveryError("; ".join(failures))
         if not delivered_any:
             raise NotificationDeliveryError("No mobile notification endpoints were delivered.")
+
+    async def _send_mobile_apprise(
+        self,
+        action: dict[str, Any],
+        context: NotificationContext,
+        urls: list[str],
+        attachments: list[str],
+        failures: list[str],
+    ) -> bool:
+        if not urls:
+            return False
+        sender = AppriseNotificationSender(urls="\n".join(urls))
+        try:
+            await sender.send(
+                str(action.get("title") or context.subject),
+                str(action.get("message") or ""),
+                context,
+                attachments=attachments,
+            )
+            return True
+        except NotificationDeliveryError as exc:
+            failures.append(f"Apprise: {exc}")
+            return False
+
+    async def _send_mobile_home_assistant(
+        self,
+        action: dict[str, Any],
+        context: NotificationContext,
+        targets: list[str],
+        snapshot: NotificationSnapshotAttachment | None,
+        failures: list[str],
+    ) -> bool:
+        if not targets:
+            return False
+        if snapshot and not snapshot.public_url:
+            failures.append("Home Assistant: IACS_PUBLIC_BASE_URL must be configured to attach camera snapshots.")
+            return False
+        image_url = snapshot.public_url if snapshot else None
+        image_content_type = snapshot.content_type if snapshot else None
+        notifier = HomeAssistantMobileAppNotifier()
+        delivered_any = False
+        for target in targets:
+            try:
+                await notifier.send(
+                    HomeAssistantMobileAppTarget(target),
+                    str(action.get("title") or context.subject),
+                    str(action.get("message") or ""),
+                    context,
+                    image_url=image_url,
+                    image_content_type=image_content_type,
+                )
+                delivered_any = True
+            except NotificationDeliveryError as exc:
+                failures.append(f"{target}: {exc}")
+        return delivered_any
+
+    def _cleanup_mobile_snapshot(
+        self,
+        snapshot: NotificationSnapshotAttachment | None,
+        home_assistant_targets: list[str],
+    ) -> None:
+        if snapshot and not (home_assistant_targets and snapshot.public_url):
+            delete_notification_snapshot(snapshot.path)
 
     async def _send_discord(self, action: dict[str, Any], context: NotificationContext) -> None:
         attachments = await self._snapshot_attachments(action.get("media") or {})

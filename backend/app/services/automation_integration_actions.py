@@ -29,12 +29,17 @@ class IntegrationActionDefinition:
     description: str
     is_enabled: IntegrationEnabledCheck
     execute: IntegrationActionHandler
+    disabled_reason: str = "Integration is not configured."
 
-    def action_catalog(self) -> dict[str, Any]:
+    def action_catalog(self, status: "IntegrationActionStatus | None" = None) -> dict[str, Any]:
+        status = status or IntegrationActionStatus(enabled=True)
         return {
             "type": self.type,
             "label": self.label,
             "description": self.description,
+            "enabled": status.enabled,
+            "disabled": not status.enabled,
+            "disabled_reason": status.disabled_reason,
             "integration_action": True,
             "integration_provider": self.provider,
             "integration_provider_label": self.provider_label,
@@ -46,33 +51,47 @@ class IntegrationActionDefinition:
         }
 
 
+@dataclass(frozen=True)
+class IntegrationActionStatus:
+    enabled: bool
+    disabled_reason: str | None = None
+
+
+async def integration_action_status(action: IntegrationActionDefinition) -> IntegrationActionStatus:
+    try:
+        enabled = await action.is_enabled()
+    except Exception as exc:
+        return IntegrationActionStatus(False, f"Integration status check failed: {exc}")
+    return IntegrationActionStatus(enabled, None if enabled else action.disabled_reason)
+
+
 async def integration_action_catalog() -> list[dict[str, Any]]:
-    enabled_actions = [
-        action
-        for action in INTEGRATION_ACTIONS
-        if await action.is_enabled()
-    ]
-    if not enabled_actions:
+    action_statuses = [(action, await integration_action_status(action)) for action in INTEGRATION_ACTIONS]
+    if not action_statuses:
         return []
 
     providers: dict[str, dict[str, Any]] = {}
-    for action in enabled_actions:
+    for action, status in action_statuses:
         provider = providers.setdefault(
             action.provider,
             {
                 "id": action.provider,
                 "label": action.provider_label,
                 "description": action.provider_description,
+                "enabled": False,
+                "disabled_reason": None,
                 "actions": [],
             },
         )
-        provider["actions"].append(action.action_catalog())
+        provider["enabled"] = bool(provider["enabled"] or status.enabled)
+        provider["disabled_reason"] = None if provider["enabled"] else status.disabled_reason
+        provider["actions"].append(action.action_catalog(status))
 
     return [
         {
             "id": "integrations",
             "label": "Integrations",
-            "actions": [action.action_catalog() for action in enabled_actions],
+            "actions": [action.action_catalog(status) for action, status in action_statuses],
             "integrations": list(providers.values()),
         }
     ]
@@ -112,6 +131,17 @@ async def execute_integration_action(
             "status": "failed",
             "error": "integration_action_not_registered",
         }
+    status = await integration_action_status(definition)
+    if not status.enabled:
+        return {
+            "id": action.get("id"),
+            "type": action_type,
+            "status": "skipped",
+            "reason": "integration_disabled",
+            "integration_provider": definition.provider,
+            "integration_action": definition.action,
+            "disabled_reason": status.disabled_reason,
+        }
     return await definition.execute(session, action, context, rule)
 
 
@@ -121,6 +151,8 @@ async def _icloud_calendar_enabled() -> bool:
             await session.scalar(
                 select(ICloudCalendarAccount.id)
                 .where(ICloudCalendarAccount.is_active.is_(True))
+                .where(ICloudCalendarAccount.status == "connected")
+                .where(ICloudCalendarAccount.encrypted_session_bundle.is_not(None))
                 .limit(1)
             )
         )
@@ -148,10 +180,12 @@ async def _execute_icloud_calendar_sync(
             "error": str(exc),
         }
 
-    return {
+    sync_status = str(result.get("status") or "ok")
+    status = "success" if sync_status == "ok" else "failed"
+    response = {
         "id": action["id"],
         "type": action["type"],
-        "status": "success",
+        "status": status,
         "integration_provider": "icloud_calendar",
         "integration_action": "sync_calendars",
         "sync": result,
@@ -163,6 +197,9 @@ async def _execute_icloud_calendar_sync(
         "passes_cancelled": result.get("passes_cancelled", 0),
         "passes_skipped": result.get("passes_skipped", 0),
     }
+    if status == "failed":
+        response["error"] = result.get("error") or f"iCloud Calendar sync returned {sync_status}."
+    return response
 
 
 def _coerce_uuid(value: Any) -> uuid.UUID | None:
@@ -183,6 +220,7 @@ INTEGRATION_ACTIONS = [
         description="Scan connected iCloud Calendars for Open Gate events.",
         is_enabled=_icloud_calendar_enabled,
         execute=_execute_icloud_calendar_sync,
+        disabled_reason="No active connected iCloud Calendar account has a valid session.",
     ),
 ]
 

@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -2907,12 +2907,16 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
         "access_event.finalized",
         {
             "event_id": str(event.id),
+            "access_event_id": str(event.id),
+            "person_id": str(event.person_id) if event.person_id else None,
+            "vehicle_id": str(event.vehicle_id) if event.vehicle_id else None,
             "registration_number": event.registration_number,
             "direction": event.direction.value,
             "decision": event.decision.value,
             "confidence": event.confidence,
             "source": event.source,
             "occurred_at": event.occurred_at.isoformat(),
+            "event_type": "access_event.finalized",
             "timing_classification": event.timing_classification.value,
             "anomaly_count": 0,
             "backfilled": True,
@@ -3610,29 +3614,33 @@ async def query_notification_workflows(arguments: dict[str, Any]) -> dict[str, A
     summarize_payload = True if summarize_payload is None else bool(summarize_payload)
 
     async with AsyncSessionLocal() as session:
+        query = select(NotificationRule)
+        if trigger_filter:
+            query = query.where(NotificationRule.trigger_event == trigger_filter)
+        if isinstance(active_filter, bool):
+            query = query.where(NotificationRule.is_active.is_(active_filter))
+        if search:
+            pattern = f"%{search}%"
+            query = query.where(
+                or_(
+                    func.lower(NotificationRule.name).like(pattern),
+                    func.lower(NotificationRule.trigger_event).like(pattern),
+                )
+            )
         rules = (
             await session.scalars(
-                select(NotificationRule).order_by(NotificationRule.created_at.desc(), NotificationRule.name)
+                query.order_by(NotificationRule.created_at.desc(), NotificationRule.name).limit(limit)
             )
         ).all()
 
     workflows: list[dict[str, Any]] = []
     for rule in rules:
-        if trigger_filter and rule.trigger_event != trigger_filter:
-            continue
-        if isinstance(active_filter, bool) and rule.is_active is not active_filter:
-            continue
-        haystack = f"{rule.name} {rule.trigger_event}".lower()
-        if search and search not in haystack:
-            continue
         workflow = _serialize_notification_rule_for_agent(rule)
         if summarize_payload:
             workflow = _compact_notification_workflow(workflow)
         if include_preview:
             workflow["preview"] = await get_notification_service().preview_rule(workflow)
         workflows.append(workflow)
-        if len(workflows) >= limit:
-            break
     return {"workflows": workflows, "count": len(workflows)}
 
 
@@ -3848,25 +3856,29 @@ async def query_automations(arguments: dict[str, Any]) -> dict[str, Any]:
     search = _normalize(arguments.get("search"))
     limit = _bounded_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     async with AsyncSessionLocal() as session:
+        query = select(AutomationRule)
+        if trigger_filter:
+            query = query.where(AutomationRule.trigger_keys.contains([trigger_filter]))
+        if isinstance(active_filter, bool):
+            query = query.where(AutomationRule.is_active.is_(active_filter))
+        if search:
+            pattern = f"%{search}%"
+            search_filters = [
+                func.lower(AutomationRule.name).like(pattern),
+                func.lower(func.coalesce(AutomationRule.description, "")).like(pattern),
+                AutomationRule.trigger_keys.contains([search]),
+            ]
+            query = query.where(or_(*search_filters))
         rules = (
             await session.scalars(
-                select(AutomationRule).order_by(AutomationRule.created_at.desc(), AutomationRule.name)
+                query.order_by(AutomationRule.created_at.desc(), AutomationRule.name).limit(limit)
             )
         ).all()
 
     automations = []
     for rule in rules:
         serialized = serialize_automation_rule(rule)
-        if trigger_filter and trigger_filter not in serialized["trigger_keys"]:
-            continue
-        if isinstance(active_filter, bool) and serialized["is_active"] is not active_filter:
-            continue
-        haystack = f"{serialized['name']} {serialized.get('description') or ''} {' '.join(serialized['trigger_keys'])}".lower()
-        if search and search not in haystack:
-            continue
         automations.append(serialized)
-        if len(automations) >= limit:
-            break
     return {"automations": automations, "count": len(automations)}
 
 

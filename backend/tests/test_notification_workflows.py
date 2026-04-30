@@ -944,6 +944,7 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
 
 
 async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     snapshot_path = tmp_path / "snapshot.jpg"
     snapshot_path.write_bytes(b"snapshot")
     calls = []

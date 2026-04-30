@@ -60,6 +60,13 @@ AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 SCHEDULER_INTERVAL_SECONDS = 15
 MAX_DUE_RULES_PER_TICK = 25
 AI_SCHEDULE_CONFIDENCE_THRESHOLD = 0.65
+AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {
+    "notification.trigger",
+    "notification.sent",
+    "notification.failed",
+    "notification.skipped",
+}
+AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES = ("automation.run.",)
 
 
 @dataclass(frozen=True)
@@ -727,23 +734,18 @@ class AutomationService:
             status = "success"
             error: str | None = None
             try:
-                for condition in normalize_conditions(rule.conditions):
-                    result = await self._evaluate_condition(session, condition, context)
-                    condition_results.append(result)
-                    if not result.get("passed"):
-                        status = "skipped"
-                        break
-
+                status, condition_results = await self._evaluate_rule_conditions(
+                    session,
+                    normalize_conditions(rule.conditions),
+                    context,
+                )
                 if status != "skipped":
-                    for action in normalize_actions(rule.actions):
-                        result = await self._execute_action(session, action, context, rule=rule)
-                        action_results.append(result)
-                        if result.get("status") == "failed":
-                            status = "failed"
-                            error = str(result.get("error") or result.get("detail") or "Automation action failed.")
-                            break
-                        if result.get("status") == "skipped":
-                            status = "skipped"
+                    status, action_results, error = await self._execute_rule_actions(
+                        session,
+                        normalize_actions(rule.actions),
+                        context,
+                        rule=rule,
+                    )
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
@@ -806,6 +808,40 @@ class AutomationService:
             error=error,
         )
         return {"executed": status == "success", "status": status, "run": serialize_run(run)}
+
+    async def _evaluate_rule_conditions(
+        self,
+        session: AsyncSession,
+        conditions: list[dict[str, Any]],
+        context: AutomationContext,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        results: list[dict[str, Any]] = []
+        for condition in conditions:
+            result = await self._evaluate_condition(session, condition, context)
+            results.append(result)
+            if not result.get("passed"):
+                return "skipped", results
+        return "success", results
+
+    async def _execute_rule_actions(
+        self,
+        session: AsyncSession,
+        actions: list[dict[str, Any]],
+        context: AutomationContext,
+        *,
+        rule: AutomationRule,
+    ) -> tuple[str, list[dict[str, Any]], str | None]:
+        results: list[dict[str, Any]] = []
+        status = "success"
+        for action in actions:
+            result = await self._execute_action(session, action, context, rule=rule)
+            results.append(result)
+            if result.get("status") == "failed":
+                error = str(result.get("error") or result.get("detail") or "Automation action failed.")
+                return "failed", results, error
+            if result.get("status") == "skipped":
+                status = "skipped"
+        return status, results, None
 
     async def context_for_trigger(self, trigger_key: str, payload: dict[str, Any]) -> AutomationContext:
         if trigger_key.startswith("visitor_pass."):
@@ -965,6 +1001,10 @@ class AutomationService:
 
     def _event_to_triggers(self, event: RealtimeEvent) -> list[tuple[str, dict[str, Any]]]:
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type in AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES or event.type.startswith(
+            AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES
+        ):
+            return []
         if event.type == "maintenance_mode.changed":
             return [
                 (
@@ -972,15 +1012,8 @@ class AutomationService:
                     {**payload, "occurred_at": event.created_at},
                 )
             ]
-        if event.type == "notification.trigger":
-            event_type = str(payload.get("event_type") or payload.get("trigger_event") or "")
-            mapped = {
-                "authorized_entry": "vehicle.known_plate",
-                "unauthorized_plate": "vehicle.unknown_plate",
-                "outside_schedule": "vehicle.outside_schedule",
-                "agent_anomaly_alert": "ai.issue_detected",
-            }.get(event_type)
-            return [(mapped, {**payload, "occurred_at": event.created_at})] if mapped else []
+        if event.type == "access_event.finalized":
+            return self._access_event_to_vehicle_trigger(event, payload)
         if event.type == "visitor_pass.created":
             return [("visitor_pass.created", {**payload, "occurred_at": event.created_at})]
         if event.type == "visitor_pass.used":
@@ -997,6 +1030,23 @@ class AutomationService:
         if event.type == "ai.issue_detected":
             return [("ai.issue_detected", {**payload, "occurred_at": event.created_at})]
         return []
+
+    def _access_event_to_vehicle_trigger(
+        self,
+        event: RealtimeEvent,
+        payload: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        decision = str(payload.get("decision") or "").lower()
+        vehicle_id = optional_text(payload.get("vehicle_id"))
+        if decision == "granted" and vehicle_id:
+            trigger_key = "vehicle.known_plate"
+        elif decision == "denied" and vehicle_id:
+            trigger_key = "vehicle.outside_schedule"
+        elif decision == "denied" and not vehicle_id:
+            trigger_key = "vehicle.unknown_plate"
+        else:
+            return []
+        return [(trigger_key, {**payload, "occurred_at": payload.get("occurred_at") or event.created_at})]
 
     async def _evaluate_condition(
         self,
@@ -1137,16 +1187,11 @@ class AutomationService:
         rule: AutomationRule,
     ) -> dict[str, Any]:
         config = await get_runtime_config()
-        action_config = action.get("config") if isinstance(action.get("config"), dict) else {}
-        target_ids = [str(item) for item in action_config.get("target_entity_ids") or [] if str(item).strip()]
-        entities = [
-            entity
-            for entity in enabled_cover_entities(
-                config.home_assistant_garage_door_entities,
-                default_open_service=config.home_assistant_gate_open_service,
-            )
-            if not target_ids or str(entity["entity_id"]) in target_ids
-        ]
+        entities = automation_garage_targets(
+            action,
+            config.home_assistant_garage_door_entities,
+            default_open_service=config.home_assistant_gate_open_service,
+        )
         if not entities:
             return {
                 "id": action["id"],
@@ -1158,35 +1203,15 @@ class AutomationService:
         reason = render_action_reason(action, context, rule)
         outcomes = []
         for entity in entities:
-            if command == "open":
-                schedule = await evaluate_schedule_id(
+            outcomes.append(
+                await self._garage_command_outcome(
                     session,
-                    entity.get("schedule_id"),
-                    datetime.now(tz=UTC),
+                    entity,
+                    command,
+                    reason,
                     timezone_name=config.site_timezone,
                     default_policy=config.schedule_default_policy,
-                    source="garage_door",
                 )
-                if not schedule.allowed:
-                    outcomes.append(
-                        {
-                            "entity_id": str(entity["entity_id"]),
-                            "name": str(entity.get("name") or entity["entity_id"]),
-                            "accepted": False,
-                            "state": "schedule_denied",
-                            "detail": schedule.reason,
-                        }
-                    )
-                    continue
-            outcome = await command_cover(HomeAssistantClient(), entity, command, reason)
-            outcomes.append(
-                {
-                    "entity_id": outcome.entity_id,
-                    "name": outcome.name,
-                    "accepted": outcome.accepted,
-                    "state": outcome.state,
-                    "detail": outcome.detail,
-                }
             )
         failed = [outcome for outcome in outcomes if not outcome["accepted"]]
         return {
@@ -1195,6 +1220,42 @@ class AutomationService:
             "status": "failed" if failed else "success",
             "outcomes": outcomes,
             "error": "; ".join(str(item.get("detail") or item["entity_id"]) for item in failed) if failed else None,
+        }
+
+    async def _garage_command_outcome(
+        self,
+        session: AsyncSession,
+        entity: dict[str, Any],
+        command: str,
+        reason: str,
+        *,
+        timezone_name: str,
+        default_policy: str,
+    ) -> dict[str, Any]:
+        if command == "open":
+            schedule = await evaluate_schedule_id(
+                session,
+                entity.get("schedule_id"),
+                datetime.now(tz=UTC),
+                timezone_name=timezone_name,
+                default_policy=default_policy,
+                source="garage_door",
+            )
+            if not schedule.allowed:
+                return {
+                    "entity_id": str(entity["entity_id"]),
+                    "name": str(entity.get("name") or entity["entity_id"]),
+                    "accepted": False,
+                    "state": "schedule_denied",
+                    "detail": schedule.reason,
+                }
+        outcome = await command_cover(HomeAssistantClient(), entity, command, reason)
+        return {
+            "entity_id": outcome.entity_id,
+            "name": outcome.name,
+            "accepted": outcome.accepted,
+            "state": outcome.state,
+            "detail": outcome.detail,
         }
 
     async def _fresh_visitor_pass_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1265,7 +1326,7 @@ def normalize_trigger_config(trigger_type: str, config: dict[str, Any]) -> dict[
         if unit not in {"minutes", "hours", "days"}:
             unit = "minutes"
         return {
-            "interval": max(1, int(config.get("interval") or 1)),
+            "interval": safe_int(config.get("interval"), default=1, minimum=1),
             "unit": unit,
             "start_at": optional_text(config.get("start_at")),
             "end_at": optional_text(config.get("end_at")),
@@ -1367,15 +1428,29 @@ def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[st
         }
     if action_type.startswith("garage_door."):
         return {
-            "target_entity_ids": [
-                str(item)
-                for item in config.get("target_entity_ids", config.get("entity_ids", []))
-                if str(item).strip()
-            ]
+            "target_entity_ids": normalize_string_list(config.get("target_entity_ids", config.get("entity_ids", [])))
         }
     if integration_action_for_type(action_type):
         return integration_action_config(action_type, config)
     return {}
+
+
+def automation_garage_targets(
+    action: dict[str, Any],
+    configured_entities: list[dict[str, Any]],
+    *,
+    default_open_service: str | None,
+) -> list[dict[str, Any]]:
+    action_config = action.get("config") if isinstance(action.get("config"), dict) else {}
+    target_ids = set(normalize_string_list(action_config.get("target_entity_ids")))
+    return [
+        entity
+        for entity in enabled_cover_entities(
+            configured_entities,
+            default_open_service=default_open_service,
+        )
+        if not target_ids or str(entity["entity_id"]) in target_ids
+    ]
 
 
 def action_paused_by_maintenance_mode(action_type: str) -> bool:
@@ -1571,6 +1646,7 @@ def context_missing_references(context: AutomationContext, value: Any) -> list[s
         variable = VARIABLE_BY_NAME.get(name.lower())
         if not variable:
             context.warnings.append(f"Unknown variable @{name}.")
+            missing.append(name)
             continue
         if variable.scope not in context.scopes:
             context.warnings.append(f"Variable @{name} is not available for {context.trigger_key}.")
@@ -1737,7 +1813,7 @@ def next_run_for_trigger(
         expression = cron_from_recurrence(run_at, recurrence)
         candidate = cron_next(expression, now, run_at.tzinfo or UTC)
     elif trigger_type == "time.every_x":
-        interval = max(1, int(config.get("interval") or 1))
+        interval = safe_int(config.get("interval"), default=1, minimum=1)
         unit = str(config.get("unit") or "minutes")
         delta = timedelta(**{unit: interval}) if unit in {"minutes", "hours", "days"} else timedelta(minutes=interval)
         start_at = parse_datetime(config.get("start_at")) or now
@@ -1941,6 +2017,26 @@ def timezone_for(value: Any) -> ZoneInfo:
 
 def optional_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def safe_int(value: Any, *, default: int = 1, minimum: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    return parsed
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, (str, bytes)):
+        iterable: list[Any] = [value]
+    elif isinstance(value, list):
+        iterable = value
+    else:
+        iterable = []
+    return [str(item).strip() for item in iterable if str(item).strip()]
 
 
 def canonical_key(value: str) -> str:

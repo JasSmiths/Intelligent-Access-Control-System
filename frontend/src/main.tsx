@@ -204,6 +204,12 @@ type AccessEvent = {
   visitor_pass_id: string | null;
   visitor_name: string | null;
   visitor_pass_mode: string | null;
+  snapshot_url: string | null;
+  snapshot_captured_at: string | null;
+  snapshot_bytes: number | null;
+  snapshot_width: number | null;
+  snapshot_height: number | null;
+  snapshot_camera: string | null;
 };
 
 type AlertSeverity = "info" | "warning" | "critical";
@@ -816,6 +822,9 @@ type AutomationCatalogItem = {
   label: string;
   description?: string;
   scopes?: string[];
+  enabled?: boolean;
+  disabled?: boolean;
+  disabled_reason?: string | null;
   integration_action?: boolean;
   integration_provider?: string;
   integration_provider_label?: string;
@@ -827,6 +836,8 @@ type AutomationIntegrationCatalog = {
   id: string;
   label: string;
   description?: string;
+  enabled?: boolean;
+  disabled_reason?: string | null;
   actions: AutomationCatalogItem[];
 };
 
@@ -1826,7 +1837,13 @@ function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
     anomaly_count: numberPayload(event.payload.anomaly_count),
     visitor_pass_id: stringPayload(event.payload.visitor_pass_id) || null,
     visitor_name: stringPayload(event.payload.visitor_name) || null,
-    visitor_pass_mode: stringPayload(event.payload.visitor_pass_mode) || null
+    visitor_pass_mode: stringPayload(event.payload.visitor_pass_mode) || null,
+    snapshot_url: stringPayload(event.payload.snapshot_url) || null,
+    snapshot_captured_at: stringPayload(event.payload.snapshot_captured_at) || null,
+    snapshot_bytes: nullableNumber(event.payload.snapshot_bytes),
+    snapshot_width: nullableNumber(event.payload.snapshot_width),
+    snapshot_height: nullableNumber(event.payload.snapshot_height),
+    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null
   };
 }
 
@@ -3352,7 +3369,11 @@ function Dashboard({
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
               return (
-                <div className="event-feed-row" key={event.id}>
+                <div
+                  className={event.snapshot_url ? "event-feed-row has-snapshot" : "event-feed-row"}
+                  key={event.id}
+                  tabIndex={event.snapshot_url ? 0 : undefined}
+                >
                   <time>{event.time}</time>
                   <span className={`feed-line ${event.tone}`} />
                   <span className={`event-chip ${event.tone}`}>
@@ -3363,6 +3384,7 @@ function Dashboard({
                     <span>{event.subtitle}</span>
                   </div>
                   <EventStatusBadge event={event} />
+                  <DashboardEventSnapshotPreview event={event} />
                 </div>
               );
             }) : <EmptyState icon={CalendarDays} label="No recent events" />}
@@ -3710,6 +3732,8 @@ type DashboardEvent = {
   time: string;
   label: string;
   subtitle: string;
+  snapshot_url: string | null;
+  snapshotLabel: string;
   status: "IN" | "OUT";
   statusTone: BadgeTone;
   statusIcon?: React.ElementType;
@@ -3734,6 +3758,8 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
       time: formatTime(event.occurred_at),
       label: visitorName || ownerFirstName || "Unknown",
       subtitle: `${event.registration_number}  •  ${event.visitor_pass_id ? "Visitor Pass" : "LPR"}`,
+      snapshot_url: event.snapshot_url,
+      snapshotLabel: `Snapshot for ${visitorName || ownerFirstName || event.registration_number}`,
       status: event.direction === "exit" ? "OUT" : "IN",
       statusTone: isDenied ? "amber" : event.direction === "entry" ? "green" : "gray",
       statusIcon: isDenied ? Lock : undefined,
@@ -3742,6 +3768,15 @@ function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], people: 
       icon: event.direction === "exit" ? LogOut : isDenied ? AlertTriangle : Car
     };
   });
+}
+
+function DashboardEventSnapshotPreview({ event }: { event: DashboardEvent }) {
+  if (!event.snapshot_url) return null;
+  return (
+    <span className="dashboard-event-snapshot-preview" aria-hidden="true">
+      <img alt="" loading="lazy" src={event.snapshot_url} />
+    </span>
+  );
 }
 
 function visitorEventDisplayName(event: Pick<AccessEvent, "visitor_name">) {
@@ -6700,6 +6735,25 @@ function mysteryGuestQuip(rank: number) {
   return "Still under investigation";
 }
 
+function EventSnapshotThumb({ event }: { event: AccessEvent }) {
+  const label = `Snapshot for ${visitorEventDisplayName(event) || event.registration_number}`;
+  if (!event.snapshot_url) {
+    return (
+      <span className="event-snapshot-placeholder" aria-hidden="true">
+        <FileImage size={16} />
+      </span>
+    );
+  }
+  return (
+    <span className="event-snapshot-thumb" tabIndex={0}>
+      <img alt={label} loading="lazy" src={event.snapshot_url} />
+      <span className="event-snapshot-preview" aria-hidden="true">
+        <img alt="" loading="lazy" src={event.snapshot_url} />
+      </span>
+    </span>
+  );
+}
+
 function EventsView({ events, query }: { events: AccessEvent[]; query: string }) {
   const filtered = events.filter(
     (item) => matches(item.registration_number, query) || matches(item.source, query) || matches(item.visitor_name || "", query)
@@ -6707,10 +6761,11 @@ function EventsView({ events, query }: { events: AccessEvent[]; query: string })
   return (
     <section className="view-stack">
       <Toolbar title="Timeline" count={filtered.length} icon={Clock3} />
-      <div className="table-card">
+      <div className="table-card events-table-card">
         <table>
           <thead>
             <tr>
+              <th>Snapshot</th>
               <th>Plate</th>
               <th>Direction</th>
               <th>Decision</th>
@@ -6722,6 +6777,9 @@ function EventsView({ events, query }: { events: AccessEvent[]; query: string })
           <tbody>
             {filtered.map((event) => (
               <tr key={event.id}>
+                <td className="event-snapshot-cell">
+                  <EventSnapshotThumb event={event} />
+                </td>
                 <td>
                   <strong>{event.registration_number}</strong>
                   {event.visitor_name ? <span className="table-muted-line">{visitorEventDisplayName(event)}</span> : null}
@@ -12804,10 +12862,19 @@ function AutomationSelectionModal({
           <div className="two-pane-card-grid automation-selector-grid">
             {selectedIntegration.actions.map((item) => {
               const Icon = automationNodeIcon(item.type);
+              const disabled = item.disabled || item.enabled === false;
+              const disabledReason = item.disabled_reason || "Integration action is unavailable.";
               return (
-                <button className="two-pane-item-card automation-selector-card" key={item.type} onClick={() => onSelect(createAutomationNode(kind, item.type, item))} type="button">
+                <button
+                  className="two-pane-item-card automation-selector-card"
+                  disabled={disabled}
+                  key={item.type}
+                  onClick={() => onSelect(createAutomationNode(kind, item.type, item))}
+                  title={disabled ? disabledReason : undefined}
+                  type="button"
+                >
                   <Icon size={18} />
-                  <span><strong>{item.label}</strong><small>{item.description ?? item.type}</small></span>
+                  <span><strong>{item.label}</strong><small>{disabled ? disabledReason : item.description ?? item.type}</small></span>
                 </button>
               );
             })}

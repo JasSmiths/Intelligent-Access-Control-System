@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from app.models import AccessEvent
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
@@ -17,6 +18,7 @@ from app.services.access_events import (
     dvla_tax_alert_required,
 )
 from app.services.dvla import NormalizedDvlaVehicle
+from app.services.snapshots import access_event_snapshot_relative_path
 
 
 class FakePresenceSession:
@@ -69,6 +71,44 @@ def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
         captured_at=read.captured_at,
         raw_payload=raw_payload,
     )
+
+
+def test_access_event_realtime_payload_includes_snapshot_metadata() -> None:
+    service = AccessEventService()
+    event_id = uuid.uuid4()
+    captured_at = datetime(2026, 4, 30, 20, 30, tzinfo=UTC)
+    event = AccessEvent(
+        id=event_id,
+        registration_number="BK26MKF",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        confidence=0.91,
+        source="test",
+        occurred_at=captured_at,
+        timing_classification=TimingClassification.NORMAL,
+        snapshot_path=access_event_snapshot_relative_path(event_id),
+        snapshot_content_type="image/jpeg",
+        snapshot_bytes=2048,
+        snapshot_width=320,
+        snapshot_height=180,
+        snapshot_captured_at=captured_at,
+        snapshot_camera="camera.gate",
+    )
+
+    payload = service._access_event_realtime_payload(
+        event,
+        anomaly_count=0,
+        visitor_pass=None,
+        visitor_pass_mode=None,
+    )
+
+    assert payload["event_id"] == str(event_id)
+    assert payload["snapshot_url"] == f"/api/v1/events/{event_id}/snapshot"
+    assert payload["snapshot_captured_at"] == captured_at.isoformat()
+    assert payload["snapshot_bytes"] == 2048
+    assert payload["snapshot_width"] == 320
+    assert payload["snapshot_height"] == 180
+    assert payload["snapshot_camera"] == "camera.gate"
 
 
 @pytest.mark.asyncio

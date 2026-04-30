@@ -29,6 +29,7 @@ from app.services.automations import (
     trigger_keys_for_triggers,
     validate_schedule_parse,
 )
+from app.services.event_bus import RealtimeEvent
 
 
 def test_automation_registries_expose_required_keys() -> None:
@@ -168,6 +169,68 @@ def test_missing_variable_references_skip_unavailable_trigger_scopes() -> None:
     assert "not available" in context.warnings[0]
 
 
+def test_missing_unknown_variable_references_skip_cleanly() -> None:
+    context = AutomationContext(
+        trigger_key="vehicle.known_plate",
+        subject="Known plate",
+        trigger_payload={},
+        facts={"registration_number": "AB12 CDE"},
+        scopes={"vehicle", "event"},
+    )
+    context.variables = build_context_variables(context)
+
+    missing = context_missing_references(context, {"reason_template": "Open for @UnknownVariable"})
+
+    assert missing == ["UnknownVariable"]
+    assert context.to_payload()["missing_required_variables"] == ["UnknownVariable"]
+    assert "Unknown variable @UnknownVariable" in context.warnings[0]
+
+
+def test_event_bridge_uses_direct_access_event_domain_events() -> None:
+    service = AutomationService()
+    created_at = "2026-04-30T20:15:00+00:00"
+
+    known = service._event_to_triggers(
+        RealtimeEvent(
+            "access_event.finalized",
+            {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at},
+            created_at,
+        )
+    )
+    outside_schedule = service._event_to_triggers(
+        RealtimeEvent(
+            "access_event.finalized",
+            {"decision": "denied", "vehicle_id": "vehicle-1", "occurred_at": created_at},
+            created_at,
+        )
+    )
+    unknown = service._event_to_triggers(
+        RealtimeEvent(
+            "access_event.finalized",
+            {"decision": "denied", "registration_number": "AB12 CDE", "occurred_at": created_at},
+            created_at,
+        )
+    )
+
+    assert known[0][0] == "vehicle.known_plate"
+    assert outside_schedule[0][0] == "vehicle.outside_schedule"
+    assert unknown[0][0] == "vehicle.unknown_plate"
+
+
+def test_event_bridge_ignores_notification_and_automation_status_events() -> None:
+    service = AutomationService()
+    for event_type in (
+        "notification.trigger",
+        "notification.sent",
+        "notification.failed",
+        "notification.skipped",
+        "automation.run.success",
+        "automation.run.failed",
+        "automation.run.skipped",
+    ):
+        assert service._event_to_triggers(RealtimeEvent(event_type, {"event_type": "unauthorized_plate"}, "2026-04-30T20:15:00+00:00")) == []
+
+
 @pytest.mark.asyncio
 async def test_person_condition_evaluation_uses_presence_state() -> None:
     person_id = "11111111-1111-1111-1111-111111111111"
@@ -243,6 +306,9 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
     async def inactive() -> bool:
         return False
 
+    async def integration_enabled(_definition) -> SimpleNamespace:
+        return SimpleNamespace(enabled=True, disabled_reason=None)
+
     class Service:
         async def sync_all(self, **kwargs):
             calls.append(kwargs)
@@ -258,6 +324,7 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
 
     monkeypatch.setattr(automations, "is_maintenance_mode_active", inactive)
     monkeypatch.setattr(automation_integration_actions, "get_icloud_calendar_service", lambda: Service())
+    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_enabled)
 
     rule = SimpleNamespace(name="Calendar sync", created_by_user_id="11111111-1111-1111-1111-111111111111")
     context = AutomationContext(
@@ -287,6 +354,58 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
     assert calls[0]["trigger_source"] == "automation"
     assert str(calls[0]["triggered_by_user_id"]) == rule.created_by_user_id
     assert calls[0]["actor"] == "Automation Engine"
+
+
+@pytest.mark.asyncio
+async def test_disabled_integration_action_skips_without_crashing(monkeypatch) -> None:
+    async def inactive() -> bool:
+        return False
+
+    async def integration_disabled(_definition) -> SimpleNamespace:
+        return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
+
+    monkeypatch.setattr(automations, "is_maintenance_mode_active", inactive)
+    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
+
+    rule = SimpleNamespace(name="Calendar sync", created_by_user_id=None)
+    context = AutomationContext(
+        trigger_key="time.cron",
+        subject="Schedule tick",
+        trigger_payload={},
+        scopes={"time", "event"},
+    )
+    context.variables = build_context_variables(context)
+
+    result = await AutomationService()._execute_action(
+        SimpleNamespace(),
+        {
+            "id": "action-1",
+            "type": "integration.icloud_calendar.sync",
+            "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
+            "reason_template": "",
+        },
+        context,
+        rule=rule,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "integration_disabled"
+    assert result["disabled_reason"] == "No active iCloud Calendar session."
+
+
+@pytest.mark.asyncio
+async def test_integration_catalog_marks_disabled_actions(monkeypatch) -> None:
+    async def integration_disabled(_definition) -> SimpleNamespace:
+        return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
+
+    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
+
+    catalog = await automation_integration_actions.integration_action_catalog()
+    action = catalog[0]["actions"][0]
+
+    assert action["type"] == "integration.icloud_calendar.sync"
+    assert action["enabled"] is False
+    assert action["disabled_reason"] == "No active iCloud Calendar session."
 
 
 @pytest.mark.asyncio
@@ -347,6 +466,16 @@ def test_scheduler_next_run_and_due_trigger_helpers() -> None:
     assert next_run_for_trigger(every_x, now=now) == now + timedelta(minutes=15)
     assert due_time_trigger([every_x], now=now, scheduled_for=now)["id"] == "trigger-1"
     assert cron_from_recurrence(weekly_start, "weekly") == "0 21 * * 4"
+
+
+def test_malformed_every_x_interval_falls_back_safely() -> None:
+    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
+    trigger = normalize_triggers(
+        [{"type": "time.every_x", "config": {"interval": "not-a-number", "unit": "hours"}}]
+    )[0]
+
+    assert trigger["config"]["interval"] == 1
+    assert next_run_for_trigger(trigger, now=now) == now + timedelta(hours=1)
 
 
 def test_webhook_payload_facts_capture_sender_and_shape_message() -> None:

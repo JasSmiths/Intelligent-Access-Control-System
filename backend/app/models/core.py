@@ -466,6 +466,14 @@ class NotificationRule(Base, TimestampMixin):
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
+Index(
+    "ix_notification_rules_trigger_active_created",
+    NotificationRule.trigger_event,
+    NotificationRule.is_active,
+    NotificationRule.created_at.desc(),
+)
+
+
 class AutomationRule(Base, TimestampMixin):
     __tablename__ = "automation_rules"
 
@@ -534,6 +542,7 @@ class AutomationWebhookSender(Base, TimestampMixin):
 
 Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
 Index("ix_automation_rules_active_next_run", AutomationRule.is_active, AutomationRule.next_run_at)
+Index("ix_automation_rules_active_created", AutomationRule.is_active, AutomationRule.created_at.desc())
 Index("ix_automation_runs_rule_started", AutomationRun.rule_id, AutomationRun.started_at.desc())
 
 
@@ -620,10 +629,25 @@ class AccessEvent(Base, TimestampMixin):
     timing_classification: Mapped[TimingClassification] = mapped_column(
         Enum(TimingClassification), default=TimingClassification.UNKNOWN, nullable=False
     )
+    snapshot_path: Mapped[str | None] = mapped_column(String(512))
+    snapshot_content_type: Mapped[str | None] = mapped_column(String(80))
+    snapshot_bytes: Mapped[int | None] = mapped_column(Integer)
+    snapshot_width: Mapped[int | None] = mapped_column(Integer)
+    snapshot_height: Mapped[int | None] = mapped_column(Integer)
+    snapshot_captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    snapshot_camera: Mapped[str | None] = mapped_column(String(120))
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     vehicle: Mapped[Vehicle | None] = relationship(back_populates="events")
     anomalies: Mapped[list["Anomaly"]] = relationship(back_populates="event")
+
+
+Index("ix_access_events_created_at", AccessEvent.created_at)
+Index(
+    "ix_access_events_snapshot_created_at",
+    AccessEvent.created_at,
+    postgresql_where=AccessEvent.snapshot_path.is_not(None),
+)
 
 
 class VisitorPass(Base, TimestampMixin):
@@ -758,6 +782,14 @@ class Anomaly(Base, TimestampMixin):
 
     event: Mapped[AccessEvent | None] = relationship(back_populates="anomalies")
     resolved_by: Mapped[User | None] = relationship()
+
+
+Index("ix_anomalies_created_at", Anomaly.created_at)
+Index(
+    "ix_anomalies_open_created_at",
+    Anomaly.created_at.desc(),
+    postgresql_where=Anomaly.resolved_at.is_(None),
+)
 
 
 class ChatSession(Base, TimestampMixin):
