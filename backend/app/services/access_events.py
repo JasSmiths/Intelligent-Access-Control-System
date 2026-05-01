@@ -31,6 +31,7 @@ from app.models.enums import (
     PresenceState,
     TimingClassification,
     VisitorPassStatus,
+    VisitorPassType,
 )
 from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
@@ -314,7 +315,13 @@ class AccessEventService:
                 await session.execute(
                     select(VisitorPass.id, VisitorPass.arrival_time)
                     .where(
-                        VisitorPass.status == VisitorPassStatus.USED,
+                        (
+                            (VisitorPass.status == VisitorPassStatus.USED)
+                            | (
+                                (VisitorPass.pass_type == VisitorPassType.DURATION)
+                                & (VisitorPass.status == VisitorPassStatus.ACTIVE)
+                            )
+                        ),
                         VisitorPass.number_plate == plate,
                         VisitorPass.departure_time.is_(None),
                         VisitorPass.arrival_time.is_not(None),
@@ -2097,6 +2104,7 @@ class AccessEventService:
         return {
             "id": str(visitor_pass.id),
             "visitor_name": visitor_pass.visitor_name,
+            "pass_type": visitor_pass.pass_type.value,
             "status": visitor_pass.status.value,
             "mode": mode,
             "expected_time": visitor_pass.expected_time.isoformat(),

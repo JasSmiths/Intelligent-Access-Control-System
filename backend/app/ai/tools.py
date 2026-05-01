@@ -34,7 +34,7 @@ from app.models import (
     Vehicle,
     VisitorPass,
 )
-from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification, VisitorPassStatus
+from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification, VisitorPassStatus, VisitorPassType
 from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, cover_entity_state_payload
@@ -87,6 +87,7 @@ from app.services.visitor_passes import (
     get_visitor_pass_service,
     serialize_visitor_pass,
 )
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context", default={})
@@ -169,15 +170,15 @@ NOTIFICATION_CONDITION_SCHEMA: dict[str, Any] = {
 
 NOTIFICATION_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Workflow action. type is mobile for Apprise, voice for Home Assistant TTS, in_app for dashboard alerts, or discord for Discord channel alerts.",
+    "description": "Workflow action. type is mobile for Apprise, voice for Home Assistant TTS, in_app for dashboard alerts, discord for Discord channel alerts, or whatsapp for WhatsApp Admin messages.",
     "properties": {
         "id": {"type": "string"},
-        "type": {"type": "string", "enum": ["mobile", "voice", "in_app", "discord"]},
+        "type": {"type": "string", "enum": ["mobile", "voice", "in_app", "discord", "whatsapp"]},
         "target_mode": {"type": "string", "enum": ["all", "many", "selected"]},
         "target_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "For Discord actions, use endpoint ids in the form discord:<channel_id>.",
+            "description": "For Discord actions, use endpoint ids in the form discord:<channel_id>. For WhatsApp actions, use whatsapp:admin:<user_id>, whatsapp:*, or whatsapp:number:@Variable.",
         },
         "title_template": {"type": "string", "description": "Title template supporting @ variables such as @FirstName."},
         "message_template": {"type": "string", "description": "Message template supporting @ variables such as @VehicleName."},
@@ -584,7 +585,8 @@ def build_agent_tools() -> dict[str, AgentTool]:
             name="create_visitor_pass",
             description=(
                 "Create a one-shot Visitor Pass for an expected unknown vehicle. "
-                "Do not call until visitor_name and expected_time are known. "
+                "For one-time passes, do not call until visitor_name and expected_time are known. "
+                "For duration passes, visitor_phone, valid_from, and valid_until are required. "
                 "Use local site time silently and default to a +/- 30 minute window when window_minutes is omitted. "
                 "Do not resolve visitor_name as a Person record. Requires confirm=true."
             ),
@@ -592,6 +594,8 @@ def build_agent_tools() -> dict[str, AgentTool]:
                 "type": "object",
                 "properties": {
                     "visitor_name": {"type": "string"},
+                    "pass_type": {"type": "string", "enum": ["one-time", "duration"]},
+                    "visitor_phone": {"type": "string", "description": "Required for duration Visitor Passes. Use full international format when known."},
                     "expected_time": {"type": "string", "description": "Expected local or ISO datetime for the visitor."},
                     "window_minutes": {
                         "type": "integer",
@@ -599,9 +603,11 @@ def build_agent_tools() -> dict[str, AgentTool]:
                         "maximum": 1440,
                         "description": "Minutes before and after expected_time. Defaults to 30.",
                     },
+                    "valid_from": {"type": "string", "description": "Start datetime for duration Visitor Passes."},
+                    "valid_until": {"type": "string", "description": "End datetime for duration Visitor Passes."},
                     "confirm": {"type": "boolean"},
                 },
-                "required": ["visitor_name", "expected_time", "confirm"],
+                "required": ["visitor_name", "confirm"],
                 "additionalProperties": False,
             },
             handler=create_visitor_pass,
@@ -615,8 +621,12 @@ def build_agent_tools() -> dict[str, AgentTool]:
                     "pass_id": {"type": "string"},
                     "visitor_name": {"type": "string", "description": "Pass lookup name or replacement visitor name."},
                     "new_visitor_name": {"type": "string", "description": "Replacement visitor name when renaming a pass."},
+                    "pass_type": {"type": "string", "enum": ["one-time", "duration"]},
+                    "visitor_phone": {"type": "string"},
                     "expected_time": {"type": "string"},
                     "window_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+                    "valid_from": {"type": "string"},
+                    "valid_until": {"type": "string"},
                     "confirm": {"type": "boolean"},
                 },
                 "required": ["confirm"],
@@ -2246,39 +2256,61 @@ async def get_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
 async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     visitor_name = str(arguments.get("visitor_name") or "").strip()
     expected_value = arguments.get("expected_time")
+    pass_type = _visitor_pass_type_from_arguments(arguments.get("pass_type"))
+    visitor_phone = str(arguments.get("visitor_phone") or "").strip()
+    valid_from_value = arguments.get("valid_from")
+    valid_until_value = arguments.get("valid_until")
     missing = []
     if not visitor_name:
         missing.append("visitor_name")
-    if not expected_value:
+    if pass_type == VisitorPassType.DURATION:
+        if not visitor_phone:
+            missing.append("visitor_phone")
+        if not valid_from_value:
+            missing.append("valid_from")
+        if not valid_until_value:
+            missing.append("valid_until")
+    elif not expected_value:
         missing.append("expected_time")
     if missing:
         return {
             "created": False,
             "requires_details": True,
             "missing": missing,
-            "detail": "I need the visitor name and expected time before I can prepare a Visitor Pass.",
+            "detail": (
+                "I need the visitor name, phone number, and start/end times before I can prepare a duration Visitor Pass."
+                if pass_type == VisitorPassType.DURATION
+                else "I need the visitor name and expected time before I can prepare a Visitor Pass."
+            ),
         }
 
     config = await get_runtime_config()
     try:
-        expected_time = _parse_agent_datetime(expected_value, config.site_timezone)
+        if pass_type == VisitorPassType.DURATION:
+            valid_from = _parse_agent_datetime(valid_from_value, config.site_timezone)
+            valid_until = _parse_agent_datetime(valid_until_value, config.site_timezone)
+            expected_time = _parse_agent_datetime(expected_value, config.site_timezone) if expected_value else valid_from
+        else:
+            valid_from = None
+            valid_until = None
+            expected_time = _parse_agent_datetime(expected_value, config.site_timezone)
     except (TypeError, ValueError) as exc:
-        return {"created": False, "error": f"Invalid visitor expected time: {exc}"}
+        return {"created": False, "error": f"Invalid visitor pass time: {exc}"}
     window_minutes = _bounded_int(
         arguments.get("window_minutes"),
         default=DEFAULT_WINDOW_MINUTES,
         minimum=1,
         maximum=1440,
     )
-    if expected_time + timedelta(minutes=window_minutes) < _agent_now(config.site_timezone):
+    ends_at = valid_until if pass_type == VisitorPassType.DURATION else expected_time + timedelta(minutes=window_minutes)
+    if ends_at < _agent_now(config.site_timezone):
         return {
             "created": False,
             "error": "That Visitor Pass window has already elapsed.",
             "expected_time": _agent_datetime_iso(expected_time, config.site_timezone),
         }
 
-    starts_at = expected_time - timedelta(minutes=window_minutes)
-    ends_at = expected_time + timedelta(minutes=window_minutes)
+    starts_at = valid_from if pass_type == VisitorPassType.DURATION else expected_time - timedelta(minutes=window_minutes)
     if not bool(arguments.get("confirm")):
         return {
             "created": False,
@@ -2286,13 +2318,19 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             "confirmation_field": "confirm",
             "target": visitor_name,
             "visitor_name": visitor_name,
+            "pass_type": pass_type.value,
+            "visitor_phone": visitor_phone or None,
             "expected_time": _agent_datetime_iso(expected_time, config.site_timezone),
             "expected_time_display": _agent_datetime_display(expected_time, config.site_timezone),
             "window_minutes": window_minutes,
             "window_start": _agent_datetime_iso(starts_at, config.site_timezone),
             "window_end": _agent_datetime_iso(ends_at, config.site_timezone),
             "detail": (
-                f"Create a Visitor Pass for {visitor_name} at "
+                f"Create a duration Visitor Pass for {visitor_name} from "
+                f"{_agent_datetime_display(starts_at, config.site_timezone)} to "
+                f"{_agent_datetime_display(ends_at, config.site_timezone)} and message them on WhatsApp?"
+                if pass_type == VisitorPassType.DURATION
+                else f"Create a Visitor Pass for {visitor_name} at "
                 f"{_agent_datetime_display(expected_time, config.site_timezone)} "
                 f"with a +/- {window_minutes} minute window?"
             ),
@@ -2307,6 +2345,10 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 visitor_name=visitor_name,
                 expected_time=expected_time,
                 window_minutes=window_minutes,
+                pass_type=pass_type,
+                visitor_phone=visitor_phone or None,
+                valid_from=valid_from,
+                valid_until=valid_until,
                 source="alfred",
                 created_by_user_id=_uuid_from_value(context.get("user_id")),
                 actor="Alfred_AI",
@@ -2319,6 +2361,14 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
         payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
 
     await event_bus.publish("visitor_pass.created", {"visitor_pass": payload, "source": "alfred"})
+    if pass_type == VisitorPassType.DURATION and payload.get("visitor_phone"):
+        try:
+            await get_whatsapp_messaging_service().send_visitor_pass_outreach(visitor_pass)
+        except Exception as exc:
+            logger.warning(
+                "alfred_visitor_pass_whatsapp_outreach_failed",
+                extra={"visitor_pass_id": payload["id"], "error": str(exc)[:240]},
+            )
     return {
         "created": True,
         "visitor_pass": payload,
@@ -2336,19 +2386,33 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             expected_time = _parse_agent_datetime(arguments.get("expected_time"), config.site_timezone)
         except (TypeError, ValueError) as exc:
             return {"updated": False, "error": f"Invalid visitor expected time: {exc}"}
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    if arguments.get("valid_from"):
+        try:
+            valid_from = _parse_agent_datetime(arguments.get("valid_from"), config.site_timezone)
+        except (TypeError, ValueError) as exc:
+            return {"updated": False, "error": f"Invalid Visitor Pass start time: {exc}"}
+    if arguments.get("valid_until"):
+        try:
+            valid_until = _parse_agent_datetime(arguments.get("valid_until"), config.site_timezone)
+        except (TypeError, ValueError) as exc:
+            return {"updated": False, "error": f"Invalid Visitor Pass end time: {exc}"}
     window_minutes = (
         _bounded_int(arguments.get("window_minutes"), default=DEFAULT_WINDOW_MINUTES, minimum=1, maximum=1440)
         if arguments.get("window_minutes") is not None
         else None
     )
+    pass_type = _visitor_pass_type_from_arguments(arguments.get("pass_type")) if arguments.get("pass_type") else None
+    visitor_phone = str(arguments.get("visitor_phone") or "").strip() or None
     replacement_name = str(arguments.get("new_visitor_name") or arguments.get("replacement_visitor_name") or "").strip() or None
     if arguments.get("pass_id") and arguments.get("visitor_name"):
         replacement_name = str(arguments.get("visitor_name") or "").strip()
-    if not any([replacement_name, expected_time, window_minutes is not None]):
+    if not any([replacement_name, expected_time, window_minutes is not None, pass_type, visitor_phone, valid_from, valid_until]):
         return {
             "updated": False,
             "requires_details": True,
-            "detail": "Tell me which Visitor Pass field to change: name, expected time, or time window.",
+            "detail": "Tell me which Visitor Pass field to change: name, type, phone, expected time, or time window.",
         }
 
     service = get_visitor_pass_service()
@@ -2366,6 +2430,8 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 "target": visitor_pass.visitor_name,
                 "visitor_pass_id": str(visitor_pass.id),
                 "visitor_name": replacement_name or visitor_pass.visitor_name,
+                "pass_type": (pass_type or visitor_pass.pass_type).value,
+                "visitor_phone": visitor_phone or visitor_pass.visitor_phone,
                 "expected_time": (
                     _agent_datetime_iso(expected_time, config.site_timezone)
                     if expected_time
@@ -2386,6 +2452,10 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 visitor_name=replacement_name,
                 expected_time=expected_time,
                 window_minutes=window_minutes,
+                pass_type=pass_type,
+                visitor_phone=visitor_phone,
+                valid_from=valid_from,
+                valid_until=valid_until,
                 actor="Alfred_AI",
                 actor_user_id=_uuid_from_value(context.get("user_id")),
             )
@@ -6706,6 +6776,14 @@ def _visitor_pass_statuses_from_arguments(arguments: dict[str, Any]) -> list[Vis
         if status not in statuses:
             statuses.append(status)
     return statuses or None
+
+
+def _visitor_pass_type_from_arguments(value: Any) -> VisitorPassType:
+    normalized = str(value or VisitorPassType.ONE_TIME.value).strip().lower().replace("_", "-")
+    try:
+        return VisitorPassType(normalized)
+    except ValueError:
+        return VisitorPassType.ONE_TIME
 
 
 def _visitor_pass_agent_payload(visitor_pass: VisitorPass, timezone_name: str) -> dict[str, Any]:

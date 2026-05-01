@@ -82,6 +82,7 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_phone_number VARCHAR(40)"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS person_id UUID"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_person_id ON users (person_id)"))
             await conn.execute(
@@ -233,12 +234,27 @@ async def init_database() -> None:
             )
             await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS valid_from TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS valid_until TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS pass_type VARCHAR(20) NOT NULL DEFAULT 'ONE_TIME'"))
+            await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS visitor_phone VARCHAR(40)"))
             await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS source_reference VARCHAR(255)"))
             await conn.execute(text("ALTER TABLE visitor_passes ADD COLUMN IF NOT EXISTS source_metadata JSONB"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_pass_type ON visitor_passes (pass_type)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_visitor_phone ON visitor_passes (visitor_phone)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_valid_from ON visitor_passes (valid_from)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_valid_until ON visitor_passes (valid_until)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_source_reference ON visitor_passes (source_reference)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_visitor_phone_status ON visitor_passes (visitor_phone, status)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_visitor_passes_status_valid_until ON visitor_passes (status, valid_until)"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_visitor_passes_duration_phone_window
+                    ON visitor_passes (visitor_phone, status, valid_from, valid_until)
+                    WHERE pass_type = 'DURATION'
+                        AND visitor_phone IS NOT NULL
+                    """
+                )
+            )
             await conn.execute(
                 text(
                     """

@@ -40,6 +40,11 @@ class VisitorPassStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class VisitorPassType(StrEnum):
+    ONE_TIME = "one-time"
+    DURATION = "duration"
+
+
 class AnomalyType(StrEnum):
     UNAUTHORIZED_PLATE = "unauthorized_plate"
     DUPLICATE_ENTRY = "duplicate_entry"

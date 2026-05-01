@@ -6,9 +6,9 @@ import pytest
 
 from app.ai import tools as ai_tools
 from app.models import VisitorPass
-from app.models.enums import VisitorPassStatus
+from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.access_events import AccessEventService
-from app.services.visitor_passes import VisitorPassService
+from app.services.visitor_passes import VisitorPassService, serialize_visitor_pass
 
 
 def visitor_pass(
@@ -17,12 +17,16 @@ def visitor_pass(
     expected_time: datetime,
     window_minutes: int = 30,
     status: VisitorPassStatus = VisitorPassStatus.SCHEDULED,
+    pass_type: VisitorPassType = VisitorPassType.ONE_TIME,
+    visitor_phone: str | None = None,
     created_at: datetime | None = None,
     number_plate: str | None = None,
 ) -> VisitorPass:
     row = VisitorPass(
         id=uuid.uuid4(),
         visitor_name=name,
+        pass_type=pass_type,
+        visitor_phone=visitor_phone,
         expected_time=expected_time,
         window_minutes=window_minutes,
         status=status,
@@ -63,6 +67,138 @@ def test_calendar_visitor_pass_uses_asymmetric_valid_window() -> None:
     assert service.status_for(row, end - timedelta(seconds=1)) == VisitorPassStatus.ACTIVE
     assert service.status_for(row, end) == VisitorPassStatus.EXPIRED
     assert not service.is_within_window(row, end)
+
+
+def test_duration_visitor_pass_uses_explicit_window() -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 1, 17, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+    )
+    row.valid_from = start
+    row.valid_until = end
+
+    assert service.status_for(row, start - timedelta(seconds=1)) == VisitorPassStatus.SCHEDULED
+    assert service.status_for(row, start) == VisitorPassStatus.ACTIVE
+    assert service.status_for(row, end - timedelta(seconds=1)) == VisitorPassStatus.ACTIVE
+    assert service.status_for(row, end) == VisitorPassStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(hours=1), registration_number="AB12 CDE")
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.record_arrival(SimpleNamespace(), row, event=event)
+
+    assert row.status == VisitorPassStatus.ACTIVE
+    assert row.arrival_time == event.occurred_at
+    assert row.number_plate == "AB12CDE"
+
+
+def test_serialize_visitor_pass_includes_concierge_fields() -> None:
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+
+    payload = serialize_visitor_pass(row, timezone_name="UTC")
+
+    assert payload["pass_type"] == "duration"
+    assert payload["visitor_phone"] == "447700900123"
+    assert payload["number_plate"] == "AB12CDE"
+    assert payload["valid_from"] == "2026-05-01T09:00:00+00:00"
+    assert payload["whatsapp_status"] == "complete"
+    assert payload["whatsapp_status_label"] == "Complete - Vehicle Registration: AB12CDE"
+
+
+def test_serialize_visitor_pass_shows_requested_time_change_before_complete() -> None:
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.source_metadata = {
+        "whatsapp_concierge_status": "timeframe_confirmation_pending",
+        "whatsapp_concierge_status_detail": "Awaiting visitor confirmation for the requested timeframe change.",
+    }
+
+    payload = serialize_visitor_pass(row, timezone_name="UTC")
+
+    assert payload["whatsapp_status"] == "timeframe_confirmation_pending"
+    assert payload["whatsapp_status_label"] == "Requested Time Change"
+
+
+def test_serialize_visitor_pass_shows_awaiting_time_change_approval_before_complete() -> None:
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.source_metadata = {
+        "whatsapp_concierge_status": "timeframe_approval_pending",
+        "whatsapp_concierge_status_detail": "Visitor requested a timeframe change that needs Admin approval.",
+    }
+
+    payload = serialize_visitor_pass(row, timezone_name="UTC")
+
+    assert payload["whatsapp_status"] == "timeframe_approval_pending"
+    assert payload["whatsapp_status_label"] == "Awaiting Time Change Approval"
+
+
+def test_serialize_visitor_pass_complete_label_includes_time_updated_after_change() -> None:
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.source_metadata = {
+        "whatsapp_concierge_status": "timeframe_approved",
+        "whatsapp_timeframe_request": {"status": "approved"},
+    }
+
+    payload = serialize_visitor_pass(row, timezone_name="UTC")
+
+    assert payload["whatsapp_status"] == "complete"
+    assert payload["whatsapp_status_label"] == "Complete - Vehicle Registration: AB12CDE Time Updated"
 
 
 def test_overlap_matching_prefers_closest_expected_time_then_oldest_created() -> None:

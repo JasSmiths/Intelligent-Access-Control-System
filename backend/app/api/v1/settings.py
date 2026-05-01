@@ -20,6 +20,7 @@ from app.services.telemetry import (
     emit_audit_log,
 )
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 router = APIRouter()
 
@@ -88,6 +89,7 @@ async def patch_settings(
             "home_assistant_",
             "apprise_",
             "discord_",
+            "whatsapp_",
             "dvla_",
             "unifi_protect_",
             "llm_",
@@ -116,6 +118,8 @@ async def test_connection(
             await _test_apprise(values)
         elif integration == "discord":
             await _test_discord(values)
+        elif integration == "whatsapp":
+            await _test_whatsapp(values)
         elif integration == "dvla":
             await _test_dvla(values)
         elif integration == "unifi_protect":
@@ -178,6 +182,10 @@ async def _test_apprise(values: dict[str, Any]) -> None:
 
 async def _test_discord(values: dict[str, Any]) -> None:
     await get_discord_messaging_service().test_connection(values)
+
+
+async def _test_whatsapp(values: dict[str, Any]) -> None:
+    await get_whatsapp_messaging_service().test_connection(values)
 
 
 async def _test_dvla(values: dict[str, Any]) -> None:

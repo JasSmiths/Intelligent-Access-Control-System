@@ -770,6 +770,25 @@ h2 {
   line-height: 1.45;
 }
 
+.notification-toast-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.notification-toast-actions .secondary-button {
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+.notification-toast-error {
+  display: block;
+  margin-top: 8px;
+  color: var(--red);
+  font-size: 12px;
+}
+
 .refresh-button {
   display: inline-flex;
 }
@@ -4891,6 +4910,111 @@ tr:last-child td {
   color: var(--muted);
 }
 
+.visitor-pass-whatsapp-status {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue-soft) 54%, var(--surface));
+  color: var(--blue-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.visitor-pass-whatsapp-status.has-tooltip {
+  cursor: help;
+}
+
+.visitor-pass-whatsapp-status.has-tooltip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.visitor-pass-whatsapp-status.message_sending_failed,
+.visitor-pass-whatsapp-status.failed,
+.visitor-pass-whatsapp-status.timeframe_denied,
+.visitor-pass-whatsapp-status.user_not_on_whatsapp {
+  background: color-mix(in srgb, var(--red-soft) 58%, var(--surface));
+  color: var(--red);
+}
+
+.visitor-pass-whatsapp-status.complete,
+.visitor-pass-whatsapp-status.message_read,
+.visitor-pass-whatsapp-status.timeframe_approved {
+  background: color-mix(in srgb, var(--green-soft) 58%, var(--surface));
+  color: var(--green);
+}
+
+.visitor-pass-whatsapp-status.timeframe_approval_pending,
+.visitor-pass-whatsapp-status.timeframe_confirmation_pending {
+  background: color-mix(in srgb, var(--amber-soft) 58%, var(--surface));
+  color: var(--amber);
+}
+
+.visitor-pass-whatsapp-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.iacs-tooltip {
+  position: fixed;
+  z-index: 260;
+  width: min(320px, calc(100vw - 24px));
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 98%, transparent);
+  box-shadow: var(--shadow-strong);
+  color: var(--text);
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%);
+}
+
+.iacs-tooltip::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.iacs-tooltip.bottom::before {
+  top: -5px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.iacs-tooltip.top::before {
+  bottom: -5px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.iacs-tooltip strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.25;
+}
+
+.iacs-tooltip span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 520;
+  line-height: 1.45;
+}
+
 .visitor-pass-telemetry {
   display: grid;
   gap: 10px;
@@ -4916,6 +5040,21 @@ tr:last-child td {
   min-height: 36px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.visitor-pass-actions > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .passes-loading,
@@ -5010,6 +5149,24 @@ tr:last-child td {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
+}
+
+.visitor-pass-type-select > div {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.visitor-pass-duration-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-duration-fields .field:first-child {
+  grid-column: 1 / -1;
 }
 
 .rotate-90 {
@@ -11590,6 +11747,24 @@ textarea.template-editor-fallback {
 
   .visitor-pass-window-select > div {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .visitor-pass-duration-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .visitor-pass-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .visitor-pass-action-buttons {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .visitor-pass-action-buttons .secondary-button {
+    flex: 1 1 0;
   }
 
   .visitor-pass-card-head {

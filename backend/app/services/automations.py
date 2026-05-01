@@ -1459,6 +1459,7 @@ def action_paused_by_maintenance_mode(action_type: str) -> bool:
         or action_type.startswith("gate.")
         or action_type.startswith("garage_door.")
         or action_type == "maintenance_mode.enable"
+        or action_type == "integration.whatsapp.send_message"
     )
 
 

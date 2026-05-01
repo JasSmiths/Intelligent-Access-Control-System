@@ -16,6 +16,9 @@ SECRET_KEYS = {
     "home_assistant_token",
     "apprise_urls",
     "discord_bot_token",
+    "whatsapp_access_token",
+    "whatsapp_webhook_verify_token",
+    "whatsapp_app_secret",
     "dvla_api_key",
     "unifi_protect_username",
     "unifi_protect_password",
@@ -86,6 +89,23 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "discord_allow_direct_messages": ("integrations", False, "Allow direct messages to Alfred from allowed users."),
     "discord_require_mention": ("integrations", True, "Require @Alfred mentions for guild channel messages."),
+    "whatsapp_enabled": ("integrations", False, "Enable WhatsApp Cloud API messaging."),
+    "whatsapp_access_token": ("integrations", "", "Meta WhatsApp Cloud API access token."),
+    "whatsapp_phone_number_id": ("integrations", "", "WhatsApp Business phone number ID."),
+    "whatsapp_business_account_id": ("integrations", "", "WhatsApp Business Account ID."),
+    "whatsapp_webhook_verify_token": ("integrations", "", "Webhook verification token for Meta setup."),
+    "whatsapp_app_secret": ("integrations", "", "Optional Meta app secret for webhook signature validation."),
+    "whatsapp_graph_api_version": ("integrations", "v25.0", "Meta Graph API version for WhatsApp Cloud API."),
+    "whatsapp_visitor_pass_template_name": (
+        "integrations",
+        "visitor_pass_registration_request",
+        "Approved WhatsApp utility template used to request Visitor Pass vehicle registrations.",
+    ),
+    "whatsapp_visitor_pass_template_language": (
+        "integrations",
+        "en_GB",
+        "Language code for the Visitor Pass WhatsApp outreach template.",
+    ),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -180,6 +200,15 @@ class RuntimeConfig:
     discord_default_notification_channel_id: str
     discord_allow_direct_messages: bool
     discord_require_mention: bool
+    whatsapp_enabled: bool
+    whatsapp_access_token: str
+    whatsapp_phone_number_id: str
+    whatsapp_business_account_id: str
+    whatsapp_webhook_verify_token: str
+    whatsapp_app_secret: str
+    whatsapp_graph_api_version: str
+    whatsapp_visitor_pass_template_name: str
+    whatsapp_visitor_pass_template_language: str
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -381,6 +410,15 @@ async def get_runtime_config() -> RuntimeConfig:
         discord_default_notification_channel_id=str(values["discord_default_notification_channel_id"] or ""),
         discord_allow_direct_messages=bool_value(values["discord_allow_direct_messages"]),
         discord_require_mention=bool_value(values["discord_require_mention"]),
+        whatsapp_enabled=bool_value(values["whatsapp_enabled"]),
+        whatsapp_access_token=str(values["whatsapp_access_token"] or ""),
+        whatsapp_phone_number_id=str(values["whatsapp_phone_number_id"] or ""),
+        whatsapp_business_account_id=str(values["whatsapp_business_account_id"] or ""),
+        whatsapp_webhook_verify_token=str(values["whatsapp_webhook_verify_token"] or ""),
+        whatsapp_app_secret=str(values["whatsapp_app_secret"] or ""),
+        whatsapp_graph_api_version=str(values["whatsapp_graph_api_version"] or "v25.0"),
+        whatsapp_visitor_pass_template_name=str(values["whatsapp_visitor_pass_template_name"] or ""),
+        whatsapp_visitor_pass_template_language=str(values["whatsapp_visitor_pass_template_language"] or "en_GB"),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),

@@ -18,6 +18,7 @@ from app.services.auth import (
     generate_temporary_password,
     hash_password,
     normalize_username,
+    normalize_mobile_phone_number,
     serialize_user,
 )
 from app.services.telemetry import (
@@ -38,6 +39,7 @@ def user_audit_snapshot(user: User) -> dict[str, Any]:
         "last_name": user.last_name,
         "full_name": user.full_name,
         "email": user.email,
+        "mobile_phone_number": user.mobile_phone_number,
         "person_id": str(user.person_id) if user.person_id else None,
         "role": user.role.value,
         "is_active": user.is_active,
@@ -53,6 +55,7 @@ class UserResponse(BaseModel):
     full_name: str
     profile_photo_data_url: str | None
     email: str | None
+    mobile_phone_number: str | None
     role: str
     is_active: bool
     last_login_at: str | None
@@ -68,6 +71,7 @@ class CreateUserRequest(BaseModel):
     last_name: str = Field(min_length=1, max_length=80)
     email: EmailStr | None = None
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
+    mobile_phone_number: str | None = Field(default=None, max_length=40)
     person_id: uuid.UUID | None = None
     role: UserRole = UserRole.STANDARD
     is_active: bool = True
@@ -86,6 +90,7 @@ class UpdateUserRequest(BaseModel):
     last_name: str | None = Field(default=None, min_length=1, max_length=80)
     email: EmailStr | None = None
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
+    mobile_phone_number: str | None = Field(default=None, max_length=40)
     person_id: uuid.UUID | None = None
     role: UserRole | None = None
     is_active: bool | None = None
@@ -131,6 +136,7 @@ async def add_user(
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
             profile_photo_data_url=request.profile_photo_data_url,
+            mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=temporary_password,
             role=request.role,
@@ -199,6 +205,8 @@ async def update_user(
         user.profile_photo_data_url = request.profile_photo_data_url
     if "email" in request.model_fields_set:
         user.email = request.email.strip().lower() if request.email else None
+    if "mobile_phone_number" in request.model_fields_set:
+        user.mobile_phone_number = normalize_mobile_phone_number(request.mobile_phone_number)
     if "person_id" in request.model_fields_set:
         if request.person_id and not await session.get(Person, request.person_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found")

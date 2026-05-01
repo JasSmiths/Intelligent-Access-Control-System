@@ -121,6 +121,7 @@ PUBLIC_AUTH_PATHS = {
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
     "/api/v1/webhooks/ubiquiti/lpr",
+    "/api/v1/webhooks/whatsapp",
 }
 PUBLIC_AUTH_PREFIXES = (
     "/api/v1/automations/webhooks/",

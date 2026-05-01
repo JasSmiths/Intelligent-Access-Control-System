@@ -1,6 +1,8 @@
+import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
 
 from app.core.logging import get_logger
@@ -16,9 +18,78 @@ from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
 from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service, load_whatsapp_config
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+@router.get("/whatsapp", response_class=PlainTextResponse)
+async def verify_whatsapp_webhook(request: Request) -> PlainTextResponse:
+    """Handle Meta's WhatsApp webhook verification challenge."""
+
+    config = await load_whatsapp_config()
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and challenge is not None and token and token == config.webhook_verify_token:
+        logger.info("whatsapp_webhook_verified")
+        return PlainTextResponse(challenge, status_code=status.HTTP_200_OK)
+    logger.warning(
+        "whatsapp_webhook_verification_failed",
+        extra={"mode": mode, "has_challenge": challenge is not None, "verify_token_configured": bool(config.webhook_verify_token)},
+    )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="WhatsApp webhook verification failed.")
+
+
+@router.post("/whatsapp", status_code=status.HTTP_202_ACCEPTED)
+async def receive_whatsapp_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    """Accept WhatsApp Cloud API message and status webhooks."""
+
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid WhatsApp webhook JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="WhatsApp webhook payload must be a JSON object.")
+
+    service = get_whatsapp_messaging_service()
+    config = await load_whatsapp_config()
+    signature_header = request.headers.get("x-hub-signature-256")
+    signature_verified = False
+    unsigned_allowed = False
+    if config.app_secret:
+        signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
+        if not signature_verified:
+            logger.warning(
+                "whatsapp_webhook_signature_invalid",
+                extra={"signature_present": bool(signature_header)},
+            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid WhatsApp webhook signature.")
+    else:
+        unsigned_allowed = True
+
+    telemetry.record_span(
+        "Webhook payload received",
+        category=TELEMETRY_CATEGORY_WEBHOOKS_API,
+        attributes={"source": "whatsapp"},
+        output_payload={
+            "payload_shape": _payload_shape(payload),
+            "signature_verified": signature_verified,
+            "unsigned_allowed": unsigned_allowed,
+        },
+    )
+    background_tasks.add_task(
+        service.handle_webhook_payload,
+        payload,
+        signature_verified=signature_verified,
+        unsigned_allowed=unsigned_allowed,
+    )
+    return {"status": "accepted"}
 
 
 @router.post("/ubiquiti/lpr", status_code=status.HTTP_202_ACCEPTED)

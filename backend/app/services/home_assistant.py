@@ -153,6 +153,12 @@ class HomeAssistantIntegrationService:
                 continue
 
             event = message.get("event", {})
+            event_type = str(event.get("event_type") or "")
+            if event_type == "mobile_app_notification_action":
+                await self._handle_mobile_notification_action(event)
+                continue
+            if event_type and event_type != "state_changed":
+                continue
             data = event.get("data", {})
             entity_id = data.get("entity_id")
             new_state = data.get("new_state") or {}
@@ -202,6 +208,57 @@ class HomeAssistantIntegrationService:
                 await self._sync_door_state(state_value, entity_id)
             if entity_id == MAINTENANCE_HA_ENTITY_ID:
                 await self._sync_maintenance_mode_state(state_value)
+
+    async def _handle_mobile_notification_action(self, event: dict) -> None:
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        action_id = str(data.get("action") or "").strip()
+        if not action_id:
+            return
+        from app.services.whatsapp_messaging import (
+            get_whatsapp_messaging_service,
+            parse_visitor_pass_timeframe_button_id,
+        )
+
+        decision = parse_visitor_pass_timeframe_button_id(action_id)
+        if not decision:
+            return
+        try:
+            result = await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
+                decision.pass_id,
+                decision.request_id,
+                decision.decision,
+                actor_label="Home Assistant Notification",
+            )
+            logger.info(
+                "home_assistant_notification_action_processed",
+                extra={
+                    "action": action_id,
+                    "decision": decision.decision,
+                    "visitor_pass_id": decision.pass_id,
+                    "request_id": decision.request_id,
+                    "admin_message": result.get("admin_message"),
+                },
+            )
+            await event_bus.publish(
+                "home_assistant.notification_action_processed",
+                {
+                    "action": action_id,
+                    "decision": decision.decision,
+                    "visitor_pass_id": decision.pass_id,
+                    "request_id": decision.request_id,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "home_assistant_notification_action_failed",
+                extra={
+                    "action": action_id,
+                    "decision": decision.decision,
+                    "visitor_pass_id": decision.pass_id,
+                    "request_id": decision.request_id,
+                    "error": str(exc),
+                },
+            )
 
     async def _sync_gate_state(
         self,

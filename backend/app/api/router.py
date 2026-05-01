@@ -25,6 +25,7 @@ from app.api.v1 import (
     users,
     visitor_passes,
     webhooks,
+    whatsapp,
 )
 from app.simulation.router import router as simulation_router
 
@@ -41,6 +42,7 @@ api_router.include_router(gate_malfunctions.router, prefix="/gate-malfunctions",
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
 api_router.include_router(icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"])
 api_router.include_router(discord.router, prefix="/integrations/discord", tags=["Integrations"])
+api_router.include_router(whatsapp.router, prefix="/integrations/whatsapp", tags=["Integrations"])
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
 api_router.include_router(notification_snapshots.router, prefix="/notification-snapshots", tags=["Notifications"])

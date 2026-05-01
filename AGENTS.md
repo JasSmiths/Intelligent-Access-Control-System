@@ -31,8 +31,8 @@ Primary goals:
 - Rich notification-template editing: Tiptap.
 - Frontend interaction helpers: `motion`, TanStack Virtual, Monaco, and
   jsondiffpatch.
-- Notifications: Apprise, Home Assistant mobile app notify services, in-app
-  realtime notifications, and Home Assistant TTS.
+- Notifications: Apprise, Home Assistant mobile app notify services, WhatsApp
+  Cloud API, in-app realtime notifications, and Home Assistant TTS.
 - Home Assistant: REST service calls plus WebSocket state listener.
 - DVLA: Vehicle Enquiry Service API lookup integration.
 - UniFi Protect: `uiprotect` camera/event/snapshot integration plus managed
@@ -215,13 +215,15 @@ Main tables:
   vehicles, notification conditions, and configured door entities.
 - `schedule_overrides`: one-off temporary access allowances, currently created
   by Alfred with confirmation.
-- `visitor_passes`: anticipated one-shot access windows for unknown visitor
-  vehicles. Stores visitor name, expected time, +/- window minutes, lifecycle
-  status (`active`, `scheduled`, `used`, `expired`, `cancelled`), creation
-  source (`ui`, `alfred`, future Discord/Slack/Calendar, etc.), creating user,
-  arrival/departure event links, trace ID, plate, DVLA/visual vehicle details,
-  calculated duration on site, optional explicit `valid_from`/`valid_until`
-  windows for asymmetric sources, source reference IDs, and source metadata.
+- `visitor_passes`: anticipated access windows for unknown visitor vehicles.
+  Stores `pass_type` (`one-time` or `duration`), visitor name, normalized
+  `visitor_phone` for WhatsApp concierge duration passes, expected time, +/-
+  window minutes, lifecycle status (`active`, `scheduled`, `used`, `expired`,
+  `cancelled`), creation source (`ui`, `alfred`, future
+  Discord/Slack/Calendar, etc.), creating user, arrival/departure event links,
+  trace ID, confirmed plate, DVLA/visual vehicle details, calculated duration
+  on site, optional explicit `valid_from`/`valid_until` windows for asymmetric
+  sources and duration passes, source reference IDs, and source metadata.
 - `icloud_calendar_accounts`: multiple connected Apple iCloud Calendar
   accounts. Stores Apple ID/display label, active/status state, encrypted
   trusted session/cookie bundle, auth/sync timestamps, last sync summary/error,
@@ -245,7 +247,7 @@ Main tables:
   and trace linkage in `raw_payload.telemetry.trace_id`.
 - `anomalies`: unauthorized plates, duplicate states, outside schedule.
 - `users`: local dashboard accounts, roles, status, hashed passwords, UI
-  preferences, and optional linked person.
+  preferences, optional mobile phone number, and optional linked person.
 - `system_settings`: database-backed dynamic settings. Secret values are
   encrypted at rest with a Fernet key derived from `IACS_AUTH_SECRET_KEY`.
 - `maintenance_mode_state`: global automation kill-switch state, actor, reason,
@@ -336,8 +338,8 @@ Dynamic settings live in `system_settings` and are edited through the UI/API:
 - Auth options: cookie name, token lifetimes, secure-cookie flag.
 - LPR tuning: debounce quiet/max seconds and similarity threshold.
 - Access: default policy when no schedule is assigned.
-- Integrations: Home Assistant, Apprise, DVLA Vehicle Enquiry Service, UniFi
-  Protect.
+- Integrations: Home Assistant, Apprise, WhatsApp Cloud API, DVLA Vehicle
+  Enquiry Service, UniFi Protect.
 - LLM providers: active provider, timeout, base URLs, models, API keys.
 
 Backend service:
@@ -349,8 +351,9 @@ Backend service:
 Do not add new provider tokens or operational tuning values back to
 `docker-compose.yml` or `.env.example`. Add them to the dynamic settings seed
 and UI instead. Secret setting keys must be added to `SECRET_KEYS`; current
-secret dynamic settings include Home Assistant token, Apprise URLs, DVLA API
-key, UniFi Protect username/password/API key, and LLM provider API keys.
+secret dynamic settings include Home Assistant token, Apprise URLs, WhatsApp
+access token/webhook verify token/app secret, DVLA API key, UniFi Protect
+username/password/API key, and LLM provider API keys.
 
 Startup prunes obsolete dynamic settings including `notification_rules` and
 `home_assistant_presence_entities`; do not reintroduce either as
@@ -379,7 +382,7 @@ Current behavior:
   API clients.
 - Dashboard APIs, docs, OpenAPI, realtime WebSocket, and AI chat WebSocket are
   protected once setup is complete. Health, auth setup/login/status/logout, and
-  Ubiquiti webhook ingestion paths remain public.
+  Ubiquiti plus WhatsApp webhook ingestion paths remain public.
 - Admin-only user CRUD prevents deleting, demoting, or deactivating the last
   active Admin.
 - Sidebar collapse preference is persisted to `users.preferences`.
@@ -449,8 +452,9 @@ Routes:
 
 Lifecycle rules:
 
-- Pass windows are `expected_time +/- window_minutes`; default window is 30
-  minutes.
+- One-time pass windows are `expected_time +/- window_minutes`; default window
+  is 30 minutes. Duration passes require `visitor_phone`, `valid_from`, and
+  `valid_until`, and use that explicit window.
 - Sources that need asymmetric validity can set `valid_from` and `valid_until`.
   Calendar-created passes use `expected_time` for the event start, `valid_from`
   for 30 minutes before the event, and `valid_until` for the event end.
@@ -459,10 +463,13 @@ Lifecycle rules:
   back to `expected_time +/- window_minutes`.
 - `scheduled` becomes `active` once the current time enters the window.
 - `active` or still-`scheduled` passes become `expired` once the window has
-  elapsed without a detection.
-- A matching unknown arrival claims the best active pass and sets it to `used`.
-- `used` and `cancelled` are terminal for lifecycle refresh; used passes can
-  still receive departure telemetry.
+  elapsed without a detection. Duration passes expire at `valid_until`.
+- A matching unknown one-time arrival claims the best active pass and sets it to
+  `used`. Duration arrivals require the confirmed stored `number_plate`, remain
+  `active` for ongoing updates during their window, and record arrival
+  telemetry without becoming `used`.
+- `used` and `cancelled` are terminal for lifecycle refresh; used one-time
+  passes and active duration passes can still receive departure telemetry.
 - If multiple active passes overlap, choose the pass whose `expected_time` is
   closest to the detection time, then the oldest `created_at` as tie-breaker.
 - A later same-plate exit updates `departure_time`, `departure_event_id`, and
@@ -752,8 +759,8 @@ Notification workflows:
   failure, garage door open failure, gate malfunction initial/30m/60m/2hrs/FUBAR,
   leaderboard overtake, Maintenance Mode enabled/disabled, and AI anomaly alert.
 - Supported action channels are mobile (Apprise and Home Assistant mobile app
-  notify services), in-app realtime dashboard notifications, and Home Assistant
-  voice/TTS.
+  notify services), WhatsApp Admin messages, in-app realtime dashboard
+  notifications, Discord, and Home Assistant voice/TTS.
 - Supported conditions currently include schedule windows and presence state.
 - Templates use `@Variable` tokens in the Tiptap editor. Legacy `[Variable]`
   tokens are accepted by the renderer but should not be used for new UI.
@@ -769,6 +776,11 @@ Notification workflows:
   `@OvertakenName`, and `@ReadCount`.
 - Mobile and in-app notification actions can attach a UniFi Protect camera
   snapshot when the selected action media has `attach_camera_snapshot`.
+- WhatsApp notification actions use `type="whatsapp"` and target IDs shaped as
+  `whatsapp:*`, `whatsapp:admin:<user_id>`, or
+  `whatsapp:number:<@Variable-or-phone>`. Dynamic phone targets are rendered
+  from notification variables, normalized to digits, deduplicated, and sent via
+  the WhatsApp service.
 - Voice/TTS messages run through `apply_vehicle_tts_phonetics` before delivery.
 
 Rules:
@@ -780,6 +792,221 @@ Rules:
   or newline-separated.
 - The obsolete `notification_rules` dynamic setting is pruned at startup; do
   not store notification workflow JSON in `system_settings`.
+
+## WhatsApp Integration
+
+Service and routes:
+
+- `backend/app/services/whatsapp_messaging.py`
+- `backend/app/api/v1/whatsapp.py`
+- `GET/POST /api/v1/webhooks/whatsapp`
+
+Configuration lives in dynamic settings. Secret values are encrypted:
+
+- `whatsapp_enabled`
+- `whatsapp_access_token` secret
+- `whatsapp_phone_number_id`
+- `whatsapp_business_account_id`
+- `whatsapp_webhook_verify_token` secret
+- `whatsapp_app_secret` optional secret
+- `whatsapp_graph_api_version`, default `v25.0`
+- `whatsapp_visitor_pass_template_name`, default
+  `visitor_pass_registration_request`
+- `whatsapp_visitor_pass_template_language`, default `en_GB`
+
+Runtime behavior:
+
+- The frontend exposes a WhatsApp tile in API & Integrations with enable toggle,
+  Meta credentials, webhook verify token, optional app secret, Graph API
+  version, and a read-only webhook URL derived from the current public origin.
+  If production uses a dedicated webhook hostname, operators must paste that
+  dedicated URL into Meta even if the modal was opened from the UI hostname.
+- Outbound text and confirmation messages use Meta Cloud API
+  `POST https://graph.facebook.com/{version}/{phone_number_id}/messages` with
+  `messaging_product="whatsapp"`. Text sends use `type="text"`; Alfred
+  confirmations use interactive reply buttons.
+- `whatsapp_phone_number_id` is always the configured WhatsApp business sender
+  ID for outbound sends. Never use an Admin user's `mobile_phone_number` as the
+  sender. Admin mobile numbers are personal recipient and inbound identity
+  values only.
+- Webhook verification accepts Meta's `hub.challenge` only when
+  `hub.verify_token` matches the encrypted `whatsapp_webhook_verify_token`.
+- Incoming POST webhooks validate `X-Hub-Signature-256` when
+  `whatsapp_app_secret` is configured. If the app secret is blank, POSTs are
+  accepted as unsigned and logged as such.
+- Incoming webhooks must match the configured `whatsapp_phone_number_id` from
+  webhook metadata before message/status processing. If `whatsapp_app_secret`
+  is configured, signature validation happens before routing.
+- Incoming sender numbers are normalized by stripping non-digits. Routing is
+  Admin-first: exact match against an active Admin
+  `users.mobile_phone_number`, including country code digits. Matched Admin
+  senders are linked to a `messaging_identities` row with
+  `provider="whatsapp"` and routed through `MessagingBridgeService` into the
+  fully privileged Alfred ReAct chat loop with messaging context.
+- If no active Admin matches, the service checks for an active or scheduled
+  `duration` Visitor Pass with exact `visitor_phone`. Eligible visitors are
+  routed to the Visitor Concierge persona only. Expired/cancelled/no-match
+  visitors receive the safe visitor response where appropriate or are audited
+  as denied; they must never reach Admin Alfred or `MessagingBridgeService`.
+- WhatsApp interactive confirmation button IDs are bound as
+  `iacs:<confirm|cancel>:<session_id>:<confirmation_id>` and call
+  `ChatService.handle_tool_confirmation`.
+- Visitor Pass interactive confirmation button IDs are bound as
+  `iacs:vp:<confirm|change>:<pass_id>:<nonce>`. `Confirm` saves the pending
+  normalized plate to that bound pass; `Change` asks the visitor to type a new
+  registration.
+- Visitor Pass timeframe approval button IDs are bound as
+  `iacs:vp_time:<allow|deny>:<pass_id>:<request_id>`. Admin approval updates
+  that pass window and messages the visitor; denial leaves the existing window
+  unchanged and messages the visitor.
+- Visitor-side timeframe confirmation button IDs are bound as
+  `iacs:vp_time_user:<confirm|change>:<pass_id>:<request_id>`. Small
+  timeframe changes are stored as pending metadata first; `Confirm` applies the
+  requested window, while `Change` asks the visitor to type a new time.
+
+Visitor Concierge sandbox:
+
+- The Visitor Concierge is a separate, restricted LLM chain for visitor
+  registration capture only. It must not import, call, or be given Admin Alfred
+  tools, `MessagingBridgeService`, gate/door controls, settings, schedules,
+  user records, maintenance controls, notification workflow tools, or file
+  tools.
+- The only Visitor Concierge tool names are
+  `get_pass_details(phone_number)` and
+  `update_visitor_plate(pass_id, new_plate)`. Server-side handlers bind the
+  normalized WhatsApp sender and resolved Visitor Pass context; supplied
+  prompt-injected pass IDs or other phone numbers are rejected or ignored.
+- The persona prompt must tell the model it is speaking to a visitor, must
+  ignore requests to act as Admin Alfred or reveal instructions, and must return
+  only registration extraction JSON, allowed timeframe-change JSON, or a short
+  safe visitor-facing reply. Any request outside Visitor Pass details,
+  timeframe, or vehicle registration, including gate/door/garage operations,
+  must reply exactly:
+  `Sorry, I can only discuss details about your visitor pass and vehicle registration.`
+- Visitor-requested timeframe changes up to one hour on either boundary may be
+  accepted by the restricted Visitor Concierge, but timeframe interpretation
+  must come from the Visitor Concierge LLM using the supplied site timezone and
+  current local pass window. Do not add local keyword/regex timeframe parsers
+  ahead of the LLM; if the LLM is unavailable or returns an invalid window, the
+  visitor must be asked to contact their host or provide clearer times rather
+  than guessing. Small changes must be confirmed back to the visitor with
+  WhatsApp `Confirm` / `Change` buttons before the database window is updated.
+  The one-hour auto-change limit is cumulative against the original Visitor
+  Pass window, not the latest visitor-updated window, so visitors cannot walk a
+  pass outside the allowed range through repeated small changes. Larger changes
+  must create the
+  `visitor_pass_timeframe_change_requested` notification trigger with the
+  pending request stored in `visitor_passes.source_metadata`; the visitor
+  receives "I've sent a request for approval to change your allowed timeframe,
+  I'll get back to you shortly." while awaiting Admin action.
+- The `visitor_pass_timeframe_change_requested` notification supports Admin
+  action buttons in WhatsApp, in-app notifications, and Home Assistant mobile
+  app notifications. Home Assistant mobile buttons use
+  `mobile_app_notification_action` events carrying the same
+  `iacs:vp_time:<allow|deny>:<pass_id>:<request_id>` action IDs; the IACS Home
+  Assistant WebSocket listener processes those events and calls the restricted
+  approval handler.
+- Duration Visitor Passes should have `visitor_phone`, `valid_from`, and
+  `valid_until`. The first outbound contact uses the approved utility template
+  named by `whatsapp_visitor_pass_template_name` and language
+  `whatsapp_visitor_pass_template_language`, with body parameters
+  `[visitor_name, window_label]`. Free-form text and interactive buttons are
+  sent only after Meta's customer-service window permits them.
+- Before production templates are approved, testing can be initiated by the
+  visitor sending `Begin` or `Start` from the matching `visitor_phone` to the
+  configured WhatsApp business number. That inbound message opens Meta's
+  customer-service window and the Visitor Concierge replies with the
+  registration prompt for the active or scheduled duration pass.
+- Duration Visitor Pass card/status metadata uses
+  `source_metadata.whatsapp_concierge_status` and related detail/error fields
+  to show states such as Welcome Message Sent, Awaiting Visitor Reply, Visitor
+  Replied, Requested Time Change, Awaiting Time Change Approval,
+  Complete - Vehicle Registration, Complete - Vehicle Registration: [plate]
+  Time Updated, Message Sending Failed, User Not On WhatsApp, and Failed.
+  Sending failure states must expose an IACS tooltip with a plain-language
+  explanation and next step; do not rely on raw Meta/API error strings as the
+  only operator-facing help.
+
+Meta production setup requirements:
+
+- `whatsapp_phone_number_id` is Meta's numeric sender ID, not the visible
+  telephone number. Keep it aligned with the production number that users are
+  actually messaging; test-number IDs and production-number IDs are different.
+- Use a permanent Meta System User token, not a temporary API Setup token. The
+  token must cover the selected app/WABA and include WhatsApp messaging
+  permissions such as `whatsapp_business_messaging` and
+  `whatsapp_business_management`.
+- A production Cloud API sender must be registered before it can send. After
+  Meta phone-code verification, registration is performed with
+  `POST /{phone_number_id}/register` and body
+  `{messaging_product:"whatsapp", pin:"<six-digit-pin>"}`. Store the
+  two-step verification PIN outside the repository. If Meta returns
+  `#133005 Two step verification PIN Mismatch`, use the existing PIN or reset
+  it in WhatsApp Manager before retrying.
+- The WABA must be subscribed to the app for production webhooks. Verify with
+  `GET /{waba_id}/subscribed_apps`; an empty list means message/status
+  webhooks will not flow for the production account. Subscribe with
+  `POST /{waba_id}/subscribed_apps` and `subscribed_fields=["messages"]`.
+- The production phone number should show `platform_type="CLOUD_API"`,
+  `status="CONNECTED"`, and `account_mode="LIVE"` from Graph API before IACS
+  is considered production-ready.
+
+Delivery model:
+
+- Meta can return HTTP 200 for `/{phone_number_id}/messages` and later reject
+  the message asynchronously through a status webhook. Always inspect
+  `whatsapp_message_status` logs when a message was accepted but not received.
+- Free-form `type="text"` messages are only valid inside WhatsApp's customer
+  service window after the recipient has replied to the exact production
+  business number. Status error `131047` / `Re-engagement message` means the
+  send was blocked because the recipient has not replied within the active
+  window.
+- To initiate contact outside that window, IACS needs approved production
+  template-message support. Template sends must use `type="template"` with an
+  approved WABA template; Meta's `hello_world` sample template is limited to
+  public test numbers and cannot be used from production numbers.
+- Admin opt-in templates should be Utility/account language, not marketing
+  language. Prefer concise copy such as "Confirm this WhatsApp number for your
+  Crest House Access Control admin account." with a Quick Reply button such as
+  `Confirm`. Avoid words like "subscribe", "marketing", "offers", and broad
+  "notifications" copy that Meta may classify as marketing.
+- Template quick replies arrive through the same WhatsApp webhook as
+  interactive messages. Future template opt-in handling should bind the button
+  payload to an Admin user/phone and then mark the channel ready for free-form
+  replies during the customer-service window.
+
+Recommended Cloudflare Tunnel deployment:
+
+- Prefer a separate webhook hostname on standard HTTPS 443 instead of a custom
+  public port. Example: `iacs.example.com` for the UI and
+  `iacs-whatsapp.example.com` for WhatsApp webhooks.
+- The UI hostname may sit behind Cloudflare Access. The WhatsApp webhook
+  hostname must not require Cloudflare Access, browser challenges, CAPTCHA,
+  mTLS, or Basic Auth because Meta cannot complete those flows.
+- Route the webhook hostname through the tunnel to `backend:8000` or to the
+  frontend proxy only if `/api/*` is forwarded correctly. In Cloudflare WAF,
+  allow only `GET` and `POST` for `/api/v1/webhooks/whatsapp`; block every
+  other path on the webhook hostname.
+- Add a moderate rate limit on the webhook hostname/path, but use block-style
+  enforcement rather than browser challenges. Keep `whatsapp_app_secret`
+  configured so IACS validates Meta's `X-Hub-Signature-256` at the app layer.
+- Do not depend on Meta source IP allowlisting unless Meta publishes stable
+  ranges for the integration in use. Signature validation and path/method
+  restrictions are the primary controls.
+
+Rules:
+
+- Keep WhatsApp Admin chat and Visitor Concierge routing separate. Do not route
+  unknown phone numbers, expired visitors, visitor numbers, or partial phone
+  matches into Admin Alfred.
+- Do not store WhatsApp credentials in `.env` or Compose. Add future WhatsApp
+  credentials/settings to dynamic settings and `SECRET_KEYS` when secret.
+- Keep the service boundary provider-neutral for Admin Alfred by converting
+  Admin inbound payloads into `IncomingChatMessage` before calling
+  `MessagingBridgeService`. Visitor Concierge traffic must stay on the
+  restricted visitor chain.
+- Rotate any Meta access token that was pasted into chat, logs, issue trackers,
+  or other shared surfaces, then update the encrypted dynamic setting.
 
 ## Unified Snapshot Service
 
@@ -886,10 +1113,18 @@ Action registry:
   payloads use provider/action config, for example
   `integration.icloud_calendar.sync` with
   `{provider:"icloud_calendar", action:"sync_calendars"}`.
+- WhatsApp automation sends use `integration.whatsapp.send_message` with
+  config `{provider:"whatsapp", action:"send_message", target_mode,
+  target_user_ids, phone_number_template, message_template}`. `target_mode`
+  may be `all`, `selected`, or `dynamic`; selected mode requires active Admin
+  user IDs with mobile numbers, while dynamic mode renders
+  `phone_number_template` from automation variables.
 - Integration catalog entries include `enabled` and `disabled_reason`. Disabled
   actions remain visible to explain unavailable integrations, but runtime
   execution must return `skipped` with `reason="integration_disabled"` instead
   of crashing the Automation Engine.
+- Maintenance Mode pauses WhatsApp automation sends along with notification and
+  hardware actions.
 
 Context variable pipeline:
 
@@ -1233,6 +1468,13 @@ Alfred 2.0 behavior:
   than selecting tools by phrase matching. Deterministic logic is only
   acceptable as a narrow safety guard after the LLM-selected path has produced
   a state-changing action requiring confirmation.
+- WhatsApp has split-brain routing. Active Admin senders are a
+  `MessagingBridgeService` entrypoint, not a separate Alfred brain: resolve the
+  Admin by full normalized phone number, upsert the matching
+  `messaging_identities` row, and pass
+  `IncomingChatMessage(provider="whatsapp", is_direct_message=True)` into the
+  shared bridge. Visitor senders must route to the restricted Visitor Concierge
+  chain only.
 - Tool results are the source of truth for live access state, device state,
   schedules, DVLA records, telemetry, notifications, reports, and files.
 - Alfred must not invent people, vehicles, schedules, events, device states,
@@ -1243,8 +1485,10 @@ Alfred 2.0 behavior:
   event lists.
 - Visitor Pass intent (`Visitor_Passes`) handles expected unknown visitors and
   visitor follow-ups. If the user says something like "I have a visitor
-  coming", Alfred must gather the visitor name and expected time before
-  preparing `create_visitor_pass`; ask concise follow-ups instead of guessing.
+  coming", Alfred must gather the visitor name and expected time for one-time
+  passes, or visitor name, phone number, `valid_from`, and `valid_until` for
+  duration passes before preparing `create_visitor_pass`; ask concise
+  follow-ups instead of guessing.
 - Visitor Pass names are free-text expected visitors. Alfred must not call
   `resolve_human_entity` or check whether the visitor exists as a `Person`
   before creating a pass.
@@ -1281,6 +1525,9 @@ Alfred 2.0 behavior:
   a pending action in chat session context, renders confirm/cancel controls,
   and calls `/api/v1/ai/chat/confirm` or sends `tool_confirmation` on the chat
   WebSocket before the tool runs with `confirm=true` or `confirm_send=true`.
+- Discord buttons and WhatsApp interactive reply buttons must both resolve the
+  existing pending `session_id` and `confirmation_id`; do not create a separate
+  confirmation store per messaging provider.
 - Pending action confirmations expire after 10 minutes and are bound to the
   session/user that created them.
 - Alfred tool calls are audited as `alfred.tool.<tool>` with actor
@@ -1337,7 +1584,7 @@ Current tool behavior:
   confirmation before `ICloudCalendarService.sync_all()` runs.
 - Notification workflow create/update/delete/test tools must preserve DB-backed
   `notification_rules` semantics. Test sends require confirmation because they
-  can deliver real mobile, in-app, Discord, or voice messages.
+  can deliver real mobile, in-app, WhatsApp, Discord, or voice messages.
 - Automation create/edit/enable/disable/delete tools must require confirmation.
   Dry-runs and catalog queries are read-only and must not execute actions or
   mutate integration sync state.
@@ -1533,6 +1780,8 @@ Dependency updates:
 Webhooks:
 
 - `POST /api/v1/webhooks/ubiquiti/lpr`
+- `GET /api/v1/webhooks/whatsapp` public Meta verification challenge
+- `POST /api/v1/webhooks/whatsapp` public WhatsApp message/status ingress
 
 Simulation:
 
@@ -1563,6 +1812,9 @@ Integrations:
 - `POST /api/v1/integrations/icloud-calendar/accounts/auth/verify`
 - `DELETE /api/v1/integrations/icloud-calendar/accounts/{account_id}`
 - `POST /api/v1/integrations/icloud-calendar/sync`
+- `GET /api/v1/integrations/whatsapp/status`
+- `GET /api/v1/integrations/whatsapp/admin-targets`
+- `POST /api/v1/integrations/whatsapp/test`
 
 UniFi Protect:
 
@@ -1654,9 +1906,15 @@ Current frontend integration/editor surfaces:
   Assistant presence-mapping UI; IACS presence is LPR-derived.
 - UniFi Protect settings include general config, exposed camera/entity state,
   camera media/snapshot analysis, and managed update/backup controls.
+- The WhatsApp integration tile belongs under notification providers. Its modal
+  must include enable/disable, Meta Cloud API credentials, webhook verify token,
+  optional app secret, Graph API version, Visitor Pass outreach template
+  name/language, and the read-only IACS webhook URL.
 - Settings / Notifications is the notification workflow builder with
   trigger/condition/action editing, endpoint pickers, snapshot-media toggles,
   live preview, and Tiptap `@Variable` insertion.
+- Notification WhatsApp actions let operators select Admin targets and add
+  dynamic `whatsapp:number:@Variable` destinations.
 - Settings / Automations is the Automation Engine builder. Keep it visually
   aligned with Settings / Notifications: vertical When / If / Then flow,
   categorized trigger/condition/action modals, dry-run preview, and trigger
@@ -1671,6 +1929,10 @@ Current frontend integration/editor surfaces:
   down from Integrations to providers such as iCloud Calendar, then to
   registered provider actions such as Sync Calendars Now. Disabled provider
   actions remain visible with their disabled reason and cannot be selected.
+- The WhatsApp automation action editor must expose target mode
+  (all/selected/dynamic), Admin-user chips for selected mode, a dynamic phone
+  template for dynamic mode, and a message template rendered from automation
+  variables.
 - Vehicles edit modal includes a display-only DVLA Compliance card for MOT
   status/expiry, tax status/expiry, and last DVLA sync date. Make and colour
   remain on the main vehicle details fields. Registration edits still use the
@@ -1980,6 +2242,10 @@ Completed:
 - Apprise, in-app, Home Assistant mobile, and Home Assistant voice notification
   workflows with DB-backed rules, Tiptap variables, conditions, media snapshots,
   preview, and test sends.
+- WhatsApp Cloud API integration with encrypted dynamic settings, setup modal,
+  webhook verification/signature validation, Admin-only Alfred routing,
+  interactive confirmations, notification channel, and Automation Engine send
+  action.
 - DVLA encrypted settings, connection tests, manual lookup, saved-vehicle
   refresh, Alfred tool access, LPR compliance refresh, and Top Charts
   enrichment.

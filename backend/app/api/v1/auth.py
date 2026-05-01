@@ -40,6 +40,7 @@ class SetupRequest(BaseModel):
     email: EmailStr | None = None
     password: str = Field(min_length=10, max_length=256)
     profile_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
+    mobile_phone_number: str | None = Field(default=None, max_length=40)
 
 
 class UserResponse(BaseModel):
@@ -50,6 +51,7 @@ class UserResponse(BaseModel):
     full_name: str
     profile_photo_data_url: str | None
     email: str | None
+    mobile_phone_number: str | None
     role: str
     is_active: bool
     last_login_at: str | None
@@ -102,6 +104,7 @@ async def first_run_setup(
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
             profile_photo_data_url=request.profile_photo_data_url,
+            mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=request.password,
             role=UserRole.ADMIN,

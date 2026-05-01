@@ -63,6 +63,12 @@ def split_full_name(full_name: str) -> tuple[str, str]:
     return parts[0], parts[1].strip()
 
 
+def normalize_mobile_phone_number(mobile_phone_number: str | None) -> str | None:
+    if not mobile_phone_number:
+        return None
+    return mobile_phone_number.strip() or None
+
+
 def serialize_user(user: User) -> dict[str, Any]:
     first_name = user.first_name or split_full_name(user.full_name)[0]
     last_name = user.last_name or split_full_name(user.full_name)[1]
@@ -74,6 +80,7 @@ def serialize_user(user: User) -> dict[str, Any]:
         "full_name": compose_full_name(first_name, last_name) or user.full_name,
         "profile_photo_data_url": user.profile_photo_data_url,
         "email": user.email,
+        "mobile_phone_number": user.mobile_phone_number,
         "role": user.role.value,
         "is_active": user.is_active,
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
@@ -106,6 +113,7 @@ async def create_user(
     first_name: str | None = None,
     last_name: str | None = None,
     profile_photo_data_url: str | None = None,
+    mobile_phone_number: str | None = None,
     password: str,
     role: UserRole = UserRole.STANDARD,
     email: str | None = None,
@@ -125,6 +133,7 @@ async def create_user(
         full_name=resolved_full_name,
         profile_photo_data_url=profile_photo_data_url,
         email=email.strip().lower() if email else None,
+        mobile_phone_number=normalize_mobile_phone_number(mobile_phone_number),
         password_hash=hash_password(password),
         role=role,
         is_active=is_active,

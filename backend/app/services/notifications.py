@@ -41,6 +41,7 @@ from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service, visitor_pass_timeframe_button_id
 
 logger = get_logger(__name__)
 
@@ -271,6 +272,12 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "description": "A Visitor Pass window elapsed without being used.",
             },
             {
+                "value": "visitor_pass_timeframe_change_requested",
+                "label": "Visitor Pass Timeframe Change Requested",
+                "severity": "warning",
+                "description": "A WhatsApp visitor requested a Visitor Pass timeframe change that needs Admin approval.",
+            },
+            {
                 "value": "visitor_pass_used",
                 "label": "Visitor Pass Used",
                 "severity": "info",
@@ -358,6 +365,21 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
                 "token": "@VisitorPassDurationOnSite",
                 "label": "Visitor Pass duration on site",
             },
+            {
+                "name": "VisitorPassCurrentWindow",
+                "token": "@VisitorPassCurrentWindow",
+                "label": "Visitor Pass current window",
+            },
+            {
+                "name": "VisitorPassRequestedWindow",
+                "token": "@VisitorPassRequestedWindow",
+                "label": "Visitor Pass requested window",
+            },
+            {
+                "name": "VisitorPassVisitorMessage",
+                "token": "@VisitorPassVisitorMessage",
+                "label": "Visitor Pass visitor message",
+            },
         ],
     },
     {
@@ -431,6 +453,10 @@ MOCK_FACTS = {
     "visitor_pass_vehicle_make": "Peugeot",
     "visitor_pass_vehicle_colour": "Silver",
     "visitor_pass_duration_on_site": "1h 25m",
+    "visitor_pass_current_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
+    "visitor_pass_requested_window": "01 May 2026, 10:00 to 01 May 2026, 20:00",
+    "visitor_pass_timeframe_request_id": "request-1",
+    "visitor_pass_visitor_message": "Can I stay two hours longer?",
 }
 
 
@@ -501,6 +527,7 @@ class NotificationService:
 
         voice_endpoints = await self._voice_endpoint_catalog(config)
         discord_endpoints = await self._discord_endpoint_catalog()
+        whatsapp_endpoints = await self._whatsapp_endpoint_catalog()
         return [
             {
                 "id": "mobile",
@@ -536,6 +563,13 @@ class NotificationService:
                 "provider": "Discord",
                 "configured": bool(discord_endpoints),
                 "endpoints": discord_endpoints,
+            },
+            {
+                "id": "whatsapp",
+                "name": "WhatsApp",
+                "provider": "Meta WhatsApp Cloud API",
+                "configured": bool(whatsapp_endpoints),
+                "endpoints": whatsapp_endpoints,
             },
         ]
 
@@ -947,6 +981,7 @@ class NotificationService:
                     "event_type": context.event_type,
                     "severity": context.severity,
                     "snapshot": action.get("snapshot") or None,
+                    "actions": notification_action_buttons(context),
                 },
             )
             return NotificationActionOutcome(delivered=True)
@@ -954,6 +989,9 @@ class NotificationService:
             return await self._send_voice(action, config)
         if action_type == "discord":
             await self._send_discord(action, context)
+            return NotificationActionOutcome(delivered=True)
+        if action_type == "whatsapp":
+            await self._send_whatsapp(action, context)
             return NotificationActionOutcome(delivered=True)
         raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
 
@@ -1023,6 +1061,7 @@ class NotificationService:
             return False
         image_url = snapshot.public_url if snapshot else None
         image_content_type = snapshot.content_type if snapshot else None
+        mobile_actions = home_assistant_notification_actions(context)
         notifier = HomeAssistantMobileAppNotifier()
         delivered_any = False
         for target in targets:
@@ -1034,6 +1073,7 @@ class NotificationService:
                     context,
                     image_url=image_url,
                     image_content_type=image_content_type,
+                    actions=mobile_actions,
                 )
                 delivered_any = True
             except NotificationDeliveryError as exc:
@@ -1059,6 +1099,13 @@ class NotificationService:
         finally:
             for path in attachments:
                 delete_notification_snapshot(path)
+
+    async def _send_whatsapp(self, action: dict[str, Any], context: NotificationContext) -> None:
+        await get_whatsapp_messaging_service().send_notification_action(
+            action,
+            context,
+            variables=context_variables(context),
+        )
 
     async def _send_voice(self, action: dict[str, Any], config) -> NotificationActionOutcome:
         targets = await self._select_voice_targets(config, action)
@@ -1269,6 +1316,13 @@ class NotificationService:
         )
         return endpoints
 
+    async def _whatsapp_endpoint_catalog(self) -> list[dict[str, Any]]:
+        try:
+            return await get_whatsapp_messaging_service().available_admin_targets()
+        except Exception as exc:
+            logger.debug("whatsapp_endpoint_catalog_failed", extra={"error": str(exc)})
+            return []
+
     async def _home_assistant_mobile_endpoint_catalog(self, config) -> list[dict[str, Any]]:
         targets = await self._all_home_assistant_mobile_targets(config)
         if not targets:
@@ -1426,6 +1480,33 @@ def notification_context_payload(context: NotificationContext) -> dict[str, Any]
         "severity": context.severity,
         "facts": dict(context.facts),
     }
+
+
+def notification_action_buttons(context: NotificationContext) -> list[dict[str, str]]:
+    if context.event_type != "visitor_pass_timeframe_change_requested":
+        return []
+    pass_id = str(context.facts.get("visitor_pass_id") or "").strip()
+    request_id = str(context.facts.get("visitor_pass_timeframe_request_id") or "").strip()
+    if not pass_id or not request_id:
+        return []
+    base_path = f"/api/v1/visitor-passes/{pass_id}/timeframe-requests/{request_id}"
+    return [
+        {"id": "allow", "label": "Allow", "method": "POST", "path": f"{base_path}/allow"},
+        {"id": "deny", "label": "Deny", "method": "POST", "path": f"{base_path}/deny"},
+    ]
+
+
+def home_assistant_notification_actions(context: NotificationContext) -> list[dict[str, str | bool]]:
+    if context.event_type != "visitor_pass_timeframe_change_requested":
+        return []
+    pass_id = str(context.facts.get("visitor_pass_id") or "").strip()
+    request_id = str(context.facts.get("visitor_pass_timeframe_request_id") or "").strip()
+    if not pass_id or not request_id:
+        return []
+    return [
+        {"action": visitor_pass_timeframe_button_id("allow", pass_id, request_id), "title": "Allow"},
+        {"action": visitor_pass_timeframe_button_id("deny", pass_id, request_id), "title": "Deny", "destructive": True},
+    ]
 
 
 def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[NotificationContext]:
@@ -1770,6 +1851,9 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "VisitorPassVehicleMake": visitor_pass_make,
         "VisitorPassVehicleColour": visitor_pass_colour,
         "VisitorPassDurationOnSite": visitor_pass_duration,
+        "VisitorPassCurrentWindow": pick("visitor_pass_current_window"),
+        "VisitorPassRequestedWindow": pick("visitor_pass_requested_window"),
+        "VisitorPassVisitorMessage": pick("visitor_pass_visitor_message"),
         "NewWinnerName": pick("new_winner_name", "winner_name"),
         "OvertakenName": pick("overtaken_name", "previous_winner_name"),
         "ReadCount": pick("read_count", "leaderboard_read_count"),
@@ -1863,7 +1947,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         action_type = str(raw.get("type") or "")
-        if action_type not in {"mobile", "voice", "in_app", "discord"}:
+        if action_type not in {"mobile", "voice", "in_app", "discord", "whatsapp"}:
             continue
         actions.append(
             {

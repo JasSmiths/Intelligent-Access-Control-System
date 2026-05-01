@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, ICloudCalendarAccount
 from app.services.icloud_calendar import ICloudCalendarError, get_icloud_calendar_service
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 
 IntegrationEnabledCheck = Callable[[], Awaitable[bool]]
@@ -30,6 +31,7 @@ class IntegrationActionDefinition:
     is_enabled: IntegrationEnabledCheck
     execute: IntegrationActionHandler
     disabled_reason: str = "Integration is not configured."
+    default_config: dict[str, Any] | None = None
 
     def action_catalog(self, status: "IntegrationActionStatus | None" = None) -> dict[str, Any]:
         status = status or IntegrationActionStatus(enabled=True)
@@ -44,7 +46,7 @@ class IntegrationActionDefinition:
             "integration_provider": self.provider,
             "integration_provider_label": self.provider_label,
             "integration_action_key": self.action,
-            "default_config": {
+            "default_config": self.default_config or {
                 "provider": self.provider,
                 "action": self.action,
             },
@@ -109,6 +111,18 @@ def integration_action_config(action_type: str, config: dict[str, Any]) -> dict[
     action = integration_action_for_type(action_type)
     if not action:
         return {}
+    if action_type == "integration.whatsapp.send_message":
+        target_mode = str(config.get("target_mode") or "selected")
+        if target_mode not in {"all", "selected", "dynamic"}:
+            target_mode = "selected"
+        return {
+            "provider": "whatsapp",
+            "action": "send_message",
+            "target_mode": target_mode,
+            "target_user_ids": normalize_string_list(config.get("target_user_ids")),
+            "phone_number_template": str(config.get("phone_number_template") or ""),
+            "message_template": str(config.get("message_template") or "@Subject"),
+        }
     return {
         "provider": str(config.get("provider") or action.provider),
         "action": str(config.get("action") or action.action),
@@ -155,7 +169,12 @@ async def _icloud_calendar_enabled() -> bool:
                 .where(ICloudCalendarAccount.encrypted_session_bundle.is_not(None))
                 .limit(1)
             )
-        )
+    )
+
+
+async def _whatsapp_enabled() -> bool:
+    status = await get_whatsapp_messaging_service().status()
+    return bool(status.get("configured"))
 
 
 async def _execute_icloud_calendar_sync(
@@ -202,11 +221,31 @@ async def _execute_icloud_calendar_sync(
     return response
 
 
+async def _execute_whatsapp_send_message(
+    session: AsyncSession,
+    action: dict[str, Any],
+    context: Any,
+    rule: AutomationRule,
+) -> dict[str, Any]:
+    return await get_whatsapp_messaging_service().execute_automation_action(
+        session,
+        action,
+        context,
+        rule=rule,
+    )
+
+
 def _coerce_uuid(value: Any) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 INTEGRATION_ACTIONS = [
@@ -221,6 +260,26 @@ INTEGRATION_ACTIONS = [
         is_enabled=_icloud_calendar_enabled,
         execute=_execute_icloud_calendar_sync,
         disabled_reason="No active connected iCloud Calendar account has a valid session.",
+    ),
+    IntegrationActionDefinition(
+        type="integration.whatsapp.send_message",
+        provider="whatsapp",
+        provider_label="WhatsApp",
+        provider_description="Send WhatsApp messages through the Meta Cloud API.",
+        action="send_message",
+        label="Send WhatsApp Message",
+        description="Send a WhatsApp text message to Admin users or a dynamic phone-number variable.",
+        is_enabled=_whatsapp_enabled,
+        execute=_execute_whatsapp_send_message,
+        disabled_reason="WhatsApp is not enabled or is missing an access token and phone number ID.",
+        default_config={
+            "provider": "whatsapp",
+            "action": "send_message",
+            "target_mode": "selected",
+            "target_user_ids": [],
+            "phone_number_template": "",
+            "message_template": "@Subject",
+        },
     ),
 ]
 

@@ -106,10 +106,13 @@ type Schedule = {
 };
 
 type VisitorPassStatus = "active" | "scheduled" | "used" | "expired" | "cancelled";
+type VisitorPassType = "one-time" | "duration";
 
 type VisitorPass = {
   id: string;
   visitor_name: string;
+  pass_type: VisitorPassType;
+  visitor_phone: string | null;
   expected_time: string;
   window_minutes: number;
   valid_from: string | null;
@@ -120,6 +123,9 @@ type VisitorPass = {
   creation_source: string;
   source_reference: string | null;
   source_metadata: Record<string, unknown> | null;
+  whatsapp_status: string | null;
+  whatsapp_status_label: string | null;
+  whatsapp_status_detail: string | null;
   created_by_user_id: string | null;
   created_by: string | null;
   arrival_time: string | null;
@@ -572,6 +578,14 @@ type NotificationToast = {
   event_type: string;
   severity: "info" | "warning" | "critical";
   snapshot_url?: string;
+  actions?: NotificationToastAction[];
+};
+
+type NotificationToastAction = {
+  id: string;
+  label: string;
+  method: "POST";
+  path: string;
 };
 
 type UserRole = "admin" | "standard";
@@ -675,7 +689,21 @@ type DiscordIdentity = {
   last_seen_at: string | null;
 };
 
-type NotificationChannelId = "mobile" | "in_app" | "voice" | "discord";
+type WhatsAppStatus = {
+  enabled: boolean;
+  configured: boolean;
+  webhook_configured: boolean;
+  signature_configured: boolean;
+  phone_number_id: string;
+  business_account_id: string;
+  graph_api_version: string;
+  visitor_pass_template_name: string;
+  visitor_pass_template_language: string;
+  admin_target_count: number;
+  last_error: string | null;
+};
+
+type NotificationChannelId = "mobile" | "in_app" | "voice" | "discord" | "whatsapp";
 type NotificationActionType = NotificationChannelId;
 type NotificationConditionType = "schedule" | "presence";
 type PresenceConditionMode = "no_one_home" | "someone_home" | "person_home";
@@ -777,7 +805,7 @@ type WorkflowRuleMenuState = {
   top: number;
 };
 
-type NotificationConfigTooltipState = {
+type TooltipPositionState = {
   left: number;
   placement: "top" | "bottom";
   top: number;
@@ -1218,6 +1246,7 @@ type UserAccount = {
   full_name: string;
   profile_photo_data_url: string | null;
   email: string | null;
+  mobile_phone_number: string | null;
   role: UserRole;
   is_active: boolean;
   last_login_at: string | null;
@@ -1858,6 +1887,7 @@ function notificationToastFromRealtime(event: RealtimeMessage): NotificationToas
   if (snapshot && typeof snapshot === "object" && "image_url" in snapshot) {
     snapshotUrl = stringPayload((snapshot as Record<string, unknown>).image_url);
   }
+  const actions = notificationToastActions(event.payload.actions);
   if (!title && !body) return null;
   return {
     id: `${event.created_at ?? Date.now()}-${eventType}-${Math.random().toString(16).slice(2)}`,
@@ -1866,7 +1896,23 @@ function notificationToastFromRealtime(event: RealtimeMessage): NotificationToas
     event_type: eventType,
     severity: isNotificationSeverity(severity) ? severity : "info",
     snapshot_url: snapshotUrl || undefined,
+    actions: actions.length ? actions : undefined,
   };
+}
+
+function notificationToastActions(value: unknown): NotificationToastAction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const method = stringPayload(item.method).toUpperCase();
+    const action = {
+      id: stringPayload(item.id),
+      label: stringPayload(item.label),
+      method: method === "POST" ? "POST" as const : null,
+      path: stringPayload(item.path),
+    };
+    return action.id && action.label && action.method && action.path ? [action as NotificationToastAction] : [];
+  });
 }
 
 function shouldRefreshDataForRealtimeEvent(event: RealtimeMessage) {
@@ -2020,6 +2066,13 @@ function App() {
     } finally {
       setDashboardRefreshing(false);
     }
+  }, [refresh]);
+
+  const handleNotificationAction = React.useCallback(async (notificationId: string, action: NotificationToastAction) => {
+    if (action.method !== "POST") return;
+    await api.post(action.path);
+    setNotificationToasts((current) => current.filter((item) => item.id !== notificationId));
+    refresh().catch(() => undefined);
   }, [refresh]);
 
   const realtimeRefreshLastRunRef = React.useRef(0);
@@ -2463,6 +2516,7 @@ function App() {
       </main>
       <NotificationToastStack
         notifications={notificationToasts}
+        onAction={handleNotificationAction}
         onDismiss={(id) => setNotificationToasts((current) => current.filter((item) => item.id !== id))}
       />
       <ChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
@@ -2517,14 +2571,18 @@ const AlertTray = React.forwardRef<HTMLDivElement, {
 
 function NotificationToastStack({
   notifications,
+  onAction,
   onDismiss
 }: {
   notifications: NotificationToast[];
+  onAction: (notificationId: string, action: NotificationToastAction) => Promise<void>;
   onDismiss: (id: string) => void;
 }) {
+  const [busyAction, setBusyAction] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<Record<string, string>>({});
   React.useEffect(() => {
     if (!notifications.length) return undefined;
-    const timers = notifications.map((notification) =>
+    const timers = notifications.filter((notification) => !notification.actions?.length).map((notification) =>
       window.setTimeout(() => onDismiss(notification.id), 9000)
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
@@ -2547,6 +2605,34 @@ function NotificationToastStack({
             </div>
             <strong>{notification.title}</strong>
             <p>{notification.body}</p>
+            {notification.actions?.length ? (
+              <div className="notification-toast-actions">
+                {notification.actions.map((action) => {
+                  const actionKey = `${notification.id}:${action.id}`;
+                  return (
+                    <button
+                      className={action.id === "deny" ? "secondary-button danger" : "secondary-button"}
+                      disabled={busyAction !== null}
+                      key={action.id}
+                      onClick={() => {
+                        setBusyAction(actionKey);
+                        setActionError((current) => ({ ...current, [notification.id]: "" }));
+                        onAction(notification.id, action)
+                          .catch((error) => setActionError((current) => ({
+                            ...current,
+                            [notification.id]: error instanceof Error ? error.message : "Unable to complete action"
+                          })))
+                          .finally(() => setBusyAction(null));
+                      }}
+                      type="button"
+                    >
+                      {busyAction === actionKey ? "Working..." : action.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+            {actionError[notification.id] ? <small className="notification-toast-error">{actionError[notification.id]}</small> : null}
           </div>
         </article>
       ))}
@@ -4441,6 +4527,7 @@ function SchedulesView({
 }
 
 const visitorPassStatuses: VisitorPassStatus[] = ["active", "scheduled", "used", "expired", "cancelled"];
+const visitorPassTypes: VisitorPassType[] = ["one-time", "duration"];
 const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "scheduled"]);
 const visitorPassWindowOptions = [30, 60, 90, 120, 180];
 
@@ -4638,6 +4725,8 @@ function VisitorPassCard({
   const vehicleSummary = visitorPassVehicleSummary(visitorPass);
   const windowLabel = visitorPassWindowLabel(visitorPass);
   const sourceLabel = visitorPassSourceLabel(visitorPass.creation_source);
+  const isDuration = visitorPass.pass_type === "duration";
+  const hasTelemetry = visitorPass.status === "used" || Boolean(visitorPass.arrival_time);
   return (
     <article className={`card visitor-pass-card ${visitorPass.status}`}>
       <div className="visitor-pass-card-head">
@@ -4658,11 +4747,18 @@ function VisitorPassCard({
         </div>
         <div>
           <GitBranch size={15} />
-          <span>{sourceLabel}{visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}</span>
+          <span>
+            {isDuration ? "Duration" : sourceLabel}
+            {visitorPass.visitor_phone ? ` · +${visitorPass.visitor_phone}` : visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}
+          </span>
         </div>
       </div>
 
-      {visitorPass.status === "used" ? (
+      {isDuration && visitorPass.whatsapp_status_label ? (
+        <VisitorPassWhatsAppStatus visitorPass={visitorPass} />
+      ) : null}
+
+      {hasTelemetry ? (
         <section className="visitor-pass-telemetry">
           <div className="visitor-pass-vehicle">
             <Car size={17} />
@@ -4683,18 +4779,84 @@ function VisitorPassCard({
       <div className="visitor-pass-actions">
         {editable ? (
           <>
-            <button className="secondary-button" onClick={() => onEdit(visitorPass)} type="button">
-              <Pencil size={15} /> Edit
-            </button>
-            <button className="secondary-button danger" disabled={cancelling} onClick={() => onCancel(visitorPass)} type="button">
-              <X size={15} /> {cancelling ? "Cancelling..." : "Cancel"}
-            </button>
+            <span>{visitorPass.number_plate || (isDuration ? "Plate pending" : "No plate linked")}</span>
+            <div className="visitor-pass-action-buttons">
+              <button className="secondary-button" onClick={() => onEdit(visitorPass)} type="button">
+                <Pencil size={15} /> Edit
+              </button>
+              <button className="secondary-button danger" disabled={cancelling} onClick={() => onCancel(visitorPass)} type="button">
+                <X size={15} /> {cancelling ? "Cancelling..." : "Cancel"}
+              </button>
+            </div>
           </>
         ) : (
           <span>{visitorPass.number_plate || "No plate linked"}</span>
         )}
       </div>
     </article>
+  );
+}
+
+function VisitorPassWhatsAppStatus({ visitorPass }: { visitorPass: VisitorPass }) {
+  const tooltip = visitorPassWhatsAppStatusTooltip(visitorPass);
+  const tooltipId = React.useId();
+  const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+  const label = visitorPass.whatsapp_status_label || "WhatsApp status";
+
+  React.useEffect(() => {
+    if (!tooltipPosition) return undefined;
+    const hideTooltip = () => setTooltipPosition(null);
+    window.addEventListener("resize", hideTooltip);
+    window.addEventListener("scroll", hideTooltip, true);
+    return () => {
+      window.removeEventListener("resize", hideTooltip);
+      window.removeEventListener("scroll", hideTooltip, true);
+    };
+  }, [tooltipPosition]);
+
+  const showTooltip = (target: HTMLElement) => {
+    if (!tooltip) return;
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = Math.min(320, window.innerWidth - 24);
+    const estimatedHeight = Math.min(168, 58 + Math.ceil(tooltip.body.length / 48) * 18);
+    const gap = 10;
+    const placement = rect.bottom + gap + estimatedHeight > window.innerHeight - 8 ? "top" : "bottom";
+    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
+    const top = placement === "bottom"
+      ? rect.bottom + gap
+      : Math.max(12, rect.top - estimatedHeight - gap);
+    setTooltipPosition({ left, placement, top });
+  };
+
+  return (
+    <div
+      aria-describedby={tooltip && tooltipPosition ? tooltipId : undefined}
+      aria-label={tooltip ? `${label}. ${tooltip.body}` : label}
+      className={`visitor-pass-whatsapp-status ${visitorPass.whatsapp_status ?? ""}${tooltip ? " has-tooltip" : ""}`}
+      onBlur={tooltip ? () => setTooltipPosition(null) : undefined}
+      onFocus={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
+      onKeyDown={tooltip ? (event) => {
+        if (event.key === "Escape") setTooltipPosition(null);
+      } : undefined}
+      onMouseEnter={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
+      onMouseLeave={tooltip ? () => setTooltipPosition(null) : undefined}
+      tabIndex={tooltip ? 0 : undefined}
+    >
+      <MessageCircle size={15} />
+      <span>{label}</span>
+      {tooltip && tooltipPosition ? createPortal(
+        <span
+          className={`iacs-tooltip visitor-pass-error-tooltip ${tooltipPosition.placement}`}
+          id={tooltipId}
+          role="tooltip"
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+        >
+          <strong>{tooltip.title}</strong>
+          <span>{tooltip.body}</span>
+        </span>,
+        document.body
+      ) : null}
+    </div>
   );
 }
 
@@ -4710,20 +4872,58 @@ function VisitorPassModal({
   onSaved: () => Promise<void>;
 }) {
   const [visitorName, setVisitorName] = React.useState(visitorPass?.visitor_name ?? "");
+  const [passType, setPassType] = React.useState<VisitorPassType>(visitorPass?.pass_type ?? "one-time");
+  const [visitorPhone, setVisitorPhone] = React.useState(visitorPass?.visitor_phone ? `+${visitorPass.visitor_phone}` : "");
   const [expectedTime, setExpectedTime] = React.useState(() => visitorPass ? new Date(visitorPass.expected_time) : nextVisitorPassDate());
   const [windowMinutes, setWindowMinutes] = React.useState(visitorPass?.window_minutes ?? 30);
+  const [validFrom, setValidFrom] = React.useState(() => visitorPass?.valid_from ? new Date(visitorPass.valid_from) : visitorPass ? new Date(visitorPass.window_start) : nextVisitorPassDate());
+  const [validUntil, setValidUntil] = React.useState(() => {
+    if (visitorPass?.valid_until) return new Date(visitorPass.valid_until);
+    const start = visitorPass ? new Date(visitorPass.window_end) : nextVisitorPassDate();
+    start.setHours(start.getHours() + 2);
+    return start;
+  });
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const isDuration = passType === "duration";
+  const updateDateFromInput = (value: string, setter: (date: Date) => void) => {
+    const iso = fromDateTimeLocal(value);
+    if (!iso) return;
+    const next = new Date(iso);
+    if (!Number.isNaN(next.getTime())) setter(next);
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
+    if (isDuration && !visitorPhone.trim()) {
+      setError("Duration passes need a visitor phone number.");
+      return;
+    }
+    if (isDuration && validUntil <= validFrom) {
+      setError("Duration pass end time must be after the start time.");
+      return;
+    }
     setSubmitting(true);
-    const payload = {
-      visitor_name: visitorName.trim(),
-      expected_time: expectedTime.toISOString(),
-      window_minutes: windowMinutes
-    };
+    const payload = isDuration
+      ? {
+        visitor_name: visitorName.trim(),
+        pass_type: passType,
+        visitor_phone: visitorPhone.trim(),
+        expected_time: validFrom.toISOString(),
+        window_minutes: windowMinutes,
+        valid_from: validFrom.toISOString(),
+        valid_until: validUntil.toISOString()
+      }
+      : {
+        visitor_name: visitorName.trim(),
+        pass_type: passType,
+        visitor_phone: null,
+        expected_time: expectedTime.toISOString(),
+        window_minutes: windowMinutes,
+        valid_from: null,
+        valid_until: null
+      };
     try {
       if (mode === "edit" && visitorPass) {
         await api.patch<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}`, payload);
@@ -4744,7 +4944,7 @@ function VisitorPassModal({
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Visitor Pass" : "New Visitor Pass"}</h2>
-            <p>{formatDate(expectedTime.toISOString())} · +/- {windowMinutes} minutes</p>
+            <p>{isDuration ? `${formatDate(validFrom.toISOString())} to ${formatDate(validUntil.toISOString())}` : `${formatDate(expectedTime.toISOString())} · +/- ${windowMinutes} minutes`}</p>
           </div>
           <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
             <X size={16} />
@@ -4760,24 +4960,80 @@ function VisitorPassModal({
           </div>
         </label>
 
-        <VisitorDateTimePicker value={expectedTime} onChange={setExpectedTime} />
-
-        <div className="visitor-pass-window-select">
-          <span>Time Window</span>
+        <div className="visitor-pass-window-select visitor-pass-type-select">
+          <span>Pass type</span>
           <div>
-            {visitorPassWindowOptions.map((minutes) => (
+            {visitorPassTypes.map((type) => (
               <button
-                aria-pressed={windowMinutes === minutes}
-                className={windowMinutes === minutes ? "active" : ""}
-                key={minutes}
-                onClick={() => setWindowMinutes(minutes)}
+                aria-pressed={passType === type}
+                className={passType === type ? "active" : ""}
+                key={type}
+                onClick={() => setPassType(type)}
                 type="button"
               >
-                +/- {minutes}m
+                {type === "one-time" ? "One-time" : "Duration"}
               </button>
             ))}
           </div>
         </div>
+
+        {isDuration ? (
+          <section className="visitor-pass-duration-fields">
+            <label className="field">
+              <span>Visitor phone</span>
+              <div className="field-control">
+                <Smartphone size={17} />
+                <input
+                  autoComplete="tel"
+                  onChange={(event) => setVisitorPhone(event.target.value)}
+                  placeholder="+447700900123"
+                  required
+                  type="tel"
+                  value={visitorPhone}
+                />
+              </div>
+            </label>
+            <label className="field compact-field">
+              <span>Valid from</span>
+              <input
+                onChange={(event) => updateDateFromInput(event.target.value, setValidFrom)}
+                required
+                type="datetime-local"
+                value={toDateTimeLocal(validFrom.toISOString())}
+              />
+            </label>
+            <label className="field compact-field">
+              <span>Valid until</span>
+              <input
+                onChange={(event) => updateDateFromInput(event.target.value, setValidUntil)}
+                required
+                type="datetime-local"
+                value={toDateTimeLocal(validUntil.toISOString())}
+              />
+            </label>
+          </section>
+        ) : (
+          <>
+            <VisitorDateTimePicker value={expectedTime} onChange={setExpectedTime} />
+
+            <div className="visitor-pass-window-select">
+              <span>Time Window</span>
+              <div>
+                {visitorPassWindowOptions.map((minutes) => (
+                  <button
+                    aria-pressed={windowMinutes === minutes}
+                    className={windowMinutes === minutes ? "active" : ""}
+                    key={minutes}
+                    onClick={() => setWindowMinutes(minutes)}
+                    type="button"
+                  >
+                    +/- {minutes}m
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
 
         <div className="modal-actions">
           <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
@@ -7082,6 +7338,9 @@ function IntegrationsView({ people, realtime, schedules, status }: { people: Per
   const [discordIdentities, setDiscordIdentities] = React.useState<DiscordIdentity[]>([]);
   const [discordLoading, setDiscordLoading] = React.useState(false);
   const [discordError, setDiscordError] = React.useState("");
+  const [whatsappStatus, setWhatsappStatus] = React.useState<WhatsAppStatus | null>(null);
+  const [whatsappLoading, setWhatsappLoading] = React.useState(false);
+  const [whatsappError, setWhatsappError] = React.useState("");
   const [dependencyPackages, setDependencyPackages] = React.useState<DependencyPackage[]>([]);
   const [dependencyStorage, setDependencyStorage] = React.useState<DependencyStorageStatus | null>(null);
   const [dependencyLoading, setDependencyLoading] = React.useState(false);
@@ -7162,6 +7421,17 @@ function IntegrationsView({ people, realtime, schedules, status }: { people: Per
       setDiscordLoading(false);
     }
   }, []);
+  const loadWhatsApp = React.useCallback(async () => {
+    setWhatsappLoading(true);
+    setWhatsappError("");
+    try {
+      setWhatsappStatus(await api.get<WhatsAppStatus>("/api/v1/integrations/whatsapp/status"));
+    } catch (error) {
+      setWhatsappError(error instanceof Error ? error.message : "Unable to load WhatsApp integration.");
+    } finally {
+      setWhatsappLoading(false);
+    }
+  }, []);
   const loadDependencyUpdates = React.useCallback(async () => {
     setDependencyLoading(true);
     setDependencyError("");
@@ -7184,19 +7454,21 @@ function IntegrationsView({ people, realtime, schedules, status }: { people: Per
     await loadProtectUpdateStatus();
     await loadICloudCalendar();
     await loadDiscord();
+    await loadWhatsApp();
     await loadDependencyUpdates();
-  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, reload]);
+  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp, reload]);
 
   React.useEffect(() => {
     loadProtect(false).catch(() => undefined);
     loadProtectUpdateStatus().catch(() => undefined);
     loadICloudCalendar().catch(() => undefined);
     loadDiscord().catch(() => undefined);
+    loadWhatsApp().catch(() => undefined);
     loadDependencyUpdates().catch(() => undefined);
-  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus]);
+  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
 
   const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
-  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, dependencyPackages);
+  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -7305,12 +7577,16 @@ function IntegrationsView({ people, realtime, schedules, status }: { people: Per
           discordIdentities={discordIdentities}
           discordLoading={discordLoading}
           discordStatus={discordStatus}
+          whatsappError={whatsappError}
+          whatsappLoading={whatsappLoading}
+          whatsappStatus={whatsappStatus}
           people={people}
           schedules={schedules}
           values={values}
           onClose={() => setActive(null)}
           onICloudChanged={loadICloudCalendar}
           onDiscordChanged={loadDiscord}
+          onWhatsAppChanged={loadWhatsApp}
           onProtectUpdateChanged={async () => {
             await loadProtectUpdateStatus();
             await loadProtect(true);
@@ -7321,6 +7597,7 @@ function IntegrationsView({ people, realtime, schedules, status }: { people: Per
           onSaved={async (updates) => {
             await save(updates);
             await loadProtect(true);
+            await loadWhatsApp();
             await loadDependencyUpdates();
             setActive(null);
           }}
@@ -7463,6 +7740,7 @@ function dependenciesForIntegrationKey(key: string, dependencies: DependencyPack
     icloud_calendar: ["icloud", "pyicloud"],
     apprise: ["apprise", "notifications"],
     discord: ["discord", "discord.py", "discord messaging"],
+    whatsapp: ["whatsapp"],
     dvla: ["dvla"],
     unifi_protect: ["unifi", "uiprotect"],
     openai: ["openai"],
@@ -7491,6 +7769,8 @@ function integrationDefinitions(
   icloudError: string,
   discordStatus: DiscordStatus | null,
   discordError: string,
+  whatsappStatus: WhatsAppStatus | null,
+  whatsappError: string,
   dependencies: DependencyPackage[] = []
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
@@ -7588,6 +7868,34 @@ function integrationDefinitions(
         { key: "discord_default_notification_channel_id", label: "Default notification channel" },
         { key: "discord_allow_direct_messages", label: "Allow direct messages", type: "select", options: ["false", "true"] },
         { key: "discord_require_mention", label: "Require mention", type: "select", options: ["true", "false"] }
+      ]
+    },
+    {
+      key: "whatsapp",
+      title: "WhatsApp",
+      description: "Bidirectional Alfred chat and WhatsApp notification messages.",
+      category: "notifications",
+      icon: MessageCircle,
+      statusLabel: whatsappError
+        ? "Error"
+        : whatsappStatus?.enabled && whatsappStatus?.configured
+          ? "Enabled"
+          : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id
+            ? "Configured"
+            : "Not Configured",
+      statusTone: whatsappError ? "red" : whatsappStatus?.enabled && whatsappStatus?.configured ? "green" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "blue" : "gray",
+      updateAvailable: hasDependencyUpdate("whatsapp"),
+      notificationChannels: ["whatsapp"],
+      fields: [
+        { key: "whatsapp_enabled", label: "Enabled", type: "select", options: ["false", "true"] },
+        { key: "whatsapp_access_token", label: "Access token", type: "password" },
+        { key: "whatsapp_phone_number_id", label: "Phone Number ID" },
+        { key: "whatsapp_business_account_id", label: "WhatsApp Business Account ID" },
+        { key: "whatsapp_webhook_verify_token", label: "Webhook verify token", type: "password" },
+        { key: "whatsapp_app_secret", label: "App secret", type: "password", help: "Optional. When set, incoming POST webhooks must pass X-Hub-Signature-256 validation." },
+        { key: "whatsapp_graph_api_version", label: "Graph API version" },
+        { key: "whatsapp_visitor_pass_template_name", label: "Visitor Pass template name" },
+        { key: "whatsapp_visitor_pass_template_language", label: "Visitor Pass template language" }
       ]
     },
     {
@@ -9393,10 +9701,14 @@ function IntegrationModal({
   discordIdentities,
   discordLoading,
   discordStatus,
+  whatsappError,
+  whatsappLoading,
+  whatsappStatus,
   people,
   schedules,
   onClose,
   onDiscordChanged,
+  onWhatsAppChanged,
   onICloudChanged,
   onProtectUpdateChanged,
   onProtectRefresh,
@@ -9422,10 +9734,14 @@ function IntegrationModal({
   discordIdentities?: DiscordIdentity[];
   discordLoading?: boolean;
   discordStatus?: DiscordStatus | null;
+  whatsappError?: string;
+  whatsappLoading?: boolean;
+  whatsappStatus?: WhatsAppStatus | null;
   people: Person[];
   schedules: Schedule[];
   onClose: () => void;
   onDiscordChanged?: () => Promise<void>;
+  onWhatsAppChanged?: () => Promise<void>;
   onICloudChanged?: () => Promise<void>;
   onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
@@ -9448,6 +9764,7 @@ function IntegrationModal({
   const isUnifiProtect = definition.key === "unifi_protect";
   const isICloudCalendar = definition.key === "icloud_calendar";
   const isDiscord = definition.key === "discord";
+  const isWhatsApp = definition.key === "whatsapp";
   const hasDependencyUpdates = dependencyPackages.length > 0;
 
   React.useEffect(() => {
@@ -9562,13 +9879,18 @@ function IntegrationModal({
       setFeedback({
         tone: "progress",
         title: "Sending test notification",
-        detail: `Delivering through ${isDiscord ? "Discord" : "Apprise"}.`,
+        detail: `Delivering through ${isDiscord ? "Discord" : isWhatsApp ? "WhatsApp" : "Apprise"}.`,
         activeStep: 1
       });
       if (isDiscord) {
         await api.post("/api/v1/integrations/discord/test", {
           channel_id: form.discord_default_notification_channel_id || undefined,
           message: "This is a test Discord notification from API & Integrations."
+        });
+      } else if (isWhatsApp) {
+        await api.post("/api/v1/integrations/whatsapp/test", {
+          message: "This is a test WhatsApp notification from API & Integrations.",
+          values: coerceSettingsPayload(form)
         });
       } else {
         await api.post("/api/v1/integrations/notifications/test", {
@@ -9580,8 +9902,9 @@ function IntegrationModal({
       setFeedback({
         tone: "success",
         title: "Test notification sent",
-        detail: `${isDiscord ? "Discord" : "Apprise"} accepted the notification request.`
+        detail: `${isDiscord ? "Discord" : isWhatsApp ? "WhatsApp" : "Apprise"} accepted the notification request.`
       });
+      if (isWhatsApp) await onWhatsAppChanged?.();
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -9733,6 +10056,16 @@ function IntegrationModal({
             people={people}
             status={discordStatus ?? null}
           />
+        ) : isWhatsApp ? (
+          <WhatsAppSettingsFields
+            error={whatsappError ?? ""}
+            fields={definition.fields}
+            form={form}
+            isConfiguredSecret={(key) => secretSettingKeys.has(key) && Boolean(values[key])}
+            loading={Boolean(whatsappLoading)}
+            onChange={update}
+            status={whatsappStatus ?? null}
+          />
         ) : (
           <div className="settings-form-grid">
             {definition.fields.map((field) => (
@@ -9748,7 +10081,7 @@ function IntegrationModal({
         )}
         {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
         <div className="modal-actions">
-          {isApprise || isDiscord ? (
+          {isApprise || isDiscord || isWhatsApp ? (
             <button className="secondary-button" onClick={sendTestNotification} disabled={sendingTest} type="button">
               <Send size={15} /> {sendingTest ? "Sending..." : "Send Test"}
             </button>
@@ -10409,6 +10742,82 @@ function DiscordSettingsFields({
   );
 }
 
+function WhatsAppSettingsFields({
+  error,
+  fields,
+  form,
+  isConfiguredSecret,
+  loading,
+  onChange,
+  status
+}: {
+  error: string;
+  fields: SettingFieldDefinition[];
+  form: Record<string, string>;
+  isConfiguredSecret: (key: string) => boolean;
+  loading: boolean;
+  onChange: (key: string, value: string) => void;
+  status: WhatsAppStatus | null;
+}) {
+  const webhookUrl = `${window.location.origin}/api/v1/webhooks/whatsapp`;
+  const copyWebhookUrl = async () => {
+    try {
+      await navigator.clipboard?.writeText(webhookUrl);
+    } catch {
+      window.prompt("WhatsApp webhook URL", webhookUrl);
+    }
+  };
+  return (
+    <div className="discord-settings">
+      <section className="discord-overview">
+        <div className="discord-overview-main">
+          <span className="discord-overview-icon"><MessageCircle size={18} /></span>
+          <div>
+            <strong>{status?.enabled ? "WhatsApp enabled" : "WhatsApp disabled"}</strong>
+            <span>{status?.configured ? `${status.graph_api_version} · ${status.admin_target_count} Admin targets` : status?.last_error || error || "Save the Meta Cloud API credentials to enable Alfred on WhatsApp."}</span>
+            {status?.visitor_pass_template_name ? <small>Visitor Pass template: {status.visitor_pass_template_name} · {status.visitor_pass_template_language || "en_GB"}</small> : null}
+          </div>
+        </div>
+        <Badge tone={error ? "red" : status?.enabled && status?.configured ? "green" : status?.configured ? "blue" : "gray"}>
+          {error ? "Error" : status?.enabled && status?.configured ? "Enabled" : status?.configured ? "Configured" : "Not Configured"}
+        </Badge>
+      </section>
+
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+
+      <div className="settings-form-grid">
+        {fields.map((field) => (
+          <SettingField
+            field={field}
+            key={field.key}
+            isConfiguredSecret={isConfiguredSecret(field.key)}
+            value={form[field.key] ?? ""}
+            onChange={(value) => onChange(field.key, value)}
+          />
+        ))}
+      </div>
+
+      <section className="discord-section">
+        <div className="icloud-section-heading">
+          <strong>Webhook URL</strong>
+          <span>{loading ? "Refreshing" : status?.signature_configured ? "Signed POSTs required" : "Unsigned POSTs accepted"}</span>
+        </div>
+        <label className="field">
+          <span>IACS webhook URL</span>
+          <div className="field-control">
+            <PlugZap size={17} />
+            <input readOnly value={webhookUrl} />
+            <button className="icon-button" onClick={copyWebhookUrl} type="button" aria-label="Copy WhatsApp webhook URL">
+              <Copy size={15} />
+            </button>
+          </div>
+          <small className="field-hint">Use this callback URL in the Meta Developer Portal for WhatsApp webhook verification and message delivery.</small>
+        </label>
+      </section>
+    </div>
+  );
+}
+
 function HomeAssistantSettingsFields({
   discovery,
   discoveryError,
@@ -11062,6 +11471,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
                 <option value="all">All live events</option>
                 <option value="event">Access events</option>
                 <option value="chat">Chat</option>
+                <option value="whatsapp">WhatsApp</option>
                 <option value="gate">Gate</option>
                 <option value="maintenance">Maintenance</option>
                 <option value="telemetry">Telemetry</option>
@@ -11703,6 +12113,12 @@ const notificationChannelMeta: Record<NotificationChannelId, {
     icon: MessageCircle,
     tone: "purple",
     description: "Discord embed delivery to selected channels."
+  },
+  whatsapp: {
+    label: "WhatsApp Message",
+    icon: MessageCircle,
+    tone: "green",
+    description: "WhatsApp Cloud API delivery to Admin users or dynamic phone-number variables."
   }
 };
 
@@ -11897,6 +12313,10 @@ const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<Notifi
   discord: {
     title_template: "@FirstName arrived at the gate",
     message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
+  },
+  whatsapp: {
+    title_template: "@FirstName arrived at the gate",
+    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
   }
 };
 
@@ -11916,6 +12336,7 @@ const vehicleTtsPhoneticPattern = new RegExp(
 function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Vehicle[] }) {
   const [catalog, setCatalog] = React.useState<AutomationCatalogResponse | null>(null);
   const [rules, setRules] = React.useState<AutomationRule[]>([]);
+  const [users, setUsers] = React.useState<UserAccount[]>([]);
   const [draft, setDraft] = React.useState<AutomationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -11956,12 +12377,14 @@ function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Veh
     setLoading(true);
     setError("");
     try {
-      const [nextCatalog, nextRules] = await Promise.all([
+      const [nextCatalog, nextRules, nextUsers] = await Promise.all([
         api.get<AutomationCatalogResponse>("/api/v1/automations/catalog"),
-        api.get<AutomationRule[]>("/api/v1/automations/rules")
+        api.get<AutomationRule[]>("/api/v1/automations/rules"),
+        api.get<UserAccount[]>("/api/v1/users")
       ]);
       setCatalog(nextCatalog);
       setRules(nextRules);
+      setUsers(nextUsers);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load automation rules.");
     } finally {
@@ -12219,6 +12642,7 @@ function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Veh
                                 nodes={draft.triggers}
                                 people={people}
                                 triggerMeta={triggerByType}
+                                users={users}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("trigger")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.map((item) => item.id === node.id ? node : item) }))}
@@ -12235,6 +12659,7 @@ function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Veh
                                 nodes={draft.conditions}
                                 people={people}
                                 triggerMeta={triggerByType}
+                                users={users}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("condition")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.map((item) => item.id === node.id ? node : item) }))}
@@ -12251,6 +12676,7 @@ function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Veh
                                 notificationRules={catalog?.notification_rules ?? []}
                                 people={people}
                                 triggerMeta={triggerByType}
+                                users={users}
                                 variables={variables}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("action")}
@@ -12568,6 +12994,7 @@ function AutomationNodeStack({
   notificationRules = [],
   people,
   triggerMeta,
+  users,
   variables = [],
   vehicles,
   onAdd,
@@ -12583,6 +13010,7 @@ function AutomationNodeStack({
   notificationRules?: Array<{ id: string; name: string }>;
   people: Person[];
   triggerMeta: Map<string, AutomationCatalogItem>;
+  users: UserAccount[];
   variables?: Array<AutomationVariable & { group: string }>;
   vehicles: Vehicle[];
   onAdd: () => void;
@@ -12603,6 +13031,7 @@ function AutomationNodeStack({
           notificationRules={notificationRules}
           people={people}
           variables={variables}
+          users={users}
           vehicles={vehicles}
           onChange={onChange}
           onParseAiSchedule={onParseAiSchedule}
@@ -12623,6 +13052,7 @@ function AutomationNodeCard({
   node,
   notificationRules,
   people,
+  users,
   variables,
   vehicles,
   onChange,
@@ -12635,6 +13065,7 @@ function AutomationNodeCard({
   node: AutomationNode | AutomationAction;
   notificationRules: Array<{ id: string; name: string }>;
   people: Person[];
+  users: UserAccount[];
   variables: Array<AutomationVariable & { group: string }>;
   vehicles: Vehicle[];
   onChange: (node: AutomationNode | AutomationAction) => void;
@@ -12643,6 +13074,9 @@ function AutomationNodeCard({
 }) {
   const Icon = automationNodeIcon(node.type);
   const updateConfig = (config: Record<string, unknown>) => onChange({ ...node, config: { ...node.config, ...config } });
+  const activeWhatsappAdmins = users.filter((user) => user.is_active && user.role === "admin" && user.mobile_phone_number);
+  const whatsappTargetMode = String(node.config.target_mode ?? "selected");
+  const whatsappSelectedUserIds = Array.isArray(node.config.target_user_ids) ? node.config.target_user_ids.map(String) : [];
   return (
     <article className="workflow-action-card automation-node-card">
       <div className="workflow-card-title">
@@ -12728,7 +13162,63 @@ function AutomationNodeCard({
         </label>
       ) : null}
 
-      {node.type.startsWith("integration.") ? (
+      {node.type === "integration.whatsapp.send_message" ? (
+        <div className="automation-integration-action-summary">
+          <MessageCircle size={15} />
+          <span>
+            <strong>WhatsApp</strong>
+            <small>Send text to Admin users or a dynamic phone number.</small>
+          </span>
+          <div className="field-grid compact-field-grid wide-field">
+            <label className="field compact-field">
+              <span>Target mode</span>
+              <select
+                value={whatsappTargetMode}
+                onChange={(event) => updateConfig({
+                  target_mode: event.target.value,
+                  target_user_ids: event.target.value === "selected" ? whatsappSelectedUserIds : [],
+                })}
+              >
+                <option value="selected">Selected Admins</option>
+                <option value="all">All Admins</option>
+                <option value="dynamic">Dynamic number</option>
+              </select>
+            </label>
+          </div>
+          {whatsappTargetMode === "selected" ? (
+            <div className="workflow-target-chips">
+              {activeWhatsappAdmins.length ? activeWhatsappAdmins.map((user) => {
+                const selected = whatsappSelectedUserIds.includes(user.id);
+                return (
+                  <button
+                    className={selected ? "workflow-target-chip selected" : "workflow-target-chip"}
+                    key={user.id}
+                    onClick={() => updateConfig({ target_user_ids: toggleStringList(node.config.target_user_ids, user.id) })}
+                    type="button"
+                  >
+                    <strong>Admin</strong>{displayUserName(user) || user.username}
+                  </button>
+                );
+              }) : <span className="workflow-target-chip unavailable"><strong>Admin</strong>No Admin mobile numbers</span>}
+            </div>
+          ) : null}
+          {whatsappTargetMode === "dynamic" ? (
+            <PlainTemplateEditor
+              label="Phone number template"
+              value={String(node.config.phone_number_template ?? "")}
+              variables={variables}
+              onChange={(phone_number_template) => updateConfig({ phone_number_template })}
+            />
+          ) : null}
+          <PlainTemplateEditor
+            label="Message template"
+            multiline
+            value={String(node.config.message_template ?? "@Subject")}
+            variables={variables}
+            onChange={(message_template) => updateConfig({ message_template })}
+          />
+        </div>
+      ) : node.type.startsWith("integration.") ? (
         <div className="automation-integration-action-summary">
           <PlugZap size={15} />
           <span>
@@ -12980,6 +13470,16 @@ function defaultAutomationConfig(type: string, meta?: AutomationCatalogItem): Re
   if (type.startsWith("garage_door.")) return { target_entity_ids: [] };
   if (type.startsWith("notification.")) return { notification_rule_id: "" };
   if (type === "integration.icloud_calendar.sync") return { provider: "icloud_calendar", action: "sync_calendars" };
+  if (type === "integration.whatsapp.send_message") {
+    return {
+      provider: "whatsapp",
+      action: "send_message",
+      target_mode: "selected",
+      target_user_ids: [],
+      phone_number_template: "",
+      message_template: "@Subject",
+    };
+  }
   return {};
 }
 
@@ -13065,6 +13565,7 @@ function automationCategoryIcon(groupId: string) {
   if (groupId.includes("maintenance")) return Construction;
   if (groupId.includes("visitor")) return UserPlus;
   if (groupId.includes("webhook")) return PlugZap;
+  if (groupId.includes("whatsapp")) return MessageCircle;
   if (groupId.includes("icloud") || groupId.includes("calendar")) return CalendarDays;
   if (groupId.includes("integration")) return PlugZap;
   if (groupId.includes("notification")) return Bell;
@@ -13080,6 +13581,7 @@ function automationNodeIcon(type: string) {
   if (type.startsWith("maintenance_mode.")) return Construction;
   if (type.startsWith("visitor_pass.")) return UserPlus;
   if (type.startsWith("webhook.")) return PlugZap;
+  if (type.startsWith("integration.whatsapp")) return MessageCircle;
   if (type.startsWith("integration.icloud_calendar")) return CalendarDays;
   if (type.startsWith("integration.")) return PlugZap;
   if (type.startsWith("notification.")) return Bell;
@@ -13764,7 +14266,7 @@ function WorkflowStatusFilters({
 
 function NotificationConfigChip({ count, icon: Icon, label }: { count: number; icon: React.ElementType; label: string }) {
   const tooltipId = React.useId();
-  const [tooltipPosition, setTooltipPosition] = React.useState<NotificationConfigTooltipState | null>(null);
+  const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
   const itemName = label === "Triggers" ? "trigger" : label === "Conditions" ? "condition" : "action";
   const tooltip = `${count} ${pluralize(itemName, count)} configured`;
 
@@ -14254,6 +14756,25 @@ function NotificationActionCard({
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
     : "";
   const targetChips = notificationActionTargetChips(action, integration);
+  const whatsappNumberTargets = action.target_ids
+    .filter((target) => target.startsWith("whatsapp:number:"))
+    .map((target) => target.replace(/^whatsapp:number:/, ""))
+    .join("\n");
+  const updateWhatsAppNumberTargets = (value: string) => {
+    const manualTargets = value
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => `whatsapp:number:${item}`);
+    onChange({
+      ...action,
+      target_mode: "selected",
+      target_ids: [
+        ...action.target_ids.filter((target) => !target.startsWith("whatsapp:number:")),
+        ...manualTargets,
+      ],
+    });
+  };
   return (
     <article className="workflow-action-card">
       <div className="workflow-card-title">
@@ -14275,6 +14796,16 @@ function NotificationActionCard({
           </span>
         ))}
       </div>
+
+      {action.type === "whatsapp" ? (
+        <PlainTemplateEditor
+          label="Phone numbers or @Variables"
+          multiline
+          value={whatsappNumberTargets}
+          variables={variables}
+          onChange={updateWhatsAppNumberTargets}
+        />
+      ) : null}
 
       {supportsTitle ? (
         <SafeVariableRichTextEditor
@@ -14832,7 +15363,7 @@ function notificationTriggerGroupIcon(groupId: string) {
 }
 
 function notificationActionCategories(): TwoPaneCategory[] {
-  return (["mobile", "discord", "voice", "in_app"] as NotificationActionType[])
+  return (["mobile", "whatsapp", "discord", "voice", "in_app"] as NotificationActionType[])
     .map((id) => {
       const meta = notificationChannelMeta[id];
       return { id, label: meta.label, count: 0, icon: meta.icon };
@@ -14849,6 +15380,7 @@ function buildNotificationActionMethods(
   const voiceIntegration = integrationById.get("voice");
   const inAppIntegration = integrationById.get("in_app");
   const discordIntegration = integrationById.get("discord");
+  const whatsappIntegration = integrationById.get("whatsapp");
   const mobileEndpoints = concreteNotificationEndpoints(mobileIntegration?.endpoints ?? []);
   const homeAssistantMobileTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("home_assistant_mobile:"));
   const appriseTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("apprise:"));
@@ -14956,10 +15488,33 @@ function buildNotificationActionMethods(
     });
   }
 
+  const whatsappTargets = concreteNotificationEndpoints(whatsappIntegration?.endpoints ?? []);
+  const whatsappDefault = whatsappIntegration?.endpoints.find((endpoint) => endpoint.id === "whatsapp:*");
+  const whatsappMethods: NotificationActionMethod[] = [];
+  if (whatsappDefault || whatsappTargets.length || whatsappIntegration?.configured) {
+    whatsappMethods.push({
+      id: "whatsapp",
+      actionType: "whatsapp",
+      label: "WhatsApp",
+      provider: "WhatsApp",
+      detail: whatsappTargets.length
+        ? `${whatsappTargets.length} Admin target${whatsappTargets.length === 1 ? "" : "s"} available`
+        : "No Admin users with mobile numbers",
+      icon: MessageCircle,
+      tone: "green",
+      targets: whatsappTargets,
+      targetMode: "selected",
+      requiresTarget: true,
+      defaultTargetIds: whatsappTargets[0]?.id ? [whatsappTargets[0].id] : [],
+      unavailableReason: whatsappTargets.length ? undefined : "WhatsApp is configured, but no active Admin users have mobile phone numbers.",
+    });
+  }
+
   return {
     discord: discordMethods.sort(sortNotificationMethods),
     in_app: inAppMethods.sort(sortNotificationMethods),
     mobile: mobileMethods.sort(sortNotificationMethods),
+    whatsapp: whatsappMethods.sort(sortNotificationMethods),
     voice: voiceMethods.sort(sortNotificationMethods),
   };
 }
@@ -15025,6 +15580,10 @@ function notificationActionTargetChips(action: NotificationAction, integration?:
     if (endpoint) {
       return { id: targetId, provider: endpoint.provider, label: endpoint.label, unavailable: false };
     }
+    if (targetId.startsWith("whatsapp:number:")) {
+      const value = targetId.replace(/^whatsapp:number:/, "");
+      return { id: targetId, provider: "WhatsApp", label: value || "Dynamic phone number", unavailable: false };
+    }
     return {
       id: targetId,
       provider: providerLabelForNotificationTarget(targetId, integration),
@@ -15037,6 +15596,7 @@ function notificationActionTargetChips(action: NotificationAction, integration?:
 function providerLabelForNotificationTarget(targetId: string, integration?: NotificationIntegration) {
   if (targetId.startsWith("apprise:")) return "Apprise";
   if (targetId.startsWith("discord:")) return "Discord";
+  if (targetId.startsWith("whatsapp:")) return "WhatsApp";
   if (targetId.startsWith("home_assistant_mobile:") || targetId.startsWith("home_assistant_tts:")) return "Home Assistant";
   if (targetId === "dashboard") return "Dashboard";
   return integration?.provider ?? "Target";
@@ -15136,7 +15696,7 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
 }
 
 function isNotificationActionType(value: string): value is NotificationActionType {
-  return value === "mobile" || value === "in_app" || value === "voice" || value === "discord";
+  return value === "mobile" || value === "in_app" || value === "voice" || value === "discord" || value === "whatsapp";
 }
 
 function normalizeNotificationTargetMode(value: unknown): NotificationTargetMode {
@@ -15495,6 +16055,7 @@ function UsersView({
                   <strong>{displayUserName(user)}</strong>
                   <span>
                     @{user.username}{user.email ? ` • ${user.email}` : ""}
+                    {user.mobile_phone_number ? ` • ${user.mobile_phone_number}` : ""}
                     {user.person_id ? ` • linked to ${people.find((person) => person.id === user.person_id)?.display_name ?? "directory person"}` : ""}
                   </span>
                 </div>
@@ -15556,6 +16117,7 @@ function UserModal({
     first_name: user?.first_name ?? "",
     last_name: user?.last_name ?? "",
     email: user?.email ?? "",
+    mobile_phone_number: user?.mobile_phone_number ?? "",
     profile_photo_data_url: user?.profile_photo_data_url ?? "",
     person_id: user?.person_id ?? "",
     role: user?.role ?? "standard",
@@ -15594,6 +16156,7 @@ function UserModal({
           first_name: form.first_name,
           last_name: form.last_name,
           email: form.email || null,
+          mobile_phone_number: form.mobile_phone_number || null,
           profile_photo_data_url: form.profile_photo_data_url || null,
           person_id: form.person_id || null,
           role: form.role,
@@ -15608,6 +16171,7 @@ function UserModal({
           first_name: form.first_name,
           last_name: form.last_name,
           email: form.email || null,
+          mobile_phone_number: form.mobile_phone_number || null,
           profile_photo_data_url: form.profile_photo_data_url || null,
           person_id: form.person_id || null,
           role: form.role,
@@ -15645,6 +16209,7 @@ function UserModal({
               full_name: `${form.first_name} ${form.last_name}`.trim(),
               profile_photo_data_url: String(form.profile_photo_data_url || "") || null,
               email: form.email || null,
+              mobile_phone_number: String(form.mobile_phone_number || "") || null,
               role: form.role as UserRole,
               is_active: Boolean(form.is_active),
               last_login_at: user?.last_login_at ?? null,
@@ -15696,6 +16261,13 @@ function UserModal({
           <div className="field-control">
             <MessageCircle size={17} />
             <input value={form.email} onChange={(event) => update("email", event.target.value)} type="email" />
+          </div>
+        </label>
+        <label className="field">
+          <span>Mobile phone</span>
+          <div className="field-control">
+            <Smartphone size={17} />
+            <input value={form.mobile_phone_number} onChange={(event) => update("mobile_phone_number", event.target.value)} type="tel" />
           </div>
         </label>
         <label className="field">
@@ -15800,6 +16372,9 @@ const secretSettingKeys = new Set([
   "home_assistant_token",
   "apprise_urls",
   "discord_bot_token",
+  "whatsapp_access_token",
+  "whatsapp_webhook_verify_token",
+  "whatsapp_app_secret",
   "dvla_api_key",
   "unifi_protect_username",
   "unifi_protect_password",
@@ -15959,7 +16534,11 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     discord_role_allowlist: "",
     discord_admin_role_ids: "",
     discord_allow_direct_messages: "false",
-    discord_require_mention: "true"
+    discord_require_mention: "true",
+    whatsapp_enabled: "false",
+    whatsapp_graph_api_version: "v25.0",
+    whatsapp_visitor_pass_template_name: "visitor_pass_registration_request",
+    whatsapp_visitor_pass_template_language: "en_GB"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
@@ -16136,12 +16715,7 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
   const payload: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(form)) {
     if (
-      key.endsWith("_api_key") ||
-      key === "home_assistant_token" ||
-      key === "apprise_urls" ||
-      key === "discord_bot_token" ||
-      key === "unifi_protect_username" ||
-      key === "unifi_protect_password"
+      secretSettingKeys.has(key)
     ) {
       if (!value.trim()) continue;
     }
@@ -16154,7 +16728,7 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       }
     } else if (listSettingKeys.has(key)) {
       payload[key] = value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "discord_allow_direct_messages", "discord_require_mention"].includes(key)) {
+    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "discord_allow_direct_messages", "discord_require_mention", "whatsapp_enabled"].includes(key)) {
       payload[key] = value === "true";
     } else if ([
       "auth_access_token_minutes",
@@ -17214,8 +17788,11 @@ function visitorPassMatches(visitorPass: VisitorPass, query: string) {
   return (
     matches(visitorPass.visitor_name, query) ||
     matches(visitorPass.number_plate ?? "", query) ||
+    matches(visitorPass.visitor_phone ?? "", query) ||
+    matches(visitorPass.pass_type, query) ||
     matches(visitorPass.vehicle_make ?? "", query) ||
     matches(visitorPass.vehicle_colour ?? "", query) ||
+    matches(visitorPass.whatsapp_status_label ?? "", query) ||
     matches(visitorPass.status, query)
   );
 }
@@ -17240,6 +17817,8 @@ function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
   return {
     id,
     visitor_name: visitorName,
+    pass_type: visitorPassTypes.includes(stringPayload(candidate.pass_type) as VisitorPassType) ? stringPayload(candidate.pass_type) as VisitorPassType : "one-time",
+    visitor_phone: stringPayload(candidate.visitor_phone) || null,
     expected_time: expectedTime,
     window_minutes: numberPayload(candidate.window_minutes) || 30,
     valid_from: stringPayload(candidate.valid_from) || null,
@@ -17250,6 +17829,9 @@ function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
     creation_source: stringPayload(candidate.creation_source) || "unknown",
     source_reference: stringPayload(candidate.source_reference) || null,
     source_metadata: isRecord(candidate.source_metadata) ? candidate.source_metadata : null,
+    whatsapp_status: stringPayload(candidate.whatsapp_status) || null,
+    whatsapp_status_label: stringPayload(candidate.whatsapp_status_label) || null,
+    whatsapp_status_detail: stringPayload(candidate.whatsapp_status_detail) || null,
     created_by_user_id: stringPayload(candidate.created_by_user_id) || null,
     created_by: stringPayload(candidate.created_by) || null,
     arrival_time: stringPayload(candidate.arrival_time) || null,
@@ -17276,6 +17858,7 @@ function visitorPassStatusTone(status: VisitorPassStatus): BadgeTone {
 }
 
 function visitorPassWindowLabel(visitorPass: VisitorPass) {
+  if (visitorPass.pass_type === "duration") return "Duration";
   return visitorPass.creation_source === "icloud_calendar" ? "Calendar Sync" : `+/- ${visitorPass.window_minutes}m`;
 }
 
@@ -17287,6 +17870,40 @@ function visitorPassSourceLabel(source: string) {
 function visitorPassVehicleSummary(visitorPass: VisitorPass) {
   const vehicle = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ");
   return [vehicle, visitorPass.number_plate].filter(Boolean).join(" - ");
+}
+
+function visitorPassWhatsAppStatusTooltip(visitorPass: VisitorPass): { title: string; body: string } | null {
+  const status = visitorPass.whatsapp_status || "";
+  if (!["failed", "message_sending_failed", "user_not_on_whatsapp"].includes(status)) return null;
+  const metadataError = isRecord(visitorPass.source_metadata) ? stringPayload(visitorPass.source_metadata.whatsapp_last_error) : "";
+  const rawDetail = [visitorPass.whatsapp_status_detail || "", metadataError].filter(Boolean).join(" ");
+  return {
+    title: visitorPass.whatsapp_status_label || "WhatsApp message issue",
+    body: visitorPassFriendlyWhatsAppError(status, rawDetail),
+  };
+}
+
+function visitorPassFriendlyWhatsAppError(status: string, rawDetail: string) {
+  const detail = rawDetail.toLowerCase();
+  if (status === "user_not_on_whatsapp" || detail.includes("131026") || detail.includes("not a whatsapp") || detail.includes("not on whatsapp") || detail.includes("not registered")) {
+    return "WhatsApp could not find an account for this phone number. Check the number includes the country code, or ask the visitor to message Alfred from WhatsApp first.";
+  }
+  if (detail.includes("131047") || detail.includes("re-engagement") || detail.includes("customer service window")) {
+    return "Meta blocked this message because the visitor has not messaged the WhatsApp business number recently. Ask the visitor to send \"Begin\" to Alfred, then try again.";
+  }
+  if (detail.includes("template")) {
+    return "Meta did not accept the WhatsApp template. Check the approved template name and language in API & Integrations, or ask the visitor to message \"Begin\" while templates are pending.";
+  }
+  if (detail.includes("access token") || detail.includes("oauth") || detail.includes("permission") || detail.includes("401") || detail.includes("403")) {
+    return "Meta rejected the WhatsApp credentials. Check the access token and WhatsApp Business permissions in API & Integrations.";
+  }
+  if (detail.includes("phone_number_id") || detail.includes("phone number id") || detail.includes("sender")) {
+    return "The WhatsApp business sender is not configured correctly. Check the WhatsApp Phone Number ID in API & Integrations.";
+  }
+  if (detail.includes("rate")) {
+    return "WhatsApp is limiting messages right now. Wait a moment, then try sending the message again.";
+  }
+  return "WhatsApp could not send this message. Check the visitor's phone number and the WhatsApp integration settings, then try again.";
 }
 
 function nextVisitorPassDate() {

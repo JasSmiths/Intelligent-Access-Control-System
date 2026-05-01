@@ -19,6 +19,7 @@ from app.models.enums import (
     TimingClassification,
     UserRole,
     VisitorPassStatus,
+    VisitorPassType,
 )
 
 
@@ -102,6 +103,7 @@ class User(Base, TimestampMixin):
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
     email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    mobile_phone_number: Mapped[str | None] = mapped_column(String(40))
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.STANDARD, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -655,6 +657,13 @@ class VisitorPass(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     visitor_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    pass_type: Mapped[VisitorPassType] = mapped_column(
+        Enum(VisitorPassType, native_enum=False, length=20),
+        default=VisitorPassType.ONE_TIME,
+        nullable=False,
+        index=True,
+    )
+    visitor_phone: Mapped[str | None] = mapped_column(String(40), index=True)
     expected_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     window_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -695,7 +704,19 @@ class VisitorPass(Base, TimestampMixin):
 
 Index("ix_visitor_passes_status_expected_time", VisitorPass.status, VisitorPass.expected_time)
 Index("ix_visitor_passes_number_plate_status", VisitorPass.number_plate, VisitorPass.status)
+Index("ix_visitor_passes_visitor_phone_status", VisitorPass.visitor_phone, VisitorPass.status)
 Index("ix_visitor_passes_status_valid_until", VisitorPass.status, VisitorPass.valid_until)
+Index(
+    "ix_visitor_passes_duration_phone_window",
+    VisitorPass.visitor_phone,
+    VisitorPass.status,
+    VisitorPass.valid_from,
+    VisitorPass.valid_until,
+    postgresql_where=(
+        (VisitorPass.pass_type == VisitorPassType.DURATION)
+        & VisitorPass.visitor_phone.is_not(None)
+    ),
+)
 Index(
     "ix_visitor_passes_open_departure_lookup",
     VisitorPass.number_plate,

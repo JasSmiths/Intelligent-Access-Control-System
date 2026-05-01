@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
@@ -24,6 +25,7 @@ class HomeAssistantMobileAppNotifier:
         *,
         image_url: str | None = None,
         image_content_type: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
     ) -> None:
         if not target.service_name.startswith("notify.mobile_app_"):
             raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.")
@@ -38,6 +40,8 @@ class HomeAssistantMobileAppNotifier:
                 "url": image_url,
                 "content-type": _attachment_content_type(image_content_type),
             }
+        if actions:
+            data["actions"] = actions
 
         try:
             await self._client.call_service(

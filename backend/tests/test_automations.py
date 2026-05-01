@@ -109,19 +109,36 @@ def test_integration_action_normalization_sets_provider_and_action() -> None:
             {
                 "type": "integration.icloud_calendar.sync",
                 "config": {},
+            },
+            {
+                "type": "integration.whatsapp.send_message",
+                "config": {
+                    "target_mode": "dynamic",
+                    "phone_number_template": "@AdminPhone",
+                    "message_template": "@Subject",
+                    "target_user_ids": ["ignored-for-dynamic"],
+                },
             }
         ]
     )
 
     assert "integration.icloud_calendar.sync" in registered_integration_action_types()
-    assert actions == [
-        {
-            "id": "action-1",
-            "type": "integration.icloud_calendar.sync",
-            "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
-            "reason_template": "",
-        }
-    ]
+    assert "integration.whatsapp.send_message" in registered_integration_action_types()
+    assert actions[0] == {
+        "id": "action-1",
+        "type": "integration.icloud_calendar.sync",
+        "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
+        "reason_template": "",
+    }
+    assert actions[1]["type"] == "integration.whatsapp.send_message"
+    assert actions[1]["config"] == {
+        "provider": "whatsapp",
+        "action": "send_message",
+        "target_mode": "dynamic",
+        "target_user_ids": ["ignored-for-dynamic"],
+        "phone_number_template": "@AdminPhone",
+        "message_template": "@Subject",
+    }
 
 
 @pytest.mark.asyncio

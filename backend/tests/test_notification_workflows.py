@@ -22,13 +22,16 @@ from app.services.notifications import (
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
     context_variables,
+    home_assistant_notification_actions,
     normalize_actions,
     normalize_conditions,
+    notification_action_buttons,
     presence_condition_matches,
     render_template,
     visitor_pass_notification_contexts_from_event,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.home_assistant import HomeAssistantIntegrationService
 from app.services.schedules import schedule_allows_at
 from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, seed_dynamic_settings_for_session
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
@@ -216,6 +219,7 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "visitor_pass_cancelled",
         "visitor_pass_created",
         "visitor_pass_expired",
+        "visitor_pass_timeframe_change_requested",
         "visitor_pass_used",
         "visitor_pass_vehicle_arrived",
         "visitor_pass_vehicle_exited",
@@ -334,6 +338,7 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
         "visitor_pass_cancelled",
         "visitor_pass_used",
         "visitor_pass_expired",
+        "visitor_pass_timeframe_change_requested",
         "visitor_pass_vehicle_arrived",
         "visitor_pass_vehicle_exited",
     ]:
@@ -352,6 +357,9 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
                 "visitor_pass_vehicle_colour": "Silver",
                 "vehicle_colour": "White",
                 "visitor_pass_duration_on_site": "1h 25m",
+                "visitor_pass_current_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
+                "visitor_pass_requested_window": "01 May 2026, 10:00 to 01 May 2026, 20:00",
+                "visitor_pass_visitor_message": "Can I stay longer?",
             },
         )
     )
@@ -360,6 +368,9 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
     assert variables["VisitorPassVehicleMake"] == "Peugeot"
     assert variables["VisitorPassVehicleColour"] == "Silver"
     assert variables["VisitorPassDurationOnSite"] == "1h 25m"
+    assert variables["VisitorPassCurrentWindow"] == "01 May 2026, 10:00 to 01 May 2026, 18:00"
+    assert variables["VisitorPassRequestedWindow"] == "01 May 2026, 10:00 to 01 May 2026, 20:00"
+    assert variables["VisitorPassVisitorMessage"] == "Can I stay longer?"
     assert variables["Registration"] == "PE70DHX"
     assert variables["VehicleMake"] == "Peugeot"
     assert variables["VehicleColour"] == "Silver"
@@ -370,6 +381,54 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
         )
         == "Silver Peugeot PE70DHX stayed for 1h 25m."
     )
+
+
+def test_visitor_pass_timeframe_notification_actions_are_available() -> None:
+    actions = notification_action_buttons(
+        NotificationContext(
+            event_type="visitor_pass_timeframe_change_requested",
+            subject="Visitor requested a timeframe change",
+            severity="warning",
+            facts={
+                "visitor_pass_id": "pass-1",
+                "visitor_pass_timeframe_request_id": "request-1",
+            },
+        )
+    )
+
+    assert actions == [
+        {
+            "id": "allow",
+            "label": "Allow",
+            "method": "POST",
+            "path": "/api/v1/visitor-passes/pass-1/timeframe-requests/request-1/allow",
+        },
+        {
+            "id": "deny",
+            "label": "Deny",
+            "method": "POST",
+            "path": "/api/v1/visitor-passes/pass-1/timeframe-requests/request-1/deny",
+        },
+    ]
+
+
+def test_visitor_pass_timeframe_home_assistant_actions_are_available() -> None:
+    actions = home_assistant_notification_actions(
+        NotificationContext(
+            event_type="visitor_pass_timeframe_change_requested",
+            subject="Visitor requested a timeframe change",
+            severity="warning",
+            facts={
+                "visitor_pass_id": "pass-1",
+                "visitor_pass_timeframe_request_id": "request-1",
+            },
+        )
+    )
+
+    assert actions == [
+        {"action": "iacs:vp_time:allow:pass-1:request-1", "title": "Allow"},
+        {"action": "iacs:vp_time:deny:pass-1:request-1", "title": "Deny", "destructive": True},
+    ]
 
 
 def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
@@ -505,6 +564,13 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
                 "message_template": "@Message",
                 "media": {"attach_camera_snapshot": True, "camera_id": "camera-2"},
             },
+            {
+                "type": "whatsapp",
+                "target_mode": "selected",
+                "target_ids": ["whatsapp:admin:user-1", "whatsapp:number:@AdminPhone"],
+                "title_template": "@Subject",
+                "message_template": "@Message",
+            },
             {"type": "unsupported"},
         ]
     )
@@ -515,11 +581,13 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
         ]
     )
 
-    assert len(actions) == 2
+    assert len(actions) == 3
     assert actions[0]["media"]["attach_camera_snapshot"] is True
     assert actions[1]["type"] == "discord"
     assert actions[1]["target_ids"] == ["discord:123"]
     assert actions[1]["media"]["camera_id"] == "camera-2"
+    assert actions[2]["type"] == "whatsapp"
+    assert actions[2]["target_ids"] == ["whatsapp:admin:user-1", "whatsapp:number:@AdminPhone"]
     assert len(conditions) == 1
     assert conditions[0]["mode"] == "person_home"
 
@@ -562,6 +630,7 @@ async def test_home_assistant_mobile_notifier_includes_image_attachment_payload(
         NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
         image_url="https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
         image_content_type="image/jpeg",
+        actions=[{"action": "ack", "title": "Acknowledge"}],
     )
 
     assert calls[0][0] == "notify.mobile_app_jason"
@@ -571,6 +640,7 @@ async def test_home_assistant_mobile_notifier_includes_image_attachment_payload(
         "url": "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
         "content-type": "jpeg",
     }
+    assert data["actions"] == [{"action": "ack", "title": "Acknowledge"}]
 
 
 async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch) -> None:
@@ -585,8 +655,8 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
         )
 
     class FakeHomeAssistantNotifier:
-        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None):
-            calls.append((target.service_name, title, body, image_url, image_content_type))
+        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None, actions=None):
+            calls.append((target.service_name, title, body, image_url, image_content_type, actions))
 
     monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
     monkeypatch.setattr("app.services.notifications.HomeAssistantMobileAppNotifier", FakeHomeAssistantNotifier)
@@ -611,6 +681,7 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
             "Snapshot attached",
             "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
             "image/jpeg",
+            [],
         )
     ]
 
@@ -640,6 +711,26 @@ async def test_mobile_workflow_requires_public_base_url_for_home_assistant_snaps
             NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
             SimpleNamespace(apprise_urls=""),
         )
+
+
+async def test_home_assistant_mobile_action_decides_visitor_timeframe(monkeypatch) -> None:
+    calls = []
+
+    class FakeWhatsAppService:
+        async def decide_visitor_timeframe_request(self, pass_id, request_id, decision, *, actor_label=None):
+            calls.append((pass_id, request_id, decision, actor_label))
+            return {"admin_message": "Approved"}
+
+    monkeypatch.setattr(
+        "app.services.whatsapp_messaging.get_whatsapp_messaging_service",
+        lambda: FakeWhatsAppService(),
+    )
+
+    await HomeAssistantIntegrationService()._handle_mobile_notification_action(
+        {"data": {"action": "iacs:vp_time:allow:pass-1:request-1"}}
+    )
+
+    assert calls == [("pass-1", "request-1", "allow", "Home Assistant Notification")]
 
 
 def test_presence_condition_modes() -> None:

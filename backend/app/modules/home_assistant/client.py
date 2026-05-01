@@ -124,16 +124,17 @@ class HomeAssistantClient:
                     if '"auth_ok"' not in auth_response:
                         raise HomeAssistantError("Home Assistant WebSocket authentication failed.")
 
-                    await websocket.send(
-                        json.dumps(
-                            {
-                                "id": event_id,
-                                "type": "subscribe_events",
-                                "event_type": "state_changed",
-                            }
+                    for event_type in ("state_changed", "mobile_app_notification_action"):
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "id": event_id,
+                                    "type": "subscribe_events",
+                                    "event_type": event_type,
+                                }
+                            )
                         )
-                    )
-                    event_id += 1
+                        event_id += 1
 
                     async for message in websocket:
                         yield json.loads(message)
