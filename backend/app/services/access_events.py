@@ -62,6 +62,7 @@ VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
+EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
@@ -125,7 +126,18 @@ class ResolvedPlateWindow:
     source: str
     registration_number: str
     first_seen: datetime
-    expires_at: datetime
+    debounce_expires_at: datetime
+    gate_cycle_expires_at: datetime
+    direction: AccessDirection | None = None
+    decision: AccessDecision | None = None
+
+
+@dataclass(frozen=True)
+class FinalizedPlateEvent:
+    event_id: str
+    direction: AccessDirection
+    decision: AccessDecision
+    occurred_at: datetime
 
 
 class AccessEventService:
@@ -238,8 +250,9 @@ class AccessEventService:
 
     async def _handle_queued_read(self, read: PlateRead) -> None:
         read = await self._read_with_known_vehicle_match(read)
-        if self._suppress_after_exact_resolution(read):
-            await self._publish_suppressed_read(read, reason="exact_known_vehicle_plate_already_resolved_in_debounce_window")
+        exact_suppression_reason = self._exact_resolution_suppression_reason(read)
+        if exact_suppression_reason:
+            await self._publish_suppressed_read(read, reason=exact_suppression_reason)
             return
 
         if not _is_exact_known_vehicle_plate_match(read):
@@ -403,7 +416,7 @@ class AccessEventService:
 
     async def _finalize_exact_known_plate_window(self, window: DebounceWindow) -> None:
         try:
-            await self._finalize_window(window)
+            finalized = await self._finalize_window(window)
         except Exception:
             logger.exception(
                 "access_event_finalize_failed",
@@ -422,7 +435,7 @@ class AccessEventService:
                 },
             )
             return
-        self._remember_exact_plate_resolution(window)
+        self._remember_exact_plate_resolution(window, finalized)
 
     def _pop_exact_known_plate_window(self, window: DebounceWindow) -> DebounceWindow:
         exact_read = next(
@@ -502,7 +515,11 @@ class AccessEventService:
             return
         self._remember_visitor_pass_resolution(window, anchor_read)
 
-    def _remember_exact_plate_resolution(self, window: DebounceWindow) -> None:
+    def _remember_exact_plate_resolution(
+        self,
+        window: DebounceWindow,
+        finalized: FinalizedPlateEvent | None = None,
+    ) -> None:
         exact_read = next(
             (
                 read
@@ -514,33 +531,53 @@ class AccessEventService:
         if not exact_read:
             return
         max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        debounce_expires_at = window.first_seen + timedelta(seconds=max_seconds)
+        gate_cycle_expires_at = debounce_expires_at
+        if finalized and finalized.decision == AccessDecision.GRANTED:
+            gate_cycle_expires_at = max(
+                gate_cycle_expires_at,
+                window.first_seen + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
+            )
         self._recent_exact_resolutions.append(
             ResolvedPlateWindow(
                 source=exact_read.source,
                 registration_number=exact_read.registration_number,
                 first_seen=window.first_seen,
-                expires_at=window.first_seen + timedelta(seconds=max_seconds),
+                debounce_expires_at=debounce_expires_at,
+                gate_cycle_expires_at=gate_cycle_expires_at,
+                direction=finalized.direction if finalized else None,
+                decision=finalized.decision if finalized else None,
             )
         )
 
-    def _suppress_after_exact_resolution(self, read: PlateRead) -> bool:
+    def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
         self._prune_recent_exact_resolutions(read.captured_at)
         match = _known_vehicle_plate_match_from_read(read)
+        read_gate_state = self._coerce_gate_state(self._gate_observation_from_read(read).get("state"))
         for resolution in self._recent_exact_resolutions:
             if read.source != resolution.source:
                 continue
-            if not (resolution.first_seen <= read.captured_at <= resolution.expires_at):
+            if resolution.first_seen <= read.captured_at <= resolution.debounce_expires_at:
+                if match and read.registration_number != resolution.registration_number:
+                    continue
+                return "exact_known_vehicle_plate_already_resolved_in_debounce_window"
+            if not (
+                resolution.decision == AccessDecision.GRANTED
+                and resolution.direction in {AccessDirection.ENTRY, AccessDirection.EXIT}
+                and match
+                and read.registration_number == resolution.registration_number
+                and read_gate_state != GateState.CLOSED
+                and resolution.first_seen <= read.captured_at <= resolution.gate_cycle_expires_at
+            ):
                 continue
-            if match and read.registration_number != resolution.registration_number:
-                continue
-            return True
-        return False
+            return "exact_known_vehicle_plate_already_resolved_in_gate_cycle"
+        return None
 
     def _prune_recent_exact_resolutions(self, now: datetime) -> None:
         self._recent_exact_resolutions = [
             resolution
             for resolution in self._recent_exact_resolutions
-            if resolution.expires_at >= now
+            if max(resolution.debounce_expires_at, resolution.gate_cycle_expires_at) >= now
         ]
 
     def _remember_visitor_pass_resolution(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
@@ -550,7 +587,8 @@ class AccessEventService:
                 source=anchor_read.source,
                 registration_number=anchor_read.registration_number,
                 first_seen=window.first_seen,
-                expires_at=window.first_seen + timedelta(seconds=max_seconds),
+                debounce_expires_at=window.first_seen + timedelta(seconds=max_seconds),
+                gate_cycle_expires_at=window.first_seen + timedelta(seconds=max_seconds),
             )
         )
 
@@ -561,7 +599,7 @@ class AccessEventService:
         for resolution in self._recent_visitor_pass_resolutions:
             if read.source != resolution.source:
                 continue
-            if not (resolution.first_seen <= read.captured_at <= resolution.expires_at):
+            if not (resolution.first_seen <= read.captured_at <= resolution.debounce_expires_at):
                 continue
             return True
         return False
@@ -570,7 +608,7 @@ class AccessEventService:
         self._recent_visitor_pass_resolutions = [
             resolution
             for resolution in self._recent_visitor_pass_resolutions
-            if resolution.expires_at >= now
+            if resolution.debounce_expires_at >= now
         ]
 
     async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
@@ -648,7 +686,7 @@ class AccessEventService:
                     },
                 )
 
-    async def _finalize_window(self, window: DebounceWindow) -> None:
+    async def _finalize_window(self, window: DebounceWindow) -> FinalizedPlateEvent | None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
             return
@@ -927,6 +965,12 @@ class AccessEventService:
                 "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
             },
+        )
+        return FinalizedPlateEvent(
+            event_id=str(event.id),
+            direction=direction,
+            decision=decision,
+            occurred_at=event.occurred_at,
         )
 
     async def _lookup_active_vehicle(self, session: AsyncSession, read: PlateRead, trace: Any) -> Vehicle | None:

@@ -11,6 +11,7 @@ from app.modules.lpr.base import PlateRead
 from app.services import access_events as access_events_module
 from app.services.access_events import (
     AccessEventService,
+    FinalizedPlateEvent,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
@@ -54,6 +55,22 @@ def plate_read(registration_number: str, captured_at: datetime) -> PlateRead:
         source="test",
         captured_at=captured_at,
         raw_payload={},
+    )
+
+
+def plate_read_with_gate_state_at(registration_number: str, captured_at: datetime, state: str) -> PlateRead:
+    return PlateRead(
+        registration_number=registration_number,
+        confidence=1.0,
+        source="test",
+        captured_at=captured_at,
+        raw_payload={
+            GATE_OBSERVATION_PAYLOAD_KEY: {
+                "state": state,
+                "observed_at": captured_at.isoformat(),
+                "controller": "home_assistant",
+            }
+        },
     )
 
 
@@ -263,6 +280,64 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
 
     assert len(finalized) == 1
     assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_window(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+    )
+    finalized = []
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return ["PE70DHX"]
+
+    async def fake_finalize_window(window):
+        finalized.append(
+            {
+                "candidate_count": len(window.reads),
+                "best_registration_number": window.best_read.registration_number,
+            }
+        )
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_no_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
+    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "closed"))
+    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen + timedelta(seconds=9), "open"))
+
+    assert finalized == [{"candidate_count": 1, "best_registration_number": "PE70DHX"}]
+    assert service._pending == []
+    assert published == [
+        (
+            "plate_read.suppressed",
+            {
+                "registration_number": "PE70DHX",
+                "detected_registration_number": "PE70DHX",
+                "source": "test",
+                "reason": "exact_known_vehicle_plate_already_resolved_in_gate_cycle",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -21,11 +22,17 @@ from app.models import AutomationRule, MessagingIdentity, User, VisitorPass
 from app.models.enums import UserRole, VisitorPassStatus, VisitorPassType
 from app.modules.messaging.base import IncomingChatMessage
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
-from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, normalize_registration_number
 from app.services.event_bus import event_bus
+from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, actor_from_user, write_audit_log
-from app.services.visitor_passes import VisitorPassError, get_visitor_pass_service, serialize_visitor_pass
+from app.services.visitor_passes import (
+    VisitorPassError,
+    append_visitor_pass_whatsapp_history,
+    get_visitor_pass_service,
+    serialize_visitor_pass,
+)
 
 logger = get_logger(__name__)
 
@@ -81,11 +88,20 @@ class VisitorPassTimeframeReply:
     request_id: str
 
 
+@dataclass(frozen=True)
+class VisitorVehicleLookup:
+    make: str | None = None
+    colour: str | None = None
+    error: str | None = None
+
+
 VISITOR_CONCIERGE_RESTRICTED_REPLY = "Sorry, I can only discuss details about your visitor pass and vehicle registration."
 VISITOR_TIMEFRAME_APPROVAL_REPLY = (
     "I've sent a request for approval to change your allowed timeframe, I'll get back to you shortly."
 )
 VISITOR_TIMEFRAME_AUTO_LIMIT_SECONDS = 60 * 60
+VISITOR_TEXT_DEBOUNCE_SECONDS = 2.5
+VISITOR_TEXT_BUFFER_KEY = "whatsapp_text_buffer"
 
 
 VISITOR_CONCIERGE_TOOLS: tuple[dict[str, Any], ...] = (
@@ -126,7 +142,11 @@ Security boundary:
 Task:
 - Extract a vehicle registration from natural language when present.
 - Normalize it as uppercase letters/numbers without spaces where possible.
+- Only extract a vehicle registration when it appears in the visitor's latest message. Never copy the stored pass registration from context and present it as newly detected.
 - Answer only questions about the visitor's own pass details, vehicle registration, or allowed timeframe.
+- If the pass already has a confirmed registration and the visitor sends thanks, banter, or a brief acknowledgement, return a warm, concise Alfred-style reply and close the loop. Do not ask for the registration again.
+- If the visitor uses Alfred's name directly in an otherwise allowed message, you may include a very short cheeky, geeky nod to Alfred and Jason creating the system.
+- Never tell visitors that vehicle make or colour came from DVLA or any external integration. Alfred should simply sound like he knows the vehicle details.
 - If the visitor asks to change their allowed timeframe, return the requested valid_from and valid_until as ISO-8601 datetimes when you can infer them from the current pass details.
 - Interpret time-only requests in the supplied site_timezone on the same local date as current_window.valid_from unless the visitor states a different date.
 - If the visitor says "from <time> to <time>", "<time> to <time>", or "<time>-<time>", those are the exact requested start and end times. Do not keep the old end time and do not shift by the old duration.
@@ -150,6 +170,8 @@ class WhatsAppMessagingService:
 
     def __init__(self) -> None:
         self._last_error: str | None = None
+        self._visitor_message_tasks: dict[str, asyncio.Task[None]] = {}
+        self._visitor_message_debounce_seconds = VISITOR_TEXT_DEBOUNCE_SECONDS
 
     async def status(self) -> dict[str, Any]:
         config = await load_whatsapp_config()
@@ -337,7 +359,14 @@ class WhatsAppMessagingService:
             "type": "text",
             "text": {"preview_url": False, "body": body[:4096]},
         }
-        return await self._post_message(config, payload)
+        result = await self._post_message(config, payload)
+        await self._record_outbound_visitor_message(
+            recipient,
+            body[:4096],
+            kind="text",
+            provider_message_id=whatsapp_response_message_id(result),
+        )
+        return result
 
     async def send_template_message(
         self,
@@ -376,7 +405,15 @@ class WhatsAppMessagingService:
                 ],
             },
         }
-        return await self._post_message(config, payload)
+        result = await self._post_message(config, payload)
+        await self._record_outbound_visitor_message(
+            recipient,
+            f"Template {name}: {' · '.join(str(value) for value in body_parameters if str(value).strip())}",
+            kind="template",
+            provider_message_id=whatsapp_response_message_id(result),
+            metadata={"template_name": name, "language_code": str(language_code or "en_GB").strip() or "en_GB"},
+        )
+        return result
 
     async def send_visitor_pass_outreach(
         self,
@@ -455,7 +492,15 @@ class WhatsAppMessagingService:
                 "action": {"buttons": normalized_buttons},
             },
         }
-        return await self._post_message(config, payload)
+        result = await self._post_message(config, payload)
+        await self._record_outbound_visitor_message(
+            recipient,
+            body[:1024],
+            kind="interactive",
+            provider_message_id=whatsapp_response_message_id(result),
+            metadata={"buttons": [button["reply"]["title"] for button in normalized_buttons]},
+        )
+        return result
 
     async def send_confirmation_message(self, to: str, pending_action: dict[str, Any]) -> None:
         session_id = str(pending_action.get("session_id") or "")
@@ -692,6 +737,7 @@ class WhatsAppMessagingService:
         phone_number_id: str,
         config: WhatsAppIntegrationConfig,
     ) -> None:
+        await self._record_inbound_visitor_message(visitor_pass, message, sender=sender)
         button = parse_visitor_pass_button_message(message)
         if button:
             await self._handle_visitor_button_reply(button, sender, config=config)
@@ -722,6 +768,31 @@ class WhatsAppMessagingService:
             )
             return
 
+        if self._visitor_message_debounce_seconds > 0:
+            token = await self._buffer_visitor_text_message(visitor_pass.id, sender, text)
+            if token:
+                self._schedule_visitor_text_processing(visitor_pass.id, sender, token, config=config)
+            return
+
+        await self._process_visitor_text(
+            sender,
+            visitor_pass,
+            text,
+            config=config,
+            emoji_preferred=visitor_message_contains_emoji(text),
+            alfred_mentioned=visitor_message_mentions_alfred(text),
+        )
+
+    async def _process_visitor_text(
+        self,
+        sender: str,
+        visitor_pass: VisitorPass,
+        text: str,
+        *,
+        config: WhatsAppIntegrationConfig,
+        emoji_preferred: bool = False,
+        alfred_mentioned: bool = False,
+    ) -> None:
         result = await self._visitor_concierge_result(sender, visitor_pass, text)
         action = str(result.get("action") or "")
         if action == "unsupported":
@@ -733,15 +804,209 @@ class WhatsAppMessagingService:
         plate = normalize_registration_number(result.get("registration_number"))
         if plate:
             nonce = uuid.uuid4().hex[:12]
-            await self._store_pending_visitor_plate(visitor_pass.id, sender, plate, nonce)
-            await self.send_visitor_plate_confirmation(sender, visitor_pass, plate, nonce, config=config)
+            vehicle_lookup = await self._lookup_visitor_vehicle_details(plate)
+            await self._store_pending_visitor_plate(
+                visitor_pass.id,
+                sender,
+                plate,
+                nonce,
+                vehicle_make=vehicle_lookup.make,
+                vehicle_colour=vehicle_lookup.colour,
+                dvla_error=vehicle_lookup.error,
+            )
+            await self.send_visitor_plate_confirmation(
+                sender,
+                visitor_pass,
+                plate,
+                nonce,
+                vehicle_make=vehicle_lookup.make,
+                vehicle_colour=vehicle_lookup.colour,
+                emoji_preferred=emoji_preferred,
+                alfred_mentioned=alfred_mentioned,
+                config=config,
+            )
             return
 
         await self.send_text_message(
             sender,
-            str(result.get("message") or "Please reply with your vehicle registration.")[:1024],
+            style_visitor_freeform_reply(
+                str(result.get("message") or "Please reply with your vehicle registration."),
+                visitor_pass,
+                text,
+                emoji_preferred=emoji_preferred,
+                alfred_mentioned=alfred_mentioned,
+            )[:1024],
             config=config,
         )
+
+    async def _buffer_visitor_text_message(self, pass_id: uuid.UUID, sender: str, text: str) -> str | None:
+        token = uuid.uuid4().hex
+        body = str(text or "").strip()
+        emoji_only = visitor_message_is_emoji_only(body)
+        emoji_preferred = visitor_message_contains_emoji(body)
+        async with AsyncSessionLocal() as session:
+            visitor_pass = await session.get(VisitorPass, pass_id)
+            if not visitor_pass or normalize_whatsapp_phone_number(visitor_pass.visitor_phone) != sender:
+                return None
+            metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
+            existing = metadata.get(VISITOR_TEXT_BUFFER_KEY) if isinstance(metadata.get(VISITOR_TEXT_BUFFER_KEY), dict) else {}
+            raw_messages = existing.get("messages") if isinstance(existing.get("messages"), list) else []
+            messages = [
+                item
+                for item in raw_messages
+                if isinstance(item, dict) and str(item.get("body") or "").strip()
+            ][-7:]
+            if body and not emoji_only:
+                messages.append(
+                    {
+                        "body": body[:1500],
+                        "created_at": datetime.now(tz=UTC).isoformat(),
+                    }
+                )
+            prefers_emoji = bool(metadata.get("whatsapp_visitor_uses_emoji")) or emoji_preferred
+            next_metadata = {
+                **metadata,
+                "whatsapp_visitor_uses_emoji": True if prefers_emoji else metadata.get("whatsapp_visitor_uses_emoji"),
+            }
+            if messages:
+                next_metadata[VISITOR_TEXT_BUFFER_KEY] = {
+                    "token": token,
+                    "messages": messages[-8:],
+                    "emoji_preferred": prefers_emoji,
+                    "updated_at": datetime.now(tz=UTC).isoformat(),
+                }
+                next_metadata["whatsapp_concierge_status"] = "visitor_replied"
+                next_metadata["whatsapp_concierge_status_detail"] = (
+                    "Visitor replied; Alfred is waiting briefly for any follow-up message."
+                )
+                next_metadata["whatsapp_status_updated_at"] = datetime.now(tz=UTC).isoformat()
+            else:
+                next_metadata.pop(VISITOR_TEXT_BUFFER_KEY, None)
+            visitor_pass.source_metadata = {key: value for key, value in next_metadata.items() if value is not None}
+            await session.commit()
+            await session.refresh(visitor_pass)
+            payload = serialize_visitor_pass(visitor_pass)
+        await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
+        return token if messages else None
+
+    def _schedule_visitor_text_processing(
+        self,
+        pass_id: uuid.UUID,
+        sender: str,
+        token: str,
+        *,
+        config: WhatsAppIntegrationConfig,
+    ) -> None:
+        key = visitor_text_task_key(pass_id, sender)
+        previous = self._visitor_message_tasks.get(key)
+        if previous and not previous.done():
+            previous.cancel()
+        task = asyncio.create_task(self._delayed_process_visitor_text(pass_id, sender, token, config=config))
+        self._visitor_message_tasks[key] = task
+
+    async def _delayed_process_visitor_text(
+        self,
+        pass_id: uuid.UUID,
+        sender: str,
+        token: str,
+        *,
+        config: WhatsAppIntegrationConfig,
+    ) -> None:
+        key = visitor_text_task_key(pass_id, sender)
+        try:
+            await asyncio.sleep(max(0.0, self._visitor_message_debounce_seconds))
+            await self._process_buffered_visitor_text(pass_id, sender, token, config=config)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.exception("visitor_concierge_buffered_message_failed", extra={"error": str(exc)[:180]})
+        finally:
+            if self._visitor_message_tasks.get(key) is asyncio.current_task():
+                self._visitor_message_tasks.pop(key, None)
+
+    async def _process_buffered_visitor_text(
+        self,
+        pass_id: uuid.UUID,
+        sender: str,
+        token: str,
+        *,
+        config: WhatsAppIntegrationConfig,
+    ) -> None:
+        buffered = await self._consume_visitor_text_buffer(pass_id, sender, token)
+        if not buffered:
+            return
+        if buffered.get("expired"):
+            await self.send_text_message(
+                sender,
+                "Your visitor pass is no longer active. Please contact your host if you still need access.",
+                config=config,
+            )
+            return
+        visitor_pass = buffered.get("visitor_pass")
+        text = str(buffered.get("text") or "").strip()
+        if not isinstance(visitor_pass, VisitorPass) or not text:
+            return
+        await self._process_visitor_text(
+            sender,
+            visitor_pass,
+            text,
+            config=config,
+            emoji_preferred=bool(buffered.get("emoji_preferred")),
+            alfred_mentioned=visitor_message_mentions_alfred(text),
+        )
+
+    async def _consume_visitor_text_buffer(
+        self,
+        pass_id: uuid.UUID,
+        sender: str,
+        token: str,
+    ) -> dict[str, Any] | None:
+        async with AsyncSessionLocal() as session:
+            visitor_pass = await session.get(VisitorPass, pass_id)
+            if not visitor_pass or normalize_whatsapp_phone_number(visitor_pass.visitor_phone) != sender:
+                return None
+            service = get_visitor_pass_service()
+            await service.refresh_statuses(session=session, publish=False)
+            metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
+            buffer_payload = metadata.get(VISITOR_TEXT_BUFFER_KEY) if isinstance(metadata.get(VISITOR_TEXT_BUFFER_KEY), dict) else {}
+            if str(buffer_payload.get("token") or "") != token:
+                await session.commit()
+                return None
+            raw_messages = buffer_payload.get("messages") if isinstance(buffer_payload.get("messages"), list) else []
+            messages = [
+                str(item.get("body") or "").strip()
+                for item in raw_messages
+                if isinstance(item, dict) and str(item.get("body") or "").strip()
+            ]
+            next_metadata = dict(metadata)
+            next_metadata.pop(VISITOR_TEXT_BUFFER_KEY, None)
+            visitor_pass.source_metadata = next_metadata
+            expired = visitor_pass.status not in {VisitorPassStatus.ACTIVE, VisitorPassStatus.SCHEDULED}
+            await session.commit()
+            await session.refresh(visitor_pass)
+            _ = (
+                visitor_pass.id,
+                visitor_pass.visitor_name,
+                visitor_pass.visitor_phone,
+                visitor_pass.pass_type,
+                visitor_pass.expected_time,
+                visitor_pass.valid_from,
+                visitor_pass.valid_until,
+                visitor_pass.number_plate,
+                visitor_pass.status,
+                visitor_pass.source_metadata,
+            )
+            payload = serialize_visitor_pass(visitor_pass)
+        await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
+        if expired:
+            return {"expired": True}
+        return {
+            "visitor_pass": visitor_pass,
+            "text": "\n".join(messages),
+            "emoji_preferred": bool(buffer_payload.get("emoji_preferred")) or bool(
+                (visitor_pass.source_metadata or {}).get("whatsapp_visitor_uses_emoji")
+            ),
+        }
 
     async def send_visitor_plate_confirmation(
         self,
@@ -750,11 +1015,19 @@ class WhatsAppMessagingService:
         plate: str,
         nonce: str,
         *,
+        vehicle_make: str | None = None,
+        vehicle_colour: str | None = None,
+        emoji_preferred: bool = False,
+        alfred_mentioned: bool = False,
         config: WhatsAppIntegrationConfig | None = None,
     ) -> None:
-        body = (
-            f"I read your registration as {format_registration_for_display(plate)} "
-            f"for {visitor_pass_window_label(visitor_pass)}. Is this correct?"
+        body = visitor_plate_confirmation_message(
+            visitor_pass,
+            plate,
+            vehicle_make=vehicle_make,
+            vehicle_colour=vehicle_colour,
+            emoji_preferred=emoji_preferred,
+            alfred_mentioned=alfred_mentioned,
         )
         await self.send_interactive_buttons(
             to,
@@ -819,6 +1092,9 @@ class WhatsAppMessagingService:
                     **metadata,
                     "whatsapp_pending_plate": None,
                     "whatsapp_pending_nonce": None,
+                    "whatsapp_pending_vehicle_make": None,
+                    "whatsapp_pending_vehicle_colour": None,
+                    "whatsapp_pending_vehicle_lookup_error": None,
                     "whatsapp_awaiting_change": True,
                     "whatsapp_concierge_status": "awaiting_visitor_reply",
                     "whatsapp_concierge_status_detail": "Visitor asked to change the parsed registration.",
@@ -839,11 +1115,15 @@ class WhatsAppMessagingService:
                 )
                 return
 
+            pending_vehicle_make = visitor_vehicle_metadata_text(metadata.get("whatsapp_pending_vehicle_make"))
+            pending_vehicle_colour = visitor_vehicle_metadata_text(metadata.get("whatsapp_pending_vehicle_colour"))
             try:
                 await service.update_visitor_plate(
                     session,
                     visitor_pass,
                     new_plate=str(pending),
+                    vehicle_make=pending_vehicle_make,
+                    vehicle_colour=pending_vehicle_colour,
                     actor="Visitor Concierge",
                     metadata={"source": "whatsapp", "phone": masked_phone_number(sender)},
                 )
@@ -857,6 +1137,9 @@ class WhatsAppMessagingService:
                     **(visitor_pass.source_metadata or {}),
                     "whatsapp_pending_plate": None,
                     "whatsapp_pending_nonce": None,
+                    "whatsapp_pending_vehicle_make": None,
+                    "whatsapp_pending_vehicle_colour": None,
+                    "whatsapp_pending_vehicle_lookup_error": None,
                     "whatsapp_awaiting_change": False,
                     "whatsapp_last_confirmed_at": datetime.now(tz=UTC).isoformat(),
                     "whatsapp_concierge_status": "complete",
@@ -871,7 +1154,11 @@ class WhatsAppMessagingService:
         await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
         await self.send_text_message(
             sender,
-            f"Thanks. I have saved {format_registration_for_display(payload.get('number_plate') or pending)} for your visit.",
+            visitor_plate_saved_message(
+                payload,
+                fallback_plate=pending,
+                emoji_preferred=visitor_payload_prefers_emoji(payload),
+            ),
             config=config,
         )
 
@@ -881,6 +1168,10 @@ class WhatsAppMessagingService:
         sender: str,
         plate: str,
         nonce: str,
+        *,
+        vehicle_make: str | None = None,
+        vehicle_colour: str | None = None,
+        dvla_error: str | None = None,
     ) -> None:
         async with AsyncSessionLocal() as session:
             visitor_pass = await session.get(VisitorPass, pass_id)
@@ -892,16 +1183,45 @@ class WhatsAppMessagingService:
                 **(visitor_pass.source_metadata or {}),
                 "whatsapp_pending_plate": plate,
                 "whatsapp_pending_nonce": nonce,
+                "whatsapp_pending_vehicle_make": visitor_vehicle_metadata_text(vehicle_make),
+                "whatsapp_pending_vehicle_colour": visitor_vehicle_metadata_text(vehicle_colour),
+                "whatsapp_pending_vehicle_lookup_error": str(dvla_error or "")[:500] or None,
                 "whatsapp_pending_at": datetime.now(tz=UTC).isoformat(),
                 "whatsapp_awaiting_change": False,
                 "whatsapp_concierge_status": "visitor_replied",
-                "whatsapp_concierge_status_detail": "Visitor replied with a vehicle registration; awaiting confirmation.",
+                "whatsapp_concierge_status_detail": visitor_plate_pending_status_detail(vehicle_make, vehicle_colour),
                 "whatsapp_status_updated_at": datetime.now(tz=UTC).isoformat(),
             }
             await session.commit()
             await session.refresh(visitor_pass)
             payload = serialize_visitor_pass(visitor_pass)
         await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
+
+    async def _lookup_visitor_vehicle_details(self, plate: str) -> VisitorVehicleLookup:
+        normalized_plate = normalize_registration_number(plate)
+        if not normalized_plate:
+            return VisitorVehicleLookup()
+        try:
+            vehicle = await lookup_normalized_vehicle_registration(normalized_plate)
+        except DvlaVehicleEnquiryError as exc:
+            detail = str(exc)[:500]
+            logger.info(
+                "visitor_concierge_dvla_lookup_failed",
+                extra={
+                    "plate": masked_plate_value(normalized_plate),
+                    "status_code": exc.status_code,
+                    "error": detail[:180],
+                },
+            )
+            return VisitorVehicleLookup(error=detail)
+        except Exception as exc:
+            detail = str(exc)[:500]
+            logger.info(
+                "visitor_concierge_dvla_lookup_failed",
+                extra={"plate": masked_plate_value(normalized_plate), "error": detail[:180]},
+            )
+            return VisitorVehicleLookup(error=detail)
+        return VisitorVehicleLookup(make=vehicle.make, colour=vehicle.colour)
 
     async def _visitor_concierge_result(
         self,
@@ -941,7 +1261,16 @@ class WhatsAppMessagingService:
                     if action == "plate_detected":
                         plate = normalize_registration_number(payload.get("registration_number"))
                         if plate:
-                            return {"action": "plate_detected", "registration_number": plate}
+                            if visitor_plate_appears_in_message(text, plate):
+                                return {"action": "plate_detected", "registration_number": plate}
+                            logger.info(
+                                "visitor_concierge_ignored_context_plate",
+                                extra={"pass_id": str(visitor_pass.id), "plate": masked_plate_value(plate)},
+                            )
+                            return {
+                                "action": "reply",
+                                "message": visitor_concierge_non_action_reply(visitor_pass, text),
+                            }
                     if action == "timeframe_change":
                         timeframe_payload = normalize_llm_timeframe_change_payload(payload, runtime.site_timezone)
                         if timeframe_payload:
@@ -953,7 +1282,10 @@ class WhatsAppMessagingService:
                     if action == "unsupported":
                         return {"action": "unsupported", "message": VISITOR_CONCIERGE_RESTRICTED_REPLY}
                     if action == "reply":
-                        return {"action": "reply", "message": str(payload.get("message") or "")[:1024]}
+                        message = str(payload.get("message") or "")[:1024]
+                        if visitor_pass.number_plate and visitor_reply_requests_registration(message):
+                            message = visitor_concierge_non_action_reply(visitor_pass, text)
+                        return {"action": "reply", "message": message}
             except (ProviderNotConfiguredError, Exception) as exc:
                 logger.info("visitor_concierge_llm_fallback", extra={"error": str(exc)[:180]})
 
@@ -965,6 +1297,8 @@ class WhatsAppMessagingService:
         plate = extract_registration_from_text(text)
         if plate:
             return {"action": "plate_detected", "registration_number": plate}
+        if visitor_pass.number_plate:
+            return {"action": "reply", "message": visitor_concierge_non_action_reply(visitor_pass, text)}
         return {"action": "reply", "message": "Please reply with your vehicle registration."}
 
     async def get_pass_details(self, phone_number: str) -> dict[str, Any]:
@@ -988,10 +1322,13 @@ class WhatsAppMessagingService:
             visitor_pass = await session.get(VisitorPass, pass_uuid)
             if not visitor_pass or normalize_whatsapp_phone_number(visitor_pass.visitor_phone) != phone:
                 return {"updated": False, "error": "Visitor pass not found for this phone number."}
+            vehicle_lookup = await self._lookup_visitor_vehicle_details(new_plate)
             await get_visitor_pass_service().update_visitor_plate(
                 session,
                 visitor_pass,
                 new_plate=new_plate,
+                vehicle_make=vehicle_lookup.make,
+                vehicle_colour=vehicle_lookup.colour,
                 actor="Visitor Concierge",
                 metadata={"source": "whatsapp", "phone": masked_phone_number(phone)},
             )
@@ -1273,6 +1610,10 @@ class WhatsAppMessagingService:
             request_payload.get("current_valid_from"),
             request_payload.get("current_valid_until"),
         )
+        original_window = visitor_window_label_from_values(
+            request_payload.get("original_valid_from") or request_payload.get("current_valid_from"),
+            request_payload.get("original_valid_until") or request_payload.get("current_valid_until"),
+        )
         requested_window = visitor_window_label_from_values(
             request_payload.get("requested_valid_from"),
             request_payload.get("requested_valid_until"),
@@ -1286,11 +1627,14 @@ class WhatsAppMessagingService:
                     "message": f"{visitor_name} requested changing their Visitor Pass from {current_window} to {requested_window}.",
                     "subject": subject,
                     "visitor_name": visitor_name,
+                    "visitor_pass_name": visitor_name,
                     "display_name": visitor_name,
                     "visitor_pass_id": str(visitor_pass_payload.get("id") or ""),
                     "visitor_pass_status": str(visitor_pass_payload.get("status") or ""),
                     "visitor_pass_current_window": current_window,
+                    "visitor_pass_original_time": original_window,
                     "visitor_pass_requested_window": requested_window,
+                    "visitor_pass_requested_time": requested_window,
                     "visitor_pass_timeframe_request_id": str(request_payload.get("id") or ""),
                     "visitor_pass_current_valid_from": str(request_payload.get("current_valid_from") or ""),
                     "visitor_pass_current_valid_until": str(request_payload.get("current_valid_until") or ""),
@@ -1381,6 +1725,17 @@ class WhatsAppMessagingService:
                     source_metadata=next_metadata,
                     actor=actor,
                     actor_user_id=actor_user.id if actor_user else None,
+                )
+                await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                    action="visitor_pass.timeframe_change_approved",
+                    actor=actor,
+                    actor_user_id=actor_user.id if actor_user else None,
+                    target_entity="VisitorPass",
+                    target_id=stored.id,
+                    target_label=stored.visitor_name,
+                    metadata={"request": pending},
                 )
             else:
                 stored.source_metadata = {
@@ -1539,6 +1894,71 @@ class WhatsAppMessagingService:
             await session.refresh(visitor_pass)
             payload = serialize_visitor_pass(visitor_pass)
         await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_status"})
+
+    async def _record_inbound_visitor_message(
+        self,
+        visitor_pass: VisitorPass,
+        message: dict[str, Any],
+        *,
+        sender: str,
+    ) -> None:
+        body = visitor_whatsapp_message_body(message)
+        if not body:
+            return
+        payload: dict[str, Any] | None = None
+        async with AsyncSessionLocal() as session:
+            stored = await session.get(VisitorPass, visitor_pass.id)
+            if not stored or normalize_whatsapp_phone_number(stored.visitor_phone) != sender:
+                return
+            append_visitor_pass_whatsapp_history(
+                stored,
+                direction="inbound",
+                kind=str(message.get("type") or "message"),
+                body=body,
+                actor_label=stored.visitor_name or "Visitor",
+                provider_message_id=str(message.get("id") or ""),
+                occurred_at=parse_whatsapp_timestamp(message.get("timestamp")),
+                metadata={"phone": masked_phone_number(sender)},
+            )
+            await session.commit()
+            await session.refresh(stored)
+            payload = serialize_visitor_pass(stored)
+        if payload:
+            await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_message"})
+
+    async def _record_outbound_visitor_message(
+        self,
+        recipient: str,
+        body: str,
+        *,
+        kind: str,
+        provider_message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not str(body or "").strip():
+            return
+        try:
+            payload: dict[str, Any] | None = None
+            async with AsyncSessionLocal() as session:
+                visitor_pass, _state = await get_visitor_pass_service().messaging_pass_for_phone(session, recipient)
+                if not visitor_pass:
+                    return
+                append_visitor_pass_whatsapp_history(
+                    visitor_pass,
+                    direction="outbound",
+                    kind=kind,
+                    body=body,
+                    actor_label="IACS",
+                    provider_message_id=provider_message_id,
+                    metadata=metadata,
+                )
+                await session.commit()
+                await session.refresh(visitor_pass)
+                payload = serialize_visitor_pass(visitor_pass)
+            if payload:
+                await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_message"})
+        except Exception as exc:
+            logger.debug("visitor_pass_whatsapp_history_record_failed", extra={"error": str(exc)[:180]})
 
     async def _handle_confirmation_reply(
         self,
@@ -1947,6 +2367,22 @@ def extract_message_text(message: dict[str, Any]) -> str:
     return ""
 
 
+def visitor_whatsapp_message_body(message: dict[str, Any]) -> str:
+    text = extract_message_text(message)
+    if text:
+        return text
+    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
+    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    if button_reply:
+        title = str(button_reply.get("title") or "").strip()
+        button_id = str(button_reply.get("id") or "").strip()
+        return title or button_id
+    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    if button:
+        return str(button.get("text") or button.get("payload") or "").strip()
+    return str(message.get("type") or "WhatsApp message").replace("_", " ").title()
+
+
 def is_visitor_concierge_start(value: Any) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
     return normalized in {"begin", "start"}
@@ -2081,6 +2517,105 @@ def extract_registration_from_text(value: Any) -> str:
     return ""
 
 
+def visitor_plate_appears_in_message(value: Any, plate: Any) -> bool:
+    normalized_plate = normalize_registration_number(plate)
+    if not normalized_plate:
+        return False
+    normalized_text = re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+    return normalized_plate in normalized_text
+
+
+def visitor_reply_requests_registration(value: Any) -> bool:
+    text = str(value or "").lower()
+    return bool(
+        re.search(r"\b(reply|send|type|provide)\b.{0,40}\b(registration|reg|plate)\b", text)
+        or re.search(r"\b(need|waiting for|still need)\b.{0,40}\b(vehicle registration|number plate|reg|plate)\b", text)
+    )
+
+
+def visitor_message_is_friendly_ack(value: Any) -> bool:
+    text = str(value or "").lower()
+    return bool(
+        re.search(
+            r"\b(thanks?|thank you|cheers|nice one|legend|brilliant|perfect|great|awesome|amazing|appreciate|love it|"
+            r"top man|sorted|all good|okay|ok|cool|haha|lol)\b",
+            text,
+        )
+    )
+
+
+def visitor_concierge_non_action_reply(visitor_pass: VisitorPass, text: Any) -> str:
+    name = str(visitor_pass.visitor_name or "").strip().split(" ")[0]
+    if visitor_message_is_friendly_ack(text):
+        if name:
+            return f"Haha, thanks {name}! You're all set."
+        return "Haha, thanks! You're all set."
+    if visitor_pass.number_plate:
+        return (
+            f"You're all set with {format_registration_for_display(visitor_pass.number_plate)}. "
+            "I can still help if you need to change your vehicle registration or allowed time."
+        )
+    return "Please reply with your vehicle registration."
+
+
+def style_visitor_freeform_reply(
+    message: str,
+    visitor_pass: VisitorPass,
+    text: Any,
+    *,
+    emoji_preferred: bool = False,
+    alfred_mentioned: bool = False,
+) -> str:
+    body = str(message or "").strip() or visitor_concierge_non_action_reply(visitor_pass, text)
+    if body == VISITOR_CONCIERGE_RESTRICTED_REPLY:
+        return body
+    if alfred_mentioned and "Jason" not in body and "access-control side quest" not in body:
+        if body.endswith("."):
+            body = body[:-1]
+        body = f"{body}. {visitor_alfred_nod_sentence()}"
+    return f"{body}{visitor_reply_emoji_suffix(emoji_preferred)}"
+
+
+def visitor_message_contains_emoji(value: Any) -> bool:
+    return any(_is_emoji_codepoint(ord(char)) for char in str(value or ""))
+
+
+def visitor_message_is_emoji_only(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text and visitor_message_contains_emoji(text) and not any(char.isalnum() for char in text))
+
+
+def visitor_message_mentions_alfred(value: Any) -> bool:
+    return bool(re.search(r"\balfred\b", str(value or ""), flags=re.IGNORECASE))
+
+
+def _is_emoji_codepoint(codepoint: int) -> bool:
+    return (
+        0x1F000 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or 0xFE00 <= codepoint <= 0xFE0F
+    )
+
+
+def visitor_reply_emoji_suffix(emoji_preferred: bool) -> str:
+    return " 👍" if emoji_preferred else ""
+
+
+def visitor_alfred_nod_sentence() -> str:
+    return "Alfred heard his name; Jason's access-control side quest gains +1 XP."
+
+
+def visitor_text_task_key(pass_id: uuid.UUID, sender: str) -> str:
+    return f"{pass_id}:{normalize_whatsapp_phone_number(sender)}"
+
+
+def masked_plate_value(value: Any) -> str:
+    plate = normalize_registration_number(value)
+    if len(plate) <= 2:
+        return "***"
+    return f"{plate[:2]}***{plate[-1:]}"
+
+
 def first_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
@@ -2120,6 +2655,89 @@ def format_registration_for_display(value: Any) -> str:
     if len(plate) == 7 and plate[:2].isalpha() and plate[2:4].isdigit():
         return f"{plate[:4]} {plate[4:]}"
     return plate
+
+
+def visitor_plate_confirmation_message(
+    visitor_pass: VisitorPass,
+    plate: Any,
+    *,
+    vehicle_make: Any = None,
+    vehicle_colour: Any = None,
+    emoji_preferred: bool = False,
+    alfred_mentioned: bool = False,
+) -> str:
+    name = visitor_first_name(visitor_pass.visitor_name)
+    prefix = f"Thanks {name}. " if name else "Thanks. "
+    body = prefix
+    if alfred_mentioned:
+        body += f"{visitor_alfred_nod_sentence()} "
+    body += f"I read your registration as {format_registration_for_display(plate)}"
+    vehicle = visitor_vehicle_description(vehicle_make, vehicle_colour)
+    if vehicle:
+        body += f", which is {vehicle}"
+    body += f", and your pass is set for {visitor_pass_window_label(visitor_pass)}. Is this correct?"
+    body += visitor_reply_emoji_suffix(emoji_preferred)
+    return body[:1024]
+
+
+def visitor_plate_saved_message(
+    payload: dict[str, Any],
+    *,
+    fallback_plate: Any = None,
+    emoji_preferred: bool = False,
+) -> str:
+    name = visitor_first_name(payload.get("visitor_name"))
+    prefix = f"Thanks {name}. " if name else "Thanks. "
+    plate = format_registration_for_display(payload.get("number_plate") or fallback_plate)
+    vehicle = visitor_vehicle_label(payload.get("vehicle_make"), payload.get("vehicle_colour"))
+    if vehicle:
+        return f"{prefix}I have saved {plate}, the {vehicle}, for your visit.{visitor_reply_emoji_suffix(emoji_preferred)}"[:1024]
+    return f"{prefix}I have saved {plate} for your visit.{visitor_reply_emoji_suffix(emoji_preferred)}"[:1024]
+
+
+def visitor_plate_pending_status_detail(vehicle_make: Any = None, vehicle_colour: Any = None) -> str:
+    vehicle = visitor_vehicle_label(vehicle_make, vehicle_colour)
+    if vehicle:
+        return f"Visitor replied with a vehicle registration; identified {vehicle}; awaiting confirmation."
+    return "Visitor replied with a vehicle registration; awaiting confirmation."
+
+
+def visitor_vehicle_description(vehicle_make: Any = None, vehicle_colour: Any = None) -> str:
+    label = visitor_vehicle_label(vehicle_make, vehicle_colour)
+    if not label:
+        return ""
+    return f"{indefinite_article(label)} {label}"
+
+
+def visitor_vehicle_label(vehicle_make: Any = None, vehicle_colour: Any = None) -> str:
+    make = visitor_vehicle_metadata_text(vehicle_make)
+    colour = visitor_vehicle_metadata_text(vehicle_colour)
+    if make and colour:
+        return f"{colour} {make}"
+    if make:
+        return make
+    if colour:
+        return f"{colour} vehicle"
+    return ""
+
+
+def visitor_vehicle_metadata_text(value: Any) -> str | None:
+    text = " ".join(str(value or "").split())
+    return text[:80] or None
+
+
+def visitor_payload_prefers_emoji(payload: dict[str, Any]) -> bool:
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    return bool(metadata.get("whatsapp_visitor_uses_emoji"))
+
+
+def visitor_first_name(value: Any) -> str:
+    return str(value or "").strip().split(" ")[0][:40]
+
+
+def indefinite_article(label: str) -> str:
+    first = str(label or "").strip()[:1].lower()
+    return "an" if first in {"a", "e", "i", "o", "u"} else "a"
 
 
 def visitor_pass_window_label(visitor_pass: VisitorPass) -> str:

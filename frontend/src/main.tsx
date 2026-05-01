@@ -8,6 +8,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   BarChart3,
   Bell,
   Bot,
@@ -55,6 +56,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Smile,
   Smartphone,
   Settings,
   Shield,
@@ -65,6 +67,7 @@ import {
   Sparkles,
   Sun,
   Terminal,
+  Ticket,
   Trash2,
   Trophy,
   Type,
@@ -140,6 +143,22 @@ type VisitorPass = {
   telemetry_trace_id: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type VisitorPassWhatsAppMessage = {
+  id: string;
+  direction: "inbound" | "outbound" | "status";
+  kind: string;
+  body: string;
+  actor_label: string;
+  provider_message_id: string | null;
+  status: string | null;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+};
+
+type VisitorPassLogEntry = AuditLog & {
+  actor_user_label: string | null;
 };
 
 type ScheduleDependencyItem = {
@@ -469,6 +488,7 @@ const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "visitor_pass.created",
   "visitor_pass.updated",
   "visitor_pass.cancelled",
+  "visitor_pass.deleted",
   "visitor_pass.status_changed",
   "visitor_pass.used",
   "visitor_pass.departure_recorded"
@@ -4536,25 +4556,26 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
   const [filters, setFilters] = React.useState<Set<VisitorPassStatus>>(() => new Set(defaultVisitorPassFilters));
   const [modalPass, setModalPass] = React.useState<VisitorPass | null>(null);
   const [modalOpen, setModalOpen] = React.useState(false);
+  const [detailPass, setDetailPass] = React.useState<VisitorPass | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
-  const [cancellingId, setCancellingId] = React.useState<string | null>(null);
 
-  const loadPasses = React.useCallback(async () => {
+  const loadPasses = React.useCallback(async (options?: { showLoading?: boolean }) => {
+    const showLoading = options?.showLoading !== false;
     const params = new URLSearchParams();
     if (filters.size && filters.size < visitorPassStatuses.length) {
       filters.forEach((status) => params.append("status", status));
     }
     if (query.trim()) params.set("q", query.trim());
     const suffix = params.toString() ? `?${params.toString()}` : "";
-    setLoading(true);
+    if (showLoading) setLoading(true);
     setError("");
     try {
       setPasses(await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Visitor Passes");
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [filters, query]);
 
@@ -4566,13 +4587,26 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
     const latest = realtime[0];
     if (!latest) return;
     if (isVisitorPassRealtimeEvent(latest)) {
+      if (latest.type === "visitor_pass.deleted") {
+        const deletedId = isRecord(latest.payload.visitor_pass) ? stringPayload(latest.payload.visitor_pass.id) : "";
+        if (deletedId) {
+          setPasses((current) => current.filter((item) => item.id !== deletedId));
+          setDetailPass((current) => current?.id === deletedId ? null : current);
+          setModalPass((current) => current?.id === deletedId ? null : current);
+        }
+        loadPasses({ showLoading: false }).catch(() => undefined);
+        return;
+      }
       const livePass = visitorPassFromRealtime(latest);
       if (livePass) {
         setPasses((current) => [livePass, ...current.filter((item) => item.id !== livePass.id)]);
+        setDetailPass((current) => current?.id === livePass.id ? livePass : current);
+        setModalPass((current) => current?.id === livePass.id ? livePass : current);
+        return;
       }
-      loadPasses().catch(() => undefined);
+      loadPasses({ showLoading: false }).catch(() => undefined);
     } else if (latest.type === "access_event.finalized") {
-      loadPasses().catch(() => undefined);
+      loadPasses({ showLoading: false }).catch(() => undefined);
     }
   }, [realtime, loadPasses]);
 
@@ -4586,22 +4620,44 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
     setModalOpen(true);
   };
 
+  const openDetails = (visitorPass: VisitorPass) => {
+    setDetailPass(visitorPass);
+  };
+
   const closeModal = () => {
     setModalOpen(false);
     setModalPass(null);
   };
 
-  const cancelPass = async (visitorPass: VisitorPass) => {
-    if (!window.confirm(`Cancel Visitor Pass for ${visitorPass.visitor_name}?`)) return;
-    setCancellingId(visitorPass.id);
+  const handlePassUpdated = React.useCallback(async (visitorPass: VisitorPass) => {
+    setPasses((current) => [visitorPass, ...current.filter((item) => item.id !== visitorPass.id)]);
+    setDetailPass(visitorPass);
+    await loadPasses();
+  }, [loadPasses]);
+
+  const cancelPass = async (visitorPass: VisitorPass): Promise<VisitorPass | null> => {
     setError("");
     try {
-      await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/cancel`, { reason: "Cancelled from dashboard" });
-      await loadPasses();
+      const cancelled = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/cancel`, { reason: "Cancelled from dashboard" });
+      await handlePassUpdated(cancelled);
+      return cancelled;
     } catch (cancelError) {
       setError(cancelError instanceof Error ? cancelError.message : "Unable to cancel Visitor Pass");
-    } finally {
-      setCancellingId(null);
+      return null;
+    }
+  };
+
+  const deletePass = async (visitorPass: VisitorPass): Promise<boolean> => {
+    setError("");
+    try {
+      await api.delete(`/api/v1/visitor-passes/${visitorPass.id}`);
+      setPasses((current) => current.filter((item) => item.id !== visitorPass.id));
+      setDetailPass(null);
+      await loadPasses();
+      return true;
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete Visitor Pass");
+      return false;
     }
   };
 
@@ -4639,15 +4695,15 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
         </div>
       ) : visiblePasses.length ? (
         <div className="visitor-pass-grid">
-          {visiblePasses.map((visitorPass) => (
-            <VisitorPassCard
-              cancelling={cancellingId === visitorPass.id}
-              key={visitorPass.id}
-              onCancel={cancelPass}
-              onEdit={openEdit}
-              visitorPass={visitorPass}
-            />
-          ))}
+          <AnimatePresence initial={false}>
+            {visiblePasses.map((visitorPass) => (
+              <VisitorPassCard
+                key={visitorPass.id}
+                onOpen={openDetails}
+                visitorPass={visitorPass}
+              />
+            ))}
+          </AnimatePresence>
         </div>
       ) : (
         <div className="card passes-empty-card">
@@ -4664,6 +4720,19 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
             closeModal();
           }}
           visitorPass={modalPass}
+        />
+      ) : null}
+
+      {detailPass ? (
+        <VisitorPassDetailsModal
+          onCancel={cancelPass}
+          onClose={() => setDetailPass(null)}
+          onDelete={deletePass}
+          onEdit={(visitorPass) => {
+            setDetailPass(null);
+            openEdit(visitorPass);
+          }}
+          visitorPass={detailPass}
         />
       ) : null}
     </section>
@@ -4712,96 +4781,170 @@ function PassFilterBar({
 
 function VisitorPassCard({
   visitorPass,
-  cancelling,
-  onEdit,
-  onCancel
+  onOpen
 }: {
   visitorPass: VisitorPass;
-  cancelling: boolean;
-  onEdit: (visitorPass: VisitorPass) => void;
-  onCancel: (visitorPass: VisitorPass) => void;
+  onOpen: (visitorPass: VisitorPass) => void;
 }) {
-  const editable = visitorPass.status === "active" || visitorPass.status === "scheduled";
   const vehicleSummary = visitorPassVehicleSummary(visitorPass);
   const windowLabel = visitorPassWindowLabel(visitorPass);
   const sourceLabel = visitorPassSourceLabel(visitorPass.creation_source);
   const isDuration = visitorPass.pass_type === "duration";
-  const hasTelemetry = visitorPass.status === "used" || Boolean(visitorPass.arrival_time);
+  const visitDuration = visitorPassVisitDurationLabel(visitorPass);
+  const passDuration = visitorPassPassDurationLabel(visitorPass);
+  const subtitle = isDuration ? formatDate(visitorPass.window_start) : `${formatDate(visitorPass.window_start)} · ${windowLabel}`;
+  const vehicleMeta = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ");
+  const vehiclePrimary = visitorPass.number_plate || vehicleSummary || "Pending";
+  const vehicleSecondary = vehicleMeta || "Vehicle";
   return (
-    <article className={`card visitor-pass-card ${visitorPass.status}`}>
+    <motion.article
+      className={`card visitor-pass-card ${visitorPass.status}`}
+      layout
+      initial={{ opacity: 0, y: 8, scale: 0.985 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 8, scale: 0.985 }}
+      onClick={() => onOpen(visitorPass)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(visitorPass);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      transition={{ duration: 0.18, ease: "easeOut", layout: { duration: 0.22 } }}
+    >
       <div className="visitor-pass-card-head">
         <div className="visitor-pass-icon">
-          <ClipboardPaste size={18} />
+          <Ticket size={18} />
         </div>
         <div>
           <strong>{visitorPass.visitor_name}</strong>
-          <span>{formatDate(visitorPass.expected_time)} · {windowLabel}</span>
+          <span className="visitor-pass-card-subtitle">{subtitle}</span>
         </div>
-        <Badge tone={visitorPassStatusTone(visitorPass.status)}>{titleCase(visitorPass.status)}</Badge>
+        <VisitorPassStatusPill showIcon={false} status={visitorPass.status} visitorPass={visitorPass} />
       </div>
 
       <div className="visitor-pass-window">
-        <div>
+        <div className="visitor-pass-window-row">
           <Clock3 size={15} />
           <span>{formatDate(visitorPass.window_start)} to {formatDate(visitorPass.window_end)}</span>
         </div>
-        <div>
+        <div className="visitor-pass-window-row">
           <GitBranch size={15} />
           <span>
-            {isDuration ? "Duration" : sourceLabel}
+            {sourceLabel}
             {visitorPass.visitor_phone ? ` · +${visitorPass.visitor_phone}` : visitorPass.created_by ? ` · ${visitorPass.created_by}` : ""}
           </span>
         </div>
       </div>
 
-      {isDuration && visitorPass.whatsapp_status_label ? (
-        <VisitorPassWhatsAppStatus visitorPass={visitorPass} />
-      ) : null}
+      <VisitorPassMoreInfo visitorPass={visitorPass} />
 
-      {hasTelemetry ? (
-        <section className="visitor-pass-telemetry">
-          <div className="visitor-pass-vehicle">
-            <Car size={17} />
-            <div>
-              <strong>{vehicleSummary || "Vehicle details pending"}</strong>
-              <span>{visitorPass.arrival_time ? `Arrived ${formatDate(visitorPass.arrival_time)}` : "Arrival not recorded"}</span>
-            </div>
+      <section className="visitor-pass-card-stats">
+        <div className="visitor-pass-card-stat">
+          <span className="visitor-pass-stat-icon vehicle">
+            <Car size={19} />
+          </span>
+          <div>
+            <strong>{vehiclePrimary}</strong>
+            <span>{vehicleSecondary}</span>
           </div>
-          <div className="visitor-pass-duration">
-            <Badge tone={visitorPass.departure_time ? "green" : "amber"}>
-              {visitorPass.duration_human || (visitorPass.departure_time ? "Duration pending" : "On site")}
-            </Badge>
-            {visitorPass.departure_time ? <span>Left {formatDate(visitorPass.departure_time)}</span> : <span>Departure pending</span>}
+        </div>
+        <div className="visitor-pass-card-stat">
+          <span className="visitor-pass-stat-icon duration">
+            <Clock3 size={19} />
+          </span>
+          <div>
+            <strong>{visitDuration || passDuration || "Pending"}</strong>
+            <span>Duration</span>
           </div>
-        </section>
-      ) : null}
-
-      <div className="visitor-pass-actions">
-        {editable ? (
-          <>
-            <span>{visitorPass.number_plate || (isDuration ? "Plate pending" : "No plate linked")}</span>
-            <div className="visitor-pass-action-buttons">
-              <button className="secondary-button" onClick={() => onEdit(visitorPass)} type="button">
-                <Pencil size={15} /> Edit
-              </button>
-              <button className="secondary-button danger" disabled={cancelling} onClick={() => onCancel(visitorPass)} type="button">
-                <X size={15} /> {cancelling ? "Cancelling..." : "Cancel"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <span>{visitorPass.number_plate || "No plate linked"}</span>
-        )}
-      </div>
-    </article>
+        </div>
+      </section>
+    </motion.article>
   );
 }
 
-function VisitorPassWhatsAppStatus({ visitorPass }: { visitorPass: VisitorPass }) {
+function VisitorPassStatusPill({
+  status,
+  visitorPass,
+  showIcon = true
+}: {
+  status: VisitorPassStatus;
+  visitorPass?: VisitorPass;
+  showIcon?: boolean;
+}) {
+  const Icon = status === "scheduled" || status === "active" ? Clock3 : status === "used" ? CheckCircle2 : status === "cancelled" ? X : CircleDot;
+  const tone = visitorPass ? visitorPassStatusPillTone(visitorPass) : visitorPassBaseStatusTone(status);
+  return (
+    <span className={`visitor-pass-status-pill ${status} tone-${tone}`}>
+      {showIcon ? <Icon size={18} /> : null}
+      <span className="visitor-pass-status-label">{titleCase(status)}</span>
+    </span>
+  );
+}
+
+function VisitorPassAvatar({ visitorPass }: { visitorPass: VisitorPass }) {
+  const initials = visitorPassInitials(visitorPass.visitor_name);
+  return (
+    <span className="visitor-pass-avatar" aria-hidden="true">
+      {initials || <ClipboardPaste size={24} />}
+    </span>
+  );
+}
+
+function VisitorPassDetailTile({
+  icon: Icon,
+  tone,
+  label,
+  value,
+  detail
+}: {
+  icon: React.ElementType;
+  tone: "blue" | "green" | "amber" | "purple";
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className={`visitor-pass-detail-tile ${tone}`}>
+      <span className="visitor-pass-detail-tile-icon">
+        <Icon size={24} />
+      </span>
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+        <small>{detail}</small>
+      </div>
+    </div>
+  );
+}
+
+function WhatsAppIcon({ size = 24, ...props }: React.SVGProps<SVGSVGElement> & { size?: number | string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height={size}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      viewBox="0 0 24 24"
+      width={size}
+      {...props}
+    >
+      <path d="M4.8 19.2l.9-3.25a7.6 7.6 0 1 1 2.72 2.62l-3.62.63Z" />
+      <path d="M9.3 8.55c.22-.48.4-.52.68-.52h.5c.17 0 .35.04.47.34l.64 1.55c.1.27.06.43-.1.62l-.37.43c-.12.14-.16.27-.07.45.33.66.9 1.25 1.48 1.65.42.29.78.48.98.55.18.06.32.03.45-.12l.57-.65c.16-.18.34-.24.58-.14l1.53.7c.27.12.36.3.31.55-.08.48-.4 1.03-.8 1.27-.45.27-1.1.34-1.93.09-1.02-.31-2.12-.93-3.22-2.02-1.1-1.1-1.78-2.22-2.08-3.18-.25-.82-.17-1.23.08-1.57Z" />
+    </svg>
+  );
+}
+
+function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass }) {
+  const state = visitorPassMoreInfoState(visitorPass);
   const tooltip = visitorPassWhatsAppStatusTooltip(visitorPass);
   const tooltipId = React.useId();
   const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
-  const label = visitorPass.whatsapp_status_label || "WhatsApp status";
 
   React.useEffect(() => {
     if (!tooltipPosition) return undefined;
@@ -4828,22 +4971,32 @@ function VisitorPassWhatsAppStatus({ visitorPass }: { visitorPass: VisitorPass }
     setTooltipPosition({ left, placement, top });
   };
 
+  if (!state) return null;
+  const Icon = state.icon;
+
   return (
-    <div
+    <motion.div
       aria-describedby={tooltip && tooltipPosition ? tooltipId : undefined}
-      aria-label={tooltip ? `${label}. ${tooltip.body}` : label}
-      className={`visitor-pass-whatsapp-status ${visitorPass.whatsapp_status ?? ""}${tooltip ? " has-tooltip" : ""}`}
+      aria-label={tooltip ? `${state.label}. ${tooltip.body}` : state.label}
+      className={`visitor-pass-more-info ${state.tone} ${visitorPass.whatsapp_status ?? ""}${tooltip ? " has-tooltip" : ""}`}
+      layout
+      onClick={tooltip ? (event) => event.stopPropagation() : undefined}
       onBlur={tooltip ? () => setTooltipPosition(null) : undefined}
       onFocus={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
       onKeyDown={tooltip ? (event) => {
-        if (event.key === "Escape") setTooltipPosition(null);
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          setTooltipPosition(null);
+        }
       } : undefined}
       onMouseEnter={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
       onMouseLeave={tooltip ? () => setTooltipPosition(null) : undefined}
       tabIndex={tooltip ? 0 : undefined}
+      transition={{ duration: 0.18, ease: "easeOut", layout: { duration: 0.2 } }}
     >
-      <MessageCircle size={15} />
-      <span>{label}</span>
+      <Icon className={state.spinning ? "spin" : undefined} size={15} />
+      <strong>{state.label}</strong>
+      {tooltip ? <AlertTriangle size={15} /> : <ChevronRight size={15} />}
       {tooltip && tooltipPosition ? createPortal(
         <span
           className={`iacs-tooltip visitor-pass-error-tooltip ${tooltipPosition.placement}`}
@@ -4856,6 +5009,459 @@ function VisitorPassWhatsAppStatus({ visitorPass }: { visitorPass: VisitorPass }
         </span>,
         document.body
       ) : null}
+    </motion.div>
+  );
+}
+
+function VisitorPassDetailsModal({
+  visitorPass,
+  onClose,
+  onEdit,
+  onCancel,
+  onDelete
+}: {
+  visitorPass: VisitorPass;
+  onClose: () => void;
+  onEdit: (visitorPass: VisitorPass) => void;
+  onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
+  onDelete: (visitorPass: VisitorPass) => Promise<boolean>;
+}) {
+  const [activeTab, setActiveTab] = React.useState<"details" | "whatsapp" | "log">("details");
+  const [messages, setMessages] = React.useState<VisitorPassWhatsAppMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = React.useState(false);
+  const [messagesLoaded, setMessagesLoaded] = React.useState(false);
+  const [messagesError, setMessagesError] = React.useState("");
+  const [logs, setLogs] = React.useState<VisitorPassLogEntry[]>([]);
+  const [logsLoading, setLogsLoading] = React.useState(false);
+  const [logsLoaded, setLogsLoaded] = React.useState(false);
+  const [logsError, setLogsError] = React.useState("");
+  const [action, setAction] = React.useState<"cancel" | "delete" | null>(null);
+  const [confirmAction, setConfirmAction] = React.useState<"cancel" | "delete" | null>(null);
+  const threadRef = React.useRef<HTMLDivElement | null>(null);
+  const latestMessageCountRef = React.useRef(0);
+  const shouldStickToLatestRef = React.useRef(true);
+  const reduceMotion = useReducedMotion();
+  const isDuration = visitorPass.pass_type === "duration";
+  const canModify = visitorPass.status === "active" || visitorPass.status === "scheduled";
+  const vehicleValue = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ") || visitorPass.number_plate || "Vehicle details pending";
+  const vehicleDetail = visitorPass.number_plate ? `Registration ${visitorPass.number_plate}` : "Plate pending";
+  const sourceLabel = visitorPassSourceLabel(visitorPass.creation_source);
+  const visitDuration = visitorPassVisitDurationLabel(visitorPass);
+  const passDuration = visitorPassPassDurationLabel(visitorPass);
+  const whatsappStatusLabel = visitorPassWhatsAppDetailLabel(visitorPass);
+  const visitDetail = visitorPass.departure_time
+    ? `Left ${formatDate(visitorPass.departure_time)}`
+    : visitorPass.arrival_time
+      ? `Arrived ${formatDate(visitorPass.arrival_time)}`
+      : passDuration
+        ? "Pass window"
+        : "No visit telemetry";
+  const telemetryLinked = Boolean(visitorPass.arrival_event_id || visitorPass.departure_event_id);
+
+  const loadWhatsAppMessages = React.useCallback(async (showLoading = false) => {
+    if (!isDuration) return;
+    if (showLoading) setMessagesLoading(true);
+    setMessagesError("");
+    try {
+      const rows = await api.get<VisitorPassWhatsAppMessage[]>(`/api/v1/visitor-passes/${visitorPass.id}/whatsapp-messages`);
+      const nextMessages = rows.map(visitorPassWhatsAppMessageFromApi);
+      setMessages((current) => visitorPassWhatsAppMessagesEqual(current, nextMessages) ? current : nextMessages);
+      setMessagesLoaded(true);
+    } catch (historyError) {
+      setMessagesError(historyError instanceof Error ? historyError.message : "Unable to load WhatsApp history");
+    } finally {
+      if (showLoading) setMessagesLoading(false);
+    }
+  }, [isDuration, visitorPass.id]);
+
+  const loadLogs = React.useCallback(async (showLoading = false) => {
+    if (showLoading) setLogsLoading(true);
+    setLogsError("");
+    try {
+      const rows = await api.get<VisitorPassLogEntry[]>(`/api/v1/visitor-passes/${visitorPass.id}/logs`);
+      setLogs((current) => visitorPassLogsEqual(current, rows) ? current : rows);
+      setLogsLoaded(true);
+    } catch (logError) {
+      setLogsError(logError instanceof Error ? logError.message : "Unable to load Visitor Pass log");
+    } finally {
+      if (showLoading) setLogsLoading(false);
+    }
+  }, [visitorPass.id]);
+
+  React.useEffect(() => {
+    setActiveTab("details");
+    setMessages([]);
+    setMessagesError("");
+    setMessagesLoaded(false);
+    setLogs([]);
+    setLogsError("");
+    setLogsLoaded(false);
+    latestMessageCountRef.current = 0;
+    shouldStickToLatestRef.current = true;
+  }, [visitorPass.id]);
+
+  React.useEffect(() => {
+    if (activeTab !== "whatsapp" || !isDuration) return undefined;
+    loadWhatsAppMessages(!messagesLoaded).catch(() => undefined);
+    const interval = window.setInterval(() => {
+      loadWhatsAppMessages(false).catch(() => undefined);
+    }, 3500);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [activeTab, isDuration, loadWhatsAppMessages, messagesLoaded, visitorPass.updated_at]);
+
+  React.useEffect(() => {
+    if (activeTab !== "log") return undefined;
+    loadLogs(!logsLoaded).catch(() => undefined);
+    const interval = window.setInterval(() => {
+      loadLogs(false).catch(() => undefined);
+    }, 5000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [activeTab, loadLogs, logsLoaded, visitorPass.updated_at]);
+
+  React.useEffect(() => {
+    if (activeTab !== "whatsapp") return;
+    window.requestAnimationFrame(() => {
+      if (threadRef.current) {
+        threadRef.current.scrollTop = threadRef.current.scrollHeight;
+      }
+    });
+  }, [activeTab]);
+
+  React.useLayoutEffect(() => {
+    if (activeTab !== "whatsapp") return;
+    const thread = threadRef.current;
+    if (!thread) return;
+    const previousCount = latestMessageCountRef.current;
+    const nextCount = messages.length;
+    latestMessageCountRef.current = nextCount;
+    if (!nextCount) return;
+    window.requestAnimationFrame(() => {
+      if (!threadRef.current) return;
+      if (previousCount === 0) {
+        threadRef.current.scrollTop = threadRef.current.scrollHeight;
+        return;
+      }
+      if (nextCount > previousCount && shouldStickToLatestRef.current) {
+        threadRef.current.scrollTo({
+          top: threadRef.current.scrollHeight,
+          behavior: reduceMotion ? "auto" : "smooth"
+        });
+      }
+    });
+  }, [activeTab, messages.length, reduceMotion]);
+
+  const updateStickiness = React.useCallback(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    shouldStickToLatestRef.current = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 72;
+  }, []);
+
+  const confirmVisitorPassAction = async () => {
+    if (!confirmAction) return;
+    setAction(confirmAction);
+    try {
+      if (confirmAction === "cancel") {
+        await onCancel(visitorPass);
+        setConfirmAction(null);
+        return;
+      }
+      const deleted = await onDelete(visitorPass);
+      if (!deleted) {
+        setAction(null);
+        return;
+      }
+    } finally {
+      if (confirmAction === "cancel") setAction(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="modal-backdrop" role="presentation">
+        <div className="modal-card visitor-pass-detail-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-detail-title">
+          <div className="modal-header visitor-pass-detail-header">
+            <VisitorPassAvatar visitorPass={visitorPass} />
+            <div className="visitor-pass-detail-title">
+              <span>{visitorPass.pass_type === "duration" ? "Duration Pass" : "Visitor Pass"}</span>
+              <h2 id="visitor-pass-detail-title">{visitorPass.visitor_name}</h2>
+              <p><CalendarDays size={17} /> {formatDate(visitorPass.window_start)} to {formatDate(visitorPass.window_end)}</p>
+            </div>
+            <div className="visitor-pass-detail-header-actions">
+              <VisitorPassStatusPill status={visitorPass.status} />
+              <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+
+          <div className="visitor-pass-detail-tabs" role="tablist" aria-label="Visitor Pass details">
+            <button className={activeTab === "details" ? "active" : ""} onClick={() => setActiveTab("details")} type="button" role="tab" aria-selected={activeTab === "details"}>
+              Details
+            </button>
+            {isDuration ? (
+              <button className={activeTab === "whatsapp" ? "active" : ""} onClick={() => setActiveTab("whatsapp")} type="button" role="tab" aria-selected={activeTab === "whatsapp"}>
+                WhatsApp
+              </button>
+            ) : null}
+            <button className={activeTab === "log" ? "active" : ""} onClick={() => setActiveTab("log")} type="button" role="tab" aria-selected={activeTab === "log"}>
+              Log
+            </button>
+          </div>
+
+          {activeTab === "whatsapp" && isDuration ? (
+            <section className="visitor-pass-whatsapp-panel">
+              {messagesError ? <div className="auth-error">{messagesError}</div> : null}
+              <div className="visitor-pass-whatsapp-thread" ref={threadRef} onScroll={updateStickiness}>
+                {messagesLoading && !messages.length ? (
+                  <div className="visitor-pass-thread-empty">
+                    <Loader2 className="spin" size={17} /> Loading WhatsApp history
+                  </div>
+                ) : messages.length ? (
+                  <AnimatePresence initial={false}>
+                    {messages.map((message) => <VisitorPassWhatsAppBubble key={message.id} message={message} />)}
+                  </AnimatePresence>
+                ) : (
+                  <div className="visitor-pass-thread-empty">No WhatsApp messages recorded for this pass yet</div>
+                )}
+                <div className="visitor-pass-whatsapp-composer" aria-hidden="true">
+                  <Smile size={18} />
+                  <span>Message...</span>
+                  <Paperclip size={18} />
+                </div>
+              </div>
+            </section>
+          ) : activeTab === "log" ? (
+            <section className="visitor-pass-log-panel">
+              {logsError ? <div className="auth-error">{logsError}</div> : null}
+              {logsLoading && !logs.length ? (
+                <div className="visitor-pass-thread-empty">
+                  <Loader2 className="spin" size={17} /> Loading Visitor Pass log
+                </div>
+              ) : logs.length ? (
+                <VisitorPassLogTimeline logs={logs} visitorPass={visitorPass} />
+              ) : (
+                <div className="visitor-pass-thread-empty">No changes have been logged for this pass yet</div>
+              )}
+            </section>
+          ) : (
+            <section className="visitor-pass-detail-body">
+              <div className="visitor-pass-detail-window-card">
+                <span className="visitor-pass-window-orb">
+                  <Clock3 size={34} />
+                </span>
+                <div className="visitor-pass-window-times">
+                  <span>Window</span>
+                  <strong>{formatDate(visitorPass.window_start)}</strong>
+                  <small>{visitorPassWindowLabel(visitorPass)}</small>
+                </div>
+                <ArrowRight className="visitor-pass-window-arrow" size={30} />
+                <div className="visitor-pass-window-times">
+                  <span>Until</span>
+                  <strong>{formatDate(visitorPass.window_end)}</strong>
+                  <small>{passDuration || "Window duration pending"}</small>
+                </div>
+                <div className="visitor-pass-window-source">
+                  <span className="visitor-pass-window-source-icon"><UserRound size={20} /></span>
+                  <div>
+                    <span>Source</span>
+                    <strong>{sourceLabel}</strong>
+                    <small>{visitorPass.created_by ? `Created by ${visitorPass.created_by}` : formatDate(visitorPass.created_at)}</small>
+                  </div>
+                </div>
+              </div>
+              <div className="visitor-pass-detail-grid">
+                <VisitorPassDetailTile
+                  detail={vehicleDetail}
+                  icon={Car}
+                  label="Vehicle"
+                  tone="green"
+                  value={vehicleValue}
+                />
+                <VisitorPassDetailTile
+                  detail={visitDetail}
+                  icon={Clock3}
+                  label="Duration"
+                  tone="amber"
+                  value={visitDuration || passDuration || "Not available"}
+                />
+                {isDuration ? (
+                  <VisitorPassDetailTile
+                    detail={visitorPass.visitor_phone ? `+${visitorPass.visitor_phone}` : "No phone number"}
+                    icon={WhatsAppIcon}
+                    label="WhatsApp"
+                    tone="green"
+                    value={whatsappStatusLabel}
+                  />
+                ) : null}
+                <VisitorPassDetailTile
+                  detail={visitorPass.telemetry_trace_id || (telemetryLinked ? "Access events linked" : "No access events linked")}
+                  icon={Activity}
+                  label="Telemetry"
+                  tone="purple"
+                  value={visitorPass.telemetry_trace_id ? "Trace linked" : "No trace linked"}
+                />
+              </div>
+            </section>
+          )}
+
+          <div className="modal-actions visitor-pass-detail-actions">
+            <button className="secondary-button" onClick={onClose} disabled={action !== null} type="button">
+              Close
+            </button>
+            <button className="secondary-button" onClick={() => onEdit(visitorPass)} disabled={!canModify || action !== null} type="button">
+              <Pencil size={15} /> Edit
+            </button>
+            <button className="secondary-button danger" onClick={() => setConfirmAction("cancel")} disabled={!canModify || action !== null} type="button">
+              <X size={15} /> {action === "cancel" ? "Cancelling..." : "Cancel pass"}
+            </button>
+            <button className="danger-button" onClick={() => setConfirmAction("delete")} disabled={action !== null} type="button">
+              <Trash2 size={15} /> {action === "delete" ? "Deleting..." : "Delete pass"}
+            </button>
+          </div>
+        </div>
+      </div>
+      {confirmAction ? (
+        <VisitorPassActionConfirmModal
+          action={confirmAction}
+          loading={action === confirmAction}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={confirmVisitorPassAction}
+          visitorPass={visitorPass}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWhatsAppMessage }) {
+  const outbound = message.direction === "outbound";
+  if (message.direction === "status") {
+    return (
+      <motion.div
+        className="visitor-pass-whatsapp-row status"
+        layout
+        initial={{ opacity: 0, y: 8, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 8, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: "easeOut" }}
+      >
+        <div className="visitor-pass-whatsapp-status-card">
+          <MessageCircle size={24} />
+          <span>
+            <strong>{message.body}</strong>
+            <small>{formatDate(message.created_at)}</small>
+          </span>
+        </div>
+      </motion.div>
+    );
+  }
+  return (
+    <motion.div
+      className={`visitor-pass-whatsapp-row ${outbound ? "outbound" : "inbound"}`}
+      layout
+      initial={{ opacity: 0, y: 12, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 8, scale: 0.98 }}
+      transition={{ duration: 0.22, ease: "easeOut" }}
+    >
+      <span className={`visitor-pass-whatsapp-avatar ${outbound ? "iacs" : ""}`}>
+        {outbound ? <ShieldCheck size={22} /> : message.actor_label.slice(0, 2).toUpperCase()}
+      </span>
+      <div className="visitor-pass-whatsapp-bubble">
+        <span>{message.actor_label}</span>
+        <p>{message.body}</p>
+        <small>{formatDate(message.created_at)}{outbound ? <Check size={14} /> : null}</small>
+      </div>
+    </motion.div>
+  );
+}
+
+function VisitorPassActionConfirmModal({
+  action,
+  visitorPass,
+  loading,
+  onCancel,
+  onConfirm
+}: {
+  action: "cancel" | "delete";
+  visitorPass: VisitorPass;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const isDelete = action === "delete";
+  return createPortal(
+    <div className="modal-backdrop stacked-modal" role="presentation">
+      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-action-confirm-title">
+        <div className="modal-header">
+          <div className="gate-confirm-title">
+            <span className={`gate-confirm-icon ${isDelete ? "danger" : ""}`}>
+              {isDelete ? <Trash2 size={20} /> : <X size={20} />}
+            </span>
+            <div>
+              <h2 id="visitor-pass-action-confirm-title">
+                {isDelete ? "Delete" : "Cancel"} Visitor Pass?
+              </h2>
+              <p>
+                {isDelete
+                  ? `This will permanently delete the pass for ${visitorPass.visitor_name}.`
+                  : `This will cancel the active window for ${visitorPass.visitor_name}.`}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary-button" disabled={loading} onClick={onCancel} type="button">
+            Keep pass
+          </button>
+          <button className={isDelete ? "danger-button" : "secondary-button danger"} disabled={loading} onClick={onConfirm} type="button">
+            {isDelete ? <Trash2 size={15} /> : <X size={15} />}
+            {loading ? (isDelete ? "Deleting..." : "Cancelling...") : isDelete ? "Delete pass" : "Cancel pass"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function VisitorPassLogTimeline({ logs, visitorPass }: { logs: VisitorPassLogEntry[]; visitorPass: VisitorPass }) {
+  return (
+    <div className="visitor-pass-log-list">
+      {logs.map((log) => {
+        const details = visitorPassLogDetails(log, visitorPass);
+        return (
+          <article className="visitor-pass-log-entry" key={log.id}>
+            <span className={`visitor-pass-log-dot ${details.tone}`} />
+            <div>
+              <div className="visitor-pass-log-head">
+                <span className={`visitor-pass-log-icon ${details.tone}`}>
+                  {React.createElement(visitorPassLogIcon(log.action), { size: 24 })}
+                </span>
+                <div>
+                  <strong>{details.title}</strong>
+                  <p>{details.description}</p>
+                </div>
+                <time><Clock3 size={15} /> {formatDate(log.timestamp)}</time>
+              </div>
+              {details.fields.length ? (
+                <div className="visitor-pass-log-fields">
+                  {details.fields.map((field) => (
+                    <span key={`${log.id}-${field.label}`}>
+                      <small>{field.label}</small>
+                      <strong>{field.value}</strong>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -12233,10 +12839,14 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
   {
     group: "Visitor Pass",
     items: [
+      { name: "VisitorName", token: "@VisitorName", label: "Visitor name" },
+      { name: "VisitorPassName", token: "@VisitorPassName", label: "Visitor Pass name" },
       { name: "VisitorPassVehicleRegistration", token: "@VisitorPassVehicleRegistration", label: "Visitor Pass vehicle registration" },
       { name: "VisitorPassVehicleMake", token: "@VisitorPassVehicleMake", label: "Visitor Pass vehicle make" },
       { name: "VisitorPassVehicleColour", token: "@VisitorPassVehicleColour", label: "Visitor Pass vehicle colour" },
-      { name: "VisitorPassDurationOnSite", token: "@VisitorPassDurationOnSite", label: "Visitor Pass duration on site" }
+      { name: "VisitorPassDurationOnSite", token: "@VisitorPassDurationOnSite", label: "Visitor Pass duration on site" },
+      { name: "VisitorPassOriginalTime", token: "@VisitorPassOriginalTime", label: "Visitor Pass original time" },
+      { name: "VisitorPassRequestedTime", token: "@VisitorPassRequestedTime", label: "Visitor Pass requested time" }
     ]
   },
   {
@@ -12288,10 +12898,14 @@ const mockNotificationContext: Record<string, string> = {
   Subject: "Steph arrived at the gate",
   Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
   MaintenanceModeReason: "Enabled by Jason from UI",
+  VisitorName: "Sarah",
+  VisitorPassName: "Sarah",
   VisitorPassVehicleRegistration: "PE70DHX",
   VisitorPassVehicleMake: "Peugeot",
   VisitorPassVehicleColour: "Silver",
   VisitorPassDurationOnSite: "1h 25m",
+  VisitorPassOriginalTime: "01 May 2026, 10:00 to 01 May 2026, 18:00",
+  VisitorPassRequestedTime: "01 May 2026, 10:00 to 01 May 2026, 20:00",
   NewWinnerName: "Steph Smith",
   OvertakenName: "Jason Smith",
   ReadCount: "42"
@@ -17849,12 +18463,115 @@ function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
   };
 }
 
+function visitorPassWhatsAppMessageFromApi(candidate: unknown): VisitorPassWhatsAppMessage {
+  const row = isRecord(candidate) ? candidate : {};
+  const direction = stringPayload(row.direction);
+  const normalizedDirection = direction === "inbound" || direction === "outbound" || direction === "status" ? direction : "status";
+  return {
+    id: stringPayload(row.id) || crypto.randomUUID(),
+    direction: normalizedDirection,
+    kind: stringPayload(row.kind) || "text",
+    body: stringPayload(row.body),
+    actor_label: stringPayload(row.actor_label) || (normalizedDirection === "inbound" ? "Visitor" : "IACS"),
+    provider_message_id: stringPayload(row.provider_message_id) || null,
+    status: stringPayload(row.status) || null,
+    created_at: stringPayload(row.created_at) || new Date().toISOString(),
+    metadata: isRecord(row.metadata) ? row.metadata : null,
+  };
+}
+
+function visitorPassWhatsAppMessagesEqual(left: VisitorPassWhatsAppMessage[], right: VisitorPassWhatsAppMessage[]) {
+  if (left.length !== right.length) return false;
+  return left.every((message, index) => {
+    const other = right[index];
+    return Boolean(other) &&
+      message.id === other.id &&
+      message.body === other.body &&
+      message.status === other.status &&
+      message.created_at === other.created_at;
+  });
+}
+
+function visitorPassLogsEqual(left: VisitorPassLogEntry[], right: VisitorPassLogEntry[]) {
+  if (left.length !== right.length) return false;
+  return left.every((log, index) => {
+    const other = right[index];
+    return Boolean(other) &&
+      log.id === other.id &&
+      log.timestamp === other.timestamp &&
+      log.action === other.action &&
+      JSON.stringify(log.diff) === JSON.stringify(other.diff) &&
+      JSON.stringify(log.metadata) === JSON.stringify(other.metadata);
+  });
+}
+
 function visitorPassStatusTone(status: VisitorPassStatus): BadgeTone {
   if (status === "active") return "green";
   if (status === "scheduled") return "blue";
   if (status === "used") return "purple";
   if (status === "cancelled") return "red";
   return "gray";
+}
+
+type VisitorPassTone = "blue" | "green" | "orange" | "red" | "gray";
+
+type VisitorPassMoreInfoState = {
+  label: string;
+  tone: "green" | "orange" | "red";
+  icon: React.ElementType;
+  spinning?: boolean;
+};
+
+function visitorPassBaseStatusTone(status: VisitorPassStatus): VisitorPassTone {
+  if (status === "active" || status === "used") return "green";
+  if (status === "scheduled") return "blue";
+  if (status === "cancelled") return "red";
+  return "gray";
+}
+
+function visitorPassStatusPillTone(visitorPass: VisitorPass): VisitorPassTone {
+  const moreInfo = visitorPassMoreInfoState(visitorPass);
+  if (!moreInfo) return visitorPassBaseStatusTone(visitorPass.status);
+  if (moreInfo.tone === "red") return "red";
+  if (moreInfo.label === "Chat Complete") return "green";
+  if (moreInfo.label === "Message Sent" || moreInfo.label === "Replying..." || moreInfo.label === "Awaiting Visitor Reply") return "orange";
+  if (moreInfo.tone === "green") return "green";
+  return moreInfo.tone;
+}
+
+function visitorPassMoreInfoState(visitorPass: VisitorPass): VisitorPassMoreInfoState | null {
+  if (visitorPass.pass_type !== "duration" || !visitorPass.visitor_phone) return null;
+  const status = (visitorPass.whatsapp_status || "").trim();
+  const label = (visitorPass.whatsapp_status_label || "").trim();
+  const detail = `${visitorPass.whatsapp_status_detail || ""} ${label} ${status}`.toLowerCase();
+  if (status === "message_sending_failed" || status === "failed") {
+    return { label: "Sending Message Failed", tone: "red", icon: AlertTriangle };
+  }
+  if (status === "user_not_on_whatsapp") {
+    return { label: "Visitor isn't on WhatsApp", tone: "red", icon: AlertTriangle };
+  }
+  if (status === "visitor_replied") {
+    return { label: "Replying...", tone: "green", icon: Loader2, spinning: true };
+  }
+  if (status === "welcome_message_sent" || status === "message_received" || status === "message_read") {
+    return { label: "Message Sent", tone: "green", icon: Send };
+  }
+  if (status === "awaiting_visitor_reply" || status === "timeframe_confirmation_pending") {
+    return { label: "Awaiting Visitor Reply", tone: "orange", icon: MessageCircle };
+  }
+  if (status === "timeframe_approval_pending") {
+    return { label: "Awaiting Approval", tone: "orange", icon: Clock3 };
+  }
+  if (status === "complete" || status === "timeframe_approved") {
+    return { label: "Chat Complete", tone: "green", icon: CheckCircle2 };
+  }
+  if (status === "timeframe_denied" || detail.includes("error") || detail.includes("failed") || detail.includes("unable") || detail.includes("rejected")) {
+    return { label: "Error Detected", tone: "red", icon: AlertTriangle };
+  }
+  if (status || label) {
+    return { label: label || titleCase(status.replace(/_/g, " ")), tone: "orange", icon: MessageCircle };
+  }
+  return { label: "Awaiting Visitor Reply", tone: "orange", icon: MessageCircle };
 }
 
 function visitorPassWindowLabel(visitorPass: VisitorPass) {
@@ -17867,24 +18584,263 @@ function visitorPassSourceLabel(source: string) {
   return titleCase(source);
 }
 
+function visitorPassInitials(name: string) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("");
+}
+
+function visitorPassPassDurationLabel(visitorPass: VisitorPass) {
+  const start = new Date(visitorPass.window_start).getTime();
+  const end = new Date(visitorPass.window_end).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return formatDurationSeconds(Math.round((end - start) / 1000));
+}
+
+function visitorPassVisitDurationLabel(visitorPass: VisitorPass) {
+  if (visitorPass.duration_human) return visitorPass.duration_human;
+  if (visitorPass.duration_on_site_seconds !== null) return formatDurationSeconds(visitorPass.duration_on_site_seconds);
+  if (visitorPass.arrival_time && visitorPass.departure_time) {
+    const arrival = new Date(visitorPass.arrival_time).getTime();
+    const departure = new Date(visitorPass.departure_time).getTime();
+    if (Number.isFinite(arrival) && Number.isFinite(departure) && departure >= arrival) {
+      return formatDurationSeconds(Math.round((departure - arrival) / 1000));
+    }
+  }
+  if (visitorPass.arrival_time && !visitorPass.departure_time) {
+    const arrival = new Date(visitorPass.arrival_time).getTime();
+    if (Number.isFinite(arrival)) {
+      const elapsed = Math.max(0, Math.round((Date.now() - arrival) / 1000));
+      return `On site for ${formatDurationSeconds(elapsed)}`;
+    }
+  }
+  return null;
+}
+
+function formatDurationSeconds(seconds: number) {
+  const normalized = Math.max(0, Math.round(seconds));
+  const days = Math.floor(normalized / 86400);
+  const hours = Math.floor((normalized % 86400) / 3600);
+  const minutes = Math.floor((normalized % 3600) / 60);
+  if (days && hours) return `${days}d ${hours}h`;
+  if (days) return `${days}d`;
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  if (minutes) return `${minutes}m`;
+  return "0m";
+}
+
 function visitorPassVehicleSummary(visitorPass: VisitorPass) {
   const vehicle = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ");
   return [vehicle, visitorPass.number_plate].filter(Boolean).join(" - ");
 }
 
+function visitorPassWhatsAppDetailLabel(visitorPass: VisitorPass) {
+  const status = (visitorPass.whatsapp_status || "").trim().toLowerCase();
+  const label = (visitorPass.whatsapp_status_label || "").trim();
+  if (status === "complete" || status === "timeframe_approved" || label.toLowerCase().startsWith("complete")) {
+    return "Complete - Access Arranged";
+  }
+  return label.replace(/\s*-\s*Vehicle Registration:.*$/i, "") || "Not started";
+}
+
+function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: VisitorPass): {
+  title: string;
+  description: string;
+  tone: BadgeTone;
+  fields: Array<{ label: string; value: string }>;
+} {
+  const actor = visitorPassLogActor(log);
+  const oldValue = isRecord(log.diff.old) ? log.diff.old : {};
+  const newValue = isRecord(log.diff.new) ? log.diff.new : {};
+  const fields = visitorPassLogChangedFields(oldValue, newValue);
+  const request = isRecord(log.metadata.request) ? log.metadata.request : null;
+  if (request) {
+    const currentWindow = visitorPassWindowFromValues(request.current_valid_from, request.current_valid_until);
+    const originalWindow = visitorPassWindowFromValues(request.original_valid_from, request.original_valid_until);
+    const requestedWindow = visitorPassWindowFromValues(request.requested_valid_from, request.requested_valid_until);
+    if (originalWindow || currentWindow) fields.push({ label: "Original", value: originalWindow || currentWindow || "" });
+    if (requestedWindow) fields.push({ label: "Requested", value: requestedWindow });
+  }
+
+  if (log.action === "visitor_pass.create") {
+    return {
+      title: "Pass Created",
+      description: `${actor} created the Visitor Pass for ${visitorPass.visitor_name}.`,
+      tone: "green",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.update") {
+    const changedWindow = fields.some((field) => ["Expected Time", "Window", "Valid From", "Valid Until"].includes(field.label));
+    return {
+      title: changedWindow ? "Time Window Updated" : "Pass Updated",
+      description: `${actor} updated ${visitorPass.visitor_name}'s Visitor Pass.`,
+      tone: changedWindow ? "blue" : "gray",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.timeframe_change_requested") {
+    return {
+      title: "Time Change Requested",
+      description: `Visitor via WhatsApp requested a time change for ${visitorPass.visitor_name}.`,
+      tone: "amber",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.timeframe_change_approved") {
+    return {
+      title: "Time Change Approved",
+      description: `${actor} approved the requested time change.`,
+      tone: "green",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.timeframe_change_denied") {
+    return {
+      title: "Time Change Denied",
+      description: `${actor} denied the requested time change.`,
+      tone: "red",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.cancel") {
+    return {
+      title: "Pass Cancelled",
+      description: `${actor} cancelled the Visitor Pass.`,
+      tone: "red",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.delete") {
+    return {
+      title: "Pass Deleted",
+      description: `${actor} deleted the Visitor Pass.`,
+      tone: "red",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.vehicle_plate_update") {
+    return {
+      title: "Registration Updated",
+      description: `${actor} updated the visitor registration.`,
+      tone: "blue",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.claim" || log.action === "visitor_pass.arrival_linked") {
+    return {
+      title: "Arrival Linked",
+      description: "IACS matched the arriving vehicle to this Visitor Pass.",
+      tone: "green",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.departure_linked") {
+    return {
+      title: "Departure Recorded",
+      description: "IACS recorded the visitor leaving site.",
+      tone: "purple",
+      fields,
+    };
+  }
+  if (log.action === "visitor_pass.status_refresh") {
+    return {
+      title: "Status Changed",
+      description: "IACS refreshed the Visitor Pass lifecycle status.",
+      tone: "gray",
+      fields,
+    };
+  }
+  return {
+    title: titleCase(log.action.replace(/\./g, " ")),
+    description: `${actor} changed this Visitor Pass.`,
+    tone: levelTone(log.level),
+    fields,
+  };
+}
+
+function visitorPassLogIcon(action: string): React.ElementType {
+  if (action === "visitor_pass.create") return UserPlus;
+  if (action === "visitor_pass.vehicle_plate_update") return Car;
+  if (action.includes("timeframe") || action === "visitor_pass.update") return Clock3;
+  if (action === "visitor_pass.cancel" || action === "visitor_pass.delete") return Trash2;
+  if (action.includes("arrival") || action === "visitor_pass.claim") return CheckCircle2;
+  if (action.includes("departure")) return ArrowRight;
+  return ClipboardPaste;
+}
+
+function visitorPassLogActor(log: VisitorPassLogEntry) {
+  const actor = log.actor_user_label || log.actor || "IACS";
+  if (log.actor === "Alfred_AI") return `${log.actor_user_label || "Jason"} via Alfred`;
+  if (log.actor === "Visitor Concierge" || log.action === "visitor_pass.timeframe_change_requested") return "Visitor via WhatsApp";
+  if (log.action === "visitor_pass.timeframe_change_approved" || log.action === "visitor_pass.timeframe_change_denied") {
+    return `${actor} via WhatsApp`;
+  }
+  if (log.actor === "System") return "IACS";
+  if (log.actor.toLowerCase().includes("icloud")) return "iCloud Calendar Sync";
+  return `${actor} in UI`;
+}
+
+function visitorPassLogChangedFields(oldValue: Record<string, unknown>, newValue: Record<string, unknown>) {
+  const labels: Record<string, string> = {
+    expected_time: "Expected Time",
+    window_minutes: "Window",
+    valid_from: "Valid From",
+    valid_until: "Valid Until",
+    status: "Status",
+    number_plate: "Registration",
+    arrival_time: "Arrival",
+    departure_time: "Departure",
+    duration_on_site_seconds: "Visit Duration",
+  };
+  return Object.entries(labels).flatMap(([key, label]) => {
+    if (!(key in oldValue) && !(key in newValue)) return [];
+    const before = visitorPassLogFieldValue(key, oldValue[key]);
+    const after = visitorPassLogFieldValue(key, newValue[key]);
+    if (!before && !after) return [];
+    return [{ label, value: `${before || "unset"} -> ${after || "unset"}` }];
+  });
+}
+
+function visitorPassLogFieldValue(key: string, value: unknown) {
+  const text = stringPayload(value);
+  if (text && ["expected_time", "valid_from", "valid_until", "arrival_time", "departure_time"].includes(key)) {
+    return formatDate(text);
+  }
+  if (key === "window_minutes" && value !== null && value !== undefined) return `+/- ${String(value)}m`;
+  if (key === "duration_on_site_seconds" && typeof value === "number") return formatDurationSeconds(value);
+  if (key === "status") return titleCase(text);
+  return text;
+}
+
+function visitorPassWindowFromValues(start: unknown, end: unknown) {
+  const startText = stringPayload(start);
+  const endText = stringPayload(end);
+  if (!startText || !endText) return "";
+  return `${formatDate(startText)} to ${formatDate(endText)}`;
+}
+
 function visitorPassWhatsAppStatusTooltip(visitorPass: VisitorPass): { title: string; body: string } | null {
   const status = visitorPass.whatsapp_status || "";
-  if (!["failed", "message_sending_failed", "user_not_on_whatsapp"].includes(status)) return null;
   const metadataError = isRecord(visitorPass.source_metadata) ? stringPayload(visitorPass.source_metadata.whatsapp_last_error) : "";
   const rawDetail = [visitorPass.whatsapp_status_detail || "", metadataError].filter(Boolean).join(" ");
+  const moreInfo = visitorPassMoreInfoState(visitorPass);
+  if (moreInfo?.tone !== "red") return null;
   return {
-    title: visitorPass.whatsapp_status_label || "WhatsApp message issue",
+    title: moreInfo?.label || visitorPass.whatsapp_status_label || "WhatsApp message issue",
     body: visitorPassFriendlyWhatsAppError(status, rawDetail),
   };
 }
 
 function visitorPassFriendlyWhatsAppError(status: string, rawDetail: string) {
   const detail = rawDetail.toLowerCase();
+  if (status === "timeframe_denied") {
+    return "The requested time change was denied. The visitor can still use the current approved pass window.";
+  }
   if (status === "user_not_on_whatsapp" || detail.includes("131026") || detail.includes("not a whatsapp") || detail.includes("not on whatsapp") || detail.includes("not registered")) {
     return "WhatsApp could not find an account for this phone number. Check the number includes the country code, or ask the visitor to message Alfred from WhatsApp first.";
   }

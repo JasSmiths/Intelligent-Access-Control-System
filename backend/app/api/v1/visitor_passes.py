@@ -4,12 +4,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
 from app.core.logging import get_logger
 from app.db.session import get_db_session
-from app.models import User
+from app.models import AuditLog, User
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.event_bus import event_bus
 from app.services.telemetry import actor_from_user
@@ -18,6 +19,7 @@ from app.services.visitor_passes import (
     VisitorPassError,
     get_visitor_pass_service,
     serialize_visitor_pass,
+    visitor_pass_whatsapp_history,
 )
 from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
@@ -47,6 +49,37 @@ class VisitorPassUpdateRequest(BaseModel):
 
 class VisitorPassCancelRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+
+class VisitorPassWhatsAppMessageResponse(BaseModel):
+    id: str
+    direction: str
+    kind: str
+    body: str
+    actor_label: str
+    provider_message_id: str | None
+    status: str | None
+    created_at: str
+    metadata: dict[str, Any] | None
+
+
+class VisitorPassLogResponse(BaseModel):
+    id: str
+    timestamp: str
+    category: str
+    action: str
+    actor: str
+    actor_user_id: str | None
+    actor_user_label: str | None
+    target_entity: str | None
+    target_id: str | None
+    target_label: str | None
+    diff: dict[str, Any]
+    metadata: dict[str, Any]
+    outcome: str
+    level: str
+    trace_id: str | None
+    request_id: str | None
 
 
 class VisitorPassResponse(BaseModel):
@@ -85,6 +118,27 @@ class VisitorPassResponse(BaseModel):
 
 def visitor_pass_response(payload: dict[str, Any]) -> VisitorPassResponse:
     return VisitorPassResponse(**payload)
+
+
+def visitor_pass_log_response(row: AuditLog, actor_user: User | None = None) -> VisitorPassLogResponse:
+    return VisitorPassLogResponse(
+        id=str(row.id),
+        timestamp=row.timestamp.isoformat(),
+        category=row.category,
+        action=row.action,
+        actor=row.actor,
+        actor_user_id=str(row.actor_user_id) if row.actor_user_id else None,
+        actor_user_label=actor_from_user(actor_user) if actor_user else None,
+        target_entity=row.target_entity,
+        target_id=row.target_id,
+        target_label=row.target_label,
+        diff=row.diff or {},
+        metadata=row.metadata_ or {},
+        outcome=row.outcome,
+        level=row.level,
+        trace_id=row.trace_id,
+        request_id=row.request_id,
+    )
 
 
 def visitor_pass_server_error(operation: str, exc: Exception) -> HTTPException:
@@ -184,6 +238,63 @@ async def get_visitor_pass(
         raise visitor_pass_server_error("load", exc) from exc
 
 
+@router.get("/{pass_id}/whatsapp-messages", response_model=list[VisitorPassWhatsAppMessageResponse])
+async def get_visitor_pass_whatsapp_messages(
+    pass_id: uuid.UUID,
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[VisitorPassWhatsAppMessageResponse]:
+    service = get_visitor_pass_service()
+    try:
+        visitor_pass = await service.get_pass(session, pass_id)
+        if not visitor_pass:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        if visitor_pass.pass_type != VisitorPassType.DURATION:
+            return []
+        return [VisitorPassWhatsAppMessageResponse(**message) for message in visitor_pass_whatsapp_history(visitor_pass)]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise visitor_pass_server_error("load WhatsApp history for", exc) from exc
+
+
+@router.get("/{pass_id}/logs", response_model=list[VisitorPassLogResponse])
+async def get_visitor_pass_logs(
+    pass_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=250),
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[VisitorPassLogResponse]:
+    service = get_visitor_pass_service()
+    try:
+        visitor_pass = await service.get_pass(session, pass_id)
+        if not visitor_pass:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        logs = (
+            await session.scalars(
+                select(AuditLog)
+                .where(AuditLog.target_entity == "VisitorPass")
+                .where(AuditLog.target_id == str(pass_id))
+                .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
+                .limit(limit)
+            )
+        ).all()
+        actor_user_ids = {log.actor_user_id for log in logs if log.actor_user_id}
+        actor_users: dict[uuid.UUID, User] = {}
+        if actor_user_ids:
+            actor_users = {
+                user.id: user
+                for user in (
+                    await session.scalars(select(User).where(User.id.in_(actor_user_ids)))
+                ).all()
+            }
+        return [visitor_pass_log_response(log, actor_users.get(log.actor_user_id)) for log in logs]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise visitor_pass_server_error("load log for", exc) from exc
+
+
 @router.patch("/{pass_id}", response_model=VisitorPassResponse)
 async def update_visitor_pass(
     pass_id: uuid.UUID,
@@ -268,6 +379,34 @@ async def cancel_visitor_pass(
     except Exception as exc:
         await session.rollback()
         raise visitor_pass_server_error("cancel", exc) from exc
+
+
+@router.delete("/{pass_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_visitor_pass(
+    pass_id: uuid.UUID,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    service = get_visitor_pass_service()
+    try:
+        visitor_pass = await service.get_pass(session, pass_id)
+        if not visitor_pass:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        snapshot = await service.delete_pass(
+            session,
+            visitor_pass,
+            actor=actor_from_user(user),
+            actor_user_id=user.id,
+            reason="Deleted from dashboard",
+        )
+        await session.commit()
+        await event_bus.publish("visitor_pass.deleted", {"visitor_pass": snapshot})
+        return None
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await session.rollback()
+        raise visitor_pass_server_error("delete", exc) from exc
 
 
 @router.post("/{pass_id}/timeframe-requests/{request_id}/{decision}")

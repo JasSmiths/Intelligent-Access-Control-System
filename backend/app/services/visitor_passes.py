@@ -32,6 +32,8 @@ MAX_WINDOW_MINUTES = 24 * 60
 VISITOR_PASS_WORKER_INTERVAL_SECONDS = 30.0
 VISITOR_PASS_ACTIVE_STATUSES = (VisitorPassStatus.SCHEDULED, VisitorPassStatus.ACTIVE)
 VISITOR_PASS_LOCKED_STATUSES = (VisitorPassStatus.USED, VisitorPassStatus.CANCELLED)
+VISITOR_PASS_WHATSAPP_HISTORY_KEY = "whatsapp_chat_history"
+VISITOR_PASS_WHATSAPP_HISTORY_LIMIT = 250
 VISITOR_PASS_WHATSAPP_STATUS_LABELS = {
     "welcome_message_sent": "Welcome Message Sent",
     "message_received": "Message Received",
@@ -333,6 +335,31 @@ class VisitorPassService:
         )
         return visitor_pass
 
+    async def delete_pass(
+        self,
+        session: AsyncSession,
+        visitor_pass: VisitorPass,
+        *,
+        actor: str = "System",
+        actor_user_id: uuid.UUID | str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        before = visitor_pass_audit_snapshot(visitor_pass)
+        await write_audit_log(
+            session,
+            category=TELEMETRY_CATEGORY_CRUD,
+            action="visitor_pass.delete",
+            actor=actor,
+            actor_user_id=_coerce_uuid(actor_user_id),
+            target_entity="VisitorPass",
+            target_id=visitor_pass.id,
+            target_label=visitor_pass.visitor_name,
+            diff=audit_diff(before, {}),
+            metadata={"reason": reason},
+        )
+        await session.delete(visitor_pass)
+        return before
+
     async def list_passes(
         self,
         session: AsyncSession,
@@ -422,6 +449,8 @@ class VisitorPassService:
         visitor_pass: VisitorPass,
         *,
         new_plate: str,
+        vehicle_make: str | None = None,
+        vehicle_colour: str | None = None,
         actor: str = "Visitor Concierge",
         metadata: dict[str, Any] | None = None,
     ) -> VisitorPass:
@@ -431,7 +460,19 @@ class VisitorPassService:
         if not plate:
             raise VisitorPassError("A valid vehicle registration is required.")
         before = visitor_pass_audit_snapshot(visitor_pass)
+        previous_plate = visitor_pass.number_plate
+        plate_changed = bool(previous_plate and previous_plate != plate)
+        make = _optional_text(vehicle_make)
+        colour = _optional_text(vehicle_colour)
         visitor_pass.number_plate = plate
+        if make:
+            visitor_pass.vehicle_make = make
+        elif plate_changed:
+            visitor_pass.vehicle_make = None
+        if colour:
+            visitor_pass.vehicle_colour = colour
+        elif plate_changed:
+            visitor_pass.vehicle_colour = None
         await self._audit_change(
             session,
             visitor_pass,
@@ -776,6 +817,78 @@ def visitor_pass_whatsapp_time_was_updated(metadata: dict[str, Any]) -> bool:
         return True
     request = metadata.get("whatsapp_timeframe_request")
     return isinstance(request, dict) and str(request.get("status") or "") == "approved"
+
+
+def visitor_pass_whatsapp_history(visitor_pass: VisitorPass) -> list[dict[str, Any]]:
+    metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
+    raw_history = metadata.get(VISITOR_PASS_WHATSAPP_HISTORY_KEY)
+    if not isinstance(raw_history, list):
+        return []
+    messages = [_normalize_whatsapp_history_entry(item) for item in raw_history]
+    return sorted(
+        [message for message in messages if message],
+        key=lambda item: str(item.get("created_at") or ""),
+    )[-VISITOR_PASS_WHATSAPP_HISTORY_LIMIT:]
+
+
+def append_visitor_pass_whatsapp_history(
+    visitor_pass: VisitorPass,
+    *,
+    direction: str,
+    body: str,
+    kind: str = "text",
+    actor_label: str | None = None,
+    provider_message_id: str | None = None,
+    status: str | None = None,
+    occurred_at: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    normalized_body = str(body or "").strip()
+    if not normalized_body:
+        return None
+    normalized_direction = str(direction or "").strip().lower()
+    if normalized_direction not in {"inbound", "outbound", "status"}:
+        normalized_direction = "status"
+    entry = {
+        "id": uuid.uuid4().hex,
+        "direction": normalized_direction,
+        "kind": str(kind or "text").strip().lower()[:40] or "text",
+        "body": normalized_body[:4096],
+        "actor_label": str(actor_label or ("Visitor" if normalized_direction == "inbound" else "IACS")).strip()[:120],
+        "provider_message_id": _optional_text(provider_message_id),
+        "status": _optional_text(status),
+        "created_at": _ensure_aware(occurred_at or datetime.now(tz=UTC)).isoformat(),
+        "metadata": metadata or None,
+    }
+    history = [*visitor_pass_whatsapp_history(visitor_pass), entry][-VISITOR_PASS_WHATSAPP_HISTORY_LIMIT:]
+    visitor_pass.source_metadata = {
+        **(visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}),
+        VISITOR_PASS_WHATSAPP_HISTORY_KEY: history,
+    }
+    return entry
+
+
+def _normalize_whatsapp_history_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    body = str(value.get("body") or "").strip()
+    created_at = str(value.get("created_at") or "").strip()
+    if not body or not created_at:
+        return None
+    direction = str(value.get("direction") or "").strip().lower()
+    if direction not in {"inbound", "outbound", "status"}:
+        direction = "status"
+    return {
+        "id": str(value.get("id") or uuid.uuid4().hex),
+        "direction": direction,
+        "kind": str(value.get("kind") or "text").strip().lower()[:40] or "text",
+        "body": body[:4096],
+        "actor_label": str(value.get("actor_label") or ("Visitor" if direction == "inbound" else "IACS")).strip()[:120],
+        "provider_message_id": str(value.get("provider_message_id") or "").strip() or None,
+        "status": str(value.get("status") or "").strip() or None,
+        "created_at": created_at,
+        "metadata": value.get("metadata") if isinstance(value.get("metadata"), dict) else None,
+    }
 
 
 def _loaded_relationship(instance: Any, relationship_name: str) -> Any:

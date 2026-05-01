@@ -66,10 +66,20 @@ def make_request(method: str, path: str, *, query: str = "", body: bytes = b"", 
 
 @pytest.fixture(autouse=True)
 def disable_whatsapp_read_receipts(monkeypatch):
+    service = get_whatsapp_messaging_service()
+    previous_debounce = service._visitor_message_debounce_seconds
+
     async def noop(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(get_whatsapp_messaging_service(), "mark_incoming_message_read", noop)
+    service._visitor_message_debounce_seconds = 0
+    monkeypatch.setattr(service, "mark_incoming_message_read", noop)
+    monkeypatch.setattr(service, "_record_inbound_visitor_message", noop)
+    yield
+    service._visitor_message_debounce_seconds = previous_debounce
+    for task in list(service._visitor_message_tasks.values()):
+        task.cancel()
+    service._visitor_message_tasks.clear()
 
 
 def test_whatsapp_dynamic_settings_are_seeded_and_secret() -> None:
@@ -96,6 +106,12 @@ def test_phone_and_graph_version_normalization() -> None:
     assert normalize_whatsapp_phone_number("+44 (7700) 900-123") == "447700900123"
     assert normalize_graph_api_version("25.0") == "v25.0"
     assert normalize_graph_api_version("") == "v25.0"
+
+
+def test_visitor_emoji_only_messages_are_preference_not_content() -> None:
+    assert whatsapp_messaging.visitor_message_is_emoji_only("😂👍")
+    assert not whatsapp_messaging.visitor_message_is_emoji_only("AB12 CDE 👍")
+    assert whatsapp_messaging.visitor_message_contains_emoji("AB12 CDE 👍")
 
 
 @pytest.mark.asyncio
@@ -482,10 +498,25 @@ async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeyp
 
     monkeypatch.setattr(service, "send_interactive_buttons", send_buttons)
 
-    await service.send_visitor_plate_confirmation("447700900123", visitor_pass, "AB12CDE", "nonce123")
+    await service.send_visitor_plate_confirmation(
+        "447700900123",
+        visitor_pass,
+        "AB12CDE",
+        "nonce123",
+        vehicle_make="Tesla",
+        vehicle_colour="Silver",
+        emoji_preferred=True,
+        alfred_mentioned=True,
+    )
 
     assert captured["to"] == "447700900123"
+    assert captured["body"].startswith("Thanks Sarah.")
+    assert "I read your registration as" in captured["body"]
     assert "AB12 CDE" in captured["body"]
+    assert "which is a Silver Tesla" in captured["body"]
+    assert "DVLA" not in captured["body"]
+    assert "Jason's access-control side quest gains +1 XP" in captured["body"]
+    assert captured["body"].endswith("👍")
     parsed_confirm = parse_visitor_pass_button_id(captured["buttons"][0]["id"])
     parsed_change = parse_visitor_pass_button_id(captured["buttons"][1]["id"])
     assert parsed_confirm.decision == "confirm"
@@ -523,15 +554,22 @@ async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch
         assert text == "yeah it is ab12 cde"
         return {"action": "plate_detected", "registration_number": "AB12CDE"}
 
-    async def store_pending(pass_id, sender, plate, nonce):
+    async def lookup_vehicle(plate):
+        assert plate == "AB12CDE"
+        return whatsapp_messaging.VisitorVehicleLookup(make="Tesla", colour="Silver")
+
+    async def store_pending(pass_id, sender, plate, nonce, **kwargs):
         captured["pending"] = (pass_id, sender, plate, nonce)
+        captured["pending_details"] = kwargs
 
     async def send_confirmation(to, pass_arg, plate, nonce, **_kwargs):
         captured["confirmation"] = (to, pass_arg.id, plate, nonce)
+        captured["confirmation_details"] = _kwargs
 
     monkeypatch.setattr(service, "_admin_for_phone", no_admin)
     monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
+    monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
     monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
     monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
 
@@ -546,7 +584,74 @@ async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch
     assert captured["pending"][0] == visitor_pass.id
     assert captured["pending"][1] == "447700900123"
     assert captured["pending"][2] == "AB12CDE"
+    assert captured["pending_details"]["vehicle_make"] == "Tesla"
+    assert captured["pending_details"]["vehicle_colour"] == "Silver"
     assert captured["confirmation"][0] == "447700900123"
+    assert captured["confirmation_details"]["vehicle_make"] == "Tesla"
+    assert captured["confirmation_details"]["vehicle_colour"] == "Silver"
+
+
+@pytest.mark.asyncio
+async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_preference(monkeypatch) -> None:
+    service = get_whatsapp_messaging_service()
+    visitor_pass = VisitorPass(
+        id=uuid.uuid4(),
+        visitor_name="Josh",
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        expected_time=datetime(2026, 5, 1, 10, 0),
+        valid_from=datetime(2026, 5, 1, 10, 0),
+        valid_until=datetime(2026, 5, 1, 18, 0),
+        status=VisitorPassStatus.ACTIVE,
+        creation_source="ui",
+    )
+    captured = {}
+
+    async def consume(pass_id, sender, token):
+        assert pass_id == visitor_pass.id
+        assert sender == "447700900123"
+        assert token == "token-1"
+        return {
+            "visitor_pass": visitor_pass,
+            "text": "Hi Alfred\nmy reg is\nAB12 CDE",
+            "emoji_preferred": True,
+        }
+
+    async def visitor_result(sender, pass_arg, text):
+        captured["text"] = text
+        assert sender == "447700900123"
+        assert pass_arg is visitor_pass
+        return {"action": "plate_detected", "registration_number": "AB12CDE"}
+
+    async def lookup_vehicle(plate):
+        assert plate == "AB12CDE"
+        return whatsapp_messaging.VisitorVehicleLookup(make="Tesla", colour="Silver")
+
+    async def store_pending(*_args, **_kwargs):
+        return None
+
+    async def send_confirmation(to, pass_arg, plate, nonce, **kwargs):
+        captured["confirmation"] = (to, pass_arg.id, plate)
+        captured["confirmation_kwargs"] = kwargs
+
+    monkeypatch.setattr(service, "_consume_visitor_text_buffer", consume)
+    monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
+    monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
+    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
+
+    await service._process_buffered_visitor_text(
+        visitor_pass.id,
+        "447700900123",
+        "token-1",
+        config=enabled_config(),
+    )
+
+    assert captured["text"] == "Hi Alfred\nmy reg is\nAB12 CDE"
+    assert captured["confirmation"][:2] == ("447700900123", visitor_pass.id)
+    assert captured["confirmation"][2] == "AB12CDE"
+    assert captured["confirmation_kwargs"]["emoji_preferred"] is True
+    assert captured["confirmation_kwargs"]["alfred_mentioned"] is True
 
 
 @pytest.mark.asyncio
@@ -580,11 +685,15 @@ async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> N
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
 
+    async def record_inbound(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(service, "_admin_for_phone", no_admin)
     monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
     monkeypatch.setattr(service, "get_pass_details", pass_details)
     monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
     monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
 
     await service._handle_incoming_message(
         {"id": "wamid.visitor", "from": "+44 7700 900123", "type": "text", "text": {"body": "can you open the top gate"}},
@@ -754,6 +863,79 @@ async def test_visitor_timeframe_change_is_not_keyword_parsed_without_llm(monkey
         "action": "reply",
         "message": "Sorry, I can't safely process time changes right now. Please contact your host.",
     }
+
+
+@pytest.mark.asyncio
+async def test_visitor_thanks_after_confirmed_plate_gets_warm_reply_not_reconfirmation(monkeypatch) -> None:
+    service = get_whatsapp_messaging_service()
+    visitor_pass = VisitorPass(
+        id=uuid.uuid4(),
+        visitor_name="Josh",
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        expected_time=datetime(2026, 5, 11, 8, 0, tzinfo=UTC),
+        valid_from=datetime(2026, 5, 11, 8, 0, tzinfo=UTC),
+        valid_until=datetime(2026, 5, 11, 16, 30, tzinfo=UTC),
+        number_plate="C25UNY",
+        status=VisitorPassStatus.SCHEDULED,
+        creation_source="ui",
+    )
+
+    async def runtime():
+        return SimpleNamespace(llm_provider="openai", site_timezone="Europe/London")
+
+    async def pass_details(_sender):
+        return {"found": True, "visitor_pass": {"id": str(visitor_pass.id), "number_plate": "C25UNY"}}
+
+    class Provider:
+        async def complete(self, _messages, **_kwargs):
+            return LlmResult('{"action":"plate_detected","registration_number":"C25UNY"}')
+
+    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
+    monkeypatch.setattr(service, "get_pass_details", pass_details)
+    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+
+    result = await service._visitor_concierge_result(
+        "447700900123",
+        visitor_pass,
+        "Alfred you LEGEND",
+    )
+
+    assert result == {"action": "reply", "message": "Haha, thanks Josh! You're all set."}
+
+
+@pytest.mark.asyncio
+async def test_visitor_confirmed_pass_can_still_send_new_plate_without_llm(monkeypatch) -> None:
+    service = get_whatsapp_messaging_service()
+    visitor_pass = VisitorPass(
+        id=uuid.uuid4(),
+        visitor_name="Josh",
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        expected_time=datetime(2026, 5, 11, 8, 0, tzinfo=UTC),
+        valid_from=datetime(2026, 5, 11, 8, 0, tzinfo=UTC),
+        valid_until=datetime(2026, 5, 11, 16, 30, tzinfo=UTC),
+        number_plate="C25UNY",
+        status=VisitorPassStatus.SCHEDULED,
+        creation_source="ui",
+    )
+
+    async def runtime():
+        return SimpleNamespace(llm_provider="local", site_timezone="Europe/London")
+
+    async def pass_details(_sender):
+        return {"found": True, "visitor_pass": {"id": str(visitor_pass.id), "number_plate": "C25UNY"}}
+
+    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
+    monkeypatch.setattr(service, "get_pass_details", pass_details)
+
+    result = await service._visitor_concierge_result(
+        "447700900123",
+        visitor_pass,
+        "Actually I brought AB12 CDE today",
+    )
+
+    assert result == {"action": "plate_detected", "registration_number": "AB12CDE"}
 
 
 def test_visitor_timeframe_auto_limit_uses_original_window_for_cumulative_changes() -> None:

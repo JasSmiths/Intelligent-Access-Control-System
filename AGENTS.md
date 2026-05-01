@@ -445,10 +445,17 @@ Routes:
 - `GET /api/v1/visitor-passes`: list passes, with repeated `status` query
   filters and optional `q` search.
 - `GET /api/v1/visitor-passes/{pass_id}`: fetch one pass.
+- `GET /api/v1/visitor-passes/{pass_id}/whatsapp-messages`: fetch the stored
+  WhatsApp Visitor Concierge transcript for a duration pass.
+- `GET /api/v1/visitor-passes/{pass_id}/logs`: fetch the pass-specific audit
+  trail used by the Passes detail Log tab.
 - `POST /api/v1/visitor-passes`: create a UI-sourced pass.
 - `PATCH /api/v1/visitor-passes/{pass_id}`: edit scheduled/active pass details.
 - `POST /api/v1/visitor-passes/{pass_id}/cancel`: cancel a scheduled/active
   pass.
+- `DELETE /api/v1/visitor-passes/{pass_id}`: hard-delete a pass after an
+  explicit operator action. Deletion must write an audit row before removing the
+  database record.
 
 Lifecycle rules:
 
@@ -476,8 +483,8 @@ Lifecycle rules:
   `duration_on_site_seconds`.
 - The lifecycle worker runs from FastAPI lifespan every 30 seconds via
   `VisitorPassService.start()`.
-- All creates, updates, cancels, lifecycle status changes, pass claims, and
-  telemetry links write audit rows.
+- All creates, updates, cancels, deletes, lifecycle status changes, pass
+  claims, and telemetry links write audit rows.
 - Visitor Pass departure lookups must use the indexed same-plate, `used`,
   no-departure path ordered by latest arrival. Calendar reconciliation must use
   `creation_source="icloud_calendar"`, active/scheduled status, and
@@ -774,6 +781,13 @@ Notification workflows:
   `@MalfunctionFixAttemptTime`, `@MalfunctionFixAttempts`,
   `@MalfunctionResolutionTime`, `@LastKnownVehicle`, `@NewWinnerName`,
   `@OvertakenName`, and `@ReadCount`.
+- Visitor Pass variables include `@VisitorName`, `@VisitorPassName`,
+  `@VisitorPassVehicleRegistration`, `@VisitorPassVehicleMake`,
+  `@VisitorPassVehicleColour`, `@VisitorPassDurationOnSite`,
+  `@VisitorPassCurrentWindow`, `@VisitorPassRequestedWindow`,
+  `@VisitorPassOriginalTime`, `@VisitorPassRequestedTime`, and
+  `@VisitorPassVisitorMessage`. Timeframe-change approval notifications must
+  populate the original and requested time variables.
 - Mobile and in-app notification actions can attach a UniFi Protect camera
   snapshot when the selected action media has `attach_camera_snapshot`.
 - WhatsApp notification actions use `type="whatsapp"` and target IDs shaped as
@@ -853,8 +867,8 @@ Runtime behavior:
   `ChatService.handle_tool_confirmation`.
 - Visitor Pass interactive confirmation button IDs are bound as
   `iacs:vp:<confirm|change>:<pass_id>:<nonce>`. `Confirm` saves the pending
-  normalized plate to that bound pass; `Change` asks the visitor to type a new
-  registration.
+  normalized plate and any server-side DVLA make/colour enrichment to that
+  bound pass; `Change` asks the visitor to type a new registration.
 - Visitor Pass timeframe approval button IDs are bound as
   `iacs:vp_time:<allow|deny>:<pass_id>:<request_id>`. Admin approval updates
   that pass window and messages the visitor; denial leaves the existing window
@@ -883,6 +897,28 @@ Visitor Concierge sandbox:
   timeframe, or vehicle registration, including gate/door/garage operations,
   must reply exactly:
   `Sorry, I can only discuss details about your visitor pass and vehicle registration.`
+- Visitor Concierge replies should still sound like Alfred. Once a visitor has
+  confirmed their plate, friendly acknowledgements or light banter should get a
+  short warm close-out such as "Haha, thanks Josh! You're all set." rather than
+  another registration prompt. Server-side handling must only accept
+  `plate_detected` when the plate appears in the visitor's latest message; the
+  LLM must never reuse the stored pass plate from context as a new detection.
+- Visitor text messages are briefly debounced and combined before Concierge
+  processing so split replies like "my reg is" followed by "AB12 CDE" are
+  interpreted together. Emoji-only visitor messages are not treated as content,
+  but they mark the visitor as emoji-friendly so Alfred may use a light emoji in
+  later safe replies.
+- If a visitor uses Alfred's name directly in an otherwise allowed message,
+  Alfred may include a concise cheeky, geeky nod to Alfred and Jason creating
+  the system. Never add this nod to restricted/off-topic responses, which must
+  keep the exact sandbox wording.
+- After the Visitor Concierge extracts a plate, the webhook service may run a
+  server-side DVLA lookup for that plate and use the returned make/colour in the
+  WhatsApp confirmation copy, for example "which is a Silver Tesla". Never tell
+  visitors that make/colour came from DVLA or another external integration;
+  Alfred should simply sound like he knows the vehicle details. DVLA lookup is
+  not a Visitor LLM tool and failures must be non-blocking; the visitor should
+  still be able to confirm or change the parsed registration.
 - Visitor-requested timeframe changes up to one hour on either boundary may be
   accepted by the restricted Visitor Concierge, but timeframe interpretation
   must come from the Visitor Concierge LLM using the supplied site timezone and
@@ -923,6 +959,12 @@ Visitor Concierge sandbox:
   Replied, Requested Time Change, Awaiting Time Change Approval,
   Complete - Vehicle Registration, Complete - Vehicle Registration: [plate]
   Time Updated, Message Sending Failed, User Not On WhatsApp, and Failed.
+- Duration Visitor Pass WhatsApp transcripts are stored on
+  `source_metadata.whatsapp_chat_history` as bounded inbound/outbound message
+  entries and exposed through
+  `GET /api/v1/visitor-passes/{pass_id}/whatsapp-messages`.
+  Transcript writes must publish a Visitor Pass realtime update so open detail
+  modals refresh without being closed and reopened.
   Sending failure states must expose an IACS tooltip with a plain-language
   explanation and next step; do not rely on raw Meta/API error strings as the
   only operator-facing help.
@@ -1686,8 +1728,11 @@ Visitor Passes:
 - `GET /api/v1/visitor-passes`
 - `POST /api/v1/visitor-passes`
 - `GET /api/v1/visitor-passes/{pass_id}`
+- `GET /api/v1/visitor-passes/{pass_id}/whatsapp-messages`
+- `GET /api/v1/visitor-passes/{pass_id}/logs`
 - `PATCH /api/v1/visitor-passes/{pass_id}`
 - `POST /api/v1/visitor-passes/{pass_id}/cancel`
+- `DELETE /api/v1/visitor-passes/{pass_id}`
 
 Settings:
 
@@ -1951,8 +1996,16 @@ Current frontend integration/editor surfaces:
   Active + Scheduled filters, supports multi-select All/Active/Scheduled/Used/
   Expired/Cancelled status filters, and provides `+ Visitor Pass` creation with
   visitor name, custom calendar/time picker, and preset +/- 30/60/90/120/180
-  minute windows. Used pass cards must show captured vehicle summary such as
-  `Silver Ford - PE70DHX` plus duration/departure data when available.
+  minute windows. Pass cards open a detail modal; edit, cancel, and hard-delete
+  actions live in that modal. Used pass cards must show captured vehicle
+  summary such as `Silver Ford - PE70DHX` plus duration/departure data when
+  available. Duration pass detail modals include a WhatsApp tab showing the
+  stored two-sided Visitor Concierge transcript in a scrollable message-bubble
+  layout that opens at the latest message and smoothly scrolls new messages
+  into view. Detail modals also include a Log tab backed by pass-specific audit
+  rows; it must show date/time changes, source/actor context such as Jason in
+  UI, Jason via Alfred, or Visitor via WhatsApp, and approval decisions for
+  Visitor Concierge timeframe requests.
 - Logs includes realtime event logs plus Telemetry & Audit tabs for LPR, gate
   events, maintenance, AI audit, CRUD, API, integrations, Updates & Rollbacks,
   and access traces.

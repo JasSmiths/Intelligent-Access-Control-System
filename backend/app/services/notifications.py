@@ -346,6 +346,16 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
         "group": "Visitor Pass",
         "items": [
             {
+                "name": "VisitorName",
+                "token": "@VisitorName",
+                "label": "Visitor name",
+            },
+            {
+                "name": "VisitorPassName",
+                "token": "@VisitorPassName",
+                "label": "Visitor Pass name",
+            },
+            {
                 "name": "VisitorPassVehicleRegistration",
                 "token": "@VisitorPassVehicleRegistration",
                 "label": "Visitor Pass vehicle registration",
@@ -374,6 +384,16 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
                 "name": "VisitorPassRequestedWindow",
                 "token": "@VisitorPassRequestedWindow",
                 "label": "Visitor Pass requested window",
+            },
+            {
+                "name": "VisitorPassOriginalTime",
+                "token": "@VisitorPassOriginalTime",
+                "label": "Visitor Pass original time",
+            },
+            {
+                "name": "VisitorPassRequestedTime",
+                "token": "@VisitorPassRequestedTime",
+                "label": "Visitor Pass requested time",
             },
             {
                 "name": "VisitorPassVisitorMessage",
@@ -455,6 +475,8 @@ MOCK_FACTS = {
     "visitor_pass_duration_on_site": "1h 25m",
     "visitor_pass_current_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
     "visitor_pass_requested_window": "01 May 2026, 10:00 to 01 May 2026, 20:00",
+    "visitor_pass_original_time": "01 May 2026, 10:00 to 01 May 2026, 18:00",
+    "visitor_pass_requested_time": "01 May 2026, 10:00 to 01 May 2026, 20:00",
     "visitor_pass_timeframe_request_id": "request-1",
     "visitor_pass_visitor_message": "Can I stay two hours longer?",
 }
@@ -1847,12 +1869,23 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "GateStatus": pick("gate_status", "gate_state"),
         "GarageDoor": pick("garage_door"),
         "EntityId": pick("entity_id"),
+        "VisitorName": pick("visitor_name", "visitor_pass_name", default=display_name or context.subject),
+        "VisitorPassName": pick("visitor_pass_name", "visitor_name", default=display_name or context.subject),
         "VisitorPassVehicleRegistration": visitor_pass_registration,
         "VisitorPassVehicleMake": visitor_pass_make,
         "VisitorPassVehicleColour": visitor_pass_colour,
         "VisitorPassDurationOnSite": visitor_pass_duration,
         "VisitorPassCurrentWindow": pick("visitor_pass_current_window"),
         "VisitorPassRequestedWindow": pick("visitor_pass_requested_window"),
+        "VisitorPassOriginalTime": pick(
+            "visitor_pass_original_time",
+            "visitor_pass_original_window",
+            "visitor_pass_current_window",
+        ),
+        "VisitorPassRequestedTime": pick(
+            "visitor_pass_requested_time",
+            "visitor_pass_requested_window",
+        ),
         "VisitorPassVisitorMessage": pick("visitor_pass_visitor_message"),
         "NewWinnerName": pick("new_winner_name", "winner_name"),
         "OvertakenName": pick("overtaken_name", "previous_winner_name"),

@@ -8,7 +8,12 @@ from app.ai import tools as ai_tools
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.access_events import AccessEventService
-from app.services.visitor_passes import VisitorPassService, serialize_visitor_pass
+from app.services.visitor_passes import (
+    VisitorPassService,
+    append_visitor_pass_whatsapp_history,
+    serialize_visitor_pass,
+    visitor_pass_whatsapp_history,
+)
 
 
 def visitor_pass(
@@ -113,6 +118,44 @@ async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
     assert row.number_plate == "AB12CDE"
 
 
+@pytest.mark.asyncio
+async def test_update_visitor_plate_saves_dvla_vehicle_details_and_clears_stale_details(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="OLD123",
+    )
+    row.vehicle_make = "Ford"
+    row.vehicle_colour = "Blue"
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.update_visitor_plate(
+        SimpleNamespace(),
+        row,
+        new_plate="AB12 CDE",
+        vehicle_make="Tesla",
+        vehicle_colour="Silver",
+    )
+
+    assert row.number_plate == "AB12CDE"
+    assert row.vehicle_make == "Tesla"
+    assert row.vehicle_colour == "Silver"
+
+    await service.update_visitor_plate(SimpleNamespace(), row, new_plate="CD34 EFG")
+
+    assert row.number_plate == "CD34EFG"
+    assert row.vehicle_make is None
+    assert row.vehicle_colour is None
+
+
 def test_serialize_visitor_pass_includes_concierge_fields() -> None:
     start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     row = visitor_pass(
@@ -177,6 +220,37 @@ def test_serialize_visitor_pass_shows_awaiting_time_change_approval_before_compl
 
     assert payload["whatsapp_status"] == "timeframe_approval_pending"
     assert payload["whatsapp_status_label"] == "Awaiting Time Change Approval"
+
+
+def test_visitor_pass_whatsapp_history_is_serialized_from_metadata() -> None:
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+    )
+
+    append_visitor_pass_whatsapp_history(
+        row,
+        direction="inbound",
+        body="My registration is AB12 CDE",
+        actor_label="Sarah",
+        occurred_at=start,
+    )
+    append_visitor_pass_whatsapp_history(
+        row,
+        direction="outbound",
+        body="Please confirm AB12CDE",
+        actor_label="IACS",
+        occurred_at=start + timedelta(minutes=1),
+    )
+
+    history = visitor_pass_whatsapp_history(row)
+
+    assert [message["direction"] for message in history] == ["inbound", "outbound"]
+    assert history[0]["body"] == "My registration is AB12 CDE"
+    assert history[1]["actor_label"] == "IACS"
 
 
 def test_serialize_visitor_pass_complete_label_includes_time_updated_after_change() -> None:

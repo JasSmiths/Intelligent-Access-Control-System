@@ -246,6 +246,26 @@ def test_context_variables_include_vehicle_aliases_and_time() -> None:
     assert variables["Time"] == "18:42"
 
 
+def test_context_variables_include_visitor_pass_timeframe_request_aliases() -> None:
+    variables = context_variables(
+        NotificationContext(
+            event_type="visitor_pass_timeframe_change_requested",
+            subject="Visitor Pass timeframe change requested for Vicky Thompson",
+            severity="warning",
+            facts={
+                "visitor_name": "Vicky Thompson",
+                "visitor_pass_original_time": "01 May 2026, 10:00 to 01 May 2026, 18:00",
+                "visitor_pass_requested_time": "01 May 2026, 10:00 to 01 May 2026, 20:00",
+            },
+        )
+    )
+
+    assert variables["VisitorName"] == "Vicky Thompson"
+    assert variables["VisitorPassName"] == "Vicky Thompson"
+    assert variables["VisitorPassOriginalTime"] == "01 May 2026, 10:00 to 01 May 2026, 18:00"
+    assert variables["VisitorPassRequestedTime"] == "01 May 2026, 10:00 to 01 May 2026, 20:00"
+
+
 def test_leaderboard_overtake_trigger_and_variables_are_available() -> None:
     events = [event for group in TRIGGER_CATALOG for event in group["events"]]
     assert any(event["value"] == "leaderboard_overtake" for event in events)
