@@ -347,14 +347,8 @@ class AccessEventService:
         if not row:
             return read
 
-        visitor_pass_id, arrival_time = row
-        if arrival_time.tzinfo is None:
-            arrival_time = arrival_time.replace(tzinfo=UTC)
-        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
-        if (
-            self._visitor_pass_candidate_kind(read) != "departure"
-            and read.captured_at <= arrival_time + timedelta(seconds=max_seconds)
-        ):
+        visitor_pass_id, _arrival_time = row
+        if self._visitor_pass_candidate_kind(read) != "departure":
             return read
 
         raw_payload = dict(read.raw_payload or {})

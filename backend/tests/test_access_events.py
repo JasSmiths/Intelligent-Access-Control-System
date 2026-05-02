@@ -32,6 +32,28 @@ class FakePresenceSession:
         return SimpleNamespace(state=self._state)
 
 
+class FakeVisitorPassLookupResult:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class FakeVisitorPassLookupSession:
+    def __init__(self, row):
+        self._row = row
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+        return False
+
+    async def execute(self, _statement):
+        return FakeVisitorPassLookupResult(self._row)
+
+
 def plate_read_with_gate_state(state: str) -> PlateRead:
     return PlateRead(
         registration_number="TEST123",
@@ -88,6 +110,56 @@ def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
         captured_at=read.captured_at,
         raw_payload=raw_payload,
     )
+
+
+@pytest.mark.asyncio
+async def test_on_site_visitor_closed_gate_reread_is_not_forced_to_departure(monkeypatch) -> None:
+    service = AccessEventService()
+    visitor_pass_id = uuid.uuid4()
+    arrival_time = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    read = plate_read_with_gate_state_at(
+        "DP25 MOU",
+        arrival_time + timedelta(minutes=5),
+        "closed",
+    )
+
+    monkeypatch.setattr(
+        access_events_module,
+        "AsyncSessionLocal",
+        lambda: FakeVisitorPassLookupSession((visitor_pass_id, arrival_time)),
+    )
+
+    matched = await service._read_with_visitor_pass_departure_match(read)
+
+    assert matched.registration_number == "DP25 MOU"
+    assert VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY not in matched.raw_payload
+
+
+@pytest.mark.asyncio
+async def test_on_site_visitor_departure_gate_state_marks_departure(monkeypatch) -> None:
+    service = AccessEventService()
+    visitor_pass_id = uuid.uuid4()
+    arrival_time = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    read = plate_read_with_gate_state_at(
+        "DP25 MOU",
+        arrival_time + timedelta(minutes=5),
+        "open",
+    )
+
+    monkeypatch.setattr(
+        access_events_module,
+        "AsyncSessionLocal",
+        lambda: FakeVisitorPassLookupSession((visitor_pass_id, arrival_time)),
+    )
+
+    matched = await service._read_with_visitor_pass_departure_match(read)
+
+    assert matched.registration_number == "DP25MOU"
+    assert matched.raw_payload[VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY] == {
+        "kind": "departure",
+        "visitor_pass_id": str(visitor_pass_id),
+        "registration_number": "DP25MOU",
+    }
 
 
 def test_access_event_realtime_payload_includes_snapshot_metadata() -> None:

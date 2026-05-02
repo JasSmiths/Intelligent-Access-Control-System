@@ -258,10 +258,37 @@ async def init_database() -> None:
             await conn.execute(
                 text(
                     """
+                    DO $$
+                    DECLARE
+                        current_predicate TEXT;
+                    BEGIN
+                        SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
+                        INTO current_predicate
+                        FROM pg_index indexes
+                        JOIN pg_class classes ON classes.oid = indexes.indexrelid
+                        WHERE classes.relname = 'ix_visitor_passes_open_departure_lookup';
+
+                        IF FOUND AND (
+                            current_predicate IS NULL
+                            OR current_predicate NOT ILIKE '%pass_type%'
+                        ) THEN
+                            DROP INDEX IF EXISTS ix_visitor_passes_open_departure_lookup;
+                        END IF;
+                    END $$;
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
                     CREATE INDEX IF NOT EXISTS ix_visitor_passes_open_departure_lookup
                     ON visitor_passes (number_plate, arrival_time DESC, created_at DESC)
-                    WHERE status = 'USED'
+                    WHERE (
+                            status = 'USED'
+                            OR (pass_type = 'DURATION' AND status = 'ACTIVE')
+                        )
                         AND departure_time IS NULL
+                        AND arrival_time IS NOT NULL
                         AND number_plate IS NOT NULL
                     """
                 )

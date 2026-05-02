@@ -245,8 +245,11 @@ class VisitorPassService:
         window_minutes: int | None = None,
         pass_type: VisitorPassType | str | None = None,
         visitor_phone: str | None = None,
+        visitor_phone_provided: bool | None = None,
         valid_from: datetime | None = None,
+        valid_from_provided: bool | None = None,
         valid_until: datetime | None = None,
+        valid_until_provided: bool | None = None,
         source_metadata: dict[str, Any] | None = None,
         actor: str = "System",
         actor_user_id: uuid.UUID | str | None = None,
@@ -255,17 +258,22 @@ class VisitorPassService:
             raise VisitorPassError(f"{visitor_pass.status.value.title()} visitor passes cannot be edited.")
         before = visitor_pass_audit_snapshot(visitor_pass)
         next_pass_type = _visitor_pass_type(pass_type) if pass_type is not None else visitor_pass.pass_type
+        visitor_phone_was_provided = (
+            visitor_phone is not None if visitor_phone_provided is None else visitor_phone_provided
+        )
+        valid_from_was_provided = valid_from is not None if valid_from_provided is None else valid_from_provided
+        valid_until_was_provided = valid_until is not None if valid_until_provided is None else valid_until_provided
         next_phone = (
             _normalize_phone_number(visitor_phone)
-            if visitor_phone is not None
+            if visitor_phone_was_provided
             else visitor_pass.visitor_phone
         )
-        next_valid_from = valid_from if valid_from is not None else visitor_pass.valid_from
-        next_valid_until = valid_until if valid_until is not None else visitor_pass.valid_until
+        next_valid_from = valid_from if valid_from_was_provided else visitor_pass.valid_from
+        next_valid_until = valid_until if valid_until_was_provided else visitor_pass.valid_until
         if pass_type is not None and next_pass_type == VisitorPassType.ONE_TIME and visitor_pass.pass_type == VisitorPassType.DURATION:
-            next_phone = _normalize_phone_number(visitor_phone)
-            next_valid_from = valid_from
-            next_valid_until = valid_until
+            next_phone = _normalize_phone_number(visitor_phone) if visitor_phone_was_provided else None
+            next_valid_from = valid_from if valid_from_was_provided else None
+            next_valid_until = valid_until if valid_until_was_provided else None
         next_valid_from, next_valid_until = _valid_window(
             next_valid_from,
             next_valid_until,
@@ -519,9 +527,7 @@ class VisitorPassService:
             return None
 
         before = visitor_pass_audit_snapshot(visitor_pass)
-        if visitor_pass.pass_type != VisitorPassType.DURATION:
-            visitor_pass.status = VisitorPassStatus.USED
-        visitor_pass.arrival_time = checked_at
+        self._apply_arrival_state(visitor_pass, checked_at)
         if not visitor_pass.number_plate:
             visitor_pass.number_plate = normalized_registration
         await self._audit_change(
@@ -577,13 +583,11 @@ class VisitorPassService:
         trace_id: str | None = None,
     ) -> VisitorPass:
         before = visitor_pass_audit_snapshot(visitor_pass)
-        if visitor_pass.pass_type != VisitorPassType.DURATION:
-            visitor_pass.status = VisitorPassStatus.USED
-        visitor_pass.arrival_time = event.occurred_at
-        visitor_pass.arrival_event_id = event.id
+        arrival_linked = self._apply_arrival_state(visitor_pass, event.occurred_at, arrival_event_id=event.id)
         if not visitor_pass.number_plate:
             visitor_pass.number_plate = normalize_registration_number(event.registration_number)
-        visitor_pass.telemetry_trace_id = trace_id or visitor_pass.telemetry_trace_id
+        if arrival_linked:
+            visitor_pass.telemetry_trace_id = trace_id or visitor_pass.telemetry_trace_id
         vehicle_make = _optional_text((dvla_enrichment or {}).get("make"))
         vehicle_colour = _optional_text((dvla_enrichment or {}).get("colour"))
         if not vehicle_colour and visual_detection:
@@ -607,6 +611,36 @@ class VisitorPassService:
             category=TELEMETRY_CATEGORY_ACCESS,
         )
         return visitor_pass
+
+    def _apply_arrival_state(
+        self,
+        visitor_pass: VisitorPass,
+        occurred_at: datetime,
+        *,
+        arrival_event_id: uuid.UUID | None = None,
+    ) -> bool:
+        occurred_at = _ensure_aware(occurred_at)
+        if visitor_pass.pass_type != VisitorPassType.DURATION:
+            visitor_pass.status = VisitorPassStatus.USED
+            visitor_pass.arrival_time = occurred_at
+            if arrival_event_id is not None:
+                visitor_pass.arrival_event_id = arrival_event_id
+            return True
+
+        visit_is_open = visitor_pass.arrival_time is not None and visitor_pass.departure_time is None
+        if visit_is_open:
+            if visitor_pass.arrival_event_id is None and arrival_event_id is not None:
+                visitor_pass.arrival_event_id = arrival_event_id
+                return True
+            return False
+
+        visitor_pass.arrival_time = occurred_at
+        if arrival_event_id is not None:
+            visitor_pass.arrival_event_id = arrival_event_id
+        visitor_pass.departure_time = None
+        visitor_pass.departure_event_id = None
+        visitor_pass.duration_on_site_seconds = None
+        return True
 
     async def record_departure(
         self,

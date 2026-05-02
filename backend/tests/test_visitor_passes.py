@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import uuid
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.ai import tools as ai_tools
 from app.models import VisitorPass
@@ -41,6 +42,22 @@ def visitor_pass(
     row.created_at = created_at or expected_time - timedelta(hours=1)
     row.updated_at = row.created_at
     return row
+
+
+class FakeScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class FakeVisitorPassSession:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def scalars(self, _statement):
+        return FakeScalarResult(self._rows)
 
 
 def test_visitor_pass_lifecycle_statuses() -> None:
@@ -92,6 +109,104 @@ def test_duration_visitor_pass_uses_explicit_window() -> None:
     assert service.status_for(row, end) == VisitorPassStatus.EXPIRED
 
 
+def test_open_departure_lookup_index_covers_duration_passes() -> None:
+    index = next(
+        index
+        for index in VisitorPass.__table__.indexes
+        if index.name == "ix_visitor_passes_open_departure_lookup"
+    )
+
+    predicate = str(
+        index.dialect_options["postgresql"]["where"].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "visitor_passes.status = 'USED'" in predicate
+    assert "visitor_passes.pass_type = 'DURATION'" in predicate
+    assert "visitor_passes.status = 'ACTIVE'" in predicate
+    assert "visitor_passes.departure_time IS NULL" in predicate
+    assert "visitor_passes.arrival_time IS NOT NULL" in predicate
+    assert "visitor_passes.number_plate IS NOT NULL" in predicate
+
+
+@pytest.mark.asyncio
+async def test_update_one_time_visitor_pass_clears_explicit_window_when_nulls_are_provided(monkeypatch) -> None:
+    service = VisitorPassService()
+    expected = datetime.now(tz=UTC) + timedelta(days=2)
+    row = visitor_pass(expected_time=expected, window_minutes=45, status=VisitorPassStatus.SCHEDULED)
+    row.valid_from = expected - timedelta(hours=1)
+    row.valid_until = expected + timedelta(hours=2)
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.update_pass(
+        SimpleNamespace(),
+        row,
+        valid_from=None,
+        valid_from_provided=True,
+        valid_until=None,
+        valid_until_provided=True,
+    )
+
+    assert row.valid_from is None
+    assert row.valid_until is None
+    assert service.window_start(row) == expected - timedelta(minutes=45)
+    assert service.window_end(row) == expected + timedelta(minutes=45)
+
+
+@pytest.mark.asyncio
+async def test_update_one_time_visitor_pass_keeps_explicit_window_when_fields_are_omitted(monkeypatch) -> None:
+    service = VisitorPassService()
+    expected = datetime.now(tz=UTC) + timedelta(days=2)
+    explicit_start = expected - timedelta(hours=1)
+    explicit_end = expected + timedelta(hours=2)
+    row = visitor_pass(expected_time=expected, window_minutes=45, status=VisitorPassStatus.SCHEDULED)
+    row.valid_from = explicit_start
+    row.valid_until = explicit_end
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.update_pass(SimpleNamespace(), row, visitor_name="Sarah Updated")
+
+    assert row.visitor_name == "Sarah Updated"
+    assert row.valid_from == explicit_start
+    assert row.valid_until == explicit_end
+
+
+@pytest.mark.asyncio
+async def test_update_duration_visitor_pass_to_one_time_clears_duration_window_by_default(monkeypatch) -> None:
+    service = VisitorPassService()
+    expected = datetime.now(tz=UTC) + timedelta(days=2)
+    row = visitor_pass(
+        expected_time=expected,
+        status=VisitorPassStatus.SCHEDULED,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+    )
+    row.valid_from = expected
+    row.valid_until = expected + timedelta(hours=8)
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.update_pass(SimpleNamespace(), row, pass_type=VisitorPassType.ONE_TIME)
+
+    assert row.pass_type == VisitorPassType.ONE_TIME
+    assert row.visitor_phone is None
+    assert row.valid_from is None
+    assert row.valid_until is None
+
+
 @pytest.mark.asyncio
 async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
     service = VisitorPassService()
@@ -115,7 +230,143 @@ async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
 
     assert row.status == VisitorPassStatus.ACTIVE
     assert row.arrival_time == event.occurred_at
+    assert row.arrival_event_id == event.id
     assert row.number_plate == "AB12CDE"
+
+
+@pytest.mark.asyncio
+async def test_duration_visitor_pass_claim_does_not_retime_open_visit(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    first_arrival = start + timedelta(minutes=10)
+    first_event_id = uuid.uuid4()
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.arrival_time = first_arrival
+    row.arrival_event_id = first_event_id
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    matched = await service.claim_active_pass(
+        FakeVisitorPassSession([row]),
+        occurred_at=start + timedelta(minutes=25),
+        registration_number="AB12 CDE",
+    )
+
+    assert matched is row
+    assert row.arrival_time == first_arrival
+    assert row.arrival_event_id == first_event_id
+    assert row.departure_time is None
+
+
+@pytest.mark.asyncio
+async def test_duration_visitor_pass_arrival_links_open_claim_without_retiming(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    first_arrival = start + timedelta(minutes=10)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.arrival_time = first_arrival
+    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(minutes=12), registration_number="AB12 CDE")
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-1")
+
+    assert row.arrival_time == first_arrival
+    assert row.arrival_event_id == event.id
+    assert row.telemetry_trace_id == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_duration_visitor_pass_repeated_arrival_does_not_overwrite_open_visit(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    first_arrival = start + timedelta(minutes=10)
+    first_event_id = uuid.uuid4()
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.arrival_time = first_arrival
+    row.arrival_event_id = first_event_id
+    row.telemetry_trace_id = "trace-first"
+    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(minutes=25), registration_number="AB12 CDE")
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-second")
+
+    assert row.arrival_time == first_arrival
+    assert row.arrival_event_id == first_event_id
+    assert row.telemetry_trace_id == "trace-first"
+    assert row.departure_time is None
+
+
+@pytest.mark.asyncio
+async def test_duration_visitor_pass_return_after_departure_starts_new_visit(monkeypatch) -> None:
+    service = VisitorPassService()
+    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    first_arrival = start + timedelta(minutes=10)
+    first_departure = start + timedelta(hours=1)
+    row = visitor_pass(
+        expected_time=start,
+        status=VisitorPassStatus.ACTIVE,
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        number_plate="AB12CDE",
+    )
+    row.valid_from = start
+    row.valid_until = start + timedelta(hours=8)
+    row.arrival_time = first_arrival
+    row.arrival_event_id = uuid.uuid4()
+    row.departure_time = first_departure
+    row.departure_event_id = uuid.uuid4()
+    row.duration_on_site_seconds = 3000
+    row.telemetry_trace_id = "trace-first"
+    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(hours=2), registration_number="AB12 CDE")
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+
+    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-return")
+
+    assert row.arrival_time == event.occurred_at
+    assert row.arrival_event_id == event.id
+    assert row.departure_time is None
+    assert row.departure_event_id is None
+    assert row.duration_on_site_seconds is None
+    assert row.telemetry_trace_id == "trace-return"
 
 
 @pytest.mark.asyncio

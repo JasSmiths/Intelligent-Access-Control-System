@@ -319,16 +319,19 @@ async def update_visitor_pass(
                 if "visitor_phone" in request.model_fields_set
                 else None
             ),
+            visitor_phone_provided="visitor_phone" in request.model_fields_set,
             valid_from=(
                 request.valid_from
                 if "valid_from" in request.model_fields_set
                 else None
             ),
+            valid_from_provided="valid_from" in request.model_fields_set,
             valid_until=(
                 request.valid_until
                 if "valid_until" in request.model_fields_set
                 else None
             ),
+            valid_until_provided="valid_until" in request.model_fields_set,
             actor=actor_from_user(user),
             actor_user_id=user.id,
         )

@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -723,8 +723,15 @@ Index(
     VisitorPass.arrival_time.desc(),
     VisitorPass.created_at.desc(),
     postgresql_where=(
-        (VisitorPass.status == VisitorPassStatus.USED)
+        or_(
+            VisitorPass.status == VisitorPassStatus.USED,
+            (
+                (VisitorPass.pass_type == VisitorPassType.DURATION)
+                & (VisitorPass.status == VisitorPassStatus.ACTIVE)
+            ),
+        )
         & VisitorPass.departure_time.is_(None)
+        & VisitorPass.arrival_time.is_not(None)
         & VisitorPass.number_plate.is_not(None)
     ),
 )
