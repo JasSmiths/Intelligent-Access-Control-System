@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from app.services.vehicle_visual_detections import (
+    VehiclePresenceTracker,
     VehicleVisualDetectionRecorder,
     extract_unifi_protect_track_vehicle_visual_observations,
     extract_unifi_protect_vehicle_visual_observations,
@@ -118,3 +119,103 @@ async def test_recorder_returns_nearest_matching_visual_detection() -> None:
     assert match is not None
     assert match["observed_vehicle_color"] == "Silver"
     assert match["observed_vehicle_type"] == "Truck"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_presence_tracker_uses_camera_vehicle_detection() -> None:
+    tracker = VehiclePresenceTracker()
+    observed_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+    await tracker.record_unifi_realtime_payload(
+        {
+            "camera": {
+                "id": "camera-1",
+                "name": "Gate",
+                "detections": {"active": ["vehicle"]},
+            }
+        },
+        received_at=observed_at,
+    )
+
+    evidence = await tracker.recent_evidence(
+        camera_id="camera-1",
+        observed_at=datetime(2026, 4, 28, 12, 0, 10, tzinfo=UTC),
+        max_age_seconds=30,
+    )
+
+    assert evidence is not None
+    assert evidence["source"] == "uiprotect_camera"
+    assert evidence["camera_id"] == "camera-1"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_presence_tracker_marks_ended_event_inactive() -> None:
+    tracker = VehiclePresenceTracker()
+    observed_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+    await tracker.record_unifi_realtime_payload(
+        {
+            "event": {
+                "id": "event-1",
+                "camera_id": "camera-1",
+                "camera_name": "Gate",
+                "start": observed_at.isoformat(),
+                "end": None,
+                "smart_detect_types": ["vehicle"],
+            }
+        },
+        received_at=observed_at,
+    )
+    assert await tracker.recent_evidence(
+        event_ids={"event-1"},
+        observed_at=observed_at + timedelta(seconds=5),
+        max_age_seconds=30,
+    )
+
+    await tracker.record_unifi_realtime_payload(
+        {
+            "event": {
+                "id": "event-1",
+                "camera_id": "camera-1",
+                "camera_name": "Gate",
+                "start": observed_at.isoformat(),
+                "end": (observed_at + timedelta(seconds=6)).isoformat(),
+                "smart_detect_types": ["vehicle"],
+            }
+        },
+        received_at=observed_at + timedelta(seconds=6),
+    )
+
+    evidence = await tracker.recent_evidence(
+        event_ids={"event-1"},
+        observed_at=observed_at + timedelta(seconds=7),
+        max_age_seconds=30,
+    )
+    assert evidence is None
+
+
+@pytest.mark.asyncio
+async def test_vehicle_presence_tracker_expires_stale_evidence() -> None:
+    tracker = VehiclePresenceTracker()
+    observed_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+    await tracker.record_unifi_protect_track(
+        {
+            "payload": [
+                {
+                    "timestamp": int(observed_at.timestamp() * 1000),
+                    "licensePlate": "ab12 cde",
+                    "objectType": "vehicle",
+                }
+            ]
+        },
+        event=SimpleNamespace(id="event-1", camera_id="camera-1"),
+        received_at=observed_at,
+    )
+
+    evidence = await tracker.recent_evidence(
+        registration_number="AB12CDE",
+        observed_at=observed_at + timedelta(seconds=31),
+        max_age_seconds=30,
+    )
+    assert evidence is None

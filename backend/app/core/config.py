@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
     lpr_debounce_quiet_seconds: float = 2.5
     lpr_debounce_max_seconds: float = 6.0
+    lpr_vehicle_session_idle_seconds: float = 180.0
     lpr_similarity_threshold: float = 0.78
 
     home_assistant_url: AnyHttpUrl | None = None

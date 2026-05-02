@@ -11,15 +11,18 @@ from app.modules.lpr.base import PlateRead
 from app.services import access_events as access_events_module
 from app.services.access_events import (
     AccessEventService,
+    ActiveVehicleSession,
     FinalizedPlateEvent,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
+    VEHICLE_SESSION_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     dvla_mot_alert_required,
     dvla_tax_alert_required,
 )
 from app.services.dvla import NormalizedDvlaVehicle
 from app.services.snapshots import access_event_snapshot_relative_path
+from app.services.vehicle_visual_detections import VehiclePresenceTracker
 
 
 class FakePresenceSession:
@@ -94,6 +97,69 @@ def plate_read_with_gate_state_at(registration_number: str, captured_at: datetim
             }
         },
     )
+
+
+def plate_read_with_context(
+    registration_number: str,
+    captured_at: datetime,
+    *,
+    state: str = "closed",
+    event_id: str | None = None,
+    camera_id: str | None = None,
+    device_id: str | None = None,
+) -> PlateRead:
+    raw_payload = {
+        GATE_OBSERVATION_PAYLOAD_KEY: {
+            "state": state,
+            "observed_at": captured_at.isoformat(),
+            "controller": "home_assistant",
+        }
+    }
+    if event_id or camera_id or device_id:
+        raw_payload["alarm"] = {
+            "eventPath": f"/protect/events/event/{event_id}" if event_id else "",
+            "triggers": [
+                {
+                    "eventId": event_id,
+                    "device": device_id,
+                    "value": registration_number,
+                }
+            ],
+            "sources": [{"device": device_id}] if device_id else [],
+        }
+        if camera_id:
+            raw_payload["cameraId"] = camera_id
+    return PlateRead(
+        registration_number=registration_number,
+        confidence=1.0,
+        source="test",
+        captured_at=captured_at,
+        raw_payload=raw_payload,
+    )
+
+
+def remember_session(
+    service: AccessEventService,
+    read: PlateRead,
+    *,
+    direction: AccessDirection = AccessDirection.DENIED,
+    decision: AccessDecision = AccessDecision.DENIED,
+):
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        direction=direction,
+        decision=decision,
+        source=read.source,
+        occurred_at=read.captured_at,
+        registration_number=read.registration_number,
+    )
+    window = access_events_module.DebounceWindow(
+        first_seen=read.captured_at,
+        updated_at=read.captured_at,
+        reads=[read],
+    )
+    service._remember_vehicle_session(event, window, read)
+    return event
 
 
 def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
@@ -323,8 +389,12 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
@@ -388,9 +458,13 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
     first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
@@ -436,9 +510,13 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     await service._handle_queued_read(plate_read("ND25VN0", first_seen))
@@ -479,9 +557,13 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
     first_seen = datetime(2026, 4, 30, 12, 23, 36, tzinfo=UTC)
@@ -512,6 +594,343 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_suppresses_stationary_denied_plate(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MJ17MDZ", first_seen, event_id="event-1", device_id="camera-device"),
+    )
+
+    await service._handle_queued_read(
+        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=55), event_id="event-2", device_id="camera-device")
+    )
+
+    assert service._pending == []
+    assert published == [
+        (
+            "plate_read.suppressed",
+            {
+                "registration_number": "MJ17MDZ",
+                "detected_registration_number": "MJ17MDZ",
+                "source": "test",
+                "reason": "vehicle_session_already_active",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_suppresses_same_protect_event_ocr_variant(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen, event_id="shared-event"))
+
+    await service._handle_queued_read(
+        plate_read_with_context("SA73YVL", first_seen + timedelta(seconds=20), event_id="shared-event")
+    )
+
+    assert service._pending == []
+    suppressed = [payload for event_type, payload in published if event_type == "plate_read.suppressed"]
+    assert suppressed[0]["reason"] == "vehicle_session_already_active"
+    assert published[0][1]["registration_number"] == "SA73YVL"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_suppresses_post_exit_closed_gate_linger(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return ["MD25VNO"]
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MD25VNO", first_seen, state="open", event_id="exit-event"),
+        direction=AccessDirection.EXIT,
+        decision=AccessDecision.GRANTED,
+    )
+
+    await service._handle_queued_read(
+        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=70), state="closed", event_id="later-event")
+    )
+
+    assert service._pending == []
+    assert published[0][0] == "plate_read.suppressed"
+    assert published[0][1]["reason"] == "vehicle_session_already_active"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_presence_evidence_extends_suppression_after_idle(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=30.0,
+    )
+    tracker = VehiclePresenceTracker()
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
+        return None
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MJ17MDZ", first_seen, camera_id="camera-1"),
+    )
+    await tracker.record_unifi_realtime_payload(
+        {"camera": {"id": "camera-1", "detections": {"active": ["vehicle"]}}},
+        received_at=first_seen + timedelta(seconds=31),
+    )
+
+    await service._handle_queued_read(
+        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=31), camera_id="camera-1")
+    )
+
+    assert service._pending == []
+    suppressed = [payload for event_type, payload in published if event_type == "plate_read.suppressed"]
+    assert suppressed[0]["reason"] == "vehicle_session_already_active"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_does_not_suppress_different_exact_known_vehicle(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    finalized = []
+
+    async def fake_active_vehicle_registrations():
+        return ["MD25VNO"]
+
+    async def fake_finalize_window(window):
+        finalized.append(window.best_read.registration_number)
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen, event_id="shared-event", camera_id="camera-1"))
+
+    await service._handle_queued_read(
+        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=10), event_id="shared-event", camera_id="camera-1")
+    )
+
+    assert finalized == ["MD25VNO"]
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_idle_expiry_allows_new_event(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=30.0,
+    )
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen))
+
+    await service._handle_queued_read(
+        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=31))
+    )
+
+    assert published == []
+    assert len(service._pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_suppressed_vehicle_session_read_updates_event_payload(monkeypatch) -> None:
+    service = AccessEventService()
+    event_id = uuid.uuid4()
+    occurred_at = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    event = SimpleNamespace(
+        id=event_id,
+        occurred_at=occurred_at,
+        registration_number="MJ17MDZ",
+        raw_payload={
+            VEHICLE_SESSION_PAYLOAD_KEY: {
+                "id": str(event_id),
+                "registration_number": "MJ17MDZ",
+                "normalized_registration_number": "MJ17MDZ",
+                "started_at": occurred_at.isoformat(),
+                "last_seen_at": occurred_at.isoformat(),
+                "protect_event_ids": ["event-1"],
+                "ocr_variants": ["MJ17MDZ"],
+                "suppressed_read_count": 0,
+                "suppressed_reads": [],
+            }
+        },
+    )
+    fake_db = SimpleNamespace(committed=False)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _model, _id):
+            return event
+
+        async def commit(self):
+            fake_db.committed = True
+
+    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: FakeSession())
+    read = plate_read_with_context(
+        "MJ17MDZ",
+        occurred_at + timedelta(seconds=20),
+        event_id="event-2",
+        state="closed",
+    )
+    session = ActiveVehicleSession(
+        event_id=str(event_id),
+        source="test",
+        registration_number="MJ17MDZ",
+        normalized_registration_number="MJ17MDZ",
+        started_at=occurred_at,
+        last_seen_at=occurred_at,
+        direction=AccessDirection.DENIED,
+        decision=AccessDecision.DENIED,
+        protect_event_ids={"event-1"},
+    )
+
+    await service._annotate_suppressed_session_read(
+        read,
+        access_events_module.VehicleSessionSuppression(
+            session=session,
+            reason="vehicle_session_already_active",
+            matched_by="registration_number",
+            evidence={"source": "webhook", "active": True, "observed_at": read.captured_at.isoformat()},
+        ),
+    )
+
+    payload = event.raw_payload[VEHICLE_SESSION_PAYLOAD_KEY]
+    assert fake_db.committed
+    assert payload["suppressed_read_count"] == 1
+    assert payload["last_seen_at"] == read.captured_at.isoformat()
+    assert payload["protect_event_ids"] == ["event-1", "event-2"]
+    assert payload["suppressed_reads"][0]["matched_by"] == "registration_number"
 
 
 @pytest.mark.asyncio

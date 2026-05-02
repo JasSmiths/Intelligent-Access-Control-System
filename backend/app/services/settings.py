@@ -48,6 +48,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "auth_cookie_secure": ("auth", settings.auth_cookie_secure, "Set secure cookies only over HTTPS."),
     "lpr_debounce_quiet_seconds": ("lpr", settings.lpr_debounce_quiet_seconds, "Quiet period before resolving LPR reads."),
     "lpr_debounce_max_seconds": ("lpr", settings.lpr_debounce_max_seconds, "Maximum LPR debounce window."),
+    "lpr_vehicle_session_idle_seconds": (
+        "lpr",
+        settings.lpr_vehicle_session_idle_seconds,
+        "Seconds without matching plate or vehicle detections before a physical gate visit is considered finished.",
+    ),
     "lpr_similarity_threshold": ("lpr", settings.lpr_similarity_threshold, "Plate similarity threshold."),
     "lpr_allowed_smart_zones": (
         "lpr",
@@ -179,6 +184,7 @@ class RuntimeConfig:
     auth_cookie_secure: bool
     lpr_debounce_quiet_seconds: float
     lpr_debounce_max_seconds: float
+    lpr_vehicle_session_idle_seconds: float
     lpr_similarity_threshold: float
     lpr_allowed_smart_zones: list[str]
     schedule_default_policy: str
@@ -381,6 +387,7 @@ async def get_runtime_config() -> RuntimeConfig:
         auth_cookie_secure=bool_value(values["auth_cookie_secure"]),
         lpr_debounce_quiet_seconds=float(values["lpr_debounce_quiet_seconds"]),
         lpr_debounce_max_seconds=float(values["lpr_debounce_max_seconds"]),
+        lpr_vehicle_session_idle_seconds=float(values["lpr_vehicle_session_idle_seconds"]),
         lpr_similarity_threshold=float(values["lpr_similarity_threshold"]),
         lpr_allowed_smart_zones=string_list_value(values["lpr_allowed_smart_zones"]),
         schedule_default_policy=(

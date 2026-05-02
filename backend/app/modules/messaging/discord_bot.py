@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+import warnings
 
 from app.core.logging import get_logger
 from app.modules.messaging.base import IncomingChatMessage
@@ -9,8 +10,15 @@ from app.modules.messaging.base import IncomingChatMessage
 logger = get_logger(__name__)
 
 try:  # pragma: no cover - exercised only when discord.py is installed.
-    import discord
-    from discord import app_commands
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="'audioop' is deprecated.*",
+            category=DeprecationWarning,
+            module="discord\\.player",
+        )
+        import discord
+        from discord import app_commands
 except Exception:  # pragma: no cover - import guard keeps the app bootable before image rebuild.
     discord = None  # type: ignore[assignment]
     app_commands = None  # type: ignore[assignment]

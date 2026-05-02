@@ -17,7 +17,10 @@ from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
-from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
+from app.services.vehicle_visual_detections import (
+    get_vehicle_presence_tracker,
+    get_vehicle_visual_detection_recorder,
+)
 from app.services.whatsapp_messaging import get_whatsapp_messaging_service, load_whatsapp_config
 
 router = APIRouter()
@@ -185,6 +188,10 @@ async def receive_ubiquiti_lpr(
         return {"status": "ignored", "plate": read.registration_number, "reason": "outside_lpr_smart_zone"}
 
     await get_vehicle_visual_detection_recorder().record_unifi_payload(
+        raw_payload,
+        registration_number=read.registration_number,
+    )
+    await get_vehicle_presence_tracker().record_unifi_payload(
         raw_payload,
         registration_number=read.registration_number,
     )

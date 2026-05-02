@@ -26,7 +26,10 @@ from app.modules.unifi_protect.client import (
 from app.services.event_bus import event_bus
 from app.services.lpr_timing import extract_unifi_protect_track_observations, get_lpr_timing_recorder
 from app.services.settings import get_runtime_config
-from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
+from app.services.vehicle_visual_detections import (
+    get_vehicle_presence_tracker,
+    get_vehicle_visual_detection_recorder,
+)
 
 logger = get_logger(__name__)
 
@@ -257,6 +260,12 @@ class UnifiProtectIntegrationService:
         except Exception as exc:
             logger.debug("unifi_protect_ws_payload_failed", extra={"error": str(exc)})
             return
+        try:
+            (loop or asyncio.get_running_loop()).create_task(
+                get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at)
+            )
+        except RuntimeError:
+            logger.debug("unifi_protect_vehicle_presence_without_loop")
 
         event_type = "protect.updated"
         if payload.get("camera"):
@@ -316,6 +325,13 @@ class UnifiProtectIntegrationService:
                     probe_attempt=attempt,
                 )
                 await get_vehicle_visual_detection_recorder().record_unifi_protect_track(
+                    track,
+                    event=event,
+                    event_id=event_id,
+                    received_at=datetime.now(tz=UTC),
+                    probe_attempt=attempt,
+                )
+                await get_vehicle_presence_tracker().record_unifi_protect_track(
                     track,
                     event=event,
                     event_id=event_id,

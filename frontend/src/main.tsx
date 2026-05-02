@@ -17113,6 +17113,7 @@ function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefin
   return [
     { key: "lpr_debounce_quiet_seconds", label: "Debounce quiet seconds", type: "number", min: 0.5, step: 0.1 },
     { key: "lpr_debounce_max_seconds", label: "Debounce max seconds", type: "number", min: 1, step: 0.1 },
+    { key: "lpr_vehicle_session_idle_seconds", label: "Vehicle session idle seconds", type: "number", min: 10, step: 5 },
     { key: "lpr_similarity_threshold", label: "Similarity threshold", type: "number", min: 0, max: 1, step: 0.01 },
     {
       key: "lpr_allowed_smart_zones",
@@ -17349,6 +17350,7 @@ function coerceSettingsPayload(form: Record<string, string>): Record<string, unk
       "auth_remember_days",
       "lpr_debounce_quiet_seconds",
       "lpr_debounce_max_seconds",
+      "lpr_vehicle_session_idle_seconds",
       "lpr_similarity_threshold",
       "llm_timeout_seconds",
       "dvla_timeout_seconds",

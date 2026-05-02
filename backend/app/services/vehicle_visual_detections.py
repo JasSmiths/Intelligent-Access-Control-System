@@ -11,6 +11,7 @@ from app.services.event_bus import event_bus
 
 
 MAX_VEHICLE_VISUAL_OBSERVATIONS = 500
+MAX_VEHICLE_PRESENCE_OBSERVATIONS = 1000
 VEHICLE_COLOR_KEYS = ("color", "colour", "vehicleColor", "vehicleColour")
 VEHICLE_TYPE_KEYS = ("vehicleType", "vehicle_type", "vehicleClass", "vehicle_class")
 PLATE_KEYS = (
@@ -27,6 +28,14 @@ PLATE_KEYS = (
     "registration_number",
     "vrn",
 )
+VEHICLE_PRESENCE_TYPES = {"vehicle", "licenseplate", "license_plate"}
+VEHICLE_PRESENCE_ACTIVE_FIELDS = (
+    "isVehicleCurrentlyDetected",
+    "is_vehicle_currently_detected",
+    "isLicensePlateCurrentlyDetected",
+    "is_license_plate_currently_detected",
+)
+VEHICLE_PRESENCE_ACTIVE_LABELS = {"vehicle", "license_plate", "licenseplate"}
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,22 @@ class VehicleVisualObservation:
     camera_name: str | None = None
     vehicle_type_confidence: float | None = None
     vehicle_color_confidence: float | None = None
+    payload_path: str | None = None
+
+
+@dataclass(frozen=True)
+class VehiclePresenceObservation:
+    id: str
+    source: str
+    source_detail: str
+    active: bool
+    observed_at: str
+    registration_number: str | None = None
+    event_id: str | None = None
+    camera_id: str | None = None
+    camera_name: str | None = None
+    device_id: str | None = None
+    ended_at: str | None = None
     payload_path: str | None = None
 
 
@@ -168,6 +193,329 @@ class VehicleVisualDetectionRecorder:
             "vehicle_visual_detection.observed",
             {"observation": asdict(observation)},
         )
+
+
+class VehiclePresenceTracker:
+    """In-memory UniFi vehicle-presence feed for access-event suppression."""
+
+    def __init__(self) -> None:
+        self._observations: deque[VehiclePresenceObservation] = deque(
+            maxlen=MAX_VEHICLE_PRESENCE_OBSERVATIONS
+        )
+        self._lock = asyncio.Lock()
+
+    async def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        async with self._lock:
+            observations = list(self._observations)[-limit:]
+        return [asdict(observation) for observation in reversed(observations)]
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._observations.clear()
+        await event_bus.publish("vehicle_presence.cleared", {})
+
+    async def record_unifi_payload(
+        self,
+        payload: Any,
+        *,
+        registration_number: str | None = None,
+        received_at: datetime | None = None,
+    ) -> int:
+        observation = _presence_from_lpr_payload(
+            payload,
+            registration_number=registration_number,
+            received_at=received_at or _now_utc(),
+        )
+        if observation is None:
+            return 0
+        await self._append_and_publish(observation)
+        return 1
+
+    async def record_unifi_realtime_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        received_at: datetime | None = None,
+    ) -> int:
+        observations = _presence_from_realtime_payload(
+            payload,
+            received_at=received_at or _now_utc(),
+        )
+        for observation in observations:
+            await self._append_and_publish(observation)
+        return len(observations)
+
+    async def record_unifi_protect_track(
+        self,
+        track: Any,
+        *,
+        event: Any = None,
+        event_id: str | None = None,
+        received_at: datetime | None = None,
+        probe_attempt: int | None = None,
+    ) -> int:
+        observations = _presence_from_track(
+            track,
+            event=event,
+            event_id=event_id,
+            received_at=received_at or _now_utc(),
+            probe_attempt=probe_attempt,
+        )
+        for observation in observations:
+            await self._append_and_publish(observation)
+        return len(observations)
+
+    async def recent_evidence(
+        self,
+        *,
+        registration_number: str | None = None,
+        event_ids: set[str] | None = None,
+        camera_id: str | None = None,
+        device_id: str | None = None,
+        observed_at: datetime | None = None,
+        max_age_seconds: float = 180.0,
+    ) -> dict[str, Any] | None:
+        checked_at = observed_at or _now_utc()
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=UTC)
+        normalized_plate = _normalize_plate(registration_number or "")
+        event_ids = {str(item) for item in (event_ids or set()) if str(item)}
+        camera_id = str(camera_id or "").strip() or None
+        device_id = str(device_id or "").strip() or None
+
+        async with self._lock:
+            observations = list(self._observations)
+
+        candidates: list[tuple[int, float, VehiclePresenceObservation]] = []
+        for observation in observations:
+            if not observation.active:
+                continue
+            observed = _datetime_from_any(observation.observed_at)
+            if observed is None:
+                continue
+            if _has_later_vehicle_presence_end(observation, observations, checked_at):
+                continue
+            age_seconds = abs((checked_at.astimezone(UTC) - observed.astimezone(UTC)).total_seconds())
+            if age_seconds > max_age_seconds:
+                continue
+
+            score = 0
+            if normalized_plate and observation.registration_number == normalized_plate:
+                score += 8
+            if event_ids and observation.event_id in event_ids:
+                score += 6
+            if camera_id and observation.camera_id == camera_id:
+                score += 2
+            if device_id and observation.device_id == device_id:
+                score += 2
+            if not score:
+                continue
+            candidates.append((score, -age_seconds, observation))
+
+        if not candidates:
+            return None
+        _score, age_sort, best = max(candidates, key=lambda item: (item[0], item[1]))
+        payload = asdict(best)
+        payload["age_seconds"] = abs(age_sort)
+        return payload
+
+    async def _append_and_publish(self, observation: VehiclePresenceObservation) -> None:
+        async with self._lock:
+            self._observations.append(observation)
+        await event_bus.publish(
+            "vehicle_presence.observed",
+            {"observation": asdict(observation)},
+        )
+
+
+def _has_later_vehicle_presence_end(
+    active_observation: VehiclePresenceObservation,
+    observations: list[VehiclePresenceObservation],
+    checked_at: datetime,
+) -> bool:
+    active_at = _datetime_from_any(active_observation.observed_at)
+    if active_at is None:
+        return False
+    for observation in observations:
+        if observation.active:
+            continue
+        if not _presence_identity_overlaps(active_observation, observation):
+            continue
+        ended_at = _datetime_from_any(observation.ended_at or observation.observed_at)
+        if ended_at and active_at <= ended_at <= checked_at.astimezone(UTC):
+            return True
+    return False
+
+
+def _presence_identity_overlaps(
+    left: VehiclePresenceObservation,
+    right: VehiclePresenceObservation,
+) -> bool:
+    if left.event_id and right.event_id and left.event_id == right.event_id:
+        return True
+    if left.camera_id and right.camera_id and left.camera_id == right.camera_id:
+        return True
+    if left.device_id and right.device_id and left.device_id == right.device_id:
+        return True
+    if left.registration_number and right.registration_number and left.registration_number == right.registration_number:
+        return True
+    return False
+
+
+def _presence_from_lpr_payload(
+    payload: Any,
+    *,
+    registration_number: str | None,
+    received_at: datetime,
+) -> VehiclePresenceObservation | None:
+    event_id = _string_or_none(_dict_deep_first(payload, ("eventId", "event_id")))
+    camera_id = _string_or_none(_dict_deep_first(payload, ("cameraId", "camera_id")))
+    device_id = _string_or_none(_dict_deep_first(payload, ("device", "deviceId", "device_id")))
+    captured_at = _datetime_from_any(_dict_deep_first(payload, ("capturedAt", "captured_at", "timestamp", "time")))
+    observed_at = captured_at or received_at
+    plate = _normalize_plate(registration_number or str(_dict_deep_first(payload, PLATE_KEYS) or ""))
+    if not (plate or event_id or camera_id or device_id):
+        return None
+    return VehiclePresenceObservation(
+        id=str(uuid.uuid4()),
+        source="webhook",
+        source_detail="ubiquiti_lpr_webhook",
+        active=True,
+        observed_at=_isoformat(observed_at) or _isoformat(received_at) or "",
+        registration_number=plate or None,
+        event_id=event_id,
+        camera_id=camera_id,
+        device_id=device_id,
+        payload_path="payload",
+    )
+
+
+def _presence_from_realtime_payload(
+    payload: dict[str, Any],
+    *,
+    received_at: datetime,
+) -> list[VehiclePresenceObservation]:
+    observations: list[VehiclePresenceObservation] = []
+    camera = payload.get("camera")
+    if isinstance(camera, dict):
+        active_labels = {
+            _normalize_detection_label(item)
+            for item in (((camera.get("detections") or {}).get("active")) or [])
+        }
+        explicit_active = [
+            bool(_dict_deep_first(camera, (field,)))
+            for field in VEHICLE_PRESENCE_ACTIVE_FIELDS
+            if _dict_deep_first(camera, (field,)) is not None
+        ]
+        if active_labels & VEHICLE_PRESENCE_ACTIVE_LABELS or any(explicit_active):
+            observations.append(
+                VehiclePresenceObservation(
+                    id=str(uuid.uuid4()),
+                    source="uiprotect_camera",
+                    source_detail="camera.current_vehicle_detection",
+                    active=True,
+                    observed_at=_isoformat(received_at) or "",
+                    camera_id=_string_or_none(camera.get("id")),
+                    camera_name=_string_or_none(camera.get("name")),
+                    payload_path="camera.detections.active",
+                )
+            )
+        elif explicit_active and not any(explicit_active):
+            observations.append(
+                VehiclePresenceObservation(
+                    id=str(uuid.uuid4()),
+                    source="uiprotect_camera",
+                    source_detail="camera.current_vehicle_detection",
+                    active=False,
+                    observed_at=_isoformat(received_at) or "",
+                    camera_id=_string_or_none(camera.get("id")),
+                    camera_name=_string_or_none(camera.get("name")),
+                    ended_at=_isoformat(received_at),
+                    payload_path="camera.detections.active",
+                )
+            )
+
+    event = payload.get("event")
+    if isinstance(event, dict):
+        smart_types = {
+            _normalize_detection_label(item)
+            for item in (event.get("smart_detect_types") or [])
+        }
+        if smart_types & VEHICLE_PRESENCE_TYPES:
+            ended_at = _datetime_from_any(event.get("end"))
+            start = _datetime_from_any(event.get("start"))
+            observations.append(
+                VehiclePresenceObservation(
+                    id=str(uuid.uuid4()),
+                    source="uiprotect_event",
+                    source_detail="event.vehicle_detection",
+                    active=ended_at is None,
+                    observed_at=_isoformat(ended_at or start or received_at) or "",
+                    event_id=_string_or_none(event.get("id")),
+                    camera_id=_string_or_none(event.get("camera_id")),
+                    camera_name=_string_or_none(event.get("camera_name")),
+                    ended_at=_isoformat(ended_at),
+                    payload_path="event.smart_detect_types",
+                )
+            )
+    return observations
+
+
+def _presence_from_track(
+    track: Any,
+    *,
+    event: Any,
+    event_id: str | None,
+    received_at: datetime,
+    probe_attempt: int | None,
+) -> list[VehiclePresenceObservation]:
+    raw_track = _model_to_debug_dict(track)
+    if not isinstance(raw_track, dict):
+        return []
+    payload = raw_track.get("payload")
+    if not isinstance(payload, list):
+        return []
+
+    common = _protect_common_fields(event, action="track_probe", model="event", received_at=received_at)
+    resolved_event_id = (
+        event_id
+        or _string_or_none(raw_track.get("eventId") or raw_track.get("event_id"))
+        or common.get("event_id")
+    )
+    camera_id = _string_or_none(raw_track.get("cameraId") or raw_track.get("camera_id")) or common.get("camera_id")
+    detail = "smart_detect_track.vehicle"
+    if probe_attempt is not None:
+        detail = f"{detail}.attempt_{probe_attempt}"
+
+    observations: list[VehiclePresenceObservation] = []
+    for index, row in enumerate(payload):
+        if not isinstance(row, dict):
+            continue
+        object_type = _normalize_detection_label(_dict_get_any(row, ("objectType", "object_type", "type")))
+        plate = _normalize_plate(str(_dict_get_any(row, PLATE_KEYS) or ""))
+        has_vehicle_attributes = bool(_dict_get_any(row, ("attributes", "attrs")))
+        if object_type not in VEHICLE_PRESENCE_TYPES and not plate and not has_vehicle_attributes:
+            continue
+        observed_at = _datetime_from_any(_dict_get_any(row, ("timestamp", "capturedAt", "captured_at", "time")))
+        observations.append(
+            VehiclePresenceObservation(
+                id=str(uuid.uuid4()),
+                source="uiprotect_track",
+                source_detail=detail,
+                active=True,
+                observed_at=_isoformat(observed_at or received_at) or "",
+                registration_number=plate or None,
+                event_id=resolved_event_id,
+                camera_id=camera_id,
+                camera_name=common.get("camera_name"),
+                payload_path=f"smartDetectTrack.payload[{index}]",
+            )
+        )
+    return observations
+
+
+def _normalize_detection_label(value: Any) -> str:
+    return str(_enum_value(value) or value or "").strip().replace("-", "_").replace(" ", "_").lower()
 
 
 def extract_unifi_protect_vehicle_visual_observations(
@@ -759,3 +1107,8 @@ def _now_utc() -> datetime:
 @lru_cache
 def get_vehicle_visual_detection_recorder() -> VehicleVisualDetectionRecorder:
     return VehicleVisualDetectionRecorder()
+
+
+@lru_cache
+def get_vehicle_presence_tracker() -> VehiclePresenceTracker:
+    return VehiclePresenceTracker()

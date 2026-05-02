@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
@@ -49,7 +50,10 @@ from app.services.snapshots import (
 )
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, TELEMETRY_CATEGORY_LPR, telemetry
 from app.services.unifi_protect import get_unifi_protect_service
-from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
+from app.services.vehicle_visual_detections import (
+    get_vehicle_presence_tracker,
+    get_vehicle_visual_detection_recorder,
+)
 from app.services.visitor_passes import get_visitor_pass_service, serialize_visitor_pass
 
 logger = get_logger(__name__)
@@ -59,10 +63,12 @@ KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
+VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
+MAX_SUPPRESSED_SESSION_READS = 20
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
@@ -140,6 +146,39 @@ class FinalizedPlateEvent:
     occurred_at: datetime
 
 
+@dataclass
+class VehicleSessionContext:
+    source: str
+    registration_number: str
+    normalized_registration_number: str
+    camera_id: str | None = None
+    device_id: str | None = None
+    protect_event_ids: set[str] = field(default_factory=set)
+
+
+@dataclass
+class ActiveVehicleSession:
+    event_id: str
+    source: str
+    registration_number: str
+    normalized_registration_number: str
+    started_at: datetime
+    last_seen_at: datetime
+    direction: AccessDirection
+    decision: AccessDecision
+    camera_id: str | None = None
+    device_id: str | None = None
+    protect_event_ids: set[str] = field(default_factory=set)
+
+
+@dataclass
+class VehicleSessionSuppression:
+    session: ActiveVehicleSession
+    reason: str
+    matched_by: str
+    evidence: dict[str, Any] | None = None
+
+
 class AccessEventService:
     """Coordinates plate reads into access events.
 
@@ -156,6 +195,7 @@ class AccessEventService:
         self._runtime: RuntimeConfig | None = None
         self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
         self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
+        self._active_vehicle_sessions: list[ActiveVehicleSession] = []
 
     async def start(self) -> None:
         if self._worker and not self._worker.done():
@@ -255,6 +295,12 @@ class AccessEventService:
             await self._publish_suppressed_read(read, reason=exact_suppression_reason)
             return
 
+        vehicle_session_suppression = await self._vehicle_session_suppression(read)
+        if vehicle_session_suppression:
+            await self._annotate_suppressed_session_read(read, vehicle_session_suppression)
+            await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
+            return
+
         if not _is_exact_known_vehicle_plate_match(read):
             read = await self._read_with_visitor_pass_departure_match(read)
         if self._suppress_after_visitor_pass_resolution(read):
@@ -277,6 +323,7 @@ class AccessEventService:
         self._pending = []
         self._recent_exact_resolutions = []
         self._recent_visitor_pass_resolutions = []
+        self._active_vehicle_sessions = []
 
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
@@ -617,6 +664,408 @@ class AccessEventService:
             },
         )
 
+    async def _vehicle_session_suppression(self, read: PlateRead) -> VehicleSessionSuppression | None:
+        context = self._vehicle_session_context_from_read(read)
+        if not context.normalized_registration_number:
+            return None
+        idle_seconds = self._vehicle_session_idle_seconds()
+        self._prune_active_vehicle_sessions(read.captured_at, idle_seconds)
+
+        for session in sorted(self._active_vehicle_sessions, key=lambda item: item.last_seen_at, reverse=True):
+            matched_by = self._vehicle_session_match(session, context, read)
+            if not matched_by:
+                continue
+            evidence = await self._vehicle_session_presence_evidence(session, context, read, idle_seconds)
+            if read.captured_at <= session.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
+                return VehicleSessionSuppression(
+                    session=session,
+                    reason="vehicle_session_already_active",
+                    matched_by=matched_by,
+                    evidence=evidence,
+                )
+
+        return await self._vehicle_session_db_fallback(read, context, idle_seconds)
+
+    def _vehicle_session_idle_seconds(self) -> float:
+        configured = (
+            getattr(self._runtime, "lpr_vehicle_session_idle_seconds", None)
+            if self._runtime
+            else settings.lpr_vehicle_session_idle_seconds
+        )
+        try:
+            value = float(configured)
+        except (TypeError, ValueError):
+            value = settings.lpr_vehicle_session_idle_seconds
+        return max(10.0, value)
+
+    def _prune_active_vehicle_sessions(self, now: datetime, idle_seconds: float) -> None:
+        horizon = timedelta(seconds=max(idle_seconds * 3, idle_seconds + 300.0))
+        self._active_vehicle_sessions = [
+            session
+            for session in self._active_vehicle_sessions
+            if session.last_seen_at + horizon >= now
+        ][-100:]
+
+    def _vehicle_session_match(
+        self,
+        session: ActiveVehicleSession,
+        context: VehicleSessionContext,
+        read: PlateRead,
+    ) -> str | None:
+        if read.source != session.source:
+            return None
+        same_plate = (
+            context.normalized_registration_number == session.normalized_registration_number
+            or self._is_similar_plate(
+                context.normalized_registration_number,
+                session.normalized_registration_number,
+            )
+        )
+        if same_plate:
+            return "registration_number"
+
+        same_event = bool(context.protect_event_ids & session.protect_event_ids)
+        if not same_event:
+            return None
+
+        if _known_vehicle_plate_match_from_read(read):
+            return None
+        return "protect_event_id"
+
+    async def _vehicle_session_presence_evidence(
+        self,
+        session: ActiveVehicleSession,
+        context: VehicleSessionContext,
+        read: PlateRead,
+        idle_seconds: float,
+    ) -> dict[str, Any] | None:
+        return await get_vehicle_presence_tracker().recent_evidence(
+            registration_number=context.registration_number,
+            event_ids=context.protect_event_ids | session.protect_event_ids,
+            camera_id=context.camera_id or session.camera_id,
+            device_id=context.device_id or session.device_id,
+            observed_at=read.captured_at,
+            max_age_seconds=idle_seconds,
+        )
+
+    async def _vehicle_session_db_fallback(
+        self,
+        read: PlateRead,
+        context: VehicleSessionContext,
+        idle_seconds: float,
+    ) -> VehicleSessionSuppression | None:
+        lookup_horizon = timedelta(seconds=max(idle_seconds * 3, 3600.0))
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.scalars(
+                    select(AccessEvent)
+                    .where(
+                        AccessEvent.source == read.source,
+                        AccessEvent.occurred_at <= read.captured_at,
+                        AccessEvent.occurred_at >= read.captured_at - lookup_horizon,
+                    )
+                    .order_by(AccessEvent.occurred_at.desc())
+                    .limit(50)
+                )
+            ).all()
+
+        for event in rows:
+            candidate = self._vehicle_session_from_event(event)
+            if not candidate:
+                continue
+            matched_by = self._vehicle_session_match(candidate, context, read)
+            if not matched_by:
+                continue
+            evidence = await self._vehicle_session_presence_evidence(candidate, context, read, idle_seconds)
+            if read.captured_at <= candidate.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
+                self._upsert_active_vehicle_session(candidate)
+                return VehicleSessionSuppression(
+                    session=candidate,
+                    reason="vehicle_session_already_active",
+                    matched_by=f"db_{matched_by}",
+                    evidence=evidence,
+                )
+        return None
+
+    async def _annotate_suppressed_session_read(
+        self,
+        read: PlateRead,
+        suppression: VehicleSessionSuppression,
+    ) -> None:
+        context = self._vehicle_session_context_from_read(read)
+        session = suppression.session
+        session.last_seen_at = max(session.last_seen_at, read.captured_at)
+        session.protect_event_ids.update(context.protect_event_ids)
+        session.camera_id = session.camera_id or context.camera_id
+        session.device_id = session.device_id or context.device_id
+
+        try:
+            event_uuid = uuid.UUID(session.event_id)
+        except ValueError:
+            return
+
+        async with AsyncSessionLocal() as db:
+            event = await db.get(AccessEvent, event_uuid)
+            if not event:
+                return
+            payload = dict(event.raw_payload or {})
+            vehicle_session = payload.get(VEHICLE_SESSION_PAYLOAD_KEY)
+            vehicle_session = dict(vehicle_session) if isinstance(vehicle_session, dict) else {}
+            vehicle_session.setdefault("id", str(event.id))
+            vehicle_session.setdefault("started_at", event.occurred_at.isoformat())
+            vehicle_session.setdefault("registration_number", event.registration_number)
+            vehicle_session.setdefault(
+                "normalized_registration_number",
+                self._normalize_registration_number(event.registration_number),
+            )
+            vehicle_session["last_seen_at"] = read.captured_at.isoformat()
+            vehicle_session["last_gate_state"] = self._gate_observation_from_read(read).get("state")
+            vehicle_session["suppressed_read_count"] = int(vehicle_session.get("suppressed_read_count") or 0) + 1
+            vehicle_session["last_suppressed_reason"] = suppression.reason
+            vehicle_session["last_matched_by"] = suppression.matched_by
+            if suppression.evidence:
+                vehicle_session["last_presence_evidence"] = self._vehicle_presence_evidence_payload(suppression.evidence)
+
+            protect_event_ids = set(self._string_list(vehicle_session.get("protect_event_ids")))
+            protect_event_ids.update(context.protect_event_ids)
+            vehicle_session["protect_event_ids"] = sorted(protect_event_ids)
+
+            ocr_variants = set(self._string_list(vehicle_session.get("ocr_variants")))
+            ocr_variants.add(_detected_registration_number(read))
+            ocr_variants.add(read.registration_number)
+            vehicle_session["ocr_variants"] = sorted(value for value in ocr_variants if value)
+
+            suppressed_reads = vehicle_session.get("suppressed_reads")
+            suppressed_reads = list(suppressed_reads) if isinstance(suppressed_reads, list) else []
+            suppressed_reads.append(self._suppressed_session_read_payload(read, suppression))
+            vehicle_session["suppressed_reads"] = suppressed_reads[-MAX_SUPPRESSED_SESSION_READS:]
+
+            payload[VEHICLE_SESSION_PAYLOAD_KEY] = vehicle_session
+            event.raw_payload = payload
+            await db.commit()
+
+    def _initial_vehicle_session_payload(
+        self,
+        window: DebounceWindow,
+        read: PlateRead,
+        event: AccessEvent,
+    ) -> dict[str, Any]:
+        context = self._vehicle_session_context_from_read(read)
+        variants = {
+            _detected_registration_number(item)
+            for item in window.reads
+            if _detected_registration_number(item)
+        }
+        variants.update(item.registration_number for item in window.reads if item.registration_number)
+        return {
+            "id": str(event.id),
+            "source": read.source,
+            "registration_number": read.registration_number,
+            "normalized_registration_number": context.normalized_registration_number,
+            "started_at": window.first_seen.isoformat(),
+            "last_seen_at": window.updated_at.isoformat(),
+            "direction": event.direction.value,
+            "decision": event.decision.value,
+            "camera_id": context.camera_id,
+            "device_id": context.device_id,
+            "protect_event_ids": sorted(context.protect_event_ids),
+            "ocr_variants": sorted(variants),
+            "last_gate_state": self._gate_observation_from_read(read).get("state"),
+            "suppressed_read_count": 0,
+            "suppressed_reads": [],
+        }
+
+    def _remember_vehicle_session(
+        self,
+        event: AccessEvent,
+        window: DebounceWindow,
+        read: PlateRead,
+    ) -> None:
+        context = self._vehicle_session_context_from_read(read)
+        if not context.normalized_registration_number:
+            return
+        self._upsert_active_vehicle_session(
+            ActiveVehicleSession(
+                event_id=str(event.id),
+                source=read.source,
+                registration_number=read.registration_number,
+                normalized_registration_number=context.normalized_registration_number,
+                started_at=window.first_seen,
+                last_seen_at=window.updated_at,
+                direction=event.direction,
+                decision=event.decision,
+                camera_id=context.camera_id,
+                device_id=context.device_id,
+                protect_event_ids=set(context.protect_event_ids),
+            )
+        )
+
+    def _upsert_active_vehicle_session(self, session: ActiveVehicleSession) -> None:
+        self._active_vehicle_sessions = [
+            item for item in self._active_vehicle_sessions if item.event_id != session.event_id
+        ]
+        self._active_vehicle_sessions.append(session)
+
+    def _vehicle_session_from_event(self, event: AccessEvent) -> ActiveVehicleSession | None:
+        payload = dict(event.raw_payload or {})
+        session_payload = payload.get(VEHICLE_SESSION_PAYLOAD_KEY)
+        session_payload = session_payload if isinstance(session_payload, dict) else {}
+        best_payload = payload.get("best")
+        context = self._vehicle_session_context_from_payload(
+            best_payload if isinstance(best_payload, dict) else {},
+            source=event.source,
+            registration_number=event.registration_number,
+        )
+        normalized = str(
+            session_payload.get("normalized_registration_number")
+            or context.normalized_registration_number
+            or self._normalize_registration_number(event.registration_number)
+        )
+        if not normalized:
+            return None
+        last_seen_at = self._datetime_from_payload(session_payload.get("last_seen_at")) or event.occurred_at
+        started_at = self._datetime_from_payload(session_payload.get("started_at")) or event.occurred_at
+        return ActiveVehicleSession(
+            event_id=str(event.id),
+            source=event.source,
+            registration_number=event.registration_number,
+            normalized_registration_number=normalized,
+            started_at=started_at,
+            last_seen_at=last_seen_at,
+            direction=event.direction,
+            decision=event.decision,
+            camera_id=str(session_payload.get("camera_id") or context.camera_id or "") or None,
+            device_id=str(session_payload.get("device_id") or context.device_id or "") or None,
+            protect_event_ids=set(self._string_list(session_payload.get("protect_event_ids")))
+            | context.protect_event_ids,
+        )
+
+    def _vehicle_session_context_from_read(self, read: PlateRead) -> VehicleSessionContext:
+        return self._vehicle_session_context_from_payload(
+            read.raw_payload or {},
+            source=read.source,
+            registration_number=read.registration_number,
+        )
+
+    def _vehicle_session_context_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        source: str,
+        registration_number: str,
+    ) -> VehicleSessionContext:
+        return VehicleSessionContext(
+            source=source,
+            registration_number=registration_number,
+            normalized_registration_number=self._normalize_registration_number(registration_number),
+            camera_id=self._first_payload_value(payload, ("cameraId", "camera_id", "sensorId", "sensor_id")),
+            device_id=self._first_payload_value(payload, ("device", "deviceId", "device_id")),
+            protect_event_ids=set(self._payload_values(payload, ("eventId", "event_id")))
+            | self._event_ids_from_paths(payload),
+        )
+
+    def _suppressed_session_read_payload(
+        self,
+        read: PlateRead,
+        suppression: VehicleSessionSuppression,
+    ) -> dict[str, Any]:
+        context = self._vehicle_session_context_from_read(read)
+        return {
+            "registration_number": read.registration_number,
+            "detected_registration_number": _detected_registration_number(read),
+            "captured_at": read.captured_at.isoformat(),
+            "confidence": read.confidence,
+            "source": read.source,
+            "gate_state": self._gate_observation_from_read(read).get("state"),
+            "reason": suppression.reason,
+            "matched_by": suppression.matched_by,
+            "protect_event_ids": sorted(context.protect_event_ids),
+            "presence_evidence": self._vehicle_presence_evidence_payload(suppression.evidence)
+            if suppression.evidence
+            else None,
+        }
+
+    def _vehicle_presence_evidence_payload(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "source",
+            "source_detail",
+            "active",
+            "observed_at",
+            "registration_number",
+            "event_id",
+            "camera_id",
+            "device_id",
+            "age_seconds",
+        )
+        return {key: evidence.get(key) for key in keys if evidence.get(key) is not None}
+
+    def _payload_values(self, value: Any, keys: tuple[str, ...]) -> list[str]:
+        normalized_keys = {self._payload_key(key) for key in keys}
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if self._payload_key(str(key)) in normalized_keys:
+                    found.extend(self._scalar_payload_values(item))
+                found.extend(self._payload_values(item, keys))
+        elif isinstance(value, list):
+            for item in value:
+                found.extend(self._payload_values(item, keys))
+        return self._dedupe_strings(found)
+
+    def _scalar_payload_values(self, value: Any) -> list[str]:
+        if value is None or isinstance(value, bool):
+            return []
+        if isinstance(value, str | int | float):
+            text = str(value).strip()
+            return [text] if text else []
+        if isinstance(value, list):
+            return [item for value_item in value for item in self._scalar_payload_values(value_item)]
+        return []
+
+    def _first_payload_value(self, value: Any, keys: tuple[str, ...]) -> str | None:
+        values = self._payload_values(value, keys)
+        return values[0] if values else None
+
+    def _event_ids_from_paths(self, value: Any) -> set[str]:
+        ids: set[str] = set()
+        for path in self._payload_values(value, ("eventPath", "eventLocalLink", "event_local_link")):
+            match = re.search(r"/event/([^/?#]+)", path)
+            if match:
+                ids.add(match.group(1))
+        return ids
+
+    def _payload_key(self, key: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", key.lower())
+
+    def _string_list(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return self._dedupe_strings(str(item).strip() for item in value if str(item).strip())
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _dedupe_strings(self, values: Any) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        return deduped
+
+    def _datetime_from_payload(self, value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
     def _is_similar_plate(self, left: str, right: str) -> bool:
         if left == right:
             return True
@@ -830,6 +1279,10 @@ class AccessEventService:
             )
             session.add(event)
             await session.flush()
+            event.raw_payload = {
+                **(event.raw_payload or {}),
+                VEHICLE_SESSION_PAYLOAD_KEY: self._initial_vehicle_session_payload(window, read, event),
+            }
             await self._capture_event_snapshot(event, trace=trace)
 
             if visitor_pass:
@@ -873,6 +1326,7 @@ class AccessEventService:
             )
 
             await session.commit()
+            self._remember_vehicle_session(event, window, read)
             persistence_span.finish(
                 output_payload={
                     "event_id": str(event.id),
