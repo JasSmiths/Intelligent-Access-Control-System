@@ -9,14 +9,16 @@ from app.core.logging import get_logger
 from app.modules.lpr.ubiquiti import (
     UbiquitiLprAdapter,
     UbiquitiLprPayload,
-    extract_smart_zone_names,
+    extract_plate_smart_zone_evidence,
     smart_zone_allowed,
 )
+from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
+from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
     get_vehicle_visual_detection_recorder,
@@ -169,13 +171,38 @@ async def receive_ubiquiti_lpr(
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
     await get_lpr_timing_recorder().record_webhook_plate(read)
-    smart_zones = extract_smart_zone_names(raw_payload)
+    zone_evidence = extract_plate_smart_zone_evidence(raw_payload, read.registration_number)
+    raw_smart_zones = zone_evidence.smart_zones
+    smart_zones = raw_smart_zones
+    zone_resolution: dict[str, Any] = {}
+    zone_resolution_error = ""
+    if raw_smart_zones and any(_looks_like_numeric_zone_id(zone) for zone in raw_smart_zones):
+        try:
+            zone_resolution = await get_unifi_protect_service().resolve_lpr_smart_zone_names(
+                raw_smart_zones,
+                camera_identifier=zone_evidence.camera_identifier,
+            )
+            resolved_smart_zones = zone_resolution.get("smart_zones")
+            if isinstance(resolved_smart_zones, list):
+                smart_zones = [str(zone) for zone in resolved_smart_zones]
+        except UnifiProtectError as exc:
+            zone_resolution_error = str(exc)
     runtime = await get_runtime_config()
-    if not smart_zone_allowed(smart_zones, runtime.lpr_allowed_smart_zones):
+    if zone_evidence.explicit_empty or not smart_zone_allowed(smart_zones, runtime.lpr_allowed_smart_zones):
         detail = {
             "registration_number": read.registration_number,
             "smart_zones": smart_zones,
+            "raw_smart_zones": raw_smart_zones,
             "allowed_smart_zones": runtime.lpr_allowed_smart_zones,
+            "smart_zone_evidence": {
+                "present": zone_evidence.present,
+                "explicit_empty": zone_evidence.explicit_empty,
+                "source": zone_evidence.source,
+                "camera_identifier": zone_evidence.camera_identifier,
+                "camera_id": zone_resolution.get("camera_id"),
+                "camera_name": zone_resolution.get("camera_name"),
+                "resolution_error": zone_resolution_error,
+            },
             "reason": "outside_lpr_smart_zone",
         }
         logger.info("ubiquiti_lpr_read_ignored_outside_smart_zone", extra=detail)
@@ -203,6 +230,13 @@ async def receive_ubiquiti_lpr(
             "confidence": read.confidence,
             "source": read.source,
             "smart_zones": smart_zones,
+            "raw_smart_zones": raw_smart_zones,
+            "smart_zone_evidence": {
+                "source": zone_evidence.source,
+                "camera_identifier": zone_evidence.camera_identifier,
+                "camera_id": zone_resolution.get("camera_id"),
+                "camera_name": zone_resolution.get("camera_name"),
+            },
         },
     )
     await service.enqueue_plate_read(read)
@@ -217,6 +251,10 @@ def _payload_shape(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_payload_shape(value[0], depth + 1)] if value else []
     return type(value).__name__
+
+
+def _looks_like_numeric_zone_id(value: Any) -> bool:
+    return str(value or "").strip().isdigit()
 
 
 def _is_alarm_manager_test_payload(payload: Any) -> bool:

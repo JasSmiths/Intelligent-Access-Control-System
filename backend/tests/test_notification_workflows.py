@@ -706,8 +706,9 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
     ]
 
 
-async def test_mobile_workflow_requires_public_base_url_for_home_assistant_snapshots(monkeypatch) -> None:
+async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base_url(monkeypatch) -> None:
     service = NotificationService()
+    calls = []
 
     async def fake_snapshot_attachment(_media):
         return NotificationSnapshotAttachment(
@@ -716,21 +717,36 @@ async def test_mobile_workflow_requires_public_base_url_for_home_assistant_snaps
             public_url=None,
         )
 
-    monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
+    class FakeHomeAssistantNotifier:
+        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None, actions=None):
+            calls.append((target.service_name, title, body, image_url, image_content_type, actions))
 
-    with pytest.raises(NotificationDeliveryError, match="IACS_PUBLIC_BASE_URL"):
-        await service._send_mobile(
-            {
-                "type": "mobile",
-                "target_mode": "selected",
-                "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
-                "title": "Gate",
-                "message": "Snapshot attached",
-                "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
-            },
-            NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
-            SimpleNamespace(apprise_urls=""),
+    monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
+    monkeypatch.setattr("app.services.notifications.HomeAssistantMobileAppNotifier", FakeHomeAssistantNotifier)
+
+    await service._send_mobile(
+        {
+            "type": "mobile",
+            "target_mode": "selected",
+            "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
+            "title": "Gate",
+            "message": "Snapshot attached",
+            "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
+        },
+        NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+        SimpleNamespace(apprise_urls=""),
+    )
+
+    assert calls == [
+        (
+            "notify.mobile_app_jason",
+            "Gate",
+            "Snapshot attached",
+            None,
+            None,
+            [],
         )
+    ]
 
 
 async def test_home_assistant_mobile_action_decides_visitor_timeframe(monkeypatch) -> None:
@@ -1056,7 +1072,8 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
 
 async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    snapshot_path = tmp_path / "snapshot.jpg"
+    snapshot_path = tmp_path / "notification-snapshots" / "snapshot.jpg"
+    snapshot_path.parent.mkdir(parents=True)
     snapshot_path.write_bytes(b"snapshot")
     calls = []
 

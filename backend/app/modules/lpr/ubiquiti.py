@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -49,6 +50,15 @@ SMART_ZONE_CONTAINER_KEYS = {
 SMART_ZONE_TRIGGER_MARKERS = ("zone", "smart detect zone", "smartdetectzone")
 
 
+@dataclass(frozen=True)
+class PlateSmartZoneEvidence:
+    smart_zones: list[str]
+    present: bool
+    explicit_empty: bool
+    source: str
+    camera_identifier: str | None = None
+
+
 class UbiquitiLprPayload(BaseModel):
     """Minimal Ubiquiti LPR webhook contract.
 
@@ -91,7 +101,7 @@ class UbiquitiLprPayload(BaseModel):
     @field_validator("registration_number")
     @classmethod
     def normalize_plate(cls, value: str) -> str:
-        plate = re.sub(r"[^A-Za-z0-9]", "", value).upper()
+        plate = _normalize_plate(value)
         if not plate:
             raise ValueError("Ubiquiti LPR webhook did not include a registration number.")
         return plate
@@ -131,24 +141,63 @@ def extract_smart_zone_names(payload: Any) -> list[str]:
     return _dedupe_preserving_order(zones)
 
 
+def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) -> PlateSmartZoneEvidence:
+    """Return smart-zone evidence scoped to the plate that produced this read."""
+
+    target = _normalize_plate(registration_number)
+    if not target or not isinstance(payload, dict):
+        return _empty_plate_zone_evidence()
+
+    trigger = _matching_lpr_trigger(payload, target)
+    if trigger is not None:
+        return _plate_zone_evidence_from_mapping(
+            trigger,
+            source="alarm.trigger",
+            camera_identifier=_camera_identifier_from_trigger(trigger) or _camera_identifier_from_payload(payload),
+        )
+
+    direct_plate = _normalize_plate(_first_present(payload, PLATE_KEYS) or "")
+    if direct_plate == target:
+        return _plate_zone_evidence_from_mapping(
+            payload,
+            source="payload",
+            camera_identifier=_camera_identifier_from_payload(payload),
+        )
+
+    nested = _find_plate_mapping(payload, target)
+    if nested is not None:
+        return _plate_zone_evidence_from_mapping(
+            nested,
+            source="payload.nested",
+            camera_identifier=_camera_identifier_from_payload(nested) or _camera_identifier_from_payload(payload),
+        )
+
+    return _empty_plate_zone_evidence()
+
+
 def smart_zone_allowed(payload_zones: list[str], allowed_zones: list[str]) -> bool:
     """Decide whether an LPR payload should participate in access control.
 
-    UniFi payloads without zone metadata are accepted for compatibility. If a
-    payload does name zones, at least one must match the configured allowlist.
-    An empty allowlist or "*" disables zone filtering.
+    A read must carry explicit smart-zone evidence. An empty allowlist rejects
+    all reads; "*" accepts any explicit smart zone.
     """
 
     if not payload_zones:
-        return True
+        return False
     allowed = {_normalize_zone_name(zone) for zone in allowed_zones if _normalize_zone_name(zone)}
-    if not allowed or "*" in allowed:
+    if not allowed:
+        return False
+    if "*" in allowed:
         return True
     return any(_normalize_zone_name(zone) in allowed for zone in payload_zones)
 
 
 def _normalize_key(key: str) -> str:
     return key.strip().lower().replace("-", "_")
+
+
+def _normalize_plate(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
 
 
 def _first_present(payload: dict[str, Any], keys: set[str]) -> Any | None:
@@ -226,6 +275,10 @@ def _collect_zone_value(value: Any, zones: list[str]) -> None:
         zones.append(str(value))
         return
     if isinstance(value, dict):
+        normalized_items = {_normalize_key(str(key)): item for key, item in value.items()}
+        if "zone" in normalized_items:
+            _collect_zone_value(normalized_items["zone"], zones)
+            return
         for key in ("name", "displayName", "display_name", "label", "id"):
             if key in value and value[key] not in {None, ""}:
                 zones.append(str(value[key]))
@@ -254,6 +307,170 @@ def _dedupe_preserving_order(values: list[str]) -> list[str]:
 def _looks_like_lpr_trigger(value: str) -> bool:
     normalized = value.lower()
     return any(token in normalized for token in ("lpr", "license", "licence", "plate", "registration"))
+
+
+def _empty_plate_zone_evidence() -> PlateSmartZoneEvidence:
+    return PlateSmartZoneEvidence(smart_zones=[], present=False, explicit_empty=False, source="missing")
+
+
+def _alarm_triggers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    triggers = payload.get("triggers")
+    if not isinstance(triggers, list):
+        alarm = payload.get("alarm")
+        triggers = alarm.get("triggers") if isinstance(alarm, dict) else None
+    if not isinstance(triggers, list):
+        return []
+    return [trigger for trigger in triggers if isinstance(trigger, dict)]
+
+
+def _matching_lpr_trigger(payload: dict[str, Any], registration_number: str) -> dict[str, Any] | None:
+    for trigger in _alarm_triggers(payload):
+        if _trigger_registration_number(trigger) == registration_number:
+            return trigger
+    return None
+
+
+def _trigger_registration_number(trigger: dict[str, Any]) -> str:
+    descriptor = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name", "label"))
+    if not _looks_like_lpr_trigger(descriptor):
+        return ""
+    group = trigger.get("group")
+    candidates = [
+        trigger.get("value"),
+        trigger.get("plate"),
+        trigger.get("registrationNumber"),
+        trigger.get("registration_number"),
+    ]
+    if isinstance(group, dict):
+        candidates.extend([group.get("name"), group.get("matchedName"), group.get("matched_name")])
+    for candidate in candidates:
+        plate = _normalize_plate(candidate)
+        if plate:
+            return plate
+    return ""
+
+
+def _plate_zone_evidence_from_mapping(
+    mapping: dict[str, Any],
+    *,
+    source: str,
+    camera_identifier: str | None,
+) -> PlateSmartZoneEvidence:
+    smart_zones, present, explicit_empty = _smart_zone_values_from_mapping(mapping)
+    return PlateSmartZoneEvidence(
+        smart_zones=_dedupe_preserving_order(smart_zones),
+        present=present,
+        explicit_empty=explicit_empty,
+        source=source,
+        camera_identifier=camera_identifier,
+    )
+
+
+def _smart_zone_values_from_mapping(mapping: dict[str, Any]) -> tuple[list[str], bool, bool]:
+    values: list[str] = []
+    present = False
+    explicit_empty = False
+    for key, item in mapping.items():
+        normalized = _normalize_key(str(key))
+        if normalized == "zones":
+            present = True
+            found, empty = _zone_values_from_container(item)
+            values.extend(found)
+            explicit_empty = explicit_empty or empty
+        elif normalized in SMART_ZONE_KEYS or normalized in SMART_ZONE_CONTAINER_KEYS:
+            present = True
+            found, empty = _zone_values_from_value(item)
+            values.extend(found)
+            explicit_empty = explicit_empty or empty
+    return values, present, explicit_empty
+
+
+def _zone_values_from_container(value: Any) -> tuple[list[str], bool]:
+    if isinstance(value, dict):
+        normalized_items = {_normalize_key(str(key)): item for key, item in value.items()}
+        if "zone" in normalized_items:
+            return _zone_values_from_value(normalized_items["zone"])
+    return _zone_values_from_value(value)
+
+
+def _zone_values_from_value(value: Any) -> tuple[list[str], bool]:
+    if value is None or value == "":
+        return [], True
+    if isinstance(value, str):
+        return [value], False
+    if isinstance(value, int | float):
+        return [str(value)], False
+    if isinstance(value, list):
+        if not value:
+            return [], True
+        values: list[str] = []
+        empty = False
+        for item in value:
+            found, item_empty = _zone_values_from_value(item)
+            values.extend(found)
+            empty = empty or item_empty
+        return values, empty and not values
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key in ("name", "displayName", "display_name", "label", "id"):
+            if key in value and value[key] not in {None, ""}:
+                values.append(str(value[key]))
+        if values:
+            return values, False
+        normalized_items = {_normalize_key(str(key)): item for key, item in value.items()}
+        if "zone" in normalized_items:
+            return _zone_values_from_value(normalized_items["zone"])
+        return [], not bool(value)
+    return [], False
+
+
+def _find_plate_mapping(value: Any, registration_number: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        direct = _normalize_plate(_first_present(value, PLATE_KEYS) or "")
+        if direct == registration_number:
+            return value
+        for nested in value.values():
+            found = _find_plate_mapping(nested, registration_number)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_plate_mapping(item, registration_number)
+            if found is not None:
+                return found
+    return None
+
+
+def _camera_identifier_from_trigger(trigger: dict[str, Any]) -> str | None:
+    return _text_or_none(trigger.get("device") or trigger.get("deviceId") or trigger.get("device_id") or trigger.get("cameraId") or trigger.get("camera_id"))
+
+
+def _camera_identifier_from_payload(payload: dict[str, Any]) -> str | None:
+    direct = _text_or_none(
+        payload.get("device")
+        or payload.get("deviceId")
+        or payload.get("device_id")
+        or payload.get("cameraId")
+        or payload.get("camera_id")
+    )
+    if direct:
+        return direct
+    alarm = payload.get("alarm")
+    if isinstance(alarm, dict):
+        sources = alarm.get("sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict):
+                    identifier = _text_or_none(source.get("device") or source.get("deviceId") or source.get("device_id"))
+                    if identifier:
+                        return identifier
+    return None
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value).strip()
 
 
 def _find_nested_value(value: Any, keys: set[str]) -> Any | None:

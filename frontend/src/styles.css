@@ -2519,9 +2519,35 @@ tr:last-child td {
   font-weight: 640;
 }
 
+.top-charts-snapshot-thumb {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  cursor: zoom-in;
+}
+
+.top-charts-snapshot-thumb:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--blue) 20%, transparent);
+  outline-offset: 2px;
+}
+
 .top-charts-avatar img {
   width: 100%;
   height: 100%;
+  object-fit: cover;
+}
+
+.top-charts-snapshot-thumb > img {
+  width: 100%;
+  height: 100%;
+  display: block;
   object-fit: cover;
 }
 
@@ -2586,6 +2612,49 @@ tr:last-child td {
   margin-bottom: 2px;
 }
 
+.top-charts-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.top-charts-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.top-charts-page-button {
+  width: 30px;
+  min-height: 30px;
+  border-radius: 8px;
+}
+
+.top-charts-snapshot-tooltip {
+  width: min(336px, calc(100vw - 24px));
+  gap: 7px;
+  padding: 8px;
+}
+
+.top-charts-snapshot-tooltip img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  display: block;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.top-charts-snapshot-tooltip strong,
+.top-charts-snapshot-tooltip span {
+  padding-inline: 2px;
+}
+
 .rank-badge {
   width: 30px;
   height: 30px;
@@ -2640,7 +2709,8 @@ tr:last-child td {
   }
 
   .top-charts-avatar,
-  .top-charts-plate-avatar {
+  .top-charts-plate-avatar,
+  .top-charts-snapshot-thumb {
     width: 38px;
     height: 38px;
   }
@@ -2653,6 +2723,11 @@ tr:last-child td {
 
   .top-charts-read-count .badge {
     justify-self: start;
+  }
+
+  .top-charts-pagination {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 
@@ -6037,7 +6112,7 @@ tr:last-child td {
 
 .visitor-pass-whatsapp-composer {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  grid-template-columns: 32px minmax(0, 1fr) 38px;
   align-items: center;
   gap: 12px;
   margin-top: auto;
@@ -6047,6 +6122,31 @@ tr:last-child td {
   background: var(--surface);
   color: var(--muted);
   font-size: 13px;
+}
+
+.visitor-pass-whatsapp-composer input {
+  min-width: 0;
+  height: 34px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.visitor-pass-whatsapp-composer input::placeholder {
+  color: var(--muted);
+}
+
+.visitor-pass-whatsapp-composer .icon-button {
+  width: 34px;
+  height: 34px;
+  color: var(--blue);
+}
+
+.visitor-pass-whatsapp-composer .icon-button:disabled {
+  color: var(--muted);
+  opacity: 0.55;
 }
 
 .visitor-pass-log-panel {
@@ -6165,6 +6265,15 @@ tr:last-child td {
   min-height: 42px;
   font-size: 13px;
   font-weight: 680;
+}
+
+.visitor-pass-unblock-button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-color: color-mix(in srgb, var(--amber) 46%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 52%, var(--surface));
+  color: var(--amber);
+  font-weight: 700;
 }
 
 /* Compact operational scale for the redesigned Visitor Pass surfaces. */
@@ -6674,11 +6783,16 @@ tr:last-child td {
 }
 
 .visitor-pass-whatsapp-composer {
-  grid-template-columns: 24px minmax(0, 1fr) 24px;
+  grid-template-columns: 24px minmax(0, 1fr) 30px;
   gap: 8px;
   padding: 8px 10px;
   border-radius: 10px;
   font-size: 12px;
+}
+
+.visitor-pass-whatsapp-composer .icon-button {
+  width: 30px;
+  height: 30px;
 }
 
 .visitor-pass-log-panel {

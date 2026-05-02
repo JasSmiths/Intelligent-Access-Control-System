@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -74,6 +75,79 @@ class GateSnapshot:
         return self.state in UNSAFE_GATE_STATES
 
 
+@dataclass(frozen=True)
+class GateMalfunctionReadContext:
+    id: uuid.UUID
+    gate_entity_id: str
+    gate_name: str | None
+    status: GateMalfunctionStatus
+    opened_at: datetime
+    declared_at: datetime
+    resolved_at: datetime | None
+    last_gate_state: str | None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "gate_entity_id": self.gate_entity_id,
+            "gate_name": self.gate_name,
+            "status": self.status.value,
+            "opened_at": self.opened_at.isoformat(),
+            "declared_at": self.declared_at.isoformat(),
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+            "last_gate_state": self.last_gate_state,
+        }
+
+
+async def active_stuck_open_malfunction_at(
+    session: AsyncSession,
+    *,
+    observed_at: datetime,
+    gate_state: GateState | str | None = None,
+    gate_entity_id: str | None = None,
+) -> GateMalfunctionReadContext | None:
+    state = _coerce_gate_state_value(gate_state)
+    if state not in UNSAFE_GATE_STATES:
+        return None
+    observed = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=UTC)
+    query = select(GateMalfunctionState).where(
+        GateMalfunctionState.opened_at <= observed,
+        GateMalfunctionState.declared_at <= observed,
+        or_(
+            GateMalfunctionState.status.in_(list(UNRESOLVED_STATUSES)),
+            GateMalfunctionState.resolved_at >= observed,
+        ),
+    )
+    if gate_entity_id:
+        query = query.where(GateMalfunctionState.gate_entity_id == gate_entity_id)
+    query = query.order_by(
+        GateMalfunctionState.opened_at.desc(),
+        GateMalfunctionState.declared_at.desc(),
+    ).limit(1)
+    row = await session.scalar(query)
+    if not row:
+        return None
+    return GateMalfunctionReadContext(
+        id=row.id,
+        gate_entity_id=row.gate_entity_id,
+        gate_name=row.gate_name,
+        status=row.status,
+        opened_at=row.opened_at,
+        declared_at=row.declared_at,
+        resolved_at=row.resolved_at,
+        last_gate_state=row.last_gate_state,
+    )
+
+
+def _coerce_gate_state_value(value: Any) -> GateState:
+    if isinstance(value, GateState):
+        return value
+    try:
+        return GateState(str(value or "").lower())
+    except ValueError:
+        return GateState.UNKNOWN
+
+
 class GateMalfunctionService:
     """Persistent state machine for stuck-open gate recovery."""
 
@@ -104,7 +178,6 @@ class GateMalfunctionService:
         logger.info("gate_malfunction_service_stopped")
 
     async def active(self, *, include_timeline: bool = False) -> list[dict[str, Any]]:
-        queue_fubar_notification = False
         async with AsyncSessionLocal() as session:
             rows = (
                 await session.scalars(
@@ -475,7 +548,7 @@ class GateMalfunctionService:
             .where(
                 GateStateObservation.gate_entity_id == existing.gate_entity_id,
                 GateStateObservation.state == GateState.CLOSED.value,
-                GateStateObservation.observed_at >= existing.opened_at,
+                GateStateObservation.observed_at > existing.opened_at,
                 GateStateObservation.observed_at <= snapshot.observed_at,
             )
             .order_by(GateStateObservation.observed_at.desc())
@@ -496,7 +569,11 @@ class GateMalfunctionService:
                 .order_by(GateStateObservation.observed_at.desc())
                 .limit(1)
             )
-            if current_transition and current_transition.previous_state == GateState.CLOSED.value:
+            if (
+                current_transition
+                and current_transition.previous_state == GateState.CLOSED.value
+                and snapshot.state_changed_at > existing.opened_at
+            ):
                 return snapshot.state_changed_at
 
         if (
@@ -1437,12 +1514,7 @@ class GateMalfunctionService:
         return f"{seconds}s"
 
     def _coerce_gate_state(self, value: Any) -> GateState:
-        if isinstance(value, GateState):
-            return value
-        try:
-            return GateState(str(value or "").lower())
-        except ValueError:
-            return GateState.UNKNOWN
+        return _coerce_gate_state_value(value)
 
     def _parse_datetime(self, value: Any) -> datetime | None:
         if not value:

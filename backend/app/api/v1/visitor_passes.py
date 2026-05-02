@@ -12,6 +12,7 @@ from app.core.logging import get_logger
 from app.db.session import get_db_session
 from app.models import AuditLog, User
 from app.models.enums import VisitorPassStatus, VisitorPassType
+from app.modules.notifications.base import NotificationDeliveryError
 from app.services.event_bus import event_bus
 from app.services.telemetry import actor_from_user
 from app.services.visitor_passes import (
@@ -49,6 +50,10 @@ class VisitorPassUpdateRequest(BaseModel):
 
 class VisitorPassCancelRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+
+class VisitorPassWhatsAppSendRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1024)
 
 
 class VisitorPassWhatsAppMessageResponse(BaseModel):
@@ -114,6 +119,11 @@ class VisitorPassResponse(BaseModel):
     whatsapp_status_detail: str | None
     created_at: str
     updated_at: str
+
+
+class VisitorPassWhatsAppSendResponse(BaseModel):
+    visitor_pass: VisitorPassResponse
+    message: VisitorPassWhatsAppMessageResponse
 
 
 def visitor_pass_response(payload: dict[str, Any]) -> VisitorPassResponse:
@@ -256,6 +266,50 @@ async def get_visitor_pass_whatsapp_messages(
         raise
     except Exception as exc:
         raise visitor_pass_server_error("load WhatsApp history for", exc) from exc
+
+
+@router.post("/{pass_id}/whatsapp-messages", response_model=VisitorPassWhatsAppSendResponse)
+async def send_visitor_pass_whatsapp_message(
+    pass_id: uuid.UUID,
+    request: VisitorPassWhatsAppSendRequest,
+    user: User = Depends(current_user),
+) -> VisitorPassWhatsAppSendResponse:
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Message is required.",
+        )
+    try:
+        result = await get_whatsapp_messaging_service().send_visitor_pass_custom_message(
+            pass_id,
+            message,
+            actor_user=user,
+        )
+        return VisitorPassWhatsAppSendResponse(
+            visitor_pass=visitor_pass_response(result["visitor_pass"]),
+            message=VisitorPassWhatsAppMessageResponse(**result["message"]),
+        )
+    except VisitorPassError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except NotificationDeliveryError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except Exception as exc:
+        raise visitor_pass_server_error("send WhatsApp message for", exc) from exc
+
+
+@router.post("/{pass_id}/whatsapp-unblock", response_model=VisitorPassResponse)
+async def unblock_visitor_pass_whatsapp(
+    pass_id: uuid.UUID,
+    user: User = Depends(current_user),
+) -> VisitorPassResponse:
+    try:
+        payload = await get_whatsapp_messaging_service().clear_visitor_abuse_mute(pass_id, actor_user=user)
+        return visitor_pass_response(payload)
+    except VisitorPassError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        raise visitor_pass_server_error("unblock WhatsApp replies for", exc) from exc
 
 
 @router.get("/{pass_id}/logs", response_model=list[VisitorPassLogResponse])

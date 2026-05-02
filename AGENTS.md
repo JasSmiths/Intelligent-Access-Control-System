@@ -531,12 +531,14 @@ Current behavior:
   command is produced from LPR.
 - Accept Ubiquiti Alarm Manager test webhook payloads and publish
   `webhook.test.received` without creating an access event.
-- Ubiquiti LPR webhooks that name a UniFi smart zone are filtered before access
-  processing. Only zones listed in `lpr_allowed_smart_zones` are allowed to
-  enqueue a `PlateRead`; default is `default`. Payloads with no zone metadata
-  remain accepted for compatibility. Ignored reads publish `plate_read.ignored`
-  with `reason="outside_lpr_smart_zone"` and never create access events,
-  alerts, notifications, visitor-pass matches, or gate commands.
+- Ubiquiti LPR webhooks are filtered by the plate detection's own UniFi smart
+  zone before access processing. Only the selected Gate LPR smart zone in
+  `lpr_allowed_smart_zones` is allowed to enqueue a `PlateRead`; default is
+  `Default`. Numeric Alarm Manager zone IDs are resolved against the Gate LPR
+  camera's `smart_detect_zones`. Missing zone evidence or an explicit empty
+  `zones.zone` list is ignored. Ignored reads publish `plate_read.ignored` with
+  `reason="outside_lpr_smart_zone"` and never create access events, alerts,
+  notifications, visitor-pass matches, or gate commands.
 - Queue every accepted plate read.
 - Record raw LPR timing diagnostics from Ubiquiti webhooks and UniFi Protect
   websocket/track probes in an in-memory feed exposed by
@@ -825,8 +827,8 @@ Configuration lives in dynamic settings. Secret values are encrypted:
 - `whatsapp_app_secret` optional secret
 - `whatsapp_graph_api_version`, default `v25.0`
 - `whatsapp_visitor_pass_template_name`, default
-  `visitor_pass_registration_request`
-- `whatsapp_visitor_pass_template_language`, default `en_GB`
+  `iacs_visitor_welcome`
+- `whatsapp_visitor_pass_template_language`, default `en`
 
 Runtime behavior:
 
@@ -897,28 +899,49 @@ Visitor Concierge sandbox:
   timeframe, or vehicle registration, including gate/door/garage operations,
   must reply exactly:
   `Sorry, I can only discuss details about your visitor pass and vehicle registration.`
-- Visitor Concierge replies should still sound like Alfred. Once a visitor has
-  confirmed their plate, friendly acknowledgements or light banter should get a
-  short warm close-out such as "Haha, thanks Josh! You're all set." rather than
-  another registration prompt. Server-side handling must only accept
-  `plate_detected` when the plate appears in the visitor's latest message; the
-  LLM must never reuse the stored pass plate from context as a new detection.
+- Visitor Concierge replies should sound warm and capable, but visitors should
+  see Crest House Access Control by default, not the internal assistant name.
+  Never mention Alfred by name unless the visitor mentioned Alfred first. Once a
+  visitor has confirmed their plate, friendly acknowledgements or light banter
+  should get a short warm close-out such as "Haha, thanks Josh! You're all
+  set." rather than another registration prompt. Server-side handling must only
+  accept `plate_detected` when the plate appears in the visitor's latest message
+  and, if a registration is already pending or confirmed, the message clearly
+  asks to change/update the vehicle registration. Random post-registration
+  text, jokes, or unrelated alphanumeric strings must not become a new plate;
+  the LLM must never reuse the stored pass plate from context as a new
+  detection.
+- Visitors must never be able to escalate privileges through WhatsApp.
+  Requests to be added to VIP lists, whitelists, allowlists, permanent access,
+  priority access, or any other special list are off-topic and must receive the
+  exact restricted Visitor Concierge reply. They must never reach Admin Alfred,
+  settings, schedule, group, list, or access-control tools.
 - Visitor text messages are briefly debounced and combined before Concierge
   processing so split replies like "my reg is" followed by "AB12 CDE" are
   interpreted together. Emoji-only visitor messages are not treated as content,
   but they mark the visitor as emoji-friendly so Alfred may use a light emoji in
   later safe replies.
-- If a visitor uses Alfred's name directly in an otherwise allowed message,
-  Alfred may include a concise cheeky, geeky nod to Alfred and Jason creating
-  the system. Never add this nod to restricted/off-topic responses, which must
-  keep the exact sandbox wording.
+- If a visitor uses Alfred's name directly in an otherwise allowed message, the
+  Visitor Concierge may include a concise cheeky, geeky nod to Alfred and Jason
+  creating the system, but that nod must be generated through the Visitor LLM so
+  it varies between messages. Never use a fixed hard-coded Alfred joke, and
+  never add this nod to restricted/off-topic responses, which must keep the
+  exact sandbox wording.
 - After the Visitor Concierge extracts a plate, the webhook service may run a
   server-side DVLA lookup for that plate and use the returned make/colour in the
   WhatsApp confirmation copy, for example "which is a Silver Tesla". Never tell
   visitors that make/colour came from DVLA or another external integration;
   Alfred should simply sound like he knows the vehicle details. DVLA lookup is
-  not a Visitor LLM tool and failures must be non-blocking; the visitor should
-  still be able to confirm or change the parsed registration.
+  not a Visitor LLM tool. A registration must not be accepted unless the
+  server-side vehicle lookup finds a vehicle; deliberate nonsense/offensive
+  plates such as joke registrations should receive a plain "check the
+  registration" reply and must not get Confirm/Change buttons.
+- Before any visitor registration is accepted or offered for confirmation, the
+  webhook service must check the normalized plate against stored directory
+  vehicles. A known directory registration is privileged and cannot be used for
+  a Visitor Pass. This is a server-side guard, not an LLM decision; the Visitor
+  LLM may only phrase the safe reply asking for the actual visitor vehicle
+  registration.
 - Visitor-requested timeframe changes up to one hour on either boundary may be
   accepted by the restricted Visitor Concierge, but timeframe interpretation
   must come from the Visitor Concierge LLM using the supplied site timezone and
@@ -935,6 +958,26 @@ Visitor Concierge sandbox:
   pending request stored in `visitor_passes.source_metadata`; the visitor
   receives "I've sent a request for approval to change your allowed timeframe,
   I'll get back to you shortly." while awaiting Admin action.
+- If a timeframe approval request is already pending, the Visitor Concierge
+  must not accept another time/date change request. It should use the Visitor
+  LLM to explain that the current request is awaiting review and no further
+  time changes can be accepted until that decision comes back.
+- Once a Visitor Pass has a confirmed registration and no pending timeframe or
+  plate confirmation, repeated non-action visitor replies should trigger a
+  Visitor LLM-generated funny but firm "please stop replying" message and then
+  mute visitor replies for 30 minutes. Repeated registration changes in a short
+  window use the same 30-minute mute pattern with a registration-change-specific
+  LLM message. Mute state is stored on the Visitor Pass metadata and inbound
+  messages are still recorded but receive no response while muted. Muted
+  visitor messages must be marked read without Meta's typing indicator, because
+  Alfred is not actually sending a reply. The Visitor Pass WhatsApp tab exposes
+  an operator Unblock control that clears only the current abuse cooldown; the
+  normal abuse counters may trigger a new cooldown again if the visitor resumes
+  the same behaviour.
+- Used, expired, or cancelled Visitor Passes should receive one final WhatsApp
+  reply explaining that the pass is no longer valid, then no further replies
+  should be sent for that terminal pass. A new active/scheduled duration pass
+  for the same phone number starts a fresh conversation.
 - The `visitor_pass_timeframe_change_requested` notification supports Admin
   action buttons in WhatsApp, in-app notifications, and Home Assistant mobile
   app notifications. Home Assistant mobile buttons use
@@ -945,14 +988,27 @@ Visitor Concierge sandbox:
 - Duration Visitor Passes should have `visitor_phone`, `valid_from`, and
   `valid_until`. The first outbound contact uses the approved utility template
   named by `whatsapp_visitor_pass_template_name` and language
-  `whatsapp_visitor_pass_template_language`, with body parameters
-  `[visitor_name, window_label]`. Free-form text and interactive buttons are
-  sent only after Meta's customer-service window permits them.
+  `whatsapp_visitor_pass_template_language`. The default
+  `iacs_visitor_welcome` template is approved as language `en` and has one body
+  parameter, `[visitor_name]`, plus a static `Begin` quick-reply button. Legacy
+  or custom templates may use `[visitor_name, window_label]`. Free-form text
+  and interactive buttons are sent only after Meta's customer-service window
+  permits them.
 - Before production templates are approved, testing can be initiated by the
   visitor sending `Begin` or `Start` from the matching `visitor_phone` to the
   configured WhatsApp business number. That inbound message opens Meta's
   customer-service window and the Visitor Concierge replies with the
-  registration prompt for the active or scheduled duration pass.
+  Crest House welcome prompt for the active or scheduled duration pass, stating
+  the exact access start/end window and asking for the vehicle registration
+  that will be read on arrival to open the gate.
+- After a visitor replies with a registration, the Concierge confirms the
+  formatted plate, any known make/colour, and the current pass window with
+  `Confirm` / `Change` buttons. The copy should invite the visitor to change
+  anything before confirming, then the confirmed-save response should thank the
+  visitor, say Crest House is looking forward to seeing them, and keep a light
+  touch without mentioning Alfred unless the visitor named him first. Avoid
+  repeated hard-coded jokes or filler such as "virtual clipboard"; use the LLM
+  for any special humour. Never mention internal integrations such as DVLA.
 - Duration Visitor Pass card/status metadata uses
   `source_metadata.whatsapp_concierge_status` and related detail/error fields
   to show states such as Welcome Message Sent, Awaiting Visitor Reply, Visitor

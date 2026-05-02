@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -20,7 +22,13 @@ from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
+from app.services.restart_backfill import (
+    backfill_missed_access_events_safely,
+    read_backend_runtime_state,
+    run_backend_runtime_heartbeat,
+)
 from app.services.settings import get_runtime_config
+from app.services.snapshot_recovery import recover_missing_access_event_snapshots_safely
 from app.services.telemetry import (
     CURRENT_REQUEST_ID,
     TELEMETRY_CATEGORY_WEBHOOKS_API,
@@ -58,9 +66,41 @@ async def lifespan(app: FastAPI):
     await get_home_assistant_service().start()
     await get_gate_malfunction_service().start()
     await get_unifi_protect_service().start()
+    startup_at = datetime.now(tz=UTC)
+    previous_runtime_state = read_backend_runtime_state()
+    runtime_heartbeat_task = asyncio.create_task(
+        run_backend_runtime_heartbeat(started_at=startup_at, previous_state=previous_runtime_state),
+        name="backend-runtime-heartbeat",
+    )
+    missed_event_backfill_task = asyncio.create_task(
+        backfill_missed_access_events_safely(
+            previous_runtime_state=previous_runtime_state,
+            startup_at=startup_at,
+        ),
+        name="missed-access-event-backfill",
+    )
+    snapshot_recovery_task = asyncio.create_task(
+        recover_missing_access_event_snapshots_safely(),
+        name="access-event-snapshot-recovery",
+    )
     try:
         yield
     finally:
+        missed_event_backfill_task.cancel()
+        try:
+            await missed_event_backfill_task
+        except asyncio.CancelledError:
+            pass
+        snapshot_recovery_task.cancel()
+        try:
+            await snapshot_recovery_task
+        except asyncio.CancelledError:
+            pass
+        runtime_heartbeat_task.cancel()
+        try:
+            await runtime_heartbeat_task
+        except asyncio.CancelledError:
+            pass
         await get_dependency_update_service().stop()
         await get_unifi_protect_service().stop()
         await get_gate_malfunction_service().stop()
@@ -258,7 +298,7 @@ async def telemetry_http_middleware(request: Request, call_next):
 async def api_error_response_middleware(request: Request, call_next):
     try:
         return await call_next(request)
-    except Exception as exc:
+    except Exception:
         if not request.url.path.startswith("/api/"):
             raise
         request_id = request.headers.get("x-request-id") or telemetry_request_id()

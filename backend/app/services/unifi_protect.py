@@ -35,6 +35,8 @@ logger = get_logger(__name__)
 
 PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS = 5.0
 LPR_TRACK_PROBE_DELAYS_SECONDS = (0.0, 0.5, 0.5, 1.0, 2.0, 4.0, 4.0, 6.0, 7.0)
+GATE_LPR_CAMERA_NAME = "gate lpr"
+GATE_LPR_CAMERA_DEVICE = "942A6FD09D64"
 
 
 class UnifiProtectIntegrationService:
@@ -106,6 +108,22 @@ class UnifiProtectIntegrationService:
     async def list_cameras(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         api = await self._ensure_api(subscribe=True, refresh=refresh)
         return [serialize_unifi_camera(camera) for camera in list_bootstrap_cameras(api)]
+
+    async def resolve_lpr_smart_zone_names(
+        self,
+        zone_values: list[str],
+        *,
+        camera_identifier: str | None = None,
+    ) -> dict[str, Any]:
+        api = await self._ensure_api(subscribe=True)
+        camera = gate_lpr_camera_from_bootstrap(list_bootstrap_cameras(api), camera_identifier=camera_identifier)
+        resolved = resolve_camera_smart_zone_names(camera, zone_values) if camera is not None else zone_values
+        return {
+            "camera_id": str(getattr(camera, "id", "") or "") if camera is not None else None,
+            "camera_name": str(getattr(camera, "display_name", None) or getattr(camera, "name", None) or "") if camera is not None else None,
+            "camera_identifier": camera_identifier,
+            "smart_zones": resolved,
+        }
 
     async def list_events(
         self,
@@ -404,6 +422,86 @@ def _runtime_with_overrides(runtime, values: dict[str, Any]):
     fields["unifi_protect_snapshot_width"] = int(fields["unifi_protect_snapshot_width"] or 1280)
     fields["unifi_protect_snapshot_height"] = int(fields["unifi_protect_snapshot_height"] or 720)
     return runtime.__class__(**fields)
+
+
+def gate_lpr_camera_from_bootstrap(cameras: list[Any], *, camera_identifier: str | None = None) -> Any | None:
+    identifier = _normalize_camera_identifier(camera_identifier)
+    if identifier:
+        for camera in cameras:
+            if identifier in _camera_identifier_values(camera):
+                return camera
+
+    for camera in cameras:
+        if _normalize_camera_identifier(getattr(camera, "display_name", None) or getattr(camera, "name", None)) == GATE_LPR_CAMERA_NAME:
+            return camera
+
+    for camera in cameras:
+        if _normalize_camera_identifier(getattr(camera, "mac", None)) == _normalize_camera_identifier(GATE_LPR_CAMERA_DEVICE):
+            return camera
+
+    for camera in cameras:
+        label = _normalize_camera_identifier(getattr(camera, "display_name", None) or getattr(camera, "name", None))
+        if label and "gate" in label and "lpr" in label:
+            return camera
+    return None
+
+
+def resolve_camera_smart_zone_names(camera: Any, zone_values: list[str]) -> list[str]:
+    lookup: dict[str, list[str]] = {}
+    for zone in getattr(camera, "smart_detect_zones", []) or []:
+        zone_id = _string_or_none(getattr(zone, "id", None))
+        zone_name = _string_or_none(getattr(zone, "name", None))
+        labels = [value for value in (zone_id, zone_name) if value]
+        for label in labels:
+            lookup[_normalize_smart_zone(label)] = labels
+
+    resolved: list[str] = []
+    for value in zone_values:
+        text = _string_or_none(value)
+        if not text:
+            continue
+        resolved.append(text)
+        resolved.extend(lookup.get(_normalize_smart_zone(text), []))
+    return _dedupe_preserving_order(resolved)
+
+
+def _camera_identifier_values(camera: Any) -> set[str]:
+    return {
+        value
+        for value in (
+            _normalize_camera_identifier(getattr(camera, "id", None)),
+            _normalize_camera_identifier(getattr(camera, "mac", None)),
+            _normalize_camera_identifier(getattr(camera, "display_name", None)),
+            _normalize_camera_identifier(getattr(camera, "name", None)),
+        )
+        if value
+    }
+
+
+def _normalize_camera_identifier(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _normalize_smart_zone(value: Any) -> str:
+    return " ".join(str(value or "").strip().casefold().replace("_", " ").replace("-", " ").split())
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value).strip()
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = _normalize_smart_zone(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(str(value).strip())
+    return deduped
 
 
 def _as_bool(value: Any) -> bool:

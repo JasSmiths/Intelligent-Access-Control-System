@@ -43,7 +43,16 @@ def alert_snapshot_url(alert_id: uuid.UUID) -> str:
 
 def alert_snapshot_metadata(row: Anomaly) -> dict | None:
     value = (row.context or {}).get(ALERT_SNAPSHOT_CONTEXT_KEY)
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return None
+    url = str(value.get("url") or "")
+    if url.startswith("/api/v1/events/"):
+        if row.event:
+            return alert_snapshot_metadata_from_event(row.event)
+        return value if _event_snapshot_url_exists(url) else None
+    if url.startswith("/api/v1/alerts/") and row.id and not alert_snapshot_path(row.id).exists():
+        return None
+    return value
 
 
 def alert_snapshot_metadata_from_event(event: Any) -> dict[str, Any] | None:
@@ -59,3 +68,11 @@ def alert_snapshot_metadata_from_event(event: Any) -> dict[str, Any] | None:
         "width": snapshot.get("snapshot_width"),
         "height": snapshot.get("snapshot_height"),
     }
+
+
+def _event_snapshot_url_exists(url: str) -> bool:
+    try:
+        event_id = uuid.UUID(url.removeprefix("/api/v1/events/").removesuffix("/snapshot"))
+    except ValueError:
+        return False
+    return (settings.data_dir / "snapshots" / "access-events" / f"{event_id}.jpg").exists()

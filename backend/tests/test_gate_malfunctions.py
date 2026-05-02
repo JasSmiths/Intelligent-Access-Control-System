@@ -12,6 +12,7 @@ from app.services.gate_malfunctions import (
     ATTEMPT_OFFSETS_SECONDS,
     GateMalfunctionService,
     GateSnapshot,
+    active_stuck_open_malfunction_at,
 )
 
 
@@ -74,6 +75,110 @@ def test_gate_malfunction_history_cursor_round_trips_opened_at_and_id() -> None:
 
     assert parsed_opened_at == opened_at
     assert parsed_id == row_id
+
+
+class FakeScalarSequenceSession:
+    def __init__(self, values) -> None:
+        self._values = list(values)
+
+    async def scalar(self, _statement):
+        return self._values.pop(0) if self._values else None
+
+
+@pytest.mark.asyncio
+async def test_current_open_transition_does_not_reopen_existing_malfunction() -> None:
+    service = GateMalfunctionService()
+    opened_at = datetime(2026, 5, 2, 18, 9, 3, 317079, tzinfo=UTC)
+    existing = GateMalfunctionState(
+        gate_entity_id="cover.top_gate",
+        gate_name="Top Gate",
+        status=GateMalfunctionStatus.ACTIVE,
+        opened_at=opened_at,
+        declared_at=opened_at + timedelta(minutes=5),
+    )
+    snapshot = GateSnapshot(
+        "cover.top_gate",
+        "Top Gate",
+        GateState.OPEN,
+        opened_at,
+        opened_at + timedelta(minutes=8),
+    )
+    current_open_observation = SimpleNamespace(
+        previous_state=GateState.CLOSED.value,
+        state_changed_at=opened_at,
+        observed_at=opened_at,
+    )
+
+    reopened_at = await service._reopened_after_existing(
+        FakeScalarSequenceSession([None, current_open_observation]),
+        existing,
+        snapshot,
+    )
+
+    assert reopened_at is None
+
+
+@pytest.mark.asyncio
+async def test_later_closed_observation_reopens_existing_malfunction_episode() -> None:
+    service = GateMalfunctionService()
+    opened_at = datetime(2026, 5, 2, 18, 9, 3, tzinfo=UTC)
+    closed_at = opened_at + timedelta(minutes=8)
+    existing = GateMalfunctionState(
+        gate_entity_id="cover.top_gate",
+        gate_name="Top Gate",
+        status=GateMalfunctionStatus.ACTIVE,
+        opened_at=opened_at,
+        declared_at=opened_at + timedelta(minutes=5),
+    )
+    snapshot = GateSnapshot(
+        "cover.top_gate",
+        "Top Gate",
+        GateState.OPEN,
+        closed_at + timedelta(minutes=1),
+        closed_at + timedelta(minutes=7),
+    )
+    closed_observation = SimpleNamespace(
+        previous_state=GateState.OPEN.value,
+        state_changed_at=closed_at,
+        observed_at=closed_at,
+    )
+
+    reopened_at = await service._reopened_after_existing(
+        FakeScalarSequenceSession([closed_observation]),
+        existing,
+        snapshot,
+    )
+
+    assert reopened_at == closed_at
+
+
+@pytest.mark.asyncio
+async def test_active_stuck_open_malfunction_context_requires_unsafe_gate_state() -> None:
+    opened_at = datetime(2026, 5, 2, 18, 9, 3, tzinfo=UTC)
+    row = GateMalfunctionState(
+        id=uuid.uuid4(),
+        gate_entity_id="cover.top_gate",
+        gate_name="Top Gate",
+        status=GateMalfunctionStatus.ACTIVE,
+        opened_at=opened_at,
+        declared_at=opened_at + timedelta(minutes=5),
+        last_gate_state=GateState.OPEN.value,
+    )
+
+    active = await active_stuck_open_malfunction_at(
+        FakeScalarSequenceSession([row]),
+        observed_at=opened_at + timedelta(minutes=8),
+        gate_state=GateState.OPEN,
+    )
+    inactive = await active_stuck_open_malfunction_at(
+        FakeScalarSequenceSession([row]),
+        observed_at=opened_at + timedelta(minutes=8),
+        gate_state=GateState.CLOSED,
+    )
+
+    assert active is not None
+    assert active.as_payload()["id"] == str(row.id)
+    assert inactive is None
 
 
 @pytest.mark.asyncio

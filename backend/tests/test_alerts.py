@@ -68,7 +68,8 @@ class FakeAlertSession:
 
 
 @pytest.mark.asyncio
-async def test_unknown_plate_anomaly_is_warning() -> None:
+async def test_unknown_plate_anomaly_is_warning(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     service = AccessEventService()
     event_id = uuid4()
     event = AccessEvent(
@@ -88,6 +89,9 @@ async def test_unknown_plate_anomaly_is_warning() -> None:
         snapshot_captured_at=datetime(2026, 4, 27, 18, 24, 1, tzinfo=UTC),
         snapshot_camera="camera.gate",
     )
+    snapshot_path = tmp_path / access_event_snapshot_relative_path(event_id)
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
 
     rows = await service._build_anomalies(SimpleNamespace(), event, None, None, allowed=False)
 
@@ -99,7 +103,8 @@ async def test_unknown_plate_anomaly_is_warning() -> None:
     assert rows[0].context["snapshot"]["bytes"] == 4096
 
 
-def test_open_unknown_plate_alerts_group_by_plate_and_local_day() -> None:
+def test_open_unknown_plate_alerts_group_by_plate_and_local_day(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
     first = datetime(2026, 4, 27, 18, 24, tzinfo=UTC)
     second = first + timedelta(hours=2)
     rows = [
@@ -113,8 +118,11 @@ def test_open_unknown_plate_alerts_group_by_plate_and_local_day() -> None:
             "url": f"/api/v1/alerts/{rows[1].id}/snapshot",
             "captured_at": second.isoformat(),
             "bytes": 4096,
-        },
-    }
+            },
+        }
+    snapshot_path = tmp_path / "alert-snapshots" / f"{rows[1].id}.jpg"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
 
     payload = _serialize_alerts(rows, ZoneInfo("Europe/London"))
 
@@ -132,7 +140,8 @@ def test_open_unknown_plate_alerts_group_by_plate_and_local_day() -> None:
     assert grouped[0]["snapshot_bytes"] == 4096
 
 
-def test_resolved_alert_serialization_retains_snapshot_metadata() -> None:
+def test_resolved_alert_serialization_retains_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
     row = anomaly("BK26MKF", datetime(2026, 4, 27, 18, 24, tzinfo=UTC))
     row.resolved_at = datetime(2026, 4, 27, 19, 0, tzinfo=UTC)
     row.context = {
@@ -141,8 +150,11 @@ def test_resolved_alert_serialization_retains_snapshot_metadata() -> None:
             "url": f"/api/v1/alerts/{row.id}/snapshot",
             "captured_at": row.created_at.isoformat(),
             "bytes": 4096,
-        },
-    }
+            },
+        }
+    snapshot_path = tmp_path / "alert-snapshots" / f"{row.id}.jpg"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
 
     payload = _serialize_alert(row)
 
@@ -152,7 +164,8 @@ def test_resolved_alert_serialization_retains_snapshot_metadata() -> None:
     assert payload["snapshot_bytes"] == 4096
 
 
-def test_access_event_serialization_retains_snapshot_metadata() -> None:
+def test_access_event_serialization_retains_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     event_id = uuid4()
     captured_at = datetime(2026, 4, 27, 18, 24, 1, tzinfo=UTC)
     event = AccessEvent(
@@ -172,6 +185,9 @@ def test_access_event_serialization_retains_snapshot_metadata() -> None:
         snapshot_captured_at=captured_at,
         snapshot_camera="camera.gate",
     )
+    snapshot_path = tmp_path / access_event_snapshot_relative_path(event_id)
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
 
     payload = _serialize_event(event)
 

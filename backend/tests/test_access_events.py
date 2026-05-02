@@ -13,6 +13,7 @@ from app.services.access_events import (
     AccessEventService,
     ActiveVehicleSession,
     FinalizedPlateEvent,
+    GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     VEHICLE_SESSION_PAYLOAD_KEY,
@@ -33,6 +34,23 @@ class FakePresenceSession:
         if not self._state:
             return None
         return SimpleNamespace(state=self._state)
+
+
+class FakeScalarRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class FakeVehicleHistorySession(FakePresenceSession):
+    def __init__(self, rows, state: PresenceState | None = None) -> None:
+        super().__init__(state)
+        self._rows = rows
+
+    async def scalars(self, _statement):
+        return FakeScalarRows(self._rows)
 
 
 class FakeVisitorPassLookupResult:
@@ -95,6 +113,39 @@ def plate_read_with_gate_state_at(registration_number: str, captured_at: datetim
                 "observed_at": captured_at.isoformat(),
                 "controller": "home_assistant",
             }
+        },
+    )
+
+
+def plate_read_with_gate_malfunction(
+    registration_number: str,
+    captured_at: datetime,
+    *,
+    state: str = "open",
+    malfunction_id: uuid.UUID | None = None,
+) -> PlateRead:
+    malfunction_id = malfunction_id or uuid.uuid4()
+    return PlateRead(
+        registration_number=registration_number,
+        confidence=1.0,
+        source="test",
+        captured_at=captured_at,
+        raw_payload={
+            GATE_OBSERVATION_PAYLOAD_KEY: {
+                "state": state,
+                "observed_at": captured_at.isoformat(),
+                "controller": "home_assistant",
+            },
+            GATE_MALFUNCTION_PAYLOAD_KEY: {
+                "id": str(malfunction_id),
+                "gate_entity_id": "cover.top_gate",
+                "gate_name": "Top Gate",
+                "status": "active",
+                "opened_at": (captured_at - timedelta(minutes=8)).isoformat(),
+                "declared_at": (captured_at - timedelta(minutes=3)).isoformat(),
+                "resolved_at": None,
+                "last_gate_state": state,
+            },
         },
     )
 
@@ -228,7 +279,8 @@ async def test_on_site_visitor_departure_gate_state_marks_departure(monkeypatch)
     }
 
 
-def test_access_event_realtime_payload_includes_snapshot_metadata() -> None:
+def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     service = AccessEventService()
     event_id = uuid.uuid4()
     captured_at = datetime(2026, 4, 30, 20, 30, tzinfo=UTC)
@@ -249,6 +301,9 @@ def test_access_event_realtime_payload_includes_snapshot_metadata() -> None:
         snapshot_captured_at=captured_at,
         snapshot_camera="camera.gate",
     )
+    snapshot_path = tmp_path / access_event_snapshot_relative_path(event_id)
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
 
     payload = service._access_event_realtime_payload(
         event,
@@ -264,6 +319,63 @@ def test_access_event_realtime_payload_includes_snapshot_metadata() -> None:
     assert payload["snapshot_width"] == 320
     assert payload["snapshot_height"] == 180
     assert payload["snapshot_camera"] == "camera.gate"
+
+
+@pytest.mark.asyncio
+async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AccessEventService()
+    event_id = uuid.uuid4()
+    occurred_at = datetime(2026, 5, 2, 18, 9, 22, tzinfo=UTC)
+    calls: dict[str, object] = {}
+
+    class FakeSnapshotManager:
+        async def capture_access_event_snapshot(self, *_args, **_kwargs):
+            raise RuntimeError("camera snapshot unavailable")
+
+        async def store_image(self, content, *, relative_path, url, camera, captured_at):
+            calls["content"] = content
+            calls["relative_path"] = relative_path
+            calls["url"] = url
+            calls["camera"] = camera
+            calls["captured_at"] = captured_at
+            return SimpleNamespace(
+                relative_path=relative_path,
+                content_type="image/jpeg",
+                bytes=1234,
+                width=320,
+                height=180,
+                captured_at=captured_at,
+                camera=camera,
+            )
+
+    class FakeProtect:
+        async def event_thumbnail(self, event_id, *, width, height):
+            calls["event_thumbnail"] = (event_id, width, height)
+            return SimpleNamespace(content=b"jpeg", content_type="image/jpeg")
+
+    monkeypatch.setattr(access_events_module, "get_snapshot_manager", lambda: FakeSnapshotManager())
+    monkeypatch.setattr(access_events_module, "get_unifi_protect_service", lambda: FakeProtect())
+
+    event = AccessEvent(
+        id=event_id,
+        registration_number="SVA673",
+        direction=AccessDirection.EXIT,
+        decision=AccessDecision.GRANTED,
+        confidence=0.88,
+        source="ubiquiti",
+        occurred_at=occurred_at,
+        timing_classification=TimingClassification.UNKNOWN,
+        raw_payload={"best": {"alarm": {"triggers": [{"eventId": "protect-event-1"}]}}},
+    )
+
+    await service._capture_event_snapshot(event)
+
+    assert calls["event_thumbnail"] == ("protect-event-1", 320, 180)
+    assert calls["content"] == b"jpeg"
+    assert calls["relative_path"] == access_event_snapshot_relative_path(event_id)
+    assert event.snapshot_path == access_event_snapshot_relative_path(event_id)
+    assert event.snapshot_bytes == 1234
+    assert event.snapshot_camera == "camera.gate"
 
 
 @pytest.mark.asyncio
@@ -299,6 +411,116 @@ async def test_non_closed_gate_state_resolves_allowed_read_as_exit(state: str) -
     assert direction == AccessDirection.EXIT
     assert resolution["source"] == "gate_state"
     assert not service._automatic_open_allowed(resolution)
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_known_vehicle_last_live_exit_resolves_as_entry() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia")
+    vehicle = SimpleNamespace(id=uuid.uuid4())
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+    previous_event = SimpleNamespace(
+        id=uuid.uuid4(),
+        direction=AccessDirection.EXIT,
+        occurred_at=datetime(2026, 5, 2, 16, 11, 27, tzinfo=UTC),
+        source="ubiquiti",
+        raw_payload={},
+    )
+
+    direction, resolution = await service._resolve_direction(
+        FakeVehicleHistorySession([previous_event]),
+        plate_read_with_gate_malfunction("SVA673", captured_at),
+        person,
+        allowed=True,
+        vehicle=vehicle,
+    )
+
+    assert direction == AccessDirection.ENTRY
+    assert resolution["source"] == "gate_malfunction_vehicle_history"
+    assert resolution["previous_live_direction"] == "exit"
+    assert resolution["previous_live_event_id"] == str(previous_event.id)
+    assert not service._automatic_open_allowed(resolution)
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_known_vehicle_last_live_entry_resolves_as_exit() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
+    vehicle = SimpleNamespace(id=uuid.uuid4())
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+    previous_event = SimpleNamespace(
+        id=uuid.uuid4(),
+        direction=AccessDirection.ENTRY,
+        occurred_at=captured_at - timedelta(minutes=20),
+        source="ubiquiti",
+        raw_payload={},
+    )
+
+    direction, resolution = await service._resolve_direction(
+        FakeVehicleHistorySession([previous_event]),
+        plate_read_with_gate_malfunction("PE70DHX", captured_at),
+        person,
+        allowed=True,
+        vehicle=vehicle,
+    )
+
+    assert direction == AccessDirection.EXIT
+    assert resolution["source"] == "gate_malfunction_vehicle_history"
+    assert resolution["previous_live_direction"] == "entry"
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_vehicle_history_excludes_backfills_for_sylvia_case() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia Smith")
+    vehicle = SimpleNamespace(id=uuid.uuid4())
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, 796000, tzinfo=UTC)
+    restart_backfill_entry = SimpleNamespace(
+        id=uuid.uuid4(),
+        direction=AccessDirection.ENTRY,
+        occurred_at=datetime(2026, 5, 2, 16, 59, 23, 963000, tzinfo=UTC),
+        source="unifi_protect_restart_backfill",
+        raw_payload={"backfill": {"source": "startup_reconciliation"}},
+    )
+    live_exit = SimpleNamespace(
+        id=uuid.uuid4(),
+        direction=AccessDirection.EXIT,
+        occurred_at=datetime(2026, 5, 2, 16, 11, 27, 297000, tzinfo=UTC),
+        source="ubiquiti",
+        raw_payload={},
+    )
+
+    direction, resolution = await service._resolve_direction(
+        FakeVehicleHistorySession([restart_backfill_entry, live_exit]),
+        plate_read_with_gate_malfunction("SVA673", captured_at),
+        person,
+        allowed=True,
+        vehicle=vehicle,
+    )
+
+    assert direction == AccessDirection.ENTRY
+    assert resolution["previous_live_event_id"] == str(live_exit.id)
+    assert resolution["previous_live_direction"] == "exit"
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_without_prior_live_vehicle_event_defaults_to_entry() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia")
+    vehicle = SimpleNamespace(id=uuid.uuid4())
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+
+    direction, resolution = await service._resolve_direction(
+        FakeVehicleHistorySession([]),
+        plate_read_with_gate_malfunction("SVA673", captured_at),
+        person,
+        allowed=True,
+        vehicle=vehicle,
+    )
+
+    assert direction == AccessDirection.ENTRY
+    assert resolution["source"] == "gate_malfunction_vehicle_history"
+    assert resolution["previous_live_event_id"] is None
 
 
 @pytest.mark.asyncio
@@ -389,6 +611,9 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
+    async def fake_no_gate_malfunction_context(read):
+        return read
+
     async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
         return None
 
@@ -455,6 +680,9 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
+    async def fake_no_gate_malfunction_context(read):
+        return read
+
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
@@ -464,6 +692,7 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
@@ -484,6 +713,176 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+    finalized = []
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return ["SVA673"]
+
+    async def fake_gate_malfunction_context(read):
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[GATE_MALFUNCTION_PAYLOAD_KEY] = {
+            "id": str(uuid.uuid4()),
+            "gate_entity_id": "cover.top_gate",
+            "gate_name": "Top Gate",
+            "status": "active",
+            "opened_at": (captured_at - timedelta(minutes=8)).isoformat(),
+            "declared_at": (captured_at - timedelta(minutes=3)).isoformat(),
+            "resolved_at": None,
+            "last_gate_state": "open",
+        }
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+        )
+
+    async def fake_finalize_window(window):
+        finalized.append(window.best_read.registration_number)
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_gate_malfunction_context)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    service._recent_exact_resolutions.append(
+        access_events_module.ResolvedPlateWindow(
+            source="test",
+            registration_number="SVA673",
+            first_seen=captured_at - timedelta(seconds=10),
+            debounce_expires_at=captured_at + timedelta(seconds=10),
+            gate_cycle_expires_at=captured_at + timedelta(seconds=10),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+        )
+    )
+    remember_session(
+        service,
+        plate_read_with_context("SVA673", captured_at - timedelta(seconds=30), state="open"),
+        direction=AccessDirection.EXIT,
+        decision=AccessDecision.GRANTED,
+    )
+
+    await service._handle_queued_read(plate_read_with_gate_state_at("SVA673", captured_at, "open"))
+
+    assert finalized == ["SVA673"]
+    assert [event_type for event_type, _payload in published] == []
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_unknown_read_is_ignored_before_finalize(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+    ignored = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_gate_malfunction_context(_read):
+        return plate_read_with_gate_malfunction("UNKNOWN1", captured_at)
+
+    async def fake_ignore(read):
+        ignored.append(read)
+
+    async def fail_finalize(_window):
+        raise AssertionError("Unknown malfunction reads must not finalize access events.")
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_gate_malfunction_context)
+    monkeypatch.setattr(service, "_ignore_unknown_gate_malfunction_read", fake_ignore)
+    monkeypatch.setattr(service, "_finalize_window", fail_finalize)
+
+    await service._handle_queued_read(plate_read_with_gate_state_at("UNKNOWN1", captured_at, "open"))
+
+    assert len(ignored) == 1
+    assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_ignored_gate_malfunction_unknown_read_emits_realtime_and_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
+    read = plate_read_with_gate_malfunction("UNKNOWN1", captured_at)
+    published = []
+    audits = []
+
+    class FakeAuditSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, _row):
+            return None
+
+    async def fake_write_audit_log(_session, **kwargs):
+        audits.append(kwargs)
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            timestamp=captured_at,
+            category=kwargs["category"],
+            action=kwargs["action"],
+            actor=kwargs["actor"],
+            actor_user_id=None,
+            target_entity=kwargs["target_entity"],
+            target_id=None,
+            target_label=kwargs["target_label"],
+            diff=None,
+            metadata_=kwargs["metadata"],
+            outcome="success",
+            level="info",
+            trace_id=None,
+            request_id=None,
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: FakeAuditSession())
+    monkeypatch.setattr(access_events_module, "write_audit_log", fake_write_audit_log)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    await service._ignore_unknown_gate_malfunction_read(read)
+
+    assert published[0][0] == "plate_read.ignored"
+    assert published[0][1]["reason"] == "gate_malfunction_unknown_vehicle"
+    assert published[0][1]["malfunction_id"] == read.raw_payload[GATE_MALFUNCTION_PAYLOAD_KEY]["id"]
+    assert audits[0]["action"] == "plate_read.gate_malfunction_ignored"
+    assert audits[0]["target_entity"] == "PlateRead"
+    assert audits[0]["target_label"] == "UNKNOWN1"
+    assert published[1][0] == "audit.log.created"
 
 
 @pytest.mark.asyncio

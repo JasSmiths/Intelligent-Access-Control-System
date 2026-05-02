@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.ai.providers import _looks_like_ollama_vision_model
 from app.modules.unifi_protect.client import _camera_identifier_score, serialize_unifi_camera, serialize_unifi_event
+from app.services.unifi_protect import gate_lpr_camera_from_bootstrap, resolve_camera_smart_zone_names
 
 
 class EnumValue:
@@ -48,6 +49,9 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
             smart_detect_types=[EnumValue("person")],
             smart_detect_audio_types=[],
         ),
+        smart_detect_zones=[
+            SimpleNamespace(id=2, name="Default", object_types=[EnumValue("person"), EnumValue("vehicle")]),
+        ],
         has_mic=True,
     )
 
@@ -55,8 +59,26 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
 
     assert payload["id"] == "cam-1"
     assert payload["detections"]["active"] == ["person"]
+    assert payload["smart_detect_zones"] == [{"id": 2, "name": "Default", "object_types": ["person", "vehicle"]}]
     assert payload["channels"][0]["is_rtsp_enabled"] is True
     assert "rtsp_url" not in payload["channels"][0]
+
+
+def test_gate_lpr_zone_id_resolves_to_zone_name() -> None:
+    gate_lpr = SimpleNamespace(
+        id="camera-protect-id",
+        mac="942A6FD09D64",
+        display_name="Gate LPR",
+        smart_detect_zones=[
+            SimpleNamespace(id=2, name="Default", object_types=[EnumValue("vehicle")]),
+        ],
+    )
+    other = SimpleNamespace(id="other", mac="other", display_name="Drive", smart_detect_zones=[])
+
+    camera = gate_lpr_camera_from_bootstrap([other, gate_lpr], camera_identifier="942A6FD09D64")
+
+    assert camera is gate_lpr
+    assert resolve_camera_smart_zone_names(camera, ["2"]) == ["2", "Default"]
 
 
 def test_event_serialization_includes_proxy_urls() -> None:

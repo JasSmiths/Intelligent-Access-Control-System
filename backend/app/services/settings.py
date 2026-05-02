@@ -33,6 +33,9 @@ LEGACY_DEFAULT_REPLACEMENTS = {
     "gemini_model": {"gemini-2.5-flash": "gemini-1.5-pro"},
     "anthropic_model": {"claude-sonnet-4-5": "claude-3-5-sonnet-latest"},
     "ollama_model": {"llama3.1": "llama3"},
+    "whatsapp_visitor_pass_template_name": {
+        "visitor_pass_registration_request": "iacs_visitor_welcome",
+    },
 }
 
 OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities"}
@@ -57,7 +60,7 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "lpr_allowed_smart_zones": (
         "lpr",
         ["default"],
-        "UniFi smart zone names or IDs allowed to produce access events. Empty or * accepts every zone.",
+        "Selected Gate LPR UniFi smart zone name allowed to produce access events.",
     ),
     "schedule_default_policy": (
         "access",
@@ -103,12 +106,12 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "whatsapp_graph_api_version": ("integrations", "v25.0", "Meta Graph API version for WhatsApp Cloud API."),
     "whatsapp_visitor_pass_template_name": (
         "integrations",
-        "visitor_pass_registration_request",
+        "iacs_visitor_welcome",
         "Approved WhatsApp utility template used to request Visitor Pass vehicle registrations.",
     ),
     "whatsapp_visitor_pass_template_language": (
         "integrations",
-        "en_GB",
+        "en",
         "Language code for the Visitor Pass WhatsApp outreach template.",
     ),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
@@ -346,6 +349,13 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
                 "home_assistant_gate_entities",
                 legacy_gate_entities(legacy_gate_entity_id, gate_open_service),
             )
+    visitor_template_record = records_by_key.get("whatsapp_visitor_pass_template_name")
+    visitor_template_language_record = records_by_key.get("whatsapp_visitor_pass_template_language")
+    if visitor_template_record and visitor_template_language_record:
+        template_name = str(decrypted_value(visitor_template_record) or "").strip()
+        template_language = str(decrypted_value(visitor_template_language_record) or "").strip()
+        if template_name == "iacs_visitor_welcome" and template_language == "en_GB":
+            visitor_template_language_record.value = setting_payload("whatsapp_visitor_pass_template_language", "en")
     for record in records:
         if record.key in OBSOLETE_DYNAMIC_SETTINGS:
             continue
@@ -425,7 +435,7 @@ async def get_runtime_config() -> RuntimeConfig:
         whatsapp_app_secret=str(values["whatsapp_app_secret"] or ""),
         whatsapp_graph_api_version=str(values["whatsapp_graph_api_version"] or "v25.0"),
         whatsapp_visitor_pass_template_name=str(values["whatsapp_visitor_pass_template_name"] or ""),
-        whatsapp_visitor_pass_template_language=str(values["whatsapp_visitor_pass_template_language"] or "en_GB"),
+        whatsapp_visitor_pass_template_language=str(values["whatsapp_visitor_pass_template_language"] or "en"),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),

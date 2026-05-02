@@ -1079,10 +1079,25 @@ class NotificationService:
         if not targets:
             return False
         if snapshot and not snapshot.public_url:
-            failures.append("Home Assistant: IACS_PUBLIC_BASE_URL must be configured to attach camera snapshots.")
-            return False
-        image_url = snapshot.public_url if snapshot else None
-        image_content_type = snapshot.content_type if snapshot else None
+            logger.warning(
+                "notification_home_assistant_snapshot_omitted",
+                extra={
+                    "event_type": context.event_type,
+                    "reason": "missing_public_base_url",
+                },
+            )
+            self._record_notification_span(
+                "Notification Snapshot Omitted",
+                context,
+                output_payload={
+                    "event_type": context.event_type,
+                    "channel": "mobile",
+                    "reason": "missing_public_base_url",
+                    "delivered": False,
+                },
+            )
+        image_url = snapshot.public_url if snapshot and snapshot.public_url else None
+        image_content_type = snapshot.content_type if image_url else None
         mobile_actions = home_assistant_notification_actions(context)
         notifier = HomeAssistantMobileAppNotifier()
         delivered_any = False

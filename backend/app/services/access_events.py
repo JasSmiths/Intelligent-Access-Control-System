@@ -38,17 +38,29 @@ from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.schedules import ScheduleEvaluation, evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.snapshots import (
+    SNAPSHOT_HEIGHT,
+    SNAPSHOT_WIDTH,
+    access_event_snapshot_relative_path,
+    access_event_snapshot_url,
     access_event_snapshot_payload,
     apply_snapshot_to_access_event,
     get_snapshot_manager,
 )
-from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, TELEMETRY_CATEGORY_LPR, telemetry
+from app.services.snapshot_recovery import protect_event_id_from_access_event
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    TELEMETRY_CATEGORY_LPR,
+    audit_log_event_payload,
+    telemetry,
+    write_audit_log,
+)
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
@@ -59,6 +71,7 @@ from app.services.visitor_passes import get_visitor_pass_service, serialize_visi
 logger = get_logger(__name__)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
+GATE_MALFUNCTION_PAYLOAD_KEY = "_iacs_gate_malfunction"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
@@ -93,6 +106,11 @@ def _is_exact_known_vehicle_plate_match(read: PlateRead) -> bool:
 def _visitor_pass_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
     match = (read.raw_payload or {}).get(VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY)
     return match if isinstance(match, dict) else None
+
+
+def _gate_malfunction_from_read(read: PlateRead) -> dict[str, Any] | None:
+    malfunction = (read.raw_payload or {}).get(GATE_MALFUNCTION_PAYLOAD_KEY)
+    return malfunction if isinstance(malfunction, dict) else None
 
 
 def _is_visitor_pass_plate_match(read: PlateRead) -> bool:
@@ -290,18 +308,26 @@ class AccessEventService:
 
     async def _handle_queued_read(self, read: PlateRead) -> None:
         read = await self._read_with_known_vehicle_match(read)
-        exact_suppression_reason = self._exact_resolution_suppression_reason(read)
-        if exact_suppression_reason:
-            await self._publish_suppressed_read(read, reason=exact_suppression_reason)
+        read = await self._read_with_gate_malfunction_context(read)
+        gate_malfunction = _gate_malfunction_from_read(read)
+        known_vehicle_match = _known_vehicle_plate_match_from_read(read)
+        if gate_malfunction and not known_vehicle_match:
+            await self._ignore_unknown_gate_malfunction_read(read)
             return
 
-        vehicle_session_suppression = await self._vehicle_session_suppression(read)
-        if vehicle_session_suppression:
-            await self._annotate_suppressed_session_read(read, vehicle_session_suppression)
-            await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
-            return
+        if not gate_malfunction:
+            exact_suppression_reason = self._exact_resolution_suppression_reason(read)
+            if exact_suppression_reason:
+                await self._publish_suppressed_read(read, reason=exact_suppression_reason)
+                return
 
-        if not _is_exact_known_vehicle_plate_match(read):
+            vehicle_session_suppression = await self._vehicle_session_suppression(read)
+            if vehicle_session_suppression:
+                await self._annotate_suppressed_session_read(read, vehicle_session_suppression)
+                await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
+                return
+
+        if not _known_vehicle_plate_match_from_read(read):
             read = await self._read_with_visitor_pass_departure_match(read)
         if self._suppress_after_visitor_pass_resolution(read):
             await self._publish_suppressed_read(read, reason="visitor_pass_plate_already_resolved_in_debounce_window")
@@ -364,6 +390,69 @@ class AccessEventService:
                 )
             ).all()
         return [str(registration) for registration in registrations]
+
+    async def _read_with_gate_malfunction_context(self, read: PlateRead) -> PlateRead:
+        gate_observation = self._gate_observation_from_read(read)
+        gate_state = self._coerce_gate_state(gate_observation.get("state"))
+        if gate_state not in DEPARTURE_GATE_STATES:
+            return read
+
+        async with AsyncSessionLocal() as session:
+            malfunction = await active_stuck_open_malfunction_at(
+                session,
+                observed_at=read.captured_at,
+                gate_state=gate_state,
+                gate_entity_id=gate_observation.get("entity_id"),
+            )
+        if not malfunction:
+            return read
+
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[GATE_MALFUNCTION_PAYLOAD_KEY] = malfunction.as_payload()
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+        )
+
+    async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
+        gate_observation = self._gate_observation_from_read(read)
+        gate_malfunction = _gate_malfunction_from_read(read) or {}
+        detail = {
+            "registration_number": read.registration_number,
+            "detected_registration_number": _detected_registration_number(read),
+            "confidence": read.confidence,
+            "source": read.source,
+            "captured_at": read.captured_at.isoformat(),
+            "gate_state": gate_observation.get("state"),
+            "gate_observation": gate_observation,
+            "gate_malfunction": gate_malfunction,
+            "malfunction_id": gate_malfunction.get("id"),
+            "reason": "gate_malfunction_unknown_vehicle",
+        }
+        logger.info("plate_read_ignored_during_gate_malfunction", extra=detail)
+        await event_bus.publish("plate_read.ignored", detail)
+        try:
+            async with AsyncSessionLocal() as session:
+                row = await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_LPR,
+                    action="plate_read.gate_malfunction_ignored",
+                    actor="System",
+                    target_entity="PlateRead",
+                    target_label=read.registration_number,
+                    metadata=detail,
+                )
+                await session.commit()
+                await session.refresh(row)
+            await event_bus.publish("audit.log.created", audit_log_event_payload(row))
+        except Exception as exc:
+            logger.warning(
+                "plate_read_gate_malfunction_ignore_audit_failed",
+                extra={"registration_number": read.registration_number, "error": str(exc)},
+            )
 
     async def _read_with_visitor_pass_departure_match(self, read: PlateRead) -> PlateRead:
         plate = self._normalize_registration_number(read.registration_number)
@@ -1214,6 +1303,7 @@ class AccessEventService:
                 direction_read,
                 person,
                 allowed,
+                vehicle=vehicle,
                 trace=trace,
             )
             direction_span.finish(
@@ -1590,6 +1680,8 @@ class AccessEventService:
     ) -> None:
         if not event.id:
             return
+        manager = get_snapshot_manager()
+        protect_event_id = protect_event_id_from_access_event(event)
         span = (
             trace.start_span(
                 "Capture Access Event Snapshot",
@@ -1603,14 +1695,16 @@ class AccessEventService:
             if trace
             else None
         )
+        capture_error: Exception | None = None
+        metadata = None
+        source = "camera_snapshot"
         try:
-            metadata = await get_snapshot_manager().capture_access_event_snapshot(
+            metadata = await manager.capture_access_event_snapshot(
                 event.id,
                 camera=GATE_CAMERA_IDENTIFIER,
             )
         except Exception as exc:
-            if span:
-                span.finish(status="error", error=exc)
+            capture_error = exc
             logger.info(
                 "access_event_snapshot_capture_skipped",
                 extra={
@@ -1618,13 +1712,49 @@ class AccessEventService:
                     "registration_number": event.registration_number,
                     "camera": GATE_CAMERA_IDENTIFIER,
                     "error": str(exc),
+                    "fallback_protect_event_id": protect_event_id,
                 },
             )
-            return
+
+        if metadata is None and protect_event_id:
+            try:
+                media = await get_unifi_protect_service().event_thumbnail(
+                    protect_event_id,
+                    width=SNAPSHOT_WIDTH,
+                    height=SNAPSHOT_HEIGHT,
+                )
+                metadata = await manager.store_image(
+                    media.content,
+                    relative_path=access_event_snapshot_relative_path(event.id),
+                    url=access_event_snapshot_url(event.id),
+                    camera=GATE_CAMERA_IDENTIFIER,
+                    captured_at=event.occurred_at,
+                )
+                source = "protect_event_thumbnail"
+            except Exception as exc:
+                logger.info(
+                    "access_event_snapshot_thumbnail_capture_skipped",
+                    extra={
+                        "event_id": str(event.id),
+                        "registration_number": event.registration_number,
+                        "protect_event_id": protect_event_id,
+                        "error": str(exc),
+                    },
+                )
+                if capture_error is None:
+                    capture_error = exc
 
         if metadata is None:
             if span:
-                span.finish(output_payload={"captured": False, "reason": "unifi_protect_unconfigured"})
+                output = {
+                    "captured": False,
+                    "reason": "capture_failed" if capture_error else "unifi_protect_unconfigured",
+                    "protect_event_id": protect_event_id,
+                }
+                if capture_error:
+                    span.finish(status="error", error=capture_error, output_payload=output)
+                else:
+                    span.finish(output_payload=output)
             return
 
         apply_snapshot_to_access_event(event, metadata)
@@ -1632,6 +1762,8 @@ class AccessEventService:
             span.finish(
                 output_payload={
                     "captured": True,
+                    "source": source,
+                    "protect_event_id": protect_event_id,
                     "snapshot_path": metadata.relative_path,
                     "bytes": metadata.bytes,
                     "width": metadata.width,
@@ -2314,6 +2446,7 @@ class AccessEventService:
         person: Person | None,
         allowed: bool,
         *,
+        vehicle: Vehicle | None = None,
         trace: Any | None = None,
     ) -> tuple[AccessDirection, dict[str, Any]]:
         gate_observation = self._gate_observation_from_read(read)
@@ -2334,6 +2467,26 @@ class AccessEventService:
             resolution["direction"] = AccessDirection.EXIT.value
             resolution["visitor_pass_id"] = visitor_pass_match.get("visitor_pass_id")
             return AccessDirection.EXIT, resolution
+
+        gate_malfunction = _gate_malfunction_from_read(read)
+        if gate_malfunction and vehicle:
+            previous_event = await self._latest_live_vehicle_event(session, vehicle, read.captured_at)
+            direction = (
+                AccessDirection.EXIT
+                if previous_event and previous_event.direction == AccessDirection.ENTRY
+                else AccessDirection.ENTRY
+            )
+            resolution.update(
+                {
+                    "source": "gate_malfunction_vehicle_history",
+                    "direction": direction.value,
+                    "gate_malfunction": gate_malfunction,
+                    "previous_live_event_id": str(previous_event.id) if previous_event else None,
+                    "previous_live_direction": previous_event.direction.value if previous_event else None,
+                    "previous_live_event_at": previous_event.occurred_at.isoformat() if previous_event else None,
+                }
+            )
+            return direction, resolution
 
         if gate_state in ARRIVAL_GATE_STATES:
             direction = AccessDirection.ENTRY
@@ -2383,6 +2536,33 @@ class AccessEventService:
     async def _person_is_present(self, session: AsyncSession, person: Person) -> bool:
         presence = await session.get(Presence, person.id)
         return bool(presence and presence.state == PresenceState.PRESENT)
+
+    async def _latest_live_vehicle_event(
+        self,
+        session: AsyncSession,
+        vehicle: Vehicle,
+        before: datetime,
+    ) -> AccessEvent | None:
+        rows = (
+            await session.scalars(
+                select(AccessEvent)
+                .where(
+                    AccessEvent.vehicle_id == vehicle.id,
+                    AccessEvent.decision == AccessDecision.GRANTED,
+                    AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
+                    AccessEvent.occurred_at < before,
+                )
+                .order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc())
+                .limit(20)
+            )
+        ).all()
+        return next((event for event in rows if not self._access_event_is_backfilled(event)), None)
+
+    def _access_event_is_backfilled(self, event: AccessEvent) -> bool:
+        if "backfill" in str(event.source or "").casefold():
+            return True
+        raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        return "backfill" in raw_payload
 
     async def _resolve_duplicate_arrival_with_camera(
         self, read: PlateRead, person: Person, *, trace: Any | None = None
@@ -2617,6 +2797,7 @@ class AccessEventService:
             "state": state.value,
             "observed_at": value.get("observed_at"),
             "controller": value.get("controller"),
+            "entity_id": value.get("entity_id"),
             "detail": value.get("detail"),
         }
 

@@ -354,6 +354,7 @@ def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
         "channels": [_serialize_channel(channel) for channel in getattr(camera, "channels", [])],
         "feature_flags": _serialize_camera_features(camera),
         "detections": _serialize_camera_detections(camera),
+        "smart_detect_zones": [_serialize_smart_detect_zone(zone) for zone in getattr(camera, "smart_detect_zones", [])],
         "snapshot_url": f"/api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot",
     }
 
@@ -437,6 +438,14 @@ def _serialize_camera_detections(camera: Any) -> dict[str, Any]:
     }
     active = [label for label, attr in mappings.items() if bool(getattr(camera, attr, False))]
     return {"active": active}
+
+
+def _serialize_smart_detect_zone(zone: Any) -> dict[str, Any]:
+    return {
+        "id": getattr(zone, "id", None),
+        "name": str(getattr(zone, "name", "") or getattr(zone, "id", "") or ""),
+        "object_types": [_enum_value(item) for item in (getattr(zone, "object_types", None) or [])],
+    }
 
 
 def _looks_like_camera(obj: Any, model_key: str) -> bool:

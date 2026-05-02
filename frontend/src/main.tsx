@@ -71,6 +71,7 @@ import {
   Trash2,
   Trophy,
   Type,
+  Unlock,
   UserPlus,
   UserRound,
   Users,
@@ -155,6 +156,11 @@ type VisitorPassWhatsAppMessage = {
   status: string | null;
   created_at: string;
   metadata: Record<string, unknown> | null;
+};
+
+type VisitorPassWhatsAppSendResponse = {
+  visitor_pass: VisitorPass;
+  message: VisitorPassWhatsAppMessage;
 };
 
 type VisitorPassLogEntry = AuditLog & {
@@ -349,12 +355,23 @@ type LeaderboardDvla = {
   error?: string;
 };
 
+type LeaderboardSnapshot = {
+  event_id: string;
+  url: string;
+  captured_at: string | null;
+  bytes: number | null;
+  width: number | null;
+  height: number | null;
+  camera: string | null;
+};
+
 type LeaderboardUnknownEntry = {
   rank: number;
   registration_number: string;
   read_count: number;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  latest_snapshot: LeaderboardSnapshot | null;
   dvla: LeaderboardDvla;
 };
 
@@ -1002,6 +1019,7 @@ type UnifiProtectStatus = {
 
 type UnifiProtectCamera = {
   id: string;
+  mac?: string | null;
   name: string;
   model: string | null;
   state: string | null;
@@ -1033,6 +1051,11 @@ type UnifiProtectCamera = {
   detections: {
     active: string[];
   };
+  smart_detect_zones: Array<{
+    id: number | string | null;
+    name: string;
+    object_types: string[];
+  }>;
 };
 
 type UnifiProtectEvent = {
@@ -4732,6 +4755,7 @@ function PassesView({ query, realtime }: { query: string; realtime: RealtimeMess
             setDetailPass(null);
             openEdit(visitorPass);
           }}
+          onUpdated={handlePassUpdated}
           visitorPass={detailPass}
         />
       ) : null}
@@ -5018,13 +5042,15 @@ function VisitorPassDetailsModal({
   onClose,
   onEdit,
   onCancel,
-  onDelete
+  onDelete,
+  onUpdated
 }: {
   visitorPass: VisitorPass;
   onClose: () => void;
   onEdit: (visitorPass: VisitorPass) => void;
   onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
   onDelete: (visitorPass: VisitorPass) => Promise<boolean>;
+  onUpdated: (visitorPass: VisitorPass) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = React.useState<"details" | "whatsapp" | "log">("details");
   const [messages, setMessages] = React.useState<VisitorPassWhatsAppMessage[]>([]);
@@ -5035,6 +5061,11 @@ function VisitorPassDetailsModal({
   const [logsLoading, setLogsLoading] = React.useState(false);
   const [logsLoaded, setLogsLoaded] = React.useState(false);
   const [logsError, setLogsError] = React.useState("");
+  const [messageDraft, setMessageDraft] = React.useState("");
+  const [messageSending, setMessageSending] = React.useState(false);
+  const [messageSendError, setMessageSendError] = React.useState("");
+  const [visitorUnblocking, setVisitorUnblocking] = React.useState(false);
+  const [visitorUnblockError, setVisitorUnblockError] = React.useState("");
   const [action, setAction] = React.useState<"cancel" | "delete" | null>(null);
   const [confirmAction, setConfirmAction] = React.useState<"cancel" | "delete" | null>(null);
   const threadRef = React.useRef<HTMLDivElement | null>(null);
@@ -5049,6 +5080,7 @@ function VisitorPassDetailsModal({
   const visitDuration = visitorPassVisitDurationLabel(visitorPass);
   const passDuration = visitorPassPassDurationLabel(visitorPass);
   const whatsappStatusLabel = visitorPassWhatsAppDetailLabel(visitorPass);
+  const abuseCooldown = visitorPassWhatsAppAbuseCooldown(visitorPass);
   const visitDetail = visitorPass.departure_time
     ? `Left ${formatDate(visitorPass.departure_time)}`
     : visitorPass.arrival_time
@@ -5057,6 +5089,9 @@ function VisitorPassDetailsModal({
         ? "Pass window"
         : "No visit telemetry";
   const telemetryLinked = Boolean(visitorPass.arrival_event_id || visitorPass.departure_event_id);
+  const trimmedMessageDraft = messageDraft.trim();
+  const canSendWhatsAppMessage = Boolean(isDuration && canModify && trimmedMessageDraft && !messageSending);
+  const canUnblockVisitor = Boolean(isDuration && activeTab === "whatsapp" && abuseCooldown && !visitorUnblocking);
 
   const loadWhatsAppMessages = React.useCallback(async (showLoading = false) => {
     if (!isDuration) return;
@@ -5096,6 +5131,11 @@ function VisitorPassDetailsModal({
     setLogs([]);
     setLogsError("");
     setLogsLoaded(false);
+    setMessageDraft("");
+    setMessageSendError("");
+    setMessageSending(false);
+    setVisitorUnblockError("");
+    setVisitorUnblocking(false);
     latestMessageCountRef.current = 0;
     shouldStickToLatestRef.current = true;
   }, [visitorPass.id]);
@@ -5179,6 +5219,44 @@ function VisitorPassDetailsModal({
     }
   };
 
+  const sendWhatsAppMessage = async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (!canSendWhatsAppMessage) return;
+    setMessageSending(true);
+    setMessageSendError("");
+    shouldStickToLatestRef.current = true;
+    try {
+      const result = await api.post<VisitorPassWhatsAppSendResponse>(
+        `/api/v1/visitor-passes/${visitorPass.id}/whatsapp-messages`,
+        { message: trimmedMessageDraft }
+      );
+      const sentMessage = visitorPassWhatsAppMessageFromApi(result.message);
+      setMessages((current) => visitorPassWhatsAppMessagesWithMessage(current, sentMessage));
+      setMessagesLoaded(true);
+      setMessageDraft("");
+      await onUpdated(result.visitor_pass);
+    } catch (sendError) {
+      setMessageSendError(sendError instanceof Error ? sendError.message : "Unable to send WhatsApp message");
+    } finally {
+      setMessageSending(false);
+    }
+  };
+
+  const unblockVisitorWhatsApp = async () => {
+    if (!canUnblockVisitor) return;
+    setVisitorUnblocking(true);
+    setVisitorUnblockError("");
+    try {
+      const updatedPass = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/whatsapp-unblock`, {});
+      await onUpdated(updatedPass);
+      await loadWhatsAppMessages(false);
+    } catch (unblockError) {
+      setVisitorUnblockError(unblockError instanceof Error ? unblockError.message : "Unable to unblock Visitor Concierge replies");
+    } finally {
+      setVisitorUnblocking(false);
+    }
+  };
+
   return (
     <>
       <div className="modal-backdrop" role="presentation">
@@ -5192,6 +5270,19 @@ function VisitorPassDetailsModal({
             </div>
             <div className="visitor-pass-detail-header-actions">
               <VisitorPassStatusPill status={visitorPass.status} />
+              {activeTab === "whatsapp" && abuseCooldown ? (
+                <button
+                  aria-label={`Unblock WhatsApp replies for ${visitorPass.visitor_name}`}
+                  className="secondary-button visitor-pass-unblock-button"
+                  disabled={!canUnblockVisitor}
+                  onClick={unblockVisitorWhatsApp}
+                  title={`Visitor Concierge replies are paused until ${formatDate(abuseCooldown.until)}`}
+                  type="button"
+                >
+                  {visitorUnblocking ? <Loader2 className="spin" size={15} /> : <Unlock size={15} />}
+                  <span>Unblock</span>
+                </button>
+              ) : null}
               <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
                 <X size={16} />
               </button>
@@ -5215,6 +5306,8 @@ function VisitorPassDetailsModal({
           {activeTab === "whatsapp" && isDuration ? (
             <section className="visitor-pass-whatsapp-panel">
               {messagesError ? <div className="auth-error">{messagesError}</div> : null}
+              {messageSendError ? <div className="auth-error">{messageSendError}</div> : null}
+              {visitorUnblockError ? <div className="auth-error">{visitorUnblockError}</div> : null}
               <div className="visitor-pass-whatsapp-thread" ref={threadRef} onScroll={updateStickiness}>
                 {messagesLoading && !messages.length ? (
                   <div className="visitor-pass-thread-empty">
@@ -5227,11 +5320,25 @@ function VisitorPassDetailsModal({
                 ) : (
                   <div className="visitor-pass-thread-empty">No WhatsApp messages recorded for this pass yet</div>
                 )}
-                <div className="visitor-pass-whatsapp-composer" aria-hidden="true">
+                <form className="visitor-pass-whatsapp-composer" onSubmit={sendWhatsAppMessage}>
                   <Smile size={18} />
-                  <span>Message...</span>
-                  <Paperclip size={18} />
-                </div>
+                  <input
+                    aria-label={`Message ${visitorPass.visitor_name} on WhatsApp`}
+                    disabled={!canModify || messageSending}
+                    maxLength={1024}
+                    onChange={(event) => setMessageDraft(event.target.value)}
+                    placeholder={canModify ? "Message..." : "Messaging unavailable for this pass"}
+                    value={messageDraft}
+                  />
+                  <button
+                    className="icon-button"
+                    disabled={!canSendWhatsAppMessage}
+                    type="submit"
+                    aria-label="Send WhatsApp message"
+                  >
+                    {messageSending ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+                  </button>
+                </form>
               </div>
             </section>
           ) : activeTab === "log" ? (
@@ -7396,11 +7503,15 @@ function vehicleLastDvlaCheckLabel(value: string | null | undefined) {
   return dateOnlyKey(value) === localDateKey() ? "Last checked with DVLA: Today" : `Last checked with DVLA: ${formatDateOnly(value)}`;
 }
 
+const TOP_CHARTS_PAGE_SIZE = 5;
+
 function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeMessage[] }) {
   const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [knownPage, setKnownPage] = React.useState(0);
+  const [unknownPage, setUnknownPage] = React.useState(0);
 
   const load = React.useCallback(async () => {
     setRefreshing(true);
@@ -7443,10 +7554,33 @@ function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeM
     () => unknownRows.reduce((total, item) => total + item.read_count, 0),
     [unknownRows]
   );
+  const knownPageCount = Math.max(1, Math.ceil(knownRows.length / TOP_CHARTS_PAGE_SIZE));
+  const unknownPageCount = Math.max(1, Math.ceil(unknownRows.length / TOP_CHARTS_PAGE_SIZE));
+  const visibleKnownRows = React.useMemo(
+    () => knownRows.slice(knownPage * TOP_CHARTS_PAGE_SIZE, (knownPage + 1) * TOP_CHARTS_PAGE_SIZE),
+    [knownPage, knownRows]
+  );
+  const visibleUnknownRows = React.useMemo(
+    () => unknownRows.slice(unknownPage * TOP_CHARTS_PAGE_SIZE, (unknownPage + 1) * TOP_CHARTS_PAGE_SIZE),
+    [unknownPage, unknownRows]
+  );
+
+  React.useEffect(() => {
+    setKnownPage(0);
+    setUnknownPage(0);
+  }, [query]);
+
+  React.useEffect(() => {
+    setKnownPage((page) => Math.min(page, knownPageCount - 1));
+  }, [knownPageCount]);
+
+  React.useEffect(() => {
+    setUnknownPage((page) => Math.min(page, unknownPageCount - 1));
+  }, [unknownPageCount]);
 
   return (
     <section className="view-stack top-charts-page">
-      <Toolbar title="Top Charts" count={knownRows.length + unknownRows.length} icon={Trophy}>
+      <Toolbar title="Top Charts" icon={Trophy}>
         <button className="secondary-button" onClick={() => load().catch(() => undefined)} disabled={refreshing} type="button">
           <RefreshCcw size={15} /> {refreshing ? "Refreshing" : "Refresh"}
         </button>
@@ -7468,11 +7602,19 @@ function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeM
             </div>
 
             {knownRows.length ? (
-              <div className="top-charts-list">
-                {knownRows.map((entry) => (
-                  <LeaderboardKnownRow entry={entry} key={`${entry.vehicle_id}-${entry.registration_number}`} />
-                ))}
-              </div>
+              <>
+                <div className="top-charts-list">
+                  {visibleKnownRows.map((entry) => (
+                    <LeaderboardKnownRow entry={entry} key={`${entry.vehicle_id}-${entry.registration_number}`} />
+                  ))}
+                </div>
+                <TopChartsPagination
+                  page={knownPage}
+                  pageCount={knownPageCount}
+                  total={knownRows.length}
+                  onPageChange={setKnownPage}
+                />
+              </>
             ) : (
               <EmptyState icon={Trophy} label="No VIP Detectiions yet" />
             )}
@@ -7483,17 +7625,25 @@ function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeM
               <div>
                 <span className="eyebrow">Unknown Plates</span>
                 <h2>The Mystery Guests</h2>
-                <p>Who are these people and why do they keep turning around in the driveway?</p>
+                <p>Unrecognized plates ranked by repeat visits.</p>
               </div>
               <Badge tone="amber">{unknownReadCount} Detectiions</Badge>
             </div>
 
             {unknownRows.length ? (
-              <div className="top-charts-list">
-                {unknownRows.map((entry) => (
-                  <LeaderboardUnknownRow entry={entry} key={entry.registration_number} />
-                ))}
-              </div>
+              <>
+                <div className="top-charts-list">
+                  {visibleUnknownRows.map((entry) => (
+                    <LeaderboardUnknownRow entry={entry} key={entry.registration_number} />
+                  ))}
+                </div>
+                <TopChartsPagination
+                  page={unknownPage}
+                  pageCount={unknownPageCount}
+                  total={unknownRows.length}
+                  onPageChange={setUnknownPage}
+                />
+              </>
             ) : (
               <EmptyState icon={Search} label="No mystery guests yet" />
             )}
@@ -7529,9 +7679,7 @@ function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
   return (
     <article className="top-charts-row">
       <span className={rankBadgeClass(entry.rank)}>{entry.rank}</span>
-      <div className="top-charts-plate-avatar" aria-hidden="true">
-        <Search size={17} />
-      </div>
+      <LeaderboardSnapshotThumb entry={entry} />
       <div className="top-charts-row-main">
         <strong>{entry.registration_number}</strong>
         <span>{label}</span>
@@ -7543,6 +7691,119 @@ function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
         <span>{entry.read_count === 1 ? "Detectiion" : "Detectiions"}</span>
       </div>
     </article>
+  );
+}
+
+function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownEntry }) {
+  const snapshot = entry.latest_snapshot;
+  const tooltipId = React.useId();
+  const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+
+  React.useEffect(() => {
+    if (!tooltipPosition) return undefined;
+    const hideTooltip = () => setTooltipPosition(null);
+    window.addEventListener("resize", hideTooltip);
+    window.addEventListener("scroll", hideTooltip, true);
+    return () => {
+      window.removeEventListener("resize", hideTooltip);
+      window.removeEventListener("scroll", hideTooltip, true);
+    };
+  }, [tooltipPosition]);
+
+  const showTooltip = (target: HTMLElement) => {
+    if (!snapshot?.url) return;
+    const tooltipWidth = Math.min(336, window.innerWidth - 24);
+    const tooltipHeight = Math.round((tooltipWidth - 16) * 9 / 16) + 56;
+    const rect = target.getBoundingClientRect();
+    const gap = 10;
+    const placement = rect.bottom + gap + tooltipHeight > window.innerHeight - 8 ? "top" : "bottom";
+    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
+    const top = placement === "bottom"
+      ? Math.min(window.innerHeight - tooltipHeight - 8, rect.bottom + gap)
+      : Math.max(8, rect.top - tooltipHeight - gap);
+    setTooltipPosition({ left, placement, top });
+  };
+
+  if (!snapshot?.url) {
+    return (
+      <span className="top-charts-plate-avatar top-charts-snapshot-placeholder" aria-label={`No stored snapshot for ${entry.registration_number}`}>
+        <FileImage size={17} />
+      </span>
+    );
+  }
+
+  return (
+    <button
+      aria-describedby={tooltipPosition ? tooltipId : undefined}
+      aria-label={`Latest snapshot for ${entry.registration_number}`}
+      className="top-charts-snapshot-thumb"
+      onBlur={() => setTooltipPosition(null)}
+      onFocus={(event) => showTooltip(event.currentTarget)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setTooltipPosition(null);
+        }
+      }}
+      onMouseEnter={(event) => showTooltip(event.currentTarget)}
+      onMouseLeave={() => setTooltipPosition(null)}
+      type="button"
+    >
+      <img alt="" loading="lazy" src={snapshot.url} />
+      {tooltipPosition ? createPortal(
+        <div
+          className={`iacs-tooltip top-charts-snapshot-tooltip ${tooltipPosition.placement}`}
+          id={tooltipId}
+          role="tooltip"
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+        >
+          <img alt="" loading="lazy" src={snapshot.url} />
+          <strong>{entry.registration_number}</strong>
+          <span>{snapshot.captured_at ? `Captured ${formatDate(snapshot.captured_at)}` : "Latest stored vehicle snapshot"}</span>
+        </div>,
+        document.body
+      ) : null}
+    </button>
+  );
+}
+
+function TopChartsPagination({
+  page,
+  pageCount,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  const firstItem = page * TOP_CHARTS_PAGE_SIZE + 1;
+  const lastItem = Math.min(total, (page + 1) * TOP_CHARTS_PAGE_SIZE);
+  return (
+    <div className="top-charts-pagination" aria-label="Top Charts pagination">
+      <span>{firstItem}-{lastItem} of {total}</span>
+      <div className="top-charts-pagination-controls">
+        <button
+          aria-label="Previous page"
+          className="icon-button top-charts-page-button"
+          disabled={page === 0}
+          onClick={() => onPageChange(Math.max(0, page - 1))}
+          type="button"
+        >
+          <ArrowLeft size={15} />
+        </button>
+        <span>Page {page + 1} of {pageCount}</span>
+        <button
+          aria-label="Next page"
+          className="icon-button top-charts-page-button"
+          disabled={page >= pageCount - 1}
+          onClick={() => onPageChange(Math.min(pageCount - 1, page + 1))}
+          type="button"
+        >
+          <ArrowRight size={15} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -11381,7 +11642,7 @@ function WhatsAppSettingsFields({
           <div>
             <strong>{status?.enabled ? "WhatsApp enabled" : "WhatsApp disabled"}</strong>
             <span>{status?.configured ? `${status.graph_api_version} · ${status.admin_target_count} Admin targets` : status?.last_error || error || "Save the Meta Cloud API credentials to enable Alfred on WhatsApp."}</span>
-            {status?.visitor_pass_template_name ? <small>Visitor Pass template: {status.visitor_pass_template_name} · {status.visitor_pass_template_language || "en_GB"}</small> : null}
+            {status?.visitor_pass_template_name ? <small>Visitor Pass template: {status.visitor_pass_template_name} · {status.visitor_pass_template_language || "en"}</small> : null}
           </div>
         </div>
         <Badge tone={error ? "red" : status?.enabled && status?.configured ? "green" : status?.configured ? "blue" : "gray"}>
@@ -11757,10 +12018,11 @@ function MobileAppNotifySelectField({
   );
 }
 
-type LogsTabKey = "lpr" | "gate" | "maintenance" | "ai" | "crud" | "api" | "integrations" | "updates" | "live";
+type LogsTabKey = "lpr" | "access" | "gate" | "maintenance" | "ai" | "crud" | "api" | "integrations" | "updates" | "live";
 
 const logsTabs: Array<{ key: LogsTabKey; label: string; icon: React.ElementType; description: string }> = [
   { key: "lpr", label: "LPR Telemetry", icon: Car, description: "Plate reads, access decisions, and gate timing." },
+  { key: "access", label: "Access & Presence", icon: ShieldCheck, description: "Access event backfills, alert actions, presence, and anomalies." },
   { key: "gate", label: "Gate Events", icon: DoorOpen, description: "Malfunctions, recovery attempts, notifications, and resolution." },
   { key: "maintenance", label: "Maintenance Mode", icon: Construction, description: "Kill-switch changes, actor, duration, and HA sync." },
   { key: "ai", label: "AI Audit", icon: Bot, description: "Alfred tools, provider use, and outcomes." },
@@ -11779,6 +12041,7 @@ const traceCategories: Partial<Record<LogsTabKey, string>> = {
 };
 
 const auditCategories: Partial<Record<LogsTabKey, string>> = {
+  access: "access_presence",
   ai: "alfred_ai",
   crud: "entity_management",
   integrations: "integrations"
@@ -12403,10 +12666,18 @@ function AuditLogRow({ log, expanded, onToggle }: { log: AuditLog; expanded: boo
     ? Bot
     : log.category === "integrations"
       ? PlugZap
+      : log.category === "access_presence"
+        ? ShieldCheck
+        : log.action.startsWith("maintenance_mode.")
+          ? Construction
+          : Database;
+  const auditTone = log.category === "alfred_ai"
+    ? "purple"
+    : log.category === "access_presence"
+      ? "green"
       : log.action.startsWith("maintenance_mode.")
-        ? Construction
-        : Database;
-  const auditTone = log.category === "alfred_ai" ? "purple" : log.action.startsWith("maintenance_mode.") ? "amber" : levelTone(log.level);
+        ? "amber"
+        : levelTone(log.level);
   return (
     <article className={expanded ? "telemetry-card expanded" : "telemetry-card"}>
       <button className="telemetry-row-button" onClick={onToggle} type="button">
@@ -12419,7 +12690,7 @@ function AuditLogRow({ log, expanded, onToggle }: { log: AuditLog; expanded: boo
           {auditSummary ? <small className="telemetry-row-summary">{auditSummary}</small> : null}
         </span>
         <span className="telemetry-row-meta">
-          <Badge tone={auditTone}>{log.category === "alfred_ai" ? "AI ACTION" : log.action.startsWith("maintenance_mode.") ? "MAINTENANCE" : levelLabel(log.level)}</Badge>
+          <Badge tone={auditTone}>{log.category === "alfred_ai" ? "AI ACTION" : log.category === "access_presence" ? "ACCESS" : log.action.startsWith("maintenance_mode.") ? "MAINTENANCE" : levelLabel(log.level)}</Badge>
           <Badge tone={outcomeTone(log.outcome)}>{titleCase(log.outcome)}</Badge>
           <time>{formatDate(log.timestamp)}</time>
         </span>
@@ -16415,6 +16686,73 @@ function SettingsView({
   );
 }
 
+const GATE_LPR_CAMERA_NAME = "gate lpr";
+const GATE_LPR_CAMERA_DEVICE = "942A6FD09D64";
+
+type GateLprSmartZonesState = {
+  loading: boolean;
+  error: string;
+  camera: UnifiProtectCamera | null;
+  zones: UnifiProtectCamera["smart_detect_zones"];
+};
+
+function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
+  const [state, setState] = React.useState<GateLprSmartZonesState>({
+    loading: false,
+    error: "",
+    camera: null,
+    zones: []
+  });
+
+  React.useEffect(() => {
+    if (!enabled) {
+      setState({ loading: false, error: "", camera: null, zones: [] });
+      return;
+    }
+    let active = true;
+    setState((current) => ({ ...current, loading: true, error: "" }));
+    api.get<{ cameras: UnifiProtectCamera[] }>("/api/v1/integrations/unifi-protect/cameras")
+      .then((payload) => {
+        if (!active) return;
+        const camera = findGateLprCamera(payload.cameras);
+        setState({
+          loading: false,
+          error: "",
+          camera,
+          zones: camera?.smart_detect_zones ?? []
+        });
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setState({
+          loading: false,
+          error: loadError instanceof Error ? loadError.message : "Unable to load UniFi Protect cameras.",
+          camera: null,
+          zones: []
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [enabled]);
+
+  return state;
+}
+
+function findGateLprCamera(cameras: UnifiProtectCamera[]) {
+  return cameras.find((camera) => normalizeCameraIdentifier(camera.name) === GATE_LPR_CAMERA_NAME)
+    ?? cameras.find((camera) => normalizeCameraIdentifier(camera.mac) === normalizeCameraIdentifier(GATE_LPR_CAMERA_DEVICE))
+    ?? cameras.find((camera) => {
+      const label = normalizeCameraIdentifier(camera.name);
+      return label.includes("gate") && label.includes("lpr");
+    })
+    ?? null;
+}
+
+function normalizeCameraIdentifier(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
 function DynamicSettingsView({
   category,
   title,
@@ -16432,6 +16770,7 @@ function DynamicSettingsView({
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
   const fields = settingsFields(category);
+  const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
 
   React.useEffect(() => {
     const next: Record<string, string> = {};
@@ -16461,14 +16800,28 @@ function DynamicSettingsView({
             />
           ) : null}
           <div className="settings-form-grid">
-            {fields.map((field) => (
-              <SettingField
-                field={field}
-                key={field.key}
-                value={form[field.key] ?? ""}
-                onChange={(value) => setForm((current) => ({ ...current, [field.key]: value }))}
-              />
-            ))}
+            {fields.map((field) => {
+              const onChange = (value: string) => setForm((current) => ({ ...current, [field.key]: value }));
+              if (category === "lpr" && field.key === "lpr_allowed_smart_zones") {
+                return (
+                  <GateLprSmartZoneField
+                    field={field}
+                    key={field.key}
+                    state={gateLprSmartZones}
+                    value={form[field.key] ?? ""}
+                    onChange={onChange}
+                  />
+                );
+              }
+              return (
+                <SettingField
+                  field={field}
+                  key={field.key}
+                  value={form[field.key] ?? ""}
+                  onChange={onChange}
+                />
+              );
+            })}
           </div>
           {error ? <div className="auth-error inline-error">{error}</div> : null}
           {saved ? <div className="success-note">{saved}</div> : null}
@@ -16937,13 +17290,13 @@ function UserModal({
   );
 }
 
-function Toolbar({ title, count, icon: Icon, children }: { title: string; count: number; icon: React.ElementType; children?: React.ReactNode }) {
+function Toolbar({ title, count, icon: Icon, children }: { title: string; count?: number; icon: React.ElementType; children?: React.ReactNode }) {
   return (
     <div className="toolbar">
       <div className="card-title">
         <Icon size={18} />
         <h2>{title}</h2>
-        <Badge tone="gray">{count}</Badge>
+        {typeof count === "number" ? <Badge tone="gray">{count}</Badge> : null}
       </div>
       {children}
     </div>
@@ -17054,6 +17407,67 @@ function SettingField({
   );
 }
 
+function GateLprSmartZoneField({
+  field,
+  state,
+  value,
+  onChange
+}: {
+  field: SettingFieldDefinition;
+  state: GateLprSmartZonesState;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const selected = firstSettingListValue(value);
+  const zones = uniqueGateLprSmartZones(state.zones);
+  const selectedZone = zones.find((zone) => normalizeSmartZoneName(zone.name) === normalizeSmartZoneName(selected));
+  const selectValue = selectedZone?.name ?? selected;
+  const disabled = state.loading || Boolean(state.error) || !state.camera || zones.length === 0;
+  const status = gateLprSmartZoneStatus(state);
+  return (
+    <label className="field">
+      <span>{field.label}</span>
+      <select value={selectValue} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{state.loading ? "Loading zones..." : "Select smart zone"}</option>
+        {selected && !selectedZone ? <option value={selected}>{selected}</option> : null}
+        {zones.map((zone) => (
+          <option key={`${zone.id ?? zone.name}:${zone.name}`} value={zone.name}>
+            {zone.name}
+          </option>
+        ))}
+      </select>
+      <small className="field-hint">{status}</small>
+    </label>
+  );
+}
+
+function firstSettingListValue(value: string) {
+  return value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean)[0] ?? "";
+}
+
+function uniqueGateLprSmartZones(zones: UnifiProtectCamera["smart_detect_zones"]) {
+  const seen = new Set<string>();
+  return zones.filter((zone) => {
+    const name = String(zone.name ?? "").trim();
+    const normalized = normalizeSmartZoneName(name);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+function normalizeSmartZoneName(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function gateLprSmartZoneStatus(state: GateLprSmartZonesState) {
+  if (state.loading) return "Loading Gate LPR smart zones from UniFi Protect.";
+  if (state.error) return `UniFi Protect zones unavailable: ${state.error}`;
+  if (!state.camera) return "Gate LPR camera was not found.";
+  if (state.zones.length === 0) return "Gate LPR camera has no smart detect zones.";
+  return `Gate LPR camera: ${state.camera.name}.`;
+}
+
 function useSettings(category?: string) {
   const [settingsRows, setSettingsRows] = React.useState<SystemSetting[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -17117,9 +17531,9 @@ function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefin
     { key: "lpr_similarity_threshold", label: "Similarity threshold", type: "number", min: 0, max: 1, step: 0.01 },
     {
       key: "lpr_allowed_smart_zones",
-      label: "Accepted smart zones",
-      type: "textarea",
-      help: "One UniFi smart zone name or ID per line. Default is default. Empty or * accepts all zones."
+      label: "Gate LPR smart zone",
+      type: "select",
+      help: "Selected UniFi smart zone for LPR access processing."
     }
   ];
 }
@@ -17152,8 +17566,8 @@ function integrationInitialValues(definition: IntegrationDefinition, values: Set
     discord_require_mention: "true",
     whatsapp_enabled: "false",
     whatsapp_graph_api_version: "v25.0",
-    whatsapp_visitor_pass_template_name: "visitor_pass_registration_request",
-    whatsapp_visitor_pass_template_language: "en_GB"
+    whatsapp_visitor_pass_template_name: "iacs_visitor_welcome",
+    whatsapp_visitor_pass_template_language: "en"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
@@ -18494,6 +18908,13 @@ function visitorPassWhatsAppMessagesEqual(left: VisitorPassWhatsAppMessage[], ri
   });
 }
 
+function visitorPassWhatsAppMessagesWithMessage(messages: VisitorPassWhatsAppMessage[], message: VisitorPassWhatsAppMessage) {
+  const next = messages.filter((item) => item.id !== message.id);
+  next.push(message);
+  next.sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+  return next;
+}
+
 function visitorPassLogsEqual(left: VisitorPassLogEntry[], right: VisitorPassLogEntry[]) {
   if (left.length !== right.length) return false;
   return left.every((log, index) => {
@@ -18647,6 +19068,18 @@ function visitorPassWhatsAppDetailLabel(visitorPass: VisitorPass) {
     return "Complete - Access Arranged";
   }
   return label.replace(/\s*-\s*Vehicle Registration:.*$/i, "") || "Not started";
+}
+
+function visitorPassWhatsAppAbuseCooldown(visitorPass: VisitorPass): { until: string; reason: string } | null {
+  if (!isRecord(visitorPass.source_metadata)) return null;
+  const until = stringPayload(visitorPass.source_metadata.whatsapp_abuse_muted_until);
+  if (!until) return null;
+  const timestamp = new Date(until).getTime();
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) return null;
+  return {
+    until,
+    reason: stringPayload(visitorPass.source_metadata.whatsapp_abuse_muted_reason)
+  };
 }
 
 function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: VisitorPass): {

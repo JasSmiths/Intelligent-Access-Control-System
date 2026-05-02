@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 import uuid
 
@@ -8,7 +9,8 @@ from app.models.enums import AccessDecision, AccessDirection
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.notifications.base import NotificationContext
 from app.services import leaderboard as leaderboard_module
-from app.services.leaderboard import KNOWN_TOP_STATE_KEY, LeaderboardService
+from app.services.leaderboard import KNOWN_TOP_STATE_KEY, LeaderboardService, _snapshot_payload
+from app.services.snapshots import access_event_snapshot_relative_path
 
 
 class FakeSessionContext:
@@ -89,6 +91,46 @@ def _leader(*, vehicle_id, person_id, registration_number="VIP123", read_count=3
             "color": "Silver",
             "display_name": "Silver Ford Transit",
         },
+    }
+
+
+def test_leaderboard_snapshot_payload_requires_existing_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    event_id = uuid.uuid4()
+    relative_path = access_event_snapshot_relative_path(event_id)
+
+    assert _snapshot_payload(
+        event_id=event_id,
+        captured_at=datetime(2026, 5, 2, 16, 30, tzinfo=UTC),
+        relative_path=relative_path,
+        byte_count=1200,
+        width=320,
+        height=180,
+        camera="camera.gate",
+    ) is None
+
+    snapshot_path = tmp_path / relative_path
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
+
+    payload = _snapshot_payload(
+        event_id=event_id,
+        captured_at=datetime(2026, 5, 2, 16, 30, tzinfo=UTC),
+        relative_path=relative_path,
+        byte_count=1200,
+        width=320,
+        height=180,
+        camera="camera.gate",
+    )
+
+    assert payload == {
+        "event_id": str(event_id),
+        "url": f"/api/v1/events/{event_id}/snapshot",
+        "captured_at": "2026-05-02T16:30:00+00:00",
+        "bytes": 1200,
+        "width": 320,
+        "height": 180,
+        "camera": "camera.gate",
     }
 
 

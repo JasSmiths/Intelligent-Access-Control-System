@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -19,6 +19,7 @@ from app.modules.notifications.base import NotificationContext
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
+from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
 
 logger = get_logger(__name__)
 
@@ -158,9 +159,31 @@ class LeaderboardService:
         count_expr = func.count(AccessEvent.id)
         first_seen_expr = func.min(AccessEvent.occurred_at)
         last_seen_expr = func.max(AccessEvent.occurred_at)
-        query = (
+        latest_snapshot_rank = (
             select(
-                AccessEvent.registration_number,
+                AccessEvent.registration_number.label("registration_number"),
+                AccessEvent.id.label("snapshot_event_id"),
+                AccessEvent.snapshot_captured_at.label("snapshot_captured_at"),
+                AccessEvent.snapshot_path.label("snapshot_path"),
+                AccessEvent.snapshot_bytes.label("snapshot_bytes"),
+                AccessEvent.snapshot_width.label("snapshot_width"),
+                AccessEvent.snapshot_height.label("snapshot_height"),
+                AccessEvent.snapshot_camera.label("snapshot_camera"),
+                func.row_number().over(
+                    partition_by=AccessEvent.registration_number,
+                    order_by=(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc()),
+                ).label("snapshot_rank"),
+            )
+            .where(
+                AccessEvent.vehicle_id.is_(None),
+                AccessEvent.decision == AccessDecision.DENIED,
+                AccessEvent.snapshot_path.is_not(None),
+            )
+            .subquery()
+        )
+        aggregate = (
+            select(
+                AccessEvent.registration_number.label("registration_number"),
                 count_expr.label("read_count"),
                 first_seen_expr.label("first_seen_at"),
                 last_seen_expr.label("last_seen_at"),
@@ -170,7 +193,34 @@ class LeaderboardService:
                 AccessEvent.decision == AccessDecision.DENIED,
             )
             .group_by(AccessEvent.registration_number)
-            .order_by(count_expr.desc(), last_seen_expr.desc(), AccessEvent.registration_number.asc())
+            .subquery()
+        )
+        query = (
+            select(
+                aggregate.c.registration_number,
+                aggregate.c.read_count,
+                aggregate.c.first_seen_at,
+                aggregate.c.last_seen_at,
+                latest_snapshot_rank.c.snapshot_event_id,
+                latest_snapshot_rank.c.snapshot_captured_at,
+                latest_snapshot_rank.c.snapshot_path,
+                latest_snapshot_rank.c.snapshot_bytes,
+                latest_snapshot_rank.c.snapshot_width,
+                latest_snapshot_rank.c.snapshot_height,
+                latest_snapshot_rank.c.snapshot_camera,
+            )
+            .outerjoin(
+                latest_snapshot_rank,
+                and_(
+                    latest_snapshot_rank.c.registration_number == aggregate.c.registration_number,
+                    latest_snapshot_rank.c.snapshot_rank == 1,
+                ),
+            )
+            .order_by(
+                aggregate.c.read_count.desc(),
+                aggregate.c.last_seen_at.desc(),
+                aggregate.c.registration_number.asc(),
+            )
             .limit(limit)
         )
         rows = (await session.execute(query)).all()
@@ -181,9 +231,30 @@ class LeaderboardService:
                 "read_count": int(read_count or 0),
                 "first_seen_at": _datetime_iso(first_seen_at),
                 "last_seen_at": _datetime_iso(last_seen_at),
+                "latest_snapshot": _snapshot_payload(
+                    event_id=snapshot_event_id,
+                    captured_at=snapshot_captured_at,
+                    relative_path=snapshot_path,
+                    byte_count=snapshot_bytes,
+                    width=snapshot_width,
+                    height=snapshot_height,
+                    camera=snapshot_camera,
+                ),
                 "dvla": {"status": "pending", "vehicle": None, "display_vehicle": None, "label": ""},
             }
-            for index, (registration_number, read_count, first_seen_at, last_seen_at)
+            for index, (
+                registration_number,
+                read_count,
+                first_seen_at,
+                last_seen_at,
+                snapshot_event_id,
+                snapshot_captured_at,
+                snapshot_path,
+                snapshot_bytes,
+                snapshot_width,
+                snapshot_height,
+                snapshot_camera,
+            )
             in enumerate(rows, start=1)
         ]
 
@@ -398,6 +469,29 @@ def _winner_name(leader: dict[str, Any] | None) -> str:
 
 def _datetime_iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _snapshot_payload(
+    *,
+    event_id: uuid.UUID | str | None,
+    captured_at: datetime | None,
+    relative_path: str | None,
+    byte_count: int | None,
+    width: int | None,
+    height: int | None,
+    camera: str | None,
+) -> dict[str, Any] | None:
+    if not event_id or not snapshot_path_available(relative_path):
+        return None
+    return {
+        "event_id": _uuid_text(event_id),
+        "url": access_event_snapshot_url(event_id),
+        "captured_at": _datetime_iso(captured_at),
+        "bytes": byte_count,
+        "width": width,
+        "height": height,
+        "camera": camera,
+    }
 
 
 def _uuid_text(value: uuid.UUID | str | None) -> str:
