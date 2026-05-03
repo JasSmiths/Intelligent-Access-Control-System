@@ -1,0 +1,128 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+from starlette.requests import Request
+
+from app.api.v1 import webhooks
+
+
+def make_json_request(payload: dict) -> Request:
+    body = json.dumps(payload).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/webhooks/ubiquiti/lpr",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+        },
+        receive,
+    )
+
+
+def alarm_payload(plate: str, zones: list[int] | list[str]) -> dict:
+    return {
+        "alarm": {
+            "name": "Home Assistant LPR",
+            "sources": [{"type": "include", "device": "942A6FD09D64"}],
+            "triggers": [
+                {
+                    "key": "license_plate_unknown",
+                    "group": {"name": plate},
+                    "value": plate,
+                    "zones": {"line": [], "zone": zones, "loiter": []},
+                    "device": "942A6FD09D64",
+                    "eventId": "event-1",
+                    "timestamp": 1777813142519,
+                }
+            ],
+            "eventPath": "/protect/events/event/event-1",
+        },
+        "timestamp": 1777813143285,
+    }
+
+
+class FakeLprTimingRecorder:
+    async def record_webhook_plate(self, _read):
+        return None
+
+
+class FakeUnifiPayloadRecorder:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def record_unifi_payload(self, payload, *, registration_number):
+        self.calls.append((payload, registration_number))
+
+
+class FakeAccessEventService:
+    def __init__(self) -> None:
+        self.enqueued = []
+
+    async def enqueue_plate_read(self, read):
+        self.enqueued.append(read)
+
+
+@pytest.fixture
+def webhook_runtime(monkeypatch):
+    published = []
+    visual_recorder = FakeUnifiPayloadRecorder()
+    presence_tracker = FakeUnifiPayloadRecorder()
+
+    async def runtime_config():
+        return SimpleNamespace(lpr_allowed_smart_zones=["default"])
+
+    async def publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(webhooks, "get_runtime_config", runtime_config)
+    monkeypatch.setattr(webhooks, "get_lpr_timing_recorder", lambda: FakeLprTimingRecorder())
+    monkeypatch.setattr(webhooks, "get_vehicle_visual_detection_recorder", lambda: visual_recorder)
+    monkeypatch.setattr(webhooks, "get_vehicle_presence_tracker", lambda: presence_tracker)
+    monkeypatch.setattr(webhooks.event_bus, "publish", publish)
+    monkeypatch.setattr(webhooks.telemetry, "record_span", lambda *_args, **_kwargs: None)
+
+    return SimpleNamespace(
+        presence_tracker=presence_tracker,
+        published=published,
+        visual_recorder=visual_recorder,
+    )
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_with_empty_smart_zone_evidence_is_accepted(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    result = await webhooks.receive_ubiquiti_lpr(make_json_request(alarm_payload("AGS7X", [])), service)
+
+    assert result == {"status": "accepted", "plate": "AGS7X"}
+    assert len(service.enqueued) == 1
+    smart_zone_evidence = service.enqueued[0].raw_payload[webhooks.SMART_ZONE_EVIDENCE_PAYLOAD_KEY]
+    assert smart_zone_evidence["smart_zones"] == []
+    assert smart_zone_evidence["smart_zone_evidence"]["present"] is True
+    assert smart_zone_evidence["smart_zone_evidence"]["explicit_empty"] is True
+    assert webhook_runtime.visual_recorder.calls
+    assert webhook_runtime.presence_tracker.calls
+    assert webhook_runtime.published == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_without_smart_zone_value_is_still_accepted(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    payload = {"registrationNumber": "AGS7X", "confidence": 99}
+    result = await webhooks.receive_ubiquiti_lpr(make_json_request(payload), service)
+
+    assert result == {"status": "accepted", "plate": "AGS7X"}
+    assert len(service.enqueued) == 1
+    smart_zone_evidence = service.enqueued[0].raw_payload[webhooks.SMART_ZONE_EVIDENCE_PAYLOAD_KEY]
+    assert smart_zone_evidence["smart_zones"] == []
+    assert smart_zone_evidence["smart_zone_evidence"]["present"] is False
+    assert smart_zone_evidence["smart_zone_evidence"]["explicit_empty"] is False
+    assert webhook_runtime.visual_recorder.calls
+    assert webhook_runtime.presence_tracker.calls

@@ -1,5 +1,6 @@
 import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -157,6 +158,26 @@ async def list_audit_logs(
     return {"items": [serialize_audit_log(row) for row in items], "next_cursor": next_cursor}
 
 
+@router.get("/storage")
+async def telemetry_storage(
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await telemetry.flush()
+    database_size_bytes = await _telemetry_database_size(session)
+    log_file_size_bytes, log_file_count = _log_directory_size()
+    artifact_size_bytes, artifact_file_count = _directory_size([settings.data_dir / "telemetry-artifacts"])
+    total_size_bytes = database_size_bytes + log_file_size_bytes + artifact_size_bytes
+    return {
+        "total_size_bytes": total_size_bytes,
+        "database_size_bytes": database_size_bytes,
+        "log_file_size_bytes": log_file_size_bytes,
+        "artifact_size_bytes": artifact_size_bytes,
+        "file_count": log_file_count + artifact_file_count,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
 @router.delete("/purge")
 async def purge_telemetry(
     _: User = Depends(admin_user),
@@ -262,6 +283,53 @@ def serialize_audit_log(row: AuditLog) -> dict[str, Any]:
 
 async def _row_count(session: AsyncSession, model: type) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def _telemetry_database_size(session: AsyncSession) -> int:
+    total = 0
+    for table_name in ("telemetry_traces", "telemetry_spans", "audit_logs"):
+        try:
+            total += int(
+                await session.scalar(
+                    text("SELECT COALESCE(pg_total_relation_size(to_regclass(:table_name)), 0)"),
+                    {"table_name": table_name},
+                )
+                or 0
+            )
+        except Exception:
+            await session.rollback()
+            return 0
+    return total
+
+
+def _log_directory_size() -> tuple[int, int]:
+    workspace_logs = settings.workspace_dir / "logs"
+    if workspace_logs.exists():
+        return _directory_size([workspace_logs])
+    return _directory_size([settings.log_dir])
+
+
+def _directory_size(paths: list[Path]) -> tuple[int, int]:
+    total_size = 0
+    file_count = 0
+    visited: set[Path] = set()
+    for root in paths:
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            continue
+        if resolved_root in visited or not resolved_root.exists():
+            continue
+        visited.add(resolved_root)
+        for path in resolved_root.rglob("*"):
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                total_size += path.stat().st_size
+                file_count += 1
+            except OSError:
+                continue
+    return total_size, file_count
 
 
 def _parse_cursor(cursor: str | None) -> tuple[datetime | None, str | None]:

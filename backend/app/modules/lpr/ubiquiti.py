@@ -175,23 +175,6 @@ def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) ->
     return _empty_plate_zone_evidence()
 
 
-def smart_zone_allowed(payload_zones: list[str], allowed_zones: list[str]) -> bool:
-    """Decide whether an LPR payload should participate in access control.
-
-    A read must carry explicit smart-zone evidence. An empty allowlist rejects
-    all reads; "*" accepts any explicit smart zone.
-    """
-
-    if not payload_zones:
-        return False
-    allowed = {_normalize_zone_name(zone) for zone in allowed_zones if _normalize_zone_name(zone)}
-    if not allowed:
-        return False
-    if "*" in allowed:
-        return True
-    return any(_normalize_zone_name(zone) in allowed for zone in payload_zones)
-
-
 def _normalize_key(key: str) -> str:
     return key.strip().lower().replace("-", "_")
 

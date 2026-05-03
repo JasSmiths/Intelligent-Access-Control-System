@@ -119,6 +119,18 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_last_fired_at ON notification_rules (last_fired_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_trigger_active_created ON notification_rules (trigger_event, is_active, created_at DESC)"))
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_notification_action_contexts_token_hash ON notification_action_contexts (token_hash)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_action ON notification_action_contexts (action)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_notify_service ON notification_action_contexts (notify_service)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_registration_number ON notification_action_contexts (registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_access_event_id ON notification_action_contexts (access_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_telemetry_trace_id ON notification_action_contexts (telemetry_trace_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_person_id ON notification_action_contexts (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_actor_user_id ON notification_action_contexts (actor_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_parent_context_id ON notification_action_contexts (parent_context_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_expires_at ON notification_action_contexts (expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_consumed_at ON notification_action_contexts (consumed_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_outcome ON notification_action_contexts (outcome)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_trigger_keys_gin ON automation_rules USING gin (trigger_keys)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_next_run ON automation_rules (is_active, next_run_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_created ON automation_rules (is_active, created_at DESC)"))
@@ -174,6 +186,105 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claimed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claim_token ON gate_malfunction_states (attempt_claim_token)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claimed_at ON gate_malfunction_states (attempt_claimed_at)"))
+            await conn.execute(text("ALTER TABLE gate_malfunction_notification_outbox ADD COLUMN IF NOT EXISTS stage VARCHAR(40) NOT NULL DEFAULT 'initial'"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_notification_outbox_stage ON gate_malfunction_notification_outbox (stage)"))
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE gate_malfunction_notification_outbox
+                    DROP CONSTRAINT IF EXISTS uq_gate_malfunction_notification_trigger
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    UPDATE gate_malfunction_notification_outbox
+                    SET stage = CASE trigger
+                        WHEN 'gate_malfunction_30m' THEN '30m'
+                        WHEN 'gate_malfunction_60m' THEN '60m'
+                        WHEN 'gate_malfunction_2hrs' THEN '2hrs'
+                        WHEN 'gate_malfunction_fubar' THEN 'fubar'
+                        ELSE COALESCE(NULLIF(stage, ''), 'initial')
+                    END,
+                    trigger = 'gate_malfunction'
+                    WHERE trigger LIKE 'gate_malfunction%'
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            id,
+                            row_number() OVER (
+                                PARTITION BY malfunction_id, stage
+                                ORDER BY occurred_at DESC, created_at DESC, id DESC
+                            ) AS rank
+                        FROM gate_malfunction_notification_outbox
+                    )
+                    DELETE FROM gate_malfunction_notification_outbox AS outbox
+                    USING ranked
+                    WHERE outbox.id = ranked.id
+                      AND ranked.rank > 1
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conname = 'uq_gate_malfunction_notification_stage'
+                            AND conrelid = 'gate_malfunction_notification_outbox'::regclass
+                        ) THEN
+                            ALTER TABLE gate_malfunction_notification_outbox
+                            ADD CONSTRAINT uq_gate_malfunction_notification_stage
+                            UNIQUE (malfunction_id, stage);
+                        END IF;
+                    EXCEPTION
+                        WHEN duplicate_object OR duplicate_table THEN NULL;
+                    END $$;
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    UPDATE notification_rules
+                    SET
+                        trigger_event = 'gate_malfunction',
+                        actions = (
+                            SELECT jsonb_agg(
+                                CASE
+                                    WHEN action ? 'gate_malfunction_stages' THEN action
+                                    ELSE jsonb_set(action, '{gate_malfunction_stages}', jsonb_build_array(
+                                        CASE notification_rules.trigger_event
+                                            WHEN 'gate_malfunction_30m' THEN '30m'
+                                            WHEN 'gate_malfunction_60m' THEN '60m'
+                                            WHEN 'gate_malfunction_2hrs' THEN '2hrs'
+                                            WHEN 'gate_malfunction_fubar' THEN 'fubar'
+                                            ELSE 'initial'
+                                        END
+                                    ))
+                                END
+                            )
+                            FROM jsonb_array_elements(actions) AS action
+                        )
+                    WHERE trigger_event IN (
+                        'gate_malfunction_initial',
+                        'gate_malfunction_30m',
+                        'gate_malfunction_60m',
+                        'gate_malfunction_2hrs',
+                        'gate_malfunction_fubar'
+                    )
+                    """
+                )
+            )
             await conn.execute(
                 text(
                     """

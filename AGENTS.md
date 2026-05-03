@@ -531,15 +531,11 @@ Current behavior:
   command is produced from LPR.
 - Accept Ubiquiti Alarm Manager test webhook payloads and publish
   `webhook.test.received` without creating an access event.
-- Ubiquiti LPR webhooks are filtered by the plate detection's own UniFi smart
-  zone before access processing. Only the selected Gate LPR smart zone in
-  `lpr_allowed_smart_zones` is allowed to enqueue a `PlateRead`; default is
-  `Default`. Numeric Alarm Manager zone IDs are resolved against the Gate LPR
-  camera's `smart_detect_zones`. Missing zone evidence or an explicit empty
-  `zones.zone` list is ignored. Ignored reads publish `plate_read.ignored` with
-  `reason="outside_lpr_smart_zone"` and never create access events, alerts,
-  notifications, visitor-pass matches, or gate commands.
-- Queue every accepted plate read.
+- Ubiquiti LPR webhook smart-zone evidence is diagnostic only. Numeric Alarm
+  Manager zone IDs may be resolved against the Gate LPR camera's
+  `smart_detect_zones` for telemetry, but missing, empty, or non-matching smart
+  zones must never block access processing. Queue every valid plate read unless
+  Maintenance Mode is active.
 - Record raw LPR timing diagnostics from Ubiquiti webhooks and UniFi Protect
   websocket/track probes in an in-memory feed exposed by
   `/api/v1/diagnostics/lpr-timing`.
@@ -629,7 +625,7 @@ Relevant dynamic settings:
 - `lpr_debounce_quiet_seconds`
 - `lpr_debounce_max_seconds`
 - `lpr_similarity_threshold`
-- `lpr_allowed_smart_zones`
+- `lpr_allowed_smart_zones` (legacy diagnostic only; not enforced)
 - `site_timezone`
 - `schedule_default_policy`
 

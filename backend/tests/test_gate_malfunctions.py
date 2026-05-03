@@ -5,7 +5,11 @@ import uuid
 import pytest
 
 from app.modules.gate.home_assistant import HomeAssistantGateController
-from app.models import GateMalfunctionState
+from app.models import (
+    GateMalfunctionNotificationOutbox,
+    GateMalfunctionState,
+    GateMalfunctionTimelineEvent,
+)
 from app.models.enums import GateMalfunctionStatus
 from app.modules.gate.base import GateState
 from app.services.gate_malfunctions import (
@@ -14,6 +18,7 @@ from app.services.gate_malfunctions import (
     GateSnapshot,
     active_stuck_open_malfunction_at,
 )
+from app.services.notifications import GATE_MALFUNCTION_EVENT_TYPE
 
 
 def test_gate_malfunction_retry_schedule_is_fixed() -> None:
@@ -83,6 +88,136 @@ class FakeScalarSequenceSession:
 
     async def scalar(self, _statement):
         return self._values.pop(0) if self._values else None
+
+
+class FakeAllResult:
+    def __init__(self, values) -> None:
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class FakeQueueSession:
+    def __init__(self, state) -> None:
+        self.state = state
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+    async def get(self, model, row_id, **_kwargs):
+        if model is GateMalfunctionState and row_id == self.state["row"].id:
+            return self.state["row"]
+        return None
+
+    async def scalar(self, _statement):
+        return None
+
+    async def scalars(self, _statement):
+        return FakeAllResult(self.state["timeline"])
+
+    def add(self, row) -> None:
+        if isinstance(row, GateMalfunctionNotificationOutbox):
+            if row.id is None:
+                row.id = uuid.uuid4()
+            self.state["outbox"].append(row)
+        elif isinstance(row, GateMalfunctionTimelineEvent):
+            if row.id is None:
+                row.id = uuid.uuid4()
+            self.state["timeline"].append(row)
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_queue_notification_writes_single_trigger_stage_outbox(monkeypatch) -> None:
+    service = GateMalfunctionService()
+    row_id = uuid.uuid4()
+    opened_at = datetime(2026, 4, 26, 7, 30, tzinfo=UTC)
+    state = {
+        "row": GateMalfunctionState(
+            id=row_id,
+            gate_entity_id="cover.top_gate",
+            gate_name="Top Gate",
+            status=GateMalfunctionStatus.ACTIVE,
+            opened_at=opened_at,
+            declared_at=opened_at + timedelta(minutes=5),
+        ),
+        "outbox": [],
+        "timeline": [],
+        "processed": [],
+        "published": [],
+    }
+
+    async def fake_process_notification(outbox_id):
+        state["processed"].append(outbox_id)
+
+    async def fake_publish(event_type, payload):
+        state["published"].append((event_type, payload))
+
+    monkeypatch.setattr("app.services.gate_malfunctions.AsyncSessionLocal", lambda: FakeQueueSession(state))
+    monkeypatch.setattr(service, "_process_notification_id", fake_process_notification)
+    monkeypatch.setattr("app.services.gate_malfunctions.event_bus.publish", fake_publish)
+
+    stages = [
+        ("initial", "Gate malfunction detected", "warning"),
+        ("30m", "Gate malfunction open for 30 minutes", "warning"),
+        ("60m", "Gate malfunction open for 60 minutes", "critical"),
+        ("2hrs", "Gate malfunction open for 2 hours", "critical"),
+        ("fubar", "Gate malfunction is FUBAR", "critical"),
+        ("resolved", "Gate malfunction resolved", "info"),
+    ]
+    for index, (stage, subject, severity) in enumerate(stages):
+        await service._queue_notification(
+            row_id,
+            stage,
+            subject,
+            severity,
+            opened_at + timedelta(minutes=index),
+        )
+
+    assert [row.trigger for row in state["outbox"]] == [GATE_MALFUNCTION_EVENT_TYPE] * len(stages)
+    assert [row.stage for row in state["outbox"]] == [stage for stage, _subject, _severity in stages]
+    assert [row.severity for row in state["outbox"]] == [severity for _stage, _subject, severity in stages]
+    assert [event.notification_trigger for event in state["timeline"]] == [
+        stage for stage, _subject, _severity in stages
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_previous_notification_only_counts_earlier_stages() -> None:
+    service = GateMalfunctionService()
+    malfunction_id = uuid.uuid4()
+
+    class SentStagesSession:
+        def __init__(self, stages) -> None:
+            self.stages = stages
+
+        async def scalars(self, _statement):
+            return FakeAllResult(self.stages)
+
+    assert await service._has_previous_stage_notification(
+        SentStagesSession(["initial"]),
+        malfunction_id,
+        "30m",
+    )
+    assert not await service._has_previous_stage_notification(
+        SentStagesSession(["30m"]),
+        malfunction_id,
+        "30m",
+    )
+    assert not await service._has_previous_stage_notification(
+        SentStagesSession(["resolved"]),
+        malfunction_id,
+        "fubar",
+    )
 
 
 @pytest.mark.asyncio

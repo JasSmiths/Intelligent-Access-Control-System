@@ -195,6 +195,24 @@ async def test_webhook_post_requires_signature_when_app_secret_configured(monkey
 
 
 @pytest.mark.asyncio
+async def test_webhook_post_rejects_enabled_whatsapp_without_app_secret(monkeypatch) -> None:
+    async def load_config():
+        return await async_enabled_config(app_secret="")
+
+    monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+    body = json.dumps({"entry": []}).encode()
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_whatsapp_webhook(
+            make_request("POST", "/api/v1/webhooks/whatsapp", body=body),
+            BackgroundTasks(),
+        )
+
+    assert exc.value.status_code == 401
+    assert "app secret" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
 async def test_webhook_post_accepts_valid_signature(monkeypatch) -> None:
     handled = {}
     async def load_config():
@@ -872,6 +890,88 @@ async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeyp
     assert parsed_confirm.pass_id == str(pass_id)
     assert parsed_confirm.nonce == "nonce123"
     assert parsed_change.decision == "change"
+
+
+@pytest.mark.asyncio
+async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) -> None:
+    service = get_whatsapp_messaging_service()
+    pass_id = uuid.uuid4()
+    visitor_pass = VisitorPass(
+        id=pass_id,
+        visitor_name="Sarah",
+        pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123",
+        expected_time=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        valid_from=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        valid_until=datetime(2026, 5, 1, 18, 0, tzinfo=UTC),
+        status=VisitorPassStatus.ACTIVE,
+        creation_source="ui",
+        source_metadata={
+            "whatsapp_pending_plate": "AB12CDE",
+            "whatsapp_pending_nonce": "nonce123",
+            "whatsapp_pending_vehicle_make": "Tesla",
+            "whatsapp_pending_vehicle_colour": "Silver",
+            "whatsapp_concierge_status": "visitor_replied",
+        },
+    )
+    visitor_pass.created_at = datetime(2026, 5, 1, 8, 0, tzinfo=UTC)
+    visitor_pass.updated_at = datetime(2026, 5, 1, 8, 0, tzinfo=UTC)
+    captured = {"published": [], "sent": []}
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, model, key):
+            assert model is VisitorPass
+            assert key == pass_id
+            return visitor_pass
+
+        async def commit(self):
+            captured["committed"] = True
+
+        async def refresh(self, row):
+            captured["refreshed"] = row.id
+
+        async def rollback(self):
+            captured["rolled_back"] = True
+
+    class VisitorPassService:
+        async def refresh_statuses(self, **_kwargs):
+            return []
+
+        async def update_visitor_plate(self, _session, pass_arg, **kwargs):
+            pass_arg.number_plate = "AB12CDE"
+            pass_arg.vehicle_make = kwargs.get("vehicle_make")
+            pass_arg.vehicle_colour = kwargs.get("vehicle_colour")
+            return pass_arg
+
+    async def publish(event, payload):
+        captured["published"].append((event, payload))
+
+    async def send_text(to, body, **_kwargs):
+        captured["sent"].append((to, body))
+
+    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(whatsapp_messaging, "get_visitor_pass_service", lambda: VisitorPassService())
+    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
+    monkeypatch.setattr(service, "send_text_message", send_text)
+
+    button = parse_visitor_pass_button_id(f"iacs:vp:confirm:{pass_id}:nonce123")
+    assert button is not None
+    await service._handle_visitor_button_reply(button, "447700900123", config=enabled_config())
+
+    assert [event for event, _payload in captured["published"]] == ["visitor_pass.updated", "visitor_pass.arranged"]
+    arranged_payload = captured["published"][1][1]["visitor_pass"]
+    assert arranged_payload["number_plate"] == "AB12CDE"
+    assert arranged_payload["vehicle_make"] == "Tesla"
+    assert arranged_payload["vehicle_colour"] == "Silver"
+    assert arranged_payload["source_metadata"]["whatsapp_concierge_status"] == "complete"
+    assert captured["published"][1][1]["source"] == "whatsapp_visitor"
+    assert captured["sent"][0][0] == "447700900123"
 
 
 def test_visitor_plate_saved_message_is_warm_and_vehicle_aware() -> None:
@@ -2431,7 +2531,7 @@ async def test_notification_action_delivers_to_dynamic_whatsapp_target(monkeypat
             "title": "Gate alert",
             "message": "Gate is open.",
         },
-        NotificationContext("gate_malfunction_initial", "Gate alert", "warning", {}),
+        NotificationContext("gate_malfunction", "Gate alert", "warning", {"malfunction_stage": "initial"}),
         variables={"AdminPhone": "+44 7700 900123"},
     )
 

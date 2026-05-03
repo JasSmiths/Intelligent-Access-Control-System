@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -82,6 +82,7 @@ ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
 MAX_SUPPRESSED_SESSION_READS = 20
+CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.85
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
@@ -697,11 +698,33 @@ class AccessEventService:
                 and match
                 and read.registration_number == resolution.registration_number
                 and read_gate_state != GateState.CLOSED
+                and not self._read_direction_conflicts_with_resolution(read, resolution.direction)
                 and resolution.first_seen <= read.captured_at <= resolution.gate_cycle_expires_at
             ):
                 continue
             return "exact_known_vehicle_plate_already_resolved_in_gate_cycle"
         return None
+
+    def _read_direction_hint(self, read: PlateRead) -> AccessDirection | None:
+        gate_state = self._coerce_gate_state(self._gate_observation_from_read(read).get("state"))
+        if gate_state in ARRIVAL_GATE_STATES:
+            return AccessDirection.ENTRY
+        if gate_state in DEPARTURE_GATE_STATES:
+            return AccessDirection.EXIT
+        explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
+        if explicit in {"entry", "enter", "arrival", "in"}:
+            return AccessDirection.ENTRY
+        if explicit in {"exit", "leave", "departure", "out"}:
+            return AccessDirection.EXIT
+        return None
+
+    def _read_direction_conflicts_with_resolution(
+        self,
+        read: PlateRead,
+        direction: AccessDirection | None,
+    ) -> bool:
+        hint = self._read_direction_hint(read)
+        return bool(direction and hint and hint != direction)
 
     def _prune_recent_exact_resolutions(self, now: datetime) -> None:
         self._recent_exact_resolutions = [
@@ -763,6 +786,8 @@ class AccessEventService:
         for session in sorted(self._active_vehicle_sessions, key=lambda item: item.last_seen_at, reverse=True):
             matched_by = self._vehicle_session_match(session, context, read)
             if not matched_by:
+                continue
+            if self._read_is_departure_after_entry_session(read, session):
                 continue
             evidence = await self._vehicle_session_presence_evidence(session, context, read, idle_seconds)
             if read.captured_at <= session.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
@@ -865,6 +890,8 @@ class AccessEventService:
             matched_by = self._vehicle_session_match(candidate, context, read)
             if not matched_by:
                 continue
+            if self._read_is_departure_after_entry_session(read, candidate):
+                continue
             evidence = await self._vehicle_session_presence_evidence(candidate, context, read, idle_seconds)
             if read.captured_at <= candidate.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
                 self._upsert_active_vehicle_session(candidate)
@@ -875,6 +902,13 @@ class AccessEventService:
                     evidence=evidence,
                 )
         return None
+
+    def _read_is_departure_after_entry_session(
+        self,
+        read: PlateRead,
+        session: ActiveVehicleSession,
+    ) -> bool:
+        return session.direction == AccessDirection.ENTRY and self._read_direction_hint(read) == AccessDirection.EXIT
 
     async def _annotate_suppressed_session_read(
         self,
@@ -2469,18 +2503,26 @@ class AccessEventService:
             return AccessDirection.EXIT, resolution
 
         gate_malfunction = _gate_malfunction_from_read(read)
-        if gate_malfunction and vehicle:
-            previous_event = await self._latest_live_vehicle_event(session, vehicle, read.captured_at)
+        if gate_malfunction and (person or vehicle):
+            previous_event = await self._latest_live_person_or_vehicle_event(
+                session,
+                person=person,
+                vehicle=vehicle,
+                before=read.captured_at,
+            )
             direction = (
                 AccessDirection.EXIT
                 if previous_event and previous_event.direction == AccessDirection.ENTRY
                 else AccessDirection.ENTRY
             )
+            match_scope = self._previous_event_match_scope(previous_event, person=person, vehicle=vehicle)
             resolution.update(
                 {
                     "source": "gate_malfunction_vehicle_history",
                     "direction": direction.value,
                     "gate_malfunction": gate_malfunction,
+                    "history_lookup": "person_or_vehicle",
+                    "previous_live_match_scope": match_scope,
                     "previous_live_event_id": str(previous_event.id) if previous_event else None,
                     "previous_live_direction": previous_event.direction.value if previous_event else None,
                     "previous_live_event_at": previous_event.occurred_at.isoformat() if previous_event else None,
@@ -2501,9 +2543,12 @@ class AccessEventService:
                 resolution["camera_tiebreaker"] = camera_decision
                 camera_direction = camera_decision.get("direction")
                 if camera_direction in {AccessDirection.ENTRY.value, AccessDirection.EXIT.value}:
-                    direction = AccessDirection(camera_direction)
-                    resolution["source"] = "camera_tiebreaker"
-                    resolution["direction"] = direction.value
+                    if self._camera_tiebreaker_is_clear(camera_decision):
+                        direction = AccessDirection(camera_direction)
+                        resolution["source"] = "camera_tiebreaker"
+                        resolution["direction"] = direction.value
+                    else:
+                        resolution["camera_tiebreaker_ignored_reason"] = "low_confidence"
             return direction, resolution
 
         if gate_state in DEPARTURE_GATE_STATES:
@@ -2537,17 +2582,43 @@ class AccessEventService:
         presence = await session.get(Presence, person.id)
         return bool(presence and presence.state == PresenceState.PRESENT)
 
+    def _camera_tiebreaker_is_clear(self, camera_decision: dict[str, Any]) -> bool:
+        confidence = self._coerce_confidence(camera_decision.get("confidence"))
+        return confidence is not None and confidence >= CAMERA_TIEBREAKER_MIN_CONFIDENCE
+
     async def _latest_live_vehicle_event(
         self,
         session: AsyncSession,
         vehicle: Vehicle,
         before: datetime,
     ) -> AccessEvent | None:
+        return await self._latest_live_person_or_vehicle_event(
+            session,
+            person=None,
+            vehicle=vehicle,
+            before=before,
+        )
+
+    async def _latest_live_person_or_vehicle_event(
+        self,
+        session: AsyncSession,
+        *,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        before: datetime,
+    ) -> AccessEvent | None:
+        identity_filters = []
+        if person and getattr(person, "id", None):
+            identity_filters.append(AccessEvent.person_id == person.id)
+        if vehicle and getattr(vehicle, "id", None):
+            identity_filters.append(AccessEvent.vehicle_id == vehicle.id)
+        if not identity_filters:
+            return None
         rows = (
             await session.scalars(
                 select(AccessEvent)
                 .where(
-                    AccessEvent.vehicle_id == vehicle.id,
+                    or_(*identity_filters),
                     AccessEvent.decision == AccessDecision.GRANTED,
                     AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
                     AccessEvent.occurred_at < before,
@@ -2557,6 +2628,30 @@ class AccessEventService:
             )
         ).all()
         return next((event for event in rows if not self._access_event_is_backfilled(event)), None)
+
+    def _previous_event_match_scope(
+        self,
+        event: AccessEvent | None,
+        *,
+        person: Person | None,
+        vehicle: Vehicle | None,
+    ) -> str | None:
+        if not event:
+            return None
+        scopes = []
+        if person and getattr(event, "person_id", None) == getattr(person, "id", None):
+            scopes.append("person")
+        if vehicle and getattr(event, "vehicle_id", None) == getattr(vehicle, "id", None):
+            scopes.append("vehicle")
+        if scopes:
+            return "+".join(scopes)
+        if person and vehicle:
+            return "person_or_vehicle"
+        if person:
+            return "person"
+        if vehicle:
+            return "vehicle"
+        return None
 
     def _access_event_is_backfilled(self, event: AccessEvent) -> bool:
         if "backfill" in str(event.source or "").casefold():

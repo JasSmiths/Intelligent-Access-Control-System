@@ -422,7 +422,7 @@ class GateMalfunctionTimelineEvent(Base, TimestampMixin):
 class GateMalfunctionNotificationOutbox(Base, TimestampMixin):
     __tablename__ = "gate_malfunction_notification_outbox"
     __table_args__ = (
-        UniqueConstraint("malfunction_id", "trigger", name="uq_gate_malfunction_notification_trigger"),
+        UniqueConstraint("malfunction_id", "stage", name="uq_gate_malfunction_notification_stage"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -430,6 +430,7 @@ class GateMalfunctionNotificationOutbox(Base, TimestampMixin):
         ForeignKey("gate_malfunction_states.id", ondelete="CASCADE"), nullable=False, index=True
     )
     trigger: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(40), nullable=False, default="initial", index=True)
     subject: Mapped[str] = mapped_column(String(240), nullable=False)
     severity: Mapped[str] = mapped_column(String(40), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -474,6 +475,48 @@ Index(
     NotificationRule.is_active,
     NotificationRule.created_at.desc(),
 )
+
+
+class NotificationActionContext(Base, TimestampMixin):
+    __tablename__ = "notification_action_contexts"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="ux_notification_action_contexts_token_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    notify_service: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"), index=True
+    )
+    telemetry_trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    parent_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("notification_action_contexts.id", ondelete="SET NULL"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    outcome: Mapped[str | None] = mapped_column(String(80), index=True)
+    outcome_detail: Mapped[str | None] = mapped_column(Text)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    person: Mapped[Person | None] = relationship(foreign_keys=[person_id])
+    actor_user: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
+    access_event: Mapped["AccessEvent | None"] = relationship(
+        "AccessEvent",
+        foreign_keys=[access_event_id],
+    )
+    parent_context: Mapped["NotificationActionContext | None"] = relationship(
+        remote_side=[id],
+        foreign_keys=[parent_context_id],
+    )
 
 
 class AutomationRule(Base, TimestampMixin):

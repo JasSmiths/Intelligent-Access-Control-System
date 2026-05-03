@@ -1361,6 +1361,7 @@ class WhatsAppMessagingService:
 
             pending_vehicle_make = visitor_vehicle_metadata_text(metadata.get("whatsapp_pending_vehicle_make"))
             pending_vehicle_colour = visitor_vehicle_metadata_text(metadata.get("whatsapp_pending_vehicle_colour"))
+            should_publish_arranged = not normalize_registration_number(visitor_pass.number_plate)
             try:
                 await service.update_visitor_plate(
                     session,
@@ -1396,6 +1397,8 @@ class WhatsAppMessagingService:
             await session.refresh(visitor_pass)
             payload = serialize_visitor_pass(visitor_pass)
         await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
+        if should_publish_arranged:
+            await event_bus.publish("visitor_pass.arranged", {"visitor_pass": payload, "source": "whatsapp_visitor"})
         await self.send_text_message(
             sender,
             visitor_plate_saved_message(
@@ -1963,6 +1966,7 @@ class WhatsAppMessagingService:
             vehicle_lookup = await self._lookup_visitor_vehicle_details(new_plate)
             if not visitor_vehicle_lookup_found(vehicle_lookup):
                 return {"updated": False, "error": "Vehicle registration could not be found. Please check it and try again."}
+            should_publish_arranged = not normalize_registration_number(visitor_pass.number_plate)
             await get_visitor_pass_service().update_visitor_plate(
                 session,
                 visitor_pass,
@@ -1972,10 +1976,23 @@ class WhatsAppMessagingService:
                 actor="Visitor Concierge",
                 metadata={"source": "whatsapp", "phone": masked_phone_number(phone)},
             )
+            visitor_pass.source_metadata = {
+                key: value
+                for key, value in {
+                    **(visitor_pass.source_metadata or {}),
+                    "whatsapp_last_confirmed_at": datetime.now(tz=UTC).isoformat(),
+                    "whatsapp_concierge_status": "complete",
+                    "whatsapp_concierge_status_detail": "Vehicle registration confirmed by visitor.",
+                    "whatsapp_status_updated_at": datetime.now(tz=UTC).isoformat(),
+                }.items()
+                if value is not None
+            }
             await session.commit()
             await session.refresh(visitor_pass)
             payload = serialize_visitor_pass(visitor_pass)
         await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "whatsapp_visitor"})
+        if should_publish_arranged:
+            await event_bus.publish("visitor_pass.arranged", {"visitor_pass": payload, "source": "whatsapp_visitor"})
         return {"updated": True, "visitor_pass": payload}
 
     async def _handle_visitor_timeframe_change(

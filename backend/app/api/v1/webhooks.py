@@ -6,11 +6,11 @@ from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
 
 from app.core.logging import get_logger
+from app.modules.lpr.base import PlateRead
 from app.modules.lpr.ubiquiti import (
     UbiquitiLprAdapter,
     UbiquitiLprPayload,
     extract_plate_smart_zone_evidence,
-    smart_zone_allowed,
 )
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.access_events import AccessEventService, get_access_event_service
@@ -27,6 +27,8 @@ from app.services.whatsapp_messaging import get_whatsapp_messaging_service, load
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+SMART_ZONE_EVIDENCE_PAYLOAD_KEY = "_iacs_smart_zone_evidence"
 
 
 @router.get("/whatsapp", response_class=PlainTextResponse)
@@ -67,6 +69,12 @@ async def receive_whatsapp_webhook(
     signature_header = request.headers.get("x-hub-signature-256")
     signature_verified = False
     unsigned_allowed = False
+    if config.enabled and not config.app_secret:
+        logger.warning("whatsapp_webhook_signature_secret_missing")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="WhatsApp app secret is required before incoming webhooks can be accepted.",
+        )
     if config.app_secret:
         signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
         if not signature_verified:
@@ -188,31 +196,16 @@ async def receive_ubiquiti_lpr(
         except UnifiProtectError as exc:
             zone_resolution_error = str(exc)
     runtime = await get_runtime_config()
-    if zone_evidence.explicit_empty or not smart_zone_allowed(smart_zones, runtime.lpr_allowed_smart_zones):
-        detail = {
-            "registration_number": read.registration_number,
-            "smart_zones": smart_zones,
-            "raw_smart_zones": raw_smart_zones,
-            "allowed_smart_zones": runtime.lpr_allowed_smart_zones,
-            "smart_zone_evidence": {
-                "present": zone_evidence.present,
-                "explicit_empty": zone_evidence.explicit_empty,
-                "source": zone_evidence.source,
-                "camera_identifier": zone_evidence.camera_identifier,
-                "camera_id": zone_resolution.get("camera_id"),
-                "camera_name": zone_resolution.get("camera_name"),
-                "resolution_error": zone_resolution_error,
-            },
-            "reason": "outside_lpr_smart_zone",
-        }
-        logger.info("ubiquiti_lpr_read_ignored_outside_smart_zone", extra=detail)
-        await event_bus.publish("plate_read.ignored", detail)
-        telemetry.record_span(
-            "Webhook payload ignored outside LPR smart zone",
-            category=TELEMETRY_CATEGORY_WEBHOOKS_API,
-            output_payload=detail,
-        )
-        return {"status": "ignored", "plate": read.registration_number, "reason": "outside_lpr_smart_zone"}
+    zone_evidence_detail = _smart_zone_evidence_detail(
+        read,
+        smart_zones=smart_zones,
+        raw_smart_zones=raw_smart_zones,
+        configured_smart_zones=runtime.lpr_allowed_smart_zones,
+        zone_evidence=zone_evidence,
+        zone_resolution=zone_resolution,
+        zone_resolution_error=zone_resolution_error,
+    )
+    read = _read_with_smart_zone_evidence_metadata(read, zone_evidence_detail)
 
     await get_vehicle_visual_detection_recorder().record_unifi_payload(
         raw_payload,
@@ -231,16 +224,67 @@ async def receive_ubiquiti_lpr(
             "source": read.source,
             "smart_zones": smart_zones,
             "raw_smart_zones": raw_smart_zones,
+            "configured_smart_zones": runtime.lpr_allowed_smart_zones,
             "smart_zone_evidence": {
+                "present": zone_evidence.present,
+                "explicit_empty": zone_evidence.explicit_empty,
                 "source": zone_evidence.source,
                 "camera_identifier": zone_evidence.camera_identifier,
                 "camera_id": zone_resolution.get("camera_id"),
                 "camera_name": zone_resolution.get("camera_name"),
+                "resolution_error": zone_resolution_error,
             },
         },
     )
     await service.enqueue_plate_read(read)
     return {"status": "accepted", "plate": read.registration_number}
+
+
+def _smart_zone_evidence_detail(
+    read: PlateRead,
+    *,
+    smart_zones: list[str],
+    raw_smart_zones: list[str],
+    configured_smart_zones: list[str],
+    zone_evidence: Any,
+    zone_resolution: dict[str, Any],
+    zone_resolution_error: str,
+) -> dict[str, Any]:
+    return {
+        "registration_number": read.registration_number,
+        "smart_zones": smart_zones,
+        "raw_smart_zones": raw_smart_zones,
+        "configured_smart_zones": configured_smart_zones,
+        "smart_zone_evidence": {
+            "present": zone_evidence.present,
+            "explicit_empty": zone_evidence.explicit_empty,
+            "source": zone_evidence.source,
+            "camera_identifier": zone_evidence.camera_identifier,
+            "camera_id": zone_resolution.get("camera_id"),
+            "camera_name": zone_resolution.get("camera_name"),
+            "resolution_error": zone_resolution_error,
+        },
+    }
+
+
+def _read_with_smart_zone_evidence_metadata(
+    read: PlateRead,
+    detail: dict[str, Any],
+) -> PlateRead:
+    raw_payload = dict(read.raw_payload or {})
+    raw_payload[SMART_ZONE_EVIDENCE_PAYLOAD_KEY] = {
+        "smart_zones": detail.get("smart_zones") or [],
+        "raw_smart_zones": detail.get("raw_smart_zones") or [],
+        "configured_smart_zones": detail.get("configured_smart_zones") or [],
+        "smart_zone_evidence": detail.get("smart_zone_evidence") or {},
+    }
+    return PlateRead(
+        registration_number=read.registration_number,
+        confidence=read.confidence,
+        source=read.source,
+        captured_at=read.captured_at,
+        raw_payload=raw_payload,
+    )
 
 
 def _payload_shape(value: Any, depth: int = 0) -> Any:

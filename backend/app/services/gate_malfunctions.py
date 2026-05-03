@@ -31,7 +31,11 @@ from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
-from app.services.notifications import get_notification_service
+from app.services.notifications import (
+    GATE_MALFUNCTION_EVENT_TYPE,
+    GATE_MALFUNCTION_STAGE_LABELS,
+    get_notification_service,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_GATE_MALFUNCTION,
     sanitize_payload,
@@ -50,10 +54,18 @@ ATTEMPT_OFFSETS_SECONDS = {
     5: 190 * 60 + 45,
 }
 MILESTONE_TRIGGERS = [
-    (30 * 60, "gate_malfunction_30m", "Gate malfunction open for 30 minutes", "warning"),
-    (60 * 60, "gate_malfunction_60m", "Gate malfunction open for 60 minutes", "critical"),
-    (120 * 60, "gate_malfunction_2hrs", "Gate malfunction open for 2 hours", "critical"),
+    (30 * 60, "30m", "Gate malfunction open for 30 minutes", "warning"),
+    (60 * 60, "60m", "Gate malfunction open for 60 minutes", "critical"),
+    (120 * 60, "2hrs", "Gate malfunction open for 2 hours", "critical"),
 ]
+MALFUNCTION_STAGE_ORDER = {
+    "initial": 0,
+    "30m": 1,
+    "60m": 2,
+    "2hrs": 3,
+    "fubar": 4,
+    "resolved": 5,
+}
 UNSAFE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 UNRESOLVED_STATUSES = {GateMalfunctionStatus.ACTIVE, GateMalfunctionStatus.FUBAR}
 NOTIFICATION_TERMINAL_STATUSES = {"sent", "skipped"}
@@ -300,6 +312,7 @@ class GateMalfunctionService:
             return await self._execute_attempt_for_id(row_id, actor=actor, reason=reason, manual=True)
 
         queue_fubar_notification = False
+        queue_resolved_notification = False
         async with AsyncSessionLocal() as session:
             row = await session.scalar(
                 select(GateMalfunctionState)
@@ -320,6 +333,7 @@ class GateMalfunctionService:
                     reason=f"Manual override by {actor}: {reason}",
                     snapshot=None,
                 )
+                queue_resolved_notification = True
             else:
                 if row.status != GateMalfunctionStatus.ACTIVE:
                     return {
@@ -337,10 +351,19 @@ class GateMalfunctionService:
             payload = await self._serialize_malfunction(session, row, include_timeline=True)
 
         await event_bus.publish("gate_malfunction.updated", payload)
+        if queue_resolved_notification:
+            await event_bus.publish("gate_malfunction.resolved", payload)
+            await self._queue_notification(
+                row_id,
+                "resolved",
+                "Gate malfunction resolved",
+                "info",
+                now,
+            )
         if queue_fubar_notification:
             await self._queue_notification(
                 row_id,
-                "gate_malfunction_fubar",
+                "fubar",
                 "Gate malfunction is FUBAR",
                 "critical",
                 now,
@@ -458,6 +481,13 @@ class GateMalfunctionService:
                     if not opened_long_enough:
                         await event_bus.publish("gate_malfunction.resolved", resolved_payload)
                         await event_bus.publish("gate_malfunction.updated", resolved_payload)
+                        await self._queue_notification(
+                            existing.id,
+                            "resolved",
+                            "Gate malfunction resolved",
+                            "info",
+                            reopened_at,
+                        )
                         return
                 else:
                     existing.last_gate_state = snapshot.state.value
@@ -471,6 +501,13 @@ class GateMalfunctionService:
             if existing and resolved_payload is not None:
                 await event_bus.publish("gate_malfunction.resolved", resolved_payload)
                 await event_bus.publish("gate_malfunction.updated", resolved_payload)
+                await self._queue_notification(
+                    existing.id,
+                    "resolved",
+                    "Gate malfunction resolved",
+                    "info",
+                    reopened_at or now,
+                )
 
             duplicate = await session.scalar(
                 select(GateMalfunctionState.id).where(
@@ -531,7 +568,7 @@ class GateMalfunctionService:
         await event_bus.publish("gate_malfunction.updated", payload)
         await self._queue_notification(
             row_id,
-            "gate_malfunction_initial",
+            "initial",
             "Gate malfunction detected",
             "warning",
             now,
@@ -800,6 +837,13 @@ class GateMalfunctionService:
 
         await event_bus.publish("gate_malfunction.resolved", payload)
         await event_bus.publish("gate_malfunction.updated", payload)
+        await self._queue_notification(
+            malfunction_id,
+            "resolved",
+            "Gate malfunction resolved",
+            "info",
+            datetime.now(tz=UTC),
+        )
         return {"changed": True, "malfunction": payload}
 
     async def _finalize_claimed_attempt(
@@ -872,7 +916,7 @@ class GateMalfunctionService:
         if payload["status"] == GateMalfunctionStatus.FUBAR.value:
             await self._queue_notification(
                 malfunction_id,
-                "gate_malfunction_fubar",
+                "fubar",
                 "Gate malfunction is FUBAR",
                 "critical",
                 datetime.now(tz=UTC),
@@ -897,16 +941,16 @@ class GateMalfunctionService:
                     if event.notification_trigger
                 }
                 candidates = [
-                    (trigger, subject, severity)
-                    for seconds, trigger, subject, severity in MILESTONE_TRIGGERS
-                    if elapsed >= seconds and trigger not in already
+                    (stage, subject, severity)
+                    for seconds, stage, subject, severity in MILESTONE_TRIGGERS
+                    if elapsed >= seconds and stage not in already
                 ]
                 if candidates:
-                    trigger, subject, severity = candidates[-1]
-                    due.append((row.id, trigger, subject, severity, now))
+                    stage, subject, severity = candidates[-1]
+                    due.append((row.id, stage, subject, severity, now))
 
-        for malfunction_id, trigger, subject, severity, occurred_at in due:
-            await self._queue_notification(malfunction_id, trigger, subject, severity, occurred_at)
+        for malfunction_id, stage, subject, severity, occurred_at in due:
+            await self._queue_notification(malfunction_id, stage, subject, severity, occurred_at)
 
     async def _resolve_for_closed_gate(self, snapshot: GateSnapshot, *, reason: str) -> None:
         async with AsyncSessionLocal() as session:
@@ -932,6 +976,15 @@ class GateMalfunctionService:
         for payload in payloads:
             await event_bus.publish("gate_malfunction.resolved", payload)
             await event_bus.publish("gate_malfunction.updated", payload)
+            malfunction_id = self._coerce_uuid(payload.get("id"))
+            if malfunction_id:
+                await self._queue_notification(
+                    malfunction_id,
+                    "resolved",
+                    "Gate malfunction resolved",
+                    "info",
+                    now,
+                )
 
     async def _mark_resolved(
         self,
@@ -994,11 +1047,12 @@ class GateMalfunctionService:
     async def _queue_notification(
         self,
         malfunction_id: uuid.UUID,
-        trigger: str,
+        stage: str,
         subject: str,
         severity: str,
         occurred_at: datetime,
     ) -> None:
+        normalized_stage = self._normalize_notification_stage(stage)
         outbox_id: uuid.UUID | None = None
         async with AsyncSessionLocal() as session:
             row = await session.get(GateMalfunctionState, malfunction_id)
@@ -1007,7 +1061,7 @@ class GateMalfunctionService:
             outbox = await session.scalar(
                 select(GateMalfunctionNotificationOutbox).where(
                     GateMalfunctionNotificationOutbox.malfunction_id == row.id,
-                    GateMalfunctionNotificationOutbox.trigger == trigger,
+                    GateMalfunctionNotificationOutbox.stage == normalized_stage,
                 )
             )
             if outbox and outbox.status in NOTIFICATION_TERMINAL_STATUSES:
@@ -1015,7 +1069,8 @@ class GateMalfunctionService:
             if outbox is None:
                 outbox = GateMalfunctionNotificationOutbox(
                     malfunction_id=row.id,
-                    trigger=trigger,
+                    trigger=GATE_MALFUNCTION_EVENT_TYPE,
+                    stage=normalized_stage,
                     subject=subject,
                     severity=severity,
                     occurred_at=occurred_at,
@@ -1029,18 +1084,22 @@ class GateMalfunctionService:
                     kind="notification_requested",
                     occurred_at=occurred_at,
                     title=f"{subject} notification queued",
-                    details={"trigger": trigger, "severity": severity},
-                    notification_trigger=trigger,
+                    details={"trigger": GATE_MALFUNCTION_EVENT_TYPE, "stage": normalized_stage, "severity": severity},
+                    notification_trigger=normalized_stage,
                 )
                 await self._update_trace(session, row)
             elif outbox.status == "failed" and (
                 outbox.next_retry_at is None or outbox.next_retry_at <= datetime.now(tz=UTC)
             ):
                 outbox.status = "pending"
+                outbox.trigger = GATE_MALFUNCTION_EVENT_TYPE
+                outbox.stage = normalized_stage
                 outbox.subject = subject
                 outbox.severity = severity
                 outbox.next_retry_at = datetime.now(tz=UTC)
             else:
+                outbox.trigger = GATE_MALFUNCTION_EVENT_TYPE
+                outbox.stage = normalized_stage
                 outbox.subject = subject
                 outbox.severity = severity
             try:
@@ -1127,8 +1186,13 @@ class GateMalfunctionService:
             outbox.attempts_count += 1
             outbox.last_attempt_at = now
             outbox.next_retry_at = None
-            facts = await self._notification_facts(session, row, occurred_at=outbox.occurred_at)
-            event_type = outbox.trigger
+            facts = await self._notification_facts(
+                session,
+                row,
+                occurred_at=outbox.occurred_at,
+                stage=outbox.stage,
+            )
+            event_type = GATE_MALFUNCTION_EVENT_TYPE
             subject = outbox.subject
             severity = outbox.severity
             await session.commit()
@@ -1180,6 +1244,7 @@ class GateMalfunctionService:
         if malfunction_id is None:
             return
         trigger = str(payload.get("event_type") or "")
+        stage = self._normalize_notification_stage(payload.get("malfunction_stage"))
         async with AsyncSessionLocal() as session:
             row = await session.get(GateMalfunctionState, malfunction_id)
             if not row:
@@ -1189,7 +1254,7 @@ class GateMalfunctionService:
                     select(GateMalfunctionNotificationOutbox)
                     .where(
                         GateMalfunctionNotificationOutbox.malfunction_id == row.id,
-                        GateMalfunctionNotificationOutbox.trigger == trigger,
+                        GateMalfunctionNotificationOutbox.stage == stage,
                     )
                     .with_for_update()
                 )
@@ -1228,12 +1293,13 @@ class GateMalfunctionService:
                 details={
                     "rule_name": payload.get("rule_name"),
                     "event_type": payload.get("event_type"),
+                    "stage": stage,
                     "channel": channel,
                     "delivered": payload.get("delivered"),
                     "reason": payload.get("reason"),
                     "error": payload.get("error"),
                 },
-                notification_trigger=str(payload.get("event_type") or ""),
+                notification_trigger=stage,
                 notification_channel=channel,
                 status="error" if event_type == "notification.failed" else "ok",
             )
@@ -1388,12 +1454,18 @@ class GateMalfunctionService:
         row: GateMalfunctionState,
         *,
         occurred_at: datetime,
+        stage: str,
     ) -> dict[str, str]:
         last_known_vehicle = await self._last_known_vehicle_label(session, row.last_known_vehicle_event_id)
         resolution_time = row.resolved_at or row.fubar_at
+        normalized_stage = self._normalize_notification_stage(stage)
+        previous_sent = await self._has_previous_stage_notification(session, row.id, normalized_stage)
         return {
             "message": self._trace_summary(row),
             "malfunction_id": str(row.id),
+            "malfunction_stage": normalized_stage,
+            "malfunction_stage_label": GATE_MALFUNCTION_STAGE_LABELS.get(normalized_stage, normalized_stage),
+            "malfunction_has_previous_notification": "true" if previous_sent else "false",
             "telemetry_trace_id": str(row.telemetry_trace_id or ""),
             "malfunction_duration": self._format_duration(self._downtime_seconds(row, now=occurred_at)),
             "malfunction_opened_time": row.opened_at.isoformat(),
@@ -1401,6 +1473,7 @@ class GateMalfunctionService:
             "malfunction_fix_attempts": str(row.fix_attempts_count),
             "malfunction_resolution_time": resolution_time.isoformat() if resolution_time else "",
             "last_known_vehicle": last_known_vehicle,
+            "gate_name": row.gate_name or "",
             "gate_status": row.last_gate_state or "",
             "entity_id": row.gate_entity_id,
             "occurred_at": occurred_at.isoformat(),
@@ -1512,6 +1585,31 @@ class GateMalfunctionService:
         if minutes:
             return f"{minutes}m {seconds}s"
         return f"{seconds}s"
+
+    async def _has_previous_stage_notification(
+        self,
+        session,
+        malfunction_id: uuid.UUID,
+        stage: str,
+    ) -> bool:
+        current_order = MALFUNCTION_STAGE_ORDER.get(self._normalize_notification_stage(stage), 0)
+        rows = (
+            await session.scalars(
+                select(GateMalfunctionNotificationOutbox.stage)
+                .where(
+                    GateMalfunctionNotificationOutbox.malfunction_id == malfunction_id,
+                    GateMalfunctionNotificationOutbox.status == "sent",
+                )
+            )
+        ).all()
+        return any(
+            MALFUNCTION_STAGE_ORDER.get(self._normalize_notification_stage(row_stage), 999) < current_order
+            for row_stage in rows
+        )
+
+    def _normalize_notification_stage(self, value: Any) -> str:
+        stage = str(value or "").strip().lower()
+        return stage if stage in MALFUNCTION_STAGE_ORDER else "initial"
 
     def _coerce_gate_state(self, value: Any) -> GateState:
         return _coerce_gate_state_value(value)

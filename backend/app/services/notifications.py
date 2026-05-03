@@ -1,3 +1,4 @@
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -8,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRule, Person, Presence, Schedule
@@ -29,6 +31,10 @@ from app.modules.notifications.base import (
     NotificationContext,
     NotificationDeliveryError,
 )
+from app.services.actionable_notifications import (
+    GATE_OPEN_ACTION,
+    get_actionable_notification_service,
+)
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.notification_snapshots import (
@@ -41,7 +47,11 @@ from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.unifi_protect import get_unifi_protect_service
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service, visitor_pass_timeframe_button_id
+from app.services.whatsapp_messaging import (
+    get_whatsapp_messaging_service,
+    visitor_pass_timeframe_button_id,
+    visitor_window_label_from_values,
+)
 
 logger = get_logger(__name__)
 
@@ -51,6 +61,37 @@ HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID = "input_boolean.announcements"
 VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE = (
     "Voice Notification suppressed: `input_boolean.announcements` is disabled."
 )
+GATE_MALFUNCTION_EVENT_TYPE = "gate_malfunction"
+LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES = {
+    "gate_malfunction_initial": "initial",
+    "gate_malfunction_30m": "30m",
+    "gate_malfunction_60m": "60m",
+    "gate_malfunction_2hrs": "2hrs",
+    "gate_malfunction_fubar": "fubar",
+}
+GATE_MALFUNCTION_STAGE_LABELS = {
+    "initial": "Initial malfunction",
+    "30m": "30 minutes stuck",
+    "60m": "60 minutes stuck",
+    "2hrs": "2 hours stuck",
+    "fubar": "FUBAR",
+    "resolved": "Resolved",
+}
+GATE_MALFUNCTION_STAGE_ORDER = {
+    stage: index
+    for index, stage in enumerate(
+        ["initial", "30m", "60m", "2hrs", "fubar", "resolved"]
+    )
+}
+GATE_MALFUNCTION_STAGES = [
+    {
+        "value": stage,
+        "label": label,
+    }
+    for stage, label in GATE_MALFUNCTION_STAGE_LABELS.items()
+]
+GATE_MALFUNCTION_UPDATE_PREFIX = "Gate Malfunction Update:"
+GATE_MALFUNCTION_VOICE_PREFIX = "Attention."
 
 
 @dataclass
@@ -140,34 +181,10 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
         "label": "Gate Malfunctions",
         "events": [
             {
-                "value": "gate_malfunction_2hrs",
-                "label": "Gate Malfunction - 2hrs",
+                "value": GATE_MALFUNCTION_EVENT_TYPE,
+                "label": "Gate Malfunction",
                 "severity": "critical",
-                "description": "The primary gate malfunction has been active for at least two hours.",
-            },
-            {
-                "value": "gate_malfunction_30m",
-                "label": "Gate Malfunction - 30m",
-                "severity": "warning",
-                "description": "The primary gate malfunction has been active for at least 30 minutes.",
-            },
-            {
-                "value": "gate_malfunction_60m",
-                "label": "Gate Malfunction - 60m",
-                "severity": "critical",
-                "description": "The primary gate malfunction has been active for at least 60 minutes.",
-            },
-            {
-                "value": "gate_malfunction_fubar",
-                "label": "Gate Malfunction - FUBAR",
-                "severity": "critical",
-                "description": "Automated gate malfunction recovery attempts have been exhausted.",
-            },
-            {
-                "value": "gate_malfunction_initial",
-                "label": "Gate Malfunction - Initial",
-                "severity": "warning",
-                "description": "The primary gate has remained open for more than five minutes.",
+                "description": "The primary gate malfunction lifecycle changed stage.",
             },
         ],
     },
@@ -254,6 +271,12 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
         "label": "Visitor Pass",
         "events": [
             {
+                "value": "visitor_pass_arranged",
+                "label": "Visitor Pass Arranged",
+                "severity": "info",
+                "description": "A WhatsApp visitor completed their Visitor Pass setup.",
+            },
+            {
                 "value": "visitor_pass_cancelled",
                 "label": "Visitor Pass Cancelled",
                 "severity": "info",
@@ -282,6 +305,19 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "label": "Visitor Pass Used",
                 "severity": "info",
                 "description": "A Visitor Pass was matched to an arriving vehicle.",
+            },
+        ],
+    },
+]
+
+ACTIONABLE_NOTIFICATION_CATALOG: list[dict[str, Any]] = [
+    {
+        "trigger_event": "unauthorized_plate",
+        "actions": [
+            {
+                "value": GATE_OPEN_ACTION,
+                "label": "Open Gate",
+                "description": "Let the selected Home Assistant mobile recipient open the gate for this unknown plate.",
             },
         ],
     },
@@ -356,6 +392,16 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
                 "label": "Visitor Pass name",
             },
             {
+                "name": "VisitorPassRegistration",
+                "token": "@VisitorPassRegistration",
+                "label": "Visitor Pass registration",
+            },
+            {
+                "name": "VisitorPassTimeWindow",
+                "token": "@VisitorPassTimeWindow",
+                "label": "Visitor Pass time window",
+            },
+            {
                 "name": "VisitorPassVehicleRegistration",
                 "token": "@VisitorPassVehicleRegistration",
                 "label": "Visitor Pass vehicle registration",
@@ -410,6 +456,7 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
             {"name": "MalfunctionFixAttemptTime", "token": "@MalfunctionFixAttemptTime", "label": "Latest fix attempt time"},
             {"name": "MalfunctionFixAttempts", "token": "@MalfunctionFixAttempts", "label": "Fix attempt count"},
             {"name": "MalfunctionResolutionTime", "token": "@MalfunctionResolutionTime", "label": "Resolution time"},
+            {"name": "MalfunctionStage", "token": "@MalfunctionStage", "label": "Malfunction stage"},
             {"name": "LastKnownVehicle", "token": "@LastKnownVehicle", "label": "Last known vehicle"},
         ],
     },
@@ -465,10 +512,13 @@ MOCK_FACTS = {
     "malfunction_fix_attempt_time": "2026-04-26T07:35:45+01:00",
     "malfunction_fix_attempts": "2",
     "malfunction_resolution_time": "",
+    "malfunction_stage": "30m",
     "last_known_vehicle": "Steph Smith exited in 2026 Tesla Model Y",
     "visitor_name": "Sarah",
     "visitor_pass_id": "visitor-pass-1",
     "visitor_pass_status": "used",
+    "visitor_pass_registration": "PE70DHX",
+    "visitor_pass_time_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
     "visitor_pass_vehicle_registration": "PE70DHX",
     "visitor_pass_vehicle_make": "Peugeot",
     "visitor_pass_vehicle_colour": "Silver",
@@ -513,6 +563,8 @@ class NotificationService:
             "triggers": TRIGGER_CATALOG,
             "variables": VARIABLE_GROUPS,
             "integrations": await self.available_integrations(config),
+            "actionable_notifications": ACTIONABLE_NOTIFICATION_CATALOG,
+            "gate_malfunction_stages": GATE_MALFUNCTION_STAGES,
             "mock_context": context_variables(sample_notification_context()),
         }
 
@@ -737,6 +789,7 @@ class NotificationService:
     ) -> None:
         payload = {
             "event_type": context.event_type,
+            "malfunction_stage": context.facts.get("malfunction_stage"),
             "severity": context.severity,
             "subject": context.subject,
             "reason": reason,
@@ -814,6 +867,8 @@ class NotificationService:
         raise_on_failure: bool = False,
     ) -> NotificationWorkflowResult:
         rendered = self.render_rule(rule, context)
+        if context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
+            rendered["actions"] = await self._gate_malfunction_actions_for_delivery(rendered["actions"], context)
         config = await get_runtime_config()
         first_notification: ComposedNotification | None = None
         failures: list[str] = []
@@ -908,17 +963,35 @@ class NotificationService:
             media = normalize_media(action.get("media"))
             title_template = str(action.get("title_template") or "")
             message_template = str(action.get("message_template") or "")
+            gate_malfunction_stages = normalize_gate_malfunction_stages(
+                action.get("gate_malfunction_stages")
+            )
+            if active_context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
+                fallback = gate_malfunction_fallback_content(
+                    action_type,
+                    active_context,
+                    previous_notification=_context_bool(
+                        active_context.facts.get("malfunction_has_previous_notification")
+                    ),
+                )
+                rendered_title = fallback["title"]
+                rendered_message = fallback["body"]
+            else:
+                rendered_title = render_template(title_template, variables)
+                rendered_message = render_template(message_template, variables)
             rendered_actions.append(
                 {
                     "id": str(action.get("id") or f"action-{len(rendered_actions) + 1}"),
                     "type": action_type,
                     "target_mode": str(action.get("target_mode") or "all"),
                     "target_ids": normalize_string_list(action.get("target_ids")),
-                    "title": render_template(title_template, variables),
-                    "message": render_template(message_template, variables),
+                    "title": rendered_title,
+                    "message": rendered_message,
                     "title_template": title_template,
                     "message_template": message_template,
+                    "gate_malfunction_stages": gate_malfunction_stages,
                     "media": media,
+                    "actionable": normalize_actionable(action.get("actionable")),
                     "snapshot": snapshot_payload(media),
                 }
             )
@@ -981,6 +1054,159 @@ class NotificationService:
             extra={"condition_type": condition_type, "event_type": context.event_type},
         )
         return False
+
+    async def _gate_malfunction_actions_for_delivery(
+        self,
+        actions: list[dict[str, Any]],
+        context: NotificationContext,
+    ) -> list[dict[str, Any]]:
+        stage = normalize_gate_malfunction_stage(context.facts.get("malfunction_stage"))
+        selected: list[dict[str, Any]] = []
+        for action in actions:
+            if not gate_malfunction_action_supports_stage(action, stage):
+                continue
+            content = await self._compose_gate_malfunction_content(str(action.get("type") or ""), context)
+            selected.append(
+                {
+                    **action,
+                    "title": content["title"],
+                    "message": content["body"],
+                }
+            )
+        return selected
+
+    async def _compose_gate_malfunction_content(
+        self,
+        channel: str,
+        context: NotificationContext,
+    ) -> dict[str, str]:
+        previous_notification = _context_bool(context.facts.get("malfunction_has_previous_notification"))
+        fallback = gate_malfunction_fallback_content(
+            channel,
+            context,
+            previous_notification=previous_notification,
+        )
+        try:
+            runtime = await get_runtime_config()
+            provider_name = str(runtime.llm_provider or "").strip().lower()
+            if not provider_name:
+                self._record_gate_malfunction_content_fallback(
+                    context,
+                    channel,
+                    reason="provider_not_configured",
+                )
+                return fallback
+            if provider_name == "local":
+                self._record_gate_malfunction_content_fallback(
+                    context,
+                    channel,
+                    reason="local_provider",
+                    provider=provider_name,
+                )
+                return fallback
+            provider = get_llm_provider(provider_name)
+            result = await provider.complete(
+                [
+                    ChatMessageInput(
+                        role="system",
+                        content=(
+                            "You write plain-language gate malfunction notifications for a household. "
+                            "The reader may have no technical knowledge. Return only JSON with string fields "
+                            "title and body. Keep the title under 80 characters and the body under 220 "
+                            "characters. The notification body must be a simple overview of what is happening. "
+                            "Mention Alfred as the system trying to help when the gate is still stuck. Do not "
+                            "include markdown, raw JSON, IDs, timestamps, vehicles, people, users, LPR, Home "
+                            "Assistant, telemetry, recovery attempt counts, internal stage names, or system "
+                            "implementation details. Do not include 'Attention.' or 'Gate Malfunction Update:'; "
+                            "the system adds required prefixes after generation."
+                        ),
+                    ),
+                    ChatMessageInput(
+                        role="user",
+                        content=(
+                            "Create a friendly Gate Malfunction notification for this channel and stage.\n"
+                            f"Channel: {channel or 'notification'}\n"
+                            f"Stage: {GATE_MALFUNCTION_STAGE_LABELS.get(normalize_gate_malfunction_stage(context.facts.get('malfunction_stage')), 'Gate malfunction')}\n"
+                            f"Previous earlier-stage notification sent: {previous_notification}\n"
+                            f"Subject: {context.subject}\n"
+                            f"Severity: {context.severity}\n"
+                            f"Suggested tone and meaning: {gate_malfunction_plain_body(normalize_gate_malfunction_stage(context.facts.get('malfunction_stage')))}"
+                        ),
+                    ),
+                ]
+            )
+            parsed = parse_gate_malfunction_llm_content(result.text)
+            if not parsed:
+                self._record_gate_malfunction_content_fallback(
+                    context,
+                    channel,
+                    reason="invalid_llm_content",
+                    provider=provider_name,
+                )
+                return fallback
+            title = parsed.get("title") or fallback["title"]
+            body = parsed.get("body") or fallback["body"]
+            if notification_text_looks_like_raw_data(body):
+                self._record_gate_malfunction_content_fallback(
+                    context,
+                    channel,
+                    reason="raw_data_in_llm_body",
+                    provider=provider_name,
+                )
+                return fallback
+            if notification_text_looks_like_raw_data(title):
+                title = fallback["title"]
+            return {
+                "title": clean_notification_text(title)[:160] or fallback["title"],
+                "body": postprocess_gate_malfunction_body(
+                    channel,
+                    body,
+                    previous_notification=previous_notification,
+                    fallback_body=fallback["body"],
+                ),
+            }
+        except ProviderNotConfiguredError:
+            self._record_gate_malfunction_content_fallback(
+                context,
+                channel,
+                reason="provider_not_configured",
+            )
+        except Exception as exc:
+            self._record_gate_malfunction_content_fallback(
+                context,
+                channel,
+                reason="llm_generation_failed",
+                error=str(exc),
+            )
+            logger.warning(
+                "gate_malfunction_notification_llm_failed",
+                extra={"event_type": context.event_type, "channel": channel, "error": str(exc)},
+            )
+        return fallback
+
+    def _record_gate_malfunction_content_fallback(
+        self,
+        context: NotificationContext,
+        channel: str,
+        *,
+        reason: str,
+        provider: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        self._record_notification_span(
+            "Gate Malfunction Notification Text Fallback",
+            context,
+            status="error" if error else "ok",
+            error=error,
+            output_payload={
+                "event_type": context.event_type,
+                "channel": channel,
+                "stage": context.facts.get("malfunction_stage"),
+                "reason": reason,
+                "provider": provider,
+                "delivered": False,
+            },
+        )
 
     async def _deliver_action(
         self,
@@ -1098,11 +1324,15 @@ class NotificationService:
             )
         image_url = snapshot.public_url if snapshot and snapshot.public_url else None
         image_content_type = snapshot.content_type if image_url else None
-        mobile_actions = home_assistant_notification_actions(context)
         notifier = HomeAssistantMobileAppNotifier()
         delivered_any = False
         for target in targets:
             try:
+                mobile_actions = await self._home_assistant_mobile_actions_for_target(
+                    action,
+                    context,
+                    target,
+                )
                 await notifier.send(
                     HomeAssistantMobileAppTarget(target),
                     str(action.get("title") or context.subject),
@@ -1116,6 +1346,23 @@ class NotificationService:
             except NotificationDeliveryError as exc:
                 failures.append(f"{target}: {exc}")
         return delivered_any
+
+    async def _home_assistant_mobile_actions_for_target(
+        self,
+        action: dict[str, Any],
+        context: NotificationContext,
+        target: str,
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = list(home_assistant_notification_actions(context))
+        actionable = normalize_actionable(action.get("actionable"))
+        if actionable.get("enabled") and actionable.get("action") == GATE_OPEN_ACTION:
+            gate_action = await get_actionable_notification_service().create_gate_open_action(
+                context=context,
+                notify_service=target,
+            )
+            if gate_action:
+                actions.append(gate_action)
+        return actions
 
     def _cleanup_mobile_snapshot(
         self,
@@ -1501,6 +1748,7 @@ class NotificationService:
             "title": action.get("title") or rule["name"],
             "body": action.get("message") or "",
             "event_type": context.event_type,
+            "malfunction_stage": context.facts.get("malfunction_stage"),
             "severity": context.severity,
             "configured": True,
             "delivered": delivered,
@@ -1554,7 +1802,9 @@ def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[
     if not visitor_pass:
         return []
 
-    if event.type == "visitor_pass.created":
+    if event.type == "visitor_pass.arranged":
+        event_types = ["visitor_pass_arranged"]
+    elif event.type == "visitor_pass.created":
         event_types = ["visitor_pass_created"]
     elif event.type == "visitor_pass.cancelled":
         event_types = ["visitor_pass_cancelled"]
@@ -1590,6 +1840,7 @@ def _visitor_pass_notification_facts(
     plate = _visitor_pass_text(visitor_pass.get("number_plate"))
     make = _visitor_pass_text(visitor_pass.get("vehicle_make"))
     colour = _visitor_pass_text(visitor_pass.get("vehicle_colour"))
+    time_window = _visitor_pass_time_window(visitor_pass)
     duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
         visitor_pass.get("duration_on_site_seconds")
     )
@@ -1613,6 +1864,9 @@ def _visitor_pass_notification_facts(
         "visitor_pass_window_end": _visitor_pass_text(visitor_pass.get("window_end")),
         "visitor_pass_valid_from": _visitor_pass_text(visitor_pass.get("valid_from")),
         "visitor_pass_valid_until": _visitor_pass_text(visitor_pass.get("valid_until")),
+        "visitor_pass_registration": plate,
+        "visitor_pass_time_window": time_window,
+        "visitor_pass_window_label": time_window,
         "visitor_pass_vehicle_registration": plate,
         "visitor_pass_vehicle_make": make,
         "visitor_pass_vehicle_colour": colour,
@@ -1636,6 +1890,8 @@ def _visitor_pass_notification_facts(
 
 def _visitor_pass_notification_subject(event_type: str, visitor_pass: dict[str, Any]) -> str:
     visitor_name = _visitor_pass_name(visitor_pass)
+    if event_type == "visitor_pass_arranged":
+        return f"Visitor Pass arranged for {visitor_name}"
     if event_type == "visitor_pass_created":
         return f"Visitor Pass created for {visitor_name}"
     if event_type == "visitor_pass_cancelled":
@@ -1652,9 +1908,14 @@ def _visitor_pass_notification_subject(event_type: str, visitor_pass: dict[str, 
 def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, Any]) -> str:
     visitor_name = _visitor_pass_name(visitor_pass)
     vehicle = _visitor_pass_vehicle_label(visitor_pass)
+    time_window = _visitor_pass_time_window(visitor_pass)
     duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
         visitor_pass.get("duration_on_site_seconds")
     )
+    if event_type == "visitor_pass_arranged":
+        window_suffix = f" for {time_window}" if time_window else ""
+        vehicle_suffix = f" with {vehicle}" if vehicle else ""
+        return f"Visitor Pass arranged for {visitor_name}{window_suffix}{vehicle_suffix}."
     if event_type == "visitor_pass_created":
         return f"Visitor Pass created for {visitor_name}."
     if event_type == "visitor_pass_cancelled":
@@ -1672,6 +1933,9 @@ def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, 
 
 
 def _visitor_pass_occurred_at(event_type: str, visitor_pass: dict[str, Any]) -> str:
+    if event_type == "visitor_pass_arranged":
+        metadata = visitor_pass.get("source_metadata") if isinstance(visitor_pass.get("source_metadata"), dict) else {}
+        return _visitor_pass_text(metadata.get("whatsapp_last_confirmed_at") or visitor_pass.get("updated_at"))
     if event_type == "visitor_pass_created":
         return _visitor_pass_text(visitor_pass.get("created_at"))
     if event_type == "visitor_pass_cancelled":
@@ -1697,6 +1961,16 @@ def _visitor_pass_vehicle_label(visitor_pass: dict[str, Any]) -> str:
     if description and plate:
         return f"{description} with registration {plate}"
     return description or plate
+
+
+def _visitor_pass_time_window(visitor_pass: dict[str, Any]) -> str:
+    explicit = _visitor_pass_text(visitor_pass.get("time_window") or visitor_pass.get("window_label"))
+    if explicit:
+        return explicit
+    return visitor_window_label_from_values(
+        visitor_pass.get("valid_from") or visitor_pass.get("window_start") or visitor_pass.get("expected_time"),
+        visitor_pass.get("valid_until") or visitor_pass.get("window_end"),
+    )
 
 
 def _visitor_pass_name(visitor_pass: dict[str, Any]) -> str:
@@ -1743,9 +2017,27 @@ def sample_notification_context(trigger_event: str | None = None) -> Notificatio
                 "decision": "denied",
             }
         )
+    elif event_type == GATE_MALFUNCTION_EVENT_TYPE:
+        facts.update(
+            {
+                "message": "Top Gate has remained open long enough to be treated as a malfunction.",
+                "subject": "Gate malfunction detected",
+                "malfunction_stage": "initial",
+                "malfunction_duration": "5m 0s",
+                "gate_name": "Top Gate",
+                "gate_status": "open",
+                "entity_id": "cover.top_gate",
+            }
+        )
     return NotificationContext(
         event_type=event_type,
-        subject="AB12CDE" if event_type == "unauthorized_plate" else "Steph arrived at the gate",
+        subject=(
+            "AB12CDE"
+            if event_type == "unauthorized_plate"
+            else "Gate malfunction detected"
+            if event_type == GATE_MALFUNCTION_EVENT_TYPE
+            else "Steph arrived at the gate"
+        ),
         severity=trigger_severity(event_type),
         facts=facts,
     )
@@ -1781,6 +2073,7 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         last_name = display_name.split(" ", 1)[1]
 
     visitor_pass_registration = pick(
+        "visitor_pass_registration",
         "visitor_pass_vehicle_registration",
         "visitor_pass_registration_number",
         "number_plate",
@@ -1803,6 +2096,11 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         visitor_pass_duration = _duration_label_from_seconds(
             pick("visitor_pass_duration_on_site_seconds", "duration_on_site_seconds")
         )
+    visitor_pass_time_window = pick(
+        "visitor_pass_time_window",
+        "visitor_pass_window_label",
+        "visitor_pass_current_window",
+    )
 
     vehicle_name = pick(
         "vehicle_name",
@@ -1886,6 +2184,8 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "EntityId": pick("entity_id"),
         "VisitorName": pick("visitor_name", "visitor_pass_name", default=display_name or context.subject),
         "VisitorPassName": pick("visitor_pass_name", "visitor_name", default=display_name or context.subject),
+        "VisitorPassRegistration": visitor_pass_registration,
+        "VisitorPassTimeWindow": visitor_pass_time_window,
         "VisitorPassVehicleRegistration": visitor_pass_registration,
         "VisitorPassVehicleMake": visitor_pass_make,
         "VisitorPassVehicleColour": visitor_pass_colour,
@@ -1911,6 +2211,7 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "MalfunctionFixAttemptTime": pick("malfunction_fix_attempt_time"),
         "MalfunctionFixAttempts": pick("malfunction_fix_attempts"),
         "MalfunctionResolutionTime": pick("malfunction_resolution_time"),
+        "MalfunctionStage": pick("malfunction_stage"),
         "LastKnownVehicle": pick("last_known_vehicle"),
     }
 
@@ -1948,13 +2249,190 @@ def snapshot_payload(media: dict[str, Any]) -> dict[str, str | bool] | None:
     }
 
 
+def normalize_trigger_event(value: Any) -> str:
+    event_type = str(value or "").strip()
+    return GATE_MALFUNCTION_EVENT_TYPE if event_type in LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES else event_type
+
+
+def legacy_gate_malfunction_stage(value: Any) -> str:
+    return LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES.get(str(value or "").strip(), "")
+
+
+def normalize_gate_malfunction_stage(value: Any) -> str:
+    stage = str(value or "").strip().lower()
+    return stage if stage in GATE_MALFUNCTION_STAGE_ORDER else "initial"
+
+
+def normalize_gate_malfunction_stages(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    stages: list[str] = []
+    for item in value:
+        stage = str(item or "").strip().lower()
+        if stage in GATE_MALFUNCTION_STAGE_ORDER and stage not in stages:
+            stages.append(stage)
+    return stages
+
+
+def gate_malfunction_action_supports_stage(action: dict[str, Any], stage: str) -> bool:
+    stages = normalize_gate_malfunction_stages(action.get("gate_malfunction_stages"))
+    return not stages or normalize_gate_malfunction_stage(stage) in stages
+
+
+def parse_gate_malfunction_llm_content(value: str) -> dict[str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    title = clean_notification_text(str(parsed.get("title") or ""))
+    body = clean_notification_text(str(parsed.get("body") or ""))
+    if not title and not body:
+        return None
+    return {"title": title, "body": body}
+
+
+def gate_malfunction_fallback_content(
+    channel: str,
+    context: NotificationContext,
+    *,
+    previous_notification: bool,
+) -> dict[str, str]:
+    facts = context.facts
+    stage = normalize_gate_malfunction_stage(facts.get("malfunction_stage"))
+    stage_label = GATE_MALFUNCTION_STAGE_LABELS.get(stage, stage)
+    if stage == "resolved":
+        title = "Gate malfunction resolved"
+    elif stage == "fubar":
+        title = "Gate malfunction needs attention"
+    elif stage == "initial":
+        title = "Gate malfunction detected"
+    else:
+        title = f"Gate malfunction {stage_label}"
+    body = gate_malfunction_plain_body(stage)
+    return {
+        "title": title[:160],
+        "body": postprocess_gate_malfunction_body(
+            channel,
+            body,
+            previous_notification=previous_notification,
+            fallback_body=body or context.subject,
+        ),
+    }
+
+
+def gate_malfunction_plain_body(stage: str) -> str:
+    normalized_stage = normalize_gate_malfunction_stage(stage)
+    if normalized_stage == "initial":
+        return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
+    if normalized_stage == "30m":
+        return "The gate is still stuck open. Alfred is still working on it."
+    if normalized_stage == "60m":
+        return "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case."
+    if normalized_stage == "2hrs":
+        return "The gate has been stuck open for over two hours. Alfred has not been able to fix it yet."
+    if normalized_stage == "fubar":
+        return "The gate is still stuck open and Alfred has run out of automatic fixes. Please check the gate when you can."
+    if normalized_stage == "resolved":
+        return "The gate malfunction has been resolved and the gate is closed again."
+    return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
+
+
+def clean_notification_text(value: str) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) > 1 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+    return text
+
+
+def notification_text_looks_like_raw_data(value: str) -> bool:
+    text = str(value or "")
+    lowered = text.lower()
+    if "{" in text or "}" in text or "[" in text or "]" in text:
+        return True
+    return any(
+        marker in lowered
+        for marker in [
+            "malfunction_id",
+            "telemetry",
+            "entity_id",
+            "last_known_vehicle",
+            "registration_number",
+            "fix_attempts",
+        ]
+    )
+
+
+def postprocess_gate_malfunction_body(
+    channel: str,
+    body: str,
+    *,
+    previous_notification: bool,
+    fallback_body: str,
+) -> str:
+    text = clean_notification_text(body) or clean_notification_text(fallback_body)
+    text = strip_gate_malfunction_prefixes(text)
+    if previous_notification:
+        text = f"{GATE_MALFUNCTION_UPDATE_PREFIX} {text}".strip()
+    if channel == "voice":
+        text = f"{GATE_MALFUNCTION_VOICE_PREFIX} {strip_attention_prefix(text)}".strip()
+    return text[:500]
+
+
+def strip_gate_malfunction_prefixes(value: str) -> str:
+    text = clean_notification_text(value)
+    while True:
+        next_text = strip_attention_prefix(text)
+        next_text = strip_update_prefix(next_text)
+        if next_text == text:
+            return text
+        text = next_text
+
+
+def strip_attention_prefix(value: str) -> str:
+    return re.sub(r"^\s*attention\.\s*", "", value, flags=re.IGNORECASE).strip()
+
+
+def strip_update_prefix(value: str) -> str:
+    return re.sub(
+        r"^\s*gate\s+malfunction\s+update:\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _context_bool(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
+    raw_trigger = value.get("trigger_event") or value.get("event_type") or ""
+    legacy_stage = legacy_gate_malfunction_stage(raw_trigger)
+    actions = normalize_actions(value.get("actions"))
+    if legacy_stage:
+        actions = [
+            {
+                **action,
+                "gate_malfunction_stages": normalize_gate_malfunction_stages(
+                    action.get("gate_malfunction_stages") or [legacy_stage]
+                ),
+            }
+            for action in actions
+        ]
     return {
         "id": str(value.get("id") or uuid.uuid4()),
         "name": str(value.get("name") or "Notification Workflow").strip()[:160],
-        "trigger_event": str(value.get("trigger_event") or value.get("event_type") or "").strip(),
+        "trigger_event": normalize_trigger_event(raw_trigger),
         "conditions": normalize_conditions(value.get("conditions")),
-        "actions": normalize_actions(value.get("actions")),
+        "actions": actions,
         "is_active": value.get("is_active", value.get("enabled", True)) is not False,
     }
 
@@ -2005,7 +2483,11 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
                 "target_ids": normalize_string_list(raw.get("target_ids")),
                 "title_template": str(raw.get("title_template") or ""),
                 "message_template": str(raw.get("message_template") or ""),
+                "gate_malfunction_stages": normalize_gate_malfunction_stages(
+                    raw.get("gate_malfunction_stages")
+                ),
                 "media": normalize_media(raw.get("media")),
+                "actionable": normalize_actionable(raw.get("actionable")),
             }
         )
     return actions
@@ -2016,6 +2498,15 @@ def normalize_media(value: Any) -> dict[str, Any]:
     return {
         "attach_camera_snapshot": bool(raw.get("attach_camera_snapshot") or raw.get("enabled")),
         "camera_id": str(raw.get("camera_id") or ""),
+    }
+
+
+def normalize_actionable(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    action = str(raw.get("action") or "")
+    return {
+        "enabled": bool(raw.get("enabled")) and action == GATE_OPEN_ACTION,
+        "action": action if action == GATE_OPEN_ACTION else "",
     }
 
 

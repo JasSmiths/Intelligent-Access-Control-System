@@ -60,7 +60,7 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "lpr_allowed_smart_zones": (
         "lpr",
         ["default"],
-        "Selected Gate LPR UniFi smart zone name allowed to produce access events.",
+        "Legacy UniFi smart-zone diagnostic list. Smart zones are not used to accept or reject LPR events.",
     ),
     "schedule_default_policy": (
         "access",

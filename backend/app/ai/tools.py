@@ -182,6 +182,11 @@ NOTIFICATION_ACTION_SCHEMA: dict[str, Any] = {
         },
         "title_template": {"type": "string", "description": "Title template supporting @ variables such as @FirstName."},
         "message_template": {"type": "string", "description": "Message template supporting @ variables such as @VehicleName."},
+        "gate_malfunction_stages": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["initial", "30m", "60m", "2hrs", "fubar", "resolved"]},
+            "description": "For the gate_malfunction trigger, optional stages this action should deliver. Empty means all stages.",
+        },
         "media": {
             "type": "object",
             "properties": {
@@ -3739,9 +3744,10 @@ async def create_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
             "detail": "Create this notification workflow? Future matching events may send real notifications.",
         }
 
-    name = str(arguments.get("name") or "").strip()
-    trigger_event = str(arguments.get("trigger_event") or "").strip()
-    actions = normalize_actions(arguments.get("actions"))
+    normalized = normalize_rule_payload(arguments)
+    name = normalized["name"]
+    trigger_event = normalized["trigger_event"]
+    actions = normalized["actions"]
     if not name:
         return {"created": False, "error": "Workflow name is required."}
     if not trigger_event:
@@ -3753,9 +3759,9 @@ async def create_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
         rule = NotificationRule(
             name=name,
             trigger_event=trigger_event,
-            conditions=normalize_conditions(arguments.get("conditions")),
+            conditions=normalized["conditions"],
             actions=actions,
-            is_active=arguments.get("is_active", True) is not False,
+            is_active=normalized["is_active"],
         )
         session.add(rule)
         try:
@@ -3798,11 +3804,24 @@ async def update_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
             trigger_event = str(arguments.get("trigger_event") or "").strip()
             if not trigger_event:
                 return {"updated": False, "error": "trigger_event cannot be empty."}
-            rule.trigger_event = trigger_event
+            normalized_trigger_payload = normalize_rule_payload(
+                {
+                    "trigger_event": trigger_event,
+                    "actions": rule.actions,
+                }
+            )
+            rule.trigger_event = normalized_trigger_payload["trigger_event"]
+            if "actions" not in arguments:
+                rule.actions = normalized_trigger_payload["actions"]
         if "conditions" in arguments:
             rule.conditions = normalize_conditions(arguments.get("conditions"))
         if "actions" in arguments:
-            actions = normalize_actions(arguments.get("actions"))
+            actions = normalize_rule_payload(
+                {
+                    "trigger_event": arguments.get("trigger_event", rule.trigger_event),
+                    "actions": arguments.get("actions"),
+                }
+            )["actions"]
             if not actions:
                 return {"updated": False, "error": "At least one notification action is required."}
             rule.actions = actions

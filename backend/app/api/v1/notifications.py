@@ -12,9 +12,12 @@ from app.models import NotificationRule, User
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notifications import (
     get_notification_service,
+    legacy_gate_malfunction_stage,
     normalize_actions,
     normalize_conditions,
+    normalize_gate_malfunction_stages,
     normalize_rule_payload,
+    normalize_trigger_event,
     notification_context_from_payload,
     sample_notification_context,
 )
@@ -79,16 +82,17 @@ async def create_notification_rule(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     user = _
-    actions = normalize_actions(request.actions)
+    normalized = normalize_rule_payload(request.model_dump())
+    actions = normalized["actions"]
     if not actions:
         raise HTTPException(status_code=400, detail="At least one notification action is required.")
 
     rule = NotificationRule(
-        name=request.name.strip(),
-        trigger_event=request.trigger_event.strip(),
-        conditions=normalize_conditions(request.conditions),
+        name=normalized["name"],
+        trigger_event=normalized["trigger_event"],
+        conditions=normalized["conditions"],
         actions=actions,
-        is_active=request.is_active,
+        is_active=normalized["is_active"],
     )
     session.add(rule)
     if hasattr(session, "flush"):
@@ -129,14 +133,31 @@ async def update_notification_rule(
     user = _
     rule = await get_rule_or_404(session, rule_id)
     before = rule_audit_snapshot(rule)
+    legacy_stage = legacy_gate_malfunction_stage(request.trigger_event) if request.trigger_event is not None else ""
     if request.name is not None:
         rule.name = request.name.strip()
     if request.trigger_event is not None:
-        rule.trigger_event = request.trigger_event.strip()
+        rule.trigger_event = normalize_trigger_event(request.trigger_event)
+        if legacy_stage and request.actions is None:
+            rule.actions = [
+                {
+                    **action,
+                    "gate_malfunction_stages": [legacy_stage],
+                }
+                for action in normalize_actions(rule.actions)
+            ]
     if request.conditions is not None:
         rule.conditions = normalize_conditions(request.conditions)
     if request.actions is not None:
         actions = normalize_actions(request.actions)
+        if legacy_stage:
+            actions = [
+                {
+                    **action,
+                    "gate_malfunction_stages": normalize_gate_malfunction_stages([legacy_stage]),
+                }
+                for action in actions
+            ]
         if not actions:
             raise HTTPException(status_code=400, detail="At least one notification action is required.")
         rule.actions = actions
@@ -234,12 +255,13 @@ async def test_notification_rule(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     rule = await get_rule_or_404(session, rule_id)
-    context = sample_notification_context(rule.trigger_event)
+    serialized = serialize_rule(rule)
+    context = sample_notification_context(serialized["trigger_event"])
     try:
         notification = await get_notification_service().process_context(
             context,
             raise_on_failure=True,
-            rules_override=[serialize_rule(rule)],
+            rules_override=[serialized],
         )
     except NotificationDeliveryError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -260,13 +282,23 @@ async def get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> Notifica
 
 def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
     last_fired_at = getattr(rule, "last_fired_at", None)
+    normalized = normalize_rule_payload(
+        {
+            "id": str(rule.id),
+            "name": rule.name,
+            "trigger_event": rule.trigger_event,
+            "conditions": rule.conditions,
+            "actions": rule.actions,
+            "is_active": rule.is_active,
+        }
+    )
     return {
         "id": str(rule.id),
-        "name": rule.name,
-        "trigger_event": rule.trigger_event,
-        "conditions": normalize_conditions(rule.conditions),
-        "actions": normalize_actions(rule.actions),
-        "is_active": rule.is_active,
+        "name": normalized["name"],
+        "trigger_event": normalized["trigger_event"],
+        "conditions": normalized["conditions"],
+        "actions": normalized["actions"],
+        "is_active": normalized["is_active"],
         "last_fired_at": last_fired_at.isoformat() if last_fired_at else None,
         "created_at": rule.created_at.isoformat(),
         "updated_at": rule.updated_at.isoformat(),

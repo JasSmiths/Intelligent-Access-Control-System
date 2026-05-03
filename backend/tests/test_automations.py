@@ -1,11 +1,15 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+import uuid
 from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
 import pytest
+from starlette.requests import Request
 
 from app.ai import tools as ai_tools
-from app.models import Presence
+from app.api.v1 import automations as automations_api
+from app.models import AutomationRule, AutomationRun, Presence
 from app.models.enums import PresenceState
 from app.services import automation_integration_actions
 from app.services import automations
@@ -16,6 +20,7 @@ from app.services.automations import (
     TRIGGER_CATALOG,
     AutomationContext,
     AutomationService,
+    ScheduledAutomationClaim,
     build_context_variables,
     context_missing_references,
     cron_from_recurrence,
@@ -30,6 +35,28 @@ from app.services.automations import (
     validate_schedule_parse,
 )
 from app.services.event_bus import RealtimeEvent
+
+
+def make_request(
+    method: str,
+    path: str,
+    *,
+    body: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "query_string": b"",
+            "headers": headers or [],
+        },
+        receive,
+    )
 
 
 def test_automation_registries_expose_required_keys() -> None:
@@ -536,3 +563,109 @@ def test_alfred_registers_automation_tool_metadata() -> None:
     assert tools["edit_automation"].requires_confirmation is True
     assert tools["delete_automation"].requires_confirmation is True
     assert "Automations" in tools["create_automation"].categories
+
+
+@pytest.mark.asyncio
+async def test_receive_automation_webhook_rejects_invalid_json() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await automations_api.receive_automation_webhook(
+            "hook-key",
+            make_request("POST", "/api/v1/automations/webhooks/hook-key", body=b"{not-json"),
+        )
+
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_scheduler_claims_due_rule_before_execution(monkeypatch) -> None:
+    now = datetime(2026, 5, 3, 12, 0, tzinfo=UTC)
+    rule = AutomationRule(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        name="Every 15 minutes",
+        is_active=True,
+        triggers=[{"type": "time.every_x", "config": {"interval": 15, "unit": "minutes"}}],
+        trigger_keys=["time.every_x"],
+        conditions=[],
+        actions=[{"id": "action-1", "type": "notification.enable", "config": {}, "reason_template": ""}],
+        next_run_at=now - timedelta(minutes=1),
+        last_fired_at=now - timedelta(minutes=16),
+        run_count=0,
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [rule]
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalars(self, _statement):
+            return ScalarRows()
+
+        def add(self, row):
+            self.added.append(row)
+
+        async def flush(self):
+            for row in self.added:
+                if isinstance(row, AutomationRun) and row.id is None:
+                    row.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+        async def commit(self):
+            self.committed = True
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: fake_session)
+
+    claims = await AutomationService()._claim_due_rules(now)
+
+    assert fake_session.committed is True
+    assert len(claims) == 1
+    assert claims[0].rule_id == str(rule.id)
+    assert claims[0].run_id == "22222222-2222-2222-2222-222222222222"
+    assert claims[0].trigger_key == "time.every_x"
+    assert claims[0].trigger_payload["scheduled_for"] == "2026-05-03T11:59:00+00:00"
+    assert rule.next_run_at == now + timedelta(minutes=15)
+    assert fake_session.added[0].status == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_process_due_rules_executes_claimed_runs(monkeypatch) -> None:
+    service = AutomationService()
+    claim = ScheduledAutomationClaim(
+        rule_id="11111111-1111-1111-1111-111111111111",
+        run_id="22222222-2222-2222-2222-222222222222",
+        trigger_key="time.every_x",
+        trigger_payload={"scheduled_for": "2026-05-03T12:00:00+00:00"},
+    )
+    calls = []
+
+    async def fake_claim_due_rules(_now):
+        return [claim]
+
+    async def fake_execute_rule(rule_id, **kwargs):
+        calls.append({"rule_id": rule_id, **kwargs})
+        return {"status": "success"}
+
+    monkeypatch.setattr(service, "_claim_due_rules", fake_claim_due_rules)
+    monkeypatch.setattr(service, "execute_rule", fake_execute_rule)
+
+    await service._process_due_rules()
+
+    assert calls == [
+        {
+            "rule_id": claim.rule_id,
+            "trigger_key": claim.trigger_key,
+            "trigger_payload": claim.trigger_payload,
+            "actor": "Automation Scheduler",
+            "source": "scheduler",
+            "claimed_run_id": claim.run_id,
+        }
+    ]

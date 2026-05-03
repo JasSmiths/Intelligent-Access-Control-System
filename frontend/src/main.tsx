@@ -551,6 +551,15 @@ type TelemetryTraceDetail = TelemetryTrace & {
   spans: TelemetrySpan[];
 };
 
+type TelemetryStorageSummary = {
+  total_size_bytes: number;
+  database_size_bytes: number;
+  log_file_size_bytes: number;
+  artifact_size_bytes: number;
+  file_count: number;
+  updated_at: string;
+};
+
 type GateMalfunctionTimelineEvent = {
   id: string;
   kind: string;
@@ -745,6 +754,7 @@ type NotificationActionType = NotificationChannelId;
 type NotificationConditionType = "schedule" | "presence";
 type PresenceConditionMode = "no_one_home" | "someone_home" | "person_home";
 type NotificationTargetMode = "all" | "many" | "selected";
+type NotificationGateMalfunctionStage = "initial" | "30m" | "60m" | "2hrs" | "fubar" | "resolved";
 
 type NotificationEndpoint = {
   id: string;
@@ -776,9 +786,14 @@ type NotificationAction = {
   target_ids: string[];
   title_template: string;
   message_template: string;
+  gate_malfunction_stages: NotificationGateMalfunctionStage[];
   media: {
     attach_camera_snapshot: boolean;
     camera_id: string;
+  };
+  actionable: {
+    enabled: boolean;
+    action: string;
   };
 };
 
@@ -818,10 +833,28 @@ type NotificationTriggerGroup = {
   events: NotificationTriggerOption[];
 };
 
+type NotificationActionableOption = {
+  value: string;
+  label: string;
+  description: string;
+};
+
+type NotificationActionableGroup = {
+  trigger_event: string;
+  actions: NotificationActionableOption[];
+};
+
+type NotificationGateMalfunctionStageOption = {
+  value: NotificationGateMalfunctionStage;
+  label: string;
+};
+
 type NotificationCatalogResponse = {
   triggers: NotificationTriggerGroup[];
   variables: NotificationVariableGroup[];
   integrations: NotificationIntegration[];
+  actionable_notifications?: NotificationActionableGroup[];
+  gate_malfunction_stages?: NotificationGateMalfunctionStageOption[];
   mock_context: Record<string, string>;
 };
 
@@ -1589,6 +1622,10 @@ function formatFileSize(size: number) {
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   if (size >= 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
   return `${size} B`;
+}
+
+function formatLogMegabytes(size: number) {
+  return `${(Math.max(0, size) / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3232,7 +3269,7 @@ function View(props: {
     case "passes":
       return <PassesView query={props.search} realtime={props.realtime} />;
     case "vehicles":
-      return <VehiclesView people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      return <VehiclesView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
     case "top_charts":
       return <TopChartsView query={props.search} realtime={props.realtime} />;
     case "events":
@@ -3542,7 +3579,7 @@ function Dashboard({
               </button>
             )) : <EmptyState icon={CheckCircle2} label="No actionable alerts" />}
           </div>
-          <p className="unresolved-count">{actionableAlerts.length} action needed</p>
+          {actionableAlerts.length ? <p className="unresolved-count">{actionableAlerts.length} action needed</p> : null}
         </div>
 
         <div className="card chart-card">
@@ -6507,6 +6544,266 @@ function useScheduleDefaultPolicyOptionLabel() {
   return `Default Policy - ${scheduleDefaultPolicyDisplay(accessSettings.values.schedule_default_policy)}`;
 }
 
+type DirectoryGroupMeta = {
+  id: string;
+  name: string;
+  category: string | null;
+};
+
+type DirectoryGroupSection<T> = DirectoryGroupMeta & {
+  items: T[];
+};
+
+type DirectoryGroupBucket<T> = DirectoryGroupSection<T> & {
+  order: number;
+};
+
+const unassignedDirectoryGroup: DirectoryGroupMeta = {
+  id: "__unassigned__",
+  name: "Unassigned",
+  category: null
+};
+
+function directoryGroupDefaultOpen(section: DirectoryGroupMeta) {
+  return section.category?.trim().toLowerCase() === "family" || section.name.trim().toLowerCase() === "family";
+}
+
+function buildDirectoryGroupIndex(groups: Group[]) {
+  const groupById = new Map<string, Group>();
+  const groupOrder = new Map<string, number>();
+  groups.forEach((group, index) => {
+    groupById.set(group.id, group);
+    groupOrder.set(group.id, index);
+  });
+  return { groupById, groupOrder };
+}
+
+function directoryGroupMetaFromGroup(group: Group): DirectoryGroupMeta {
+  return {
+    id: group.id,
+    name: group.name,
+    category: group.category
+  };
+}
+
+function directoryGroupMetaForPerson(person: Person, groupById: Map<string, Group>): DirectoryGroupMeta {
+  if (person.group_id) {
+    const group = groupById.get(person.group_id);
+    if (group) return directoryGroupMetaFromGroup(group);
+    return {
+      id: person.group_id,
+      name: person.group ?? "Unknown Group",
+      category: person.category
+    };
+  }
+
+  if (person.group) {
+    return {
+      id: `group-name:${person.group.trim().toLowerCase()}`,
+      name: person.group,
+      category: person.category
+    };
+  }
+
+  return unassignedDirectoryGroup;
+}
+
+function directoryGroupOrder(meta: DirectoryGroupMeta, groupOrder: Map<string, number>, groupCount: number) {
+  const knownOrder = groupOrder.get(meta.id);
+  if (knownOrder !== undefined) return knownOrder;
+  if (meta.id === unassignedDirectoryGroup.id) return groupCount + 1000;
+  return groupCount + 100;
+}
+
+function addToDirectoryBucket<T>(
+  buckets: Map<string, DirectoryGroupBucket<T>>,
+  meta: DirectoryGroupMeta,
+  order: number,
+  item: T
+) {
+  const existing = buckets.get(meta.id);
+  if (existing) {
+    existing.items.push(item);
+    return;
+  }
+
+  buckets.set(meta.id, {
+    ...meta,
+    items: [item],
+    order
+  });
+}
+
+function directoryBucketsToSections<T>(buckets: Map<string, DirectoryGroupBucket<T>>): DirectoryGroupSection<T>[] {
+  return Array.from(buckets.values())
+    .filter((bucket) => bucket.items.length)
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+    .map((bucket) => ({
+      id: bucket.id,
+      name: bucket.name,
+      category: bucket.category,
+      items: bucket.items
+    }));
+}
+
+function groupPeopleByDirectoryGroup(people: Person[], groups: Group[]): DirectoryGroupSection<Person>[] {
+  const { groupById, groupOrder } = buildDirectoryGroupIndex(groups);
+  const buckets = new Map<string, DirectoryGroupBucket<Person>>();
+
+  for (const person of people) {
+    const meta = directoryGroupMetaForPerson(person, groupById);
+    addToDirectoryBucket(buckets, meta, directoryGroupOrder(meta, groupOrder, groups.length), person);
+  }
+
+  return directoryBucketsToSections(buckets);
+}
+
+function indexPeopleByVehicleId(people: Person[]) {
+  const peopleByVehicleId = new Map<string, Person[]>();
+  for (const person of people) {
+    for (const vehicle of person.vehicles) {
+      const owners = peopleByVehicleId.get(vehicle.id) ?? [];
+      owners.push(person);
+      peopleByVehicleId.set(vehicle.id, owners);
+    }
+  }
+  return peopleByVehicleId;
+}
+
+function ownerPeopleForVehicle(
+  vehicle: Vehicle,
+  peopleByVehicleId: Map<string, Person[]>,
+  peopleById: Map<string, Person>
+) {
+  const ownersById = new Map<string, Person>();
+
+  for (const person of peopleByVehicleId.get(vehicle.id) ?? []) {
+    ownersById.set(person.id, person);
+  }
+
+  if (vehicle.person_id) {
+    const person = peopleById.get(vehicle.person_id);
+    if (person) ownersById.set(person.id, person);
+  }
+
+  return Array.from(ownersById.values()).sort((left, right) => left.display_name.localeCompare(right.display_name));
+}
+
+function vehicleOwnerLabel(
+  vehicle: Vehicle,
+  peopleByVehicleId: Map<string, Person[]>,
+  peopleById: Map<string, Person>
+) {
+  const owners = ownerPeopleForVehicle(vehicle, peopleByVehicleId, peopleById);
+  if (owners.length) return owners.map((person) => person.display_name).join(", ");
+  return vehicle.owner ?? "Unassigned";
+}
+
+function groupVehiclesByDirectoryGroup(
+  vehicles: Vehicle[],
+  peopleByVehicleId: Map<string, Person[]>,
+  peopleById: Map<string, Person>,
+  groups: Group[]
+): DirectoryGroupSection<Vehicle>[] {
+  const { groupById, groupOrder } = buildDirectoryGroupIndex(groups);
+  const buckets = new Map<string, DirectoryGroupBucket<Vehicle>>();
+
+  for (const vehicle of vehicles) {
+    const owners = ownerPeopleForVehicle(vehicle, peopleByVehicleId, peopleById);
+    const vehicleGroups = new Map<string, DirectoryGroupMeta>();
+
+    for (const owner of owners) {
+      const meta = directoryGroupMetaForPerson(owner, groupById);
+      vehicleGroups.set(meta.id, meta);
+    }
+
+    if (!vehicleGroups.size) {
+      vehicleGroups.set(unassignedDirectoryGroup.id, unassignedDirectoryGroup);
+    }
+
+    for (const meta of vehicleGroups.values()) {
+      addToDirectoryBucket(buckets, meta, directoryGroupOrder(meta, groupOrder, groups.length), vehicle);
+    }
+  }
+
+  return directoryBucketsToSections(buckets);
+}
+
+function useDirectoryGroupOpenState<T>(sections: DirectoryGroupSection<T>[]) {
+  const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({});
+  const defaultOpenById = React.useMemo(
+    () => new Map(sections.map((section) => [section.id, directoryGroupDefaultOpen(section)])),
+    [sections]
+  );
+
+  React.useEffect(() => {
+    setOpenGroups((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const section of sections) {
+        if (next[section.id] === undefined) {
+          next[section.id] = directoryGroupDefaultOpen(section);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [sections]);
+
+  const toggleGroup = React.useCallback((sectionId: string) => {
+    setOpenGroups((current) => ({
+      ...current,
+      [sectionId]: !(current[sectionId] ?? defaultOpenById.get(sectionId) ?? false)
+    }));
+  }, [defaultOpenById]);
+
+  return { openGroups, toggleGroup };
+}
+
+function DirectoryGroupAccordion<T>({
+  section,
+  singularLabel,
+  pluralLabel,
+  expanded,
+  onToggle,
+  children
+}: {
+  section: DirectoryGroupSection<T>;
+  singularLabel: string;
+  pluralLabel: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const bodyId = React.useId();
+  const count = section.items.length;
+  return (
+    <article className={expanded ? "directory-group expanded" : "directory-group"}>
+      <button
+        aria-controls={bodyId}
+        aria-expanded={expanded}
+        className="directory-group-header"
+        onClick={onToggle}
+        type="button"
+      >
+        <span className="directory-group-chevron" aria-hidden="true">
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </span>
+        <span className="directory-group-title">
+          <strong>{section.name}</strong>
+          {section.category ? <small>{titleCase(section.category)}</small> : null}
+        </span>
+        <span className="directory-group-count">{count} {count === 1 ? singularLabel : pluralLabel}</span>
+      </button>
+      {expanded ? (
+        <div className="directory-group-body" id={bodyId}>
+          {children}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function PeopleView({
   garageDoors,
   groups,
@@ -6529,15 +6826,17 @@ function PeopleView({
   const [error, setError] = React.useState("");
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const availableGarageDoors = React.useMemo(() => activeManagedCovers(garageDoors), [garageDoors]);
-  const filtered = people.filter((item) =>
+  const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
+  const filtered = React.useMemo(() => people.filter((item) =>
     matches(item.display_name, query) ||
     matches(item.group ?? "", query) ||
     item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
-    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoors.find((door) => door.entity_id === entityId)?.name ?? entityId, query)) ||
+    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoorNameMap.get(entityId) ?? entityId, query)) ||
     matches(item.home_assistant_mobile_app_notify_service ?? "", query)
-  );
+  ), [garageDoorNameMap, people, query]);
+  const groupedPeople = React.useMemo(() => groupPeopleByDirectoryGroup(filtered, groups), [filtered, groups]);
+  const { openGroups: openPeopleGroups, toggleGroup: togglePeopleGroup } = useDirectoryGroupOpenState(groupedPeople);
   const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
-  const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
 
   const openCreate = () => {
     setSelectedPerson(null);
@@ -6570,40 +6869,52 @@ function PeopleView({
       {error ? <div className="auth-error inline-error">{error}</div> : null}
 
       <div className="card users-card people-card">
-        <PanelHeader title="Profile Roster" action={`${filtered.length} profiles`} actionKind="select" />
         {filtered.length ? (
-          <div className="users-table people-table">
-            {filtered.map((person) => (
-              <article
-                className="user-row person-row person-row-button"
-                key={person.id}
-                onClick={() => openEdit(person)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    openEdit(person);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
+          <div className="directory-group-list">
+            {groupedPeople.map((section) => (
+              <DirectoryGroupAccordion
+                expanded={openPeopleGroups[section.id] ?? directoryGroupDefaultOpen(section)}
+                key={section.id}
+                onToggle={() => togglePeopleGroup(section.id)}
+                pluralLabel="people"
+                section={section}
+                singularLabel="person"
               >
-                <PersonAvatar person={person} />
-                <div>
-                  <strong>{person.display_name}</strong>
-                  <span>{person.category ? titleCase(person.category) : "No category"}{person.group ? ` • ${person.group}` : ""}</span>
-                </div>
-                <Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "Active" : "Inactive"}</Badge>
-                <div className="vehicle-chip-list">
-                  {person.schedule ? <span className="vehicle-chip schedule-chip">{person.schedule}</span> : null}
-                  {person.vehicles.length ? person.vehicles.map((vehicle) => (
-                    <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
-                  )) : <span className="muted-value">No vehicles</span>}
-                  {(person.garage_door_entity_ids ?? []).map((entityId) => (
-                    <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
+                <div className="users-table people-table">
+                  {section.items.map((person) => (
+                    <article
+                      className="user-row person-row person-row-button"
+                      key={person.id}
+                      onClick={() => openEdit(person)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openEdit(person);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <PersonAvatar person={person} />
+                      <div>
+                        <strong>{person.display_name}</strong>
+                        <span>{person.category ? titleCase(person.category) : "No category"}{person.group ? ` • ${person.group}` : ""}</span>
+                      </div>
+                      <Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "Active" : "Inactive"}</Badge>
+                      <div className="vehicle-chip-list">
+                        {person.schedule ? <span className="vehicle-chip schedule-chip">{person.schedule}</span> : null}
+                        {person.vehicles.length ? person.vehicles.map((vehicle) => (
+                          <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
+                        )) : <span className="muted-value">No vehicles</span>}
+                        {(person.garage_door_entity_ids ?? []).map((entityId) => (
+                          <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
+                        ))}
+                        {person.home_assistant_mobile_app_notify_service ? <span className="vehicle-chip ha-chip">HA mobile</span> : null}
+                      </div>
+                    </article>
                   ))}
-                  {person.home_assistant_mobile_app_notify_service ? <span className="vehicle-chip ha-chip">HA mobile</span> : null}
                 </div>
-              </article>
+              </DirectoryGroupAccordion>
             ))}
           </div>
         ) : (
@@ -7003,12 +7314,14 @@ function PersonModal({
 }
 
 function VehiclesView({
+  groups,
   people,
   query,
   refresh,
   schedules,
   vehicles
 }: {
+  groups: Group[];
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
@@ -7019,13 +7332,28 @@ function VehiclesView({
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
-  const filtered = vehicles.filter((item) =>
-    matches(item.registration_number, query) ||
-    matches(item.owner ?? "", query) ||
-    matches(item.make ?? "", query) ||
-    matches(item.model ?? "", query) ||
-    matches(item.color ?? "", query)
+  const peopleById = React.useMemo(() => new Map(people.map((person) => [person.id, person])), [people]);
+  const peopleByVehicleId = React.useMemo(() => indexPeopleByVehicleId(people), [people]);
+  const filtered = React.useMemo(() => vehicles.filter((item) => {
+    const owners = ownerPeopleForVehicle(item, peopleByVehicleId, peopleById);
+    return (
+      matches(item.registration_number, query) ||
+      matches(item.owner ?? "", query) ||
+      owners.some((person) =>
+        matches(person.display_name, query) ||
+        matches(person.group ?? "", query) ||
+        matches(person.category ?? "", query)
+      ) ||
+      matches(item.make ?? "", query) ||
+      matches(item.model ?? "", query) ||
+      matches(item.color ?? "", query)
+    );
+  }), [peopleById, peopleByVehicleId, query, vehicles]);
+  const groupedVehicles = React.useMemo(
+    () => groupVehiclesByDirectoryGroup(filtered, peopleByVehicleId, peopleById, groups),
+    [filtered, groups, peopleById, peopleByVehicleId]
   );
+  const { openGroups: openVehicleGroups, toggleGroup: toggleVehicleGroup } = useDirectoryGroupOpenState(groupedVehicles);
 
   const openCreate = () => {
     setSelectedVehicle(null);
@@ -7070,43 +7398,56 @@ function VehiclesView({
 
       <div className="card users-card vehicles-card">
         {filtered.length ? (
-          <div className="users-table vehicles-table">
-            {filtered.map((vehicle) => (
-              <article
-                className="user-row vehicle-row vehicle-row-button"
-                key={vehicle.id}
-                onClick={() => openEdit(vehicle)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    openEdit(vehicle);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
+          <div className="directory-group-list">
+            {groupedVehicles.map((section) => (
+              <DirectoryGroupAccordion
+                expanded={openVehicleGroups[section.id] ?? directoryGroupDefaultOpen(section)}
+                key={section.id}
+                onToggle={() => toggleVehicleGroup(section.id)}
+                pluralLabel="vehicles"
+                section={section}
+                singularLabel="vehicle"
               >
-                <VehiclePhoto vehicle={vehicle} />
-                <div className="vehicle-row-main">
-                  <strong>{vehicle.registration_number}</strong>
-                  <span>{vehicleTitle(vehicle)}</span>
+                <div className="users-table vehicles-table">
+                  {section.items.map((vehicle) => (
+                    <article
+                      className="user-row vehicle-row vehicle-row-button"
+                      key={vehicle.id}
+                      onClick={() => openEdit(vehicle)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openEdit(vehicle);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <VehiclePhoto vehicle={vehicle} />
+                      <div className="vehicle-row-main">
+                        <strong>{vehicle.registration_number}</strong>
+                        <span>{vehicleTitle(vehicle)}</span>
+                      </div>
+                      <span className="vehicle-owner">{vehicleOwnerLabel(vehicle, peopleByVehicleId, peopleById)}</span>
+                      <span className={vehicle.schedule ? "vehicle-chip schedule-chip" : "vehicle-chip inherit-chip"}>
+                        {vehicle.schedule ?? "Inherit"}
+                      </span>
+                      <Badge tone={vehicle.is_active !== false ? "green" : "gray"}>{vehicle.is_active !== false ? "Active" : "Inactive"}</Badge>
+                      <button
+                        className="icon-button danger"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteVehicle(vehicle).catch(() => undefined);
+                        }}
+                        type="button"
+                        aria-label={`Delete ${vehicle.registration_number}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </article>
+                  ))}
                 </div>
-                <span className="vehicle-owner">{vehicle.owner ?? "Unassigned"}</span>
-                <span className={vehicle.schedule ? "vehicle-chip schedule-chip" : "vehicle-chip inherit-chip"}>
-                  {vehicle.schedule ?? "Inherit"}
-                </span>
-                <Badge tone={vehicle.is_active !== false ? "green" : "gray"}>{vehicle.is_active !== false ? "Active" : "Inactive"}</Badge>
-                <button
-                  className="icon-button danger"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    deleteVehicle(vehicle).catch(() => undefined);
-                  }}
-                  type="button"
-                  aria-label={`Delete ${vehicle.registration_number}`}
-                >
-                  <Trash2 size={16} />
-                </button>
-              </article>
+              </DirectoryGroupAccordion>
             ))}
           </div>
         ) : (
@@ -8759,7 +9100,7 @@ function integrationDefinitions(
         { key: "whatsapp_phone_number_id", label: "Phone Number ID" },
         { key: "whatsapp_business_account_id", label: "WhatsApp Business Account ID" },
         { key: "whatsapp_webhook_verify_token", label: "Webhook verify token", type: "password" },
-        { key: "whatsapp_app_secret", label: "App secret", type: "password", help: "Optional. When set, incoming POST webhooks must pass X-Hub-Signature-256 validation." },
+        { key: "whatsapp_app_secret", label: "App secret", type: "password", help: "Required for incoming POST webhooks. IACS rejects unsigned WhatsApp payloads when WhatsApp is enabled." },
         { key: "whatsapp_graph_api_version", label: "Graph API version" },
         { key: "whatsapp_visitor_pass_template_name", label: "Visitor Pass template name" },
         { key: "whatsapp_visitor_pass_template_language", label: "Visitor Pass template language" }
@@ -11667,7 +12008,7 @@ function WhatsAppSettingsFields({
       <section className="discord-section">
         <div className="icloud-section-heading">
           <strong>Webhook URL</strong>
-          <span>{loading ? "Refreshing" : status?.signature_configured ? "Signed POSTs required" : "Unsigned POSTs accepted"}</span>
+          <span>{loading ? "Refreshing" : status?.signature_configured ? "Signed POSTs required" : "App secret required for inbound webhooks"}</span>
         </div>
         <label className="field">
           <span>IACS webhook URL</span>
@@ -12094,6 +12435,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
   const [auditLogs, setAuditLogs] = React.useState<AuditLog[]>([]);
   const [auditCursor, setAuditCursor] = React.useState<string | null>(null);
   const [expandedAuditId, setExpandedAuditId] = React.useState<string | null>(null);
+  const [storageSummary, setStorageSummary] = React.useState<TelemetryStorageSummary | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -12164,6 +12506,19 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
     }
   }
 
+  const loadTelemetryStorage = React.useCallback(async () => {
+    try {
+      setStorageSummary(await api.get<TelemetryStorageSummary>("/api/v1/telemetry/storage"));
+    } catch {
+      setStorageSummary(null);
+    }
+  }, []);
+
+  function refreshLogs() {
+    loadTelemetry("reset").catch(() => undefined);
+    loadTelemetryStorage().catch(() => undefined);
+  }
+
   async function clearLogs() {
     if (!window.confirm("Clear all telemetry, audit, and live log records?")) return;
     setClearing(true);
@@ -12180,6 +12535,7 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
       setExpandedAuditId(null);
       processedRealtimeKeysRef.current.clear();
       onClearRealtime();
+      await loadTelemetryStorage();
       setNotice("Logs cleared");
     } catch (clearError) {
       setError(clearError instanceof Error ? clearError.message : "Unable to clear logs");
@@ -12200,6 +12556,10 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
     clearScheduledTelemetryReload();
     loadTelemetry("reset").catch(() => undefined);
   }, [tab, query, level, status, clearScheduledTelemetryReload]);
+
+  React.useEffect(() => {
+    loadTelemetryStorage().catch(() => undefined);
+  }, [loadTelemetryStorage]);
 
   React.useEffect(() => {
     const gateStatuses = new Set(["all", "active", "resolved", "fubar"]);
@@ -12276,8 +12636,9 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
     reloadTimerRef.current = window.setTimeout(() => {
       reloadTimerRef.current = null;
       loadTelemetry("reset").catch(() => undefined);
+      loadTelemetryStorage().catch(() => undefined);
     }, 900);
-  }, [logs, tab, query, level, status, clearScheduledTelemetryReload]);
+  }, [logs, tab, query, level, status, clearScheduledTelemetryReload, loadTelemetryStorage]);
 
   const toggleTrace = async (trace: TelemetryTrace) => {
     const traceId = trace.trace_id;
@@ -12300,15 +12661,15 @@ function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearR
   };
 
   const activeTab = logsTabs.find((item) => item.key === tab) ?? logsTabs[0];
-  const count = tab === "live" ? visibleLiveLogs.length : isTraceTab ? traces.length : auditLogs.length;
+  const logStorageLabel = storageSummary ? formatLogMegabytes(storageSummary.total_size_bytes) : "...";
 
   return (
     <section className="view-stack telemetry-workspace">
-      <Toolbar title="Telemetry & Audit" count={count} icon={activeTab.icon}>
+      <Toolbar title="Telemetry & Audit" badge={logStorageLabel} icon={activeTab.icon}>
         <button className="danger-button" onClick={clearLogs} type="button" disabled={clearing}>
           <Trash2 size={15} /> {clearing ? "Clearing..." : "Clear Logs"}
         </button>
-        <button className="secondary-button" onClick={() => loadTelemetry("reset")} type="button">
+        <button className="secondary-button" onClick={refreshLogs} type="button">
           <RefreshCcw size={15} /> Refresh
         </button>
       </Toolbar>
@@ -13027,11 +13388,7 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
     id: "gate_malfunctions",
     label: "Gate Malfunctions",
     events: [
-      { value: "gate_malfunction_2hrs", label: "Gate Malfunction - 2hrs", severity: "critical", description: "The gate malfunction has been active for at least two hours." },
-      { value: "gate_malfunction_30m", label: "Gate Malfunction - 30m", severity: "warning", description: "The gate malfunction has been active for at least 30 minutes." },
-      { value: "gate_malfunction_60m", label: "Gate Malfunction - 60m", severity: "critical", description: "The gate malfunction has been active for at least 60 minutes." },
-      { value: "gate_malfunction_fubar", label: "Gate Malfunction - FUBAR", severity: "critical", description: "Automated gate recovery attempts have been exhausted." },
-      { value: "gate_malfunction_initial", label: "Gate Malfunction - Initial", severity: "warning", description: "The primary gate has remained open for more than five minutes." }
+      { value: "gate_malfunction", label: "Gate Malfunction", severity: "critical", description: "The gate malfunction lifecycle changed stage." }
     ]
   },
   {
@@ -13066,6 +13423,7 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
     id: "visitor_pass",
     label: "Visitor Pass",
     events: [
+      { value: "visitor_pass_arranged", label: "Visitor Pass Arranged", severity: "info", description: "A WhatsApp visitor completed their Visitor Pass setup." },
       { value: "visitor_pass_cancelled", label: "Visitor Pass Cancelled", severity: "info", description: "A scheduled or active Visitor Pass was cancelled." },
       { value: "visitor_pass_created", label: "Visitor Pass Created", severity: "info", description: "A new Visitor Pass was created." },
       { value: "visitor_pass_expired", label: "Visitor Pass Expired", severity: "warning", description: "A Visitor Pass window elapsed without being used." },
@@ -13073,6 +13431,22 @@ const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
     ]
   }
 ];
+
+const defaultGateMalfunctionStageOptions: NotificationGateMalfunctionStageOption[] = [
+  { value: "initial", label: "Initial malfunction" },
+  { value: "30m", label: "30 minutes stuck" },
+  { value: "60m", label: "60 minutes stuck" },
+  { value: "2hrs", label: "2 hours stuck" },
+  { value: "fubar", label: "FUBAR" },
+  { value: "resolved", label: "Resolved" },
+];
+
+const canonicalGateMalfunctionTrigger: NotificationTriggerOption = {
+  value: "gate_malfunction",
+  label: "Gate Malfunction",
+  severity: "critical",
+  description: "The gate malfunction lifecycle changed stage.",
+};
 
 const fallbackNotificationVariables: NotificationVariableGroup[] = [
   {
@@ -13112,6 +13486,8 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
     items: [
       { name: "VisitorName", token: "@VisitorName", label: "Visitor name" },
       { name: "VisitorPassName", token: "@VisitorPassName", label: "Visitor Pass name" },
+      { name: "VisitorPassRegistration", token: "@VisitorPassRegistration", label: "Visitor Pass registration" },
+      { name: "VisitorPassTimeWindow", token: "@VisitorPassTimeWindow", label: "Visitor Pass time window" },
       { name: "VisitorPassVehicleRegistration", token: "@VisitorPassVehicleRegistration", label: "Visitor Pass vehicle registration" },
       { name: "VisitorPassVehicleMake", token: "@VisitorPassVehicleMake", label: "Visitor Pass vehicle make" },
       { name: "VisitorPassVehicleColour", token: "@VisitorPassVehicleColour", label: "Visitor Pass vehicle colour" },
@@ -13136,6 +13512,7 @@ const fallbackNotificationVariables: NotificationVariableGroup[] = [
       { name: "MalfunctionFixAttemptTime", token: "@MalfunctionFixAttemptTime", label: "Latest fix attempt time" },
       { name: "MalfunctionFixAttempts", token: "@MalfunctionFixAttempts", label: "Fix attempt count" },
       { name: "MalfunctionResolutionTime", token: "@MalfunctionResolutionTime", label: "Resolution time" },
+      { name: "MalfunctionStage", token: "@MalfunctionStage", label: "Malfunction stage" },
       { name: "LastKnownVehicle", token: "@LastKnownVehicle", label: "Last known vehicle" }
     ]
   }
@@ -13171,12 +13548,21 @@ const mockNotificationContext: Record<string, string> = {
   MaintenanceModeReason: "Enabled by Jason from UI",
   VisitorName: "Sarah",
   VisitorPassName: "Sarah",
+  VisitorPassRegistration: "PE70DHX",
+  VisitorPassTimeWindow: "01 May 2026, 10:00 to 01 May 2026, 18:00",
   VisitorPassVehicleRegistration: "PE70DHX",
   VisitorPassVehicleMake: "Peugeot",
   VisitorPassVehicleColour: "Silver",
   VisitorPassDurationOnSite: "1h 25m",
   VisitorPassOriginalTime: "01 May 2026, 10:00 to 01 May 2026, 18:00",
   VisitorPassRequestedTime: "01 May 2026, 10:00 to 01 May 2026, 20:00",
+  MalfunctionDuration: "5m 0s",
+  MalfunctionOpenedTime: "2026-04-26T07:30:00+01:00",
+  MalfunctionFixAttemptTime: "2026-04-26T07:35:00+01:00",
+  MalfunctionFixAttempts: "1",
+  MalfunctionResolutionTime: "",
+  MalfunctionStage: "initial",
+  LastKnownVehicle: "Steph Smith exited in 2026 Tesla Model Y",
   NewWinnerName: "Steph Smith",
   OvertakenName: "Jason Smith",
   ReadCount: "42"
@@ -14511,15 +14897,25 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
   const [error, setError] = React.useState("");
   const prefersReducedMotion = useReducedMotion();
 
-  const triggerGroups = catalog?.triggers.length ? catalog.triggers : fallbackNotificationTriggers;
+  const triggerGroups = notificationTriggerGroupsForDisplay(
+    catalog?.triggers.length ? catalog.triggers : fallbackNotificationTriggers
+  );
+  const gateMalfunctionStageOptions = catalog?.gate_malfunction_stages?.length
+    ? catalog.gate_malfunction_stages
+    : defaultGateMalfunctionStageOptions;
   const variableGroups = catalog?.variables.length ? catalog.variables : fallbackNotificationVariables;
   const variables = React.useMemo(() => variableGroups.flatMap((group) => group.items.map((item) => ({ ...item, group: group.group }))), [variableGroups]);
   const triggerOptions = React.useMemo(() => triggerGroups.flatMap((group) => group.events), [triggerGroups]);
   const triggerByValue = React.useMemo(() => new Map(triggerOptions.map((trigger) => [trigger.value, trigger])), [triggerOptions]);
+  const actionableOptionsByTrigger = React.useMemo(() => {
+    return new Map((catalog?.actionable_notifications ?? []).map((group) => [group.trigger_event, group.actions]));
+  }, [catalog?.actionable_notifications]);
   const activeDraft = draft;
   const workflowModalMode: "editor" | "trigger" | "action" = modal === "trigger" || modal === "action" ? modal : "editor";
   const previewContext = catalog?.mock_context && Object.keys(catalog.mock_context).length ? catalog.mock_context : mockNotificationContext;
-  const previewActions = activeDraft ? renderWorkflowPreview(activeDraft.actions, previewContext) : [];
+  const previewActions = activeDraft
+    ? renderWorkflowPreview(activeDraft.actions, previewContext, activeDraft.trigger_event)
+    : [];
   const filterCounts = React.useMemo<NotificationFilterCounts>(() => {
     return rules.reduce<NotificationFilterCounts>((counts, rule) => {
       counts.all += 1;
@@ -14775,7 +15171,13 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
                     selected={activeDraft.trigger_event}
                     onClose={() => setModal(null)}
                     onSelect={(triggerEvent) => {
-                      updateDraft((rule) => ({ ...rule, trigger_event: triggerEvent, name: rule.name === "New Notification" ? notificationEventLabel(triggerEvent, triggerByValue) : rule.name }));
+                      const supportedActionable = actionableOptionsByTrigger.get(triggerEvent) ?? [];
+                      updateDraft((rule) => ({
+                        ...rule,
+                        trigger_event: triggerEvent,
+                        name: rule.name === "New Notification" ? notificationEventLabel(triggerEvent, triggerByValue) : rule.name,
+                        actions: rule.actions.map((action) => notificationActionWithSupportedActionable(action, supportedActionable)),
+                      }));
                       setModal(null);
                     }}
                   />
@@ -14812,6 +15214,8 @@ function NotificationsView({ currentUser, people, schedules }: { currentUser: Us
                       saving={saving}
                       schedules={schedules}
                       testing={testing}
+                      actionableOptions={actionableOptionsByTrigger.get(activeDraft.trigger_event) ?? []}
+                      gateMalfunctionStageOptions={gateMalfunctionStageOptions}
                       trigger={triggerByValue.get(activeDraft.trigger_event)}
                       variables={variables}
                       onAddAction={() => setModal("action")}
@@ -15280,8 +15684,10 @@ function groupNotificationRulesByTriggerCategory(
 }
 
 function NotificationWorkflowEditor({
+  actionableOptions,
   cameras,
   feedback,
+  gateMalfunctionStageOptions,
   integrations,
   people,
   previewActions,
@@ -15300,8 +15706,10 @@ function NotificationWorkflowEditor({
   onShowTrigger,
   onUpdate
 }: {
+  actionableOptions: NotificationActionableOption[];
   cameras: UnifiProtectCamera[];
   feedback: { tone: "success" | "error" | "info"; text: string } | null;
+  gateMalfunctionStageOptions: NotificationGateMalfunctionStageOption[];
   integrations: NotificationIntegration[];
   people: Person[];
   previewActions: Array<NotificationAction & { title: string; message: string }>;
@@ -15322,6 +15730,7 @@ function NotificationWorkflowEditor({
 }) {
   const integrationById = React.useMemo(() => new Map(integrations.map((integration) => [integration.id, integration])), [integrations]);
   const isDraft = rule.id.startsWith("draft-");
+  const isGateMalfunctionWorkflow = rule.trigger_event === "gate_malfunction";
   return (
     <div className="workflow-editor-modal-grid">
       <div className="workflow-editor-column">
@@ -15389,9 +15798,12 @@ function NotificationWorkflowEditor({
                 {rule.actions.map((action) => (
                   <NotificationActionCard
                     action={action}
+                    actionableOptions={actionableOptions}
                     cameras={cameras}
                     integration={integrationById.get(action.type)}
+                    isGateMalfunctionWorkflow={isGateMalfunctionWorkflow}
                     key={action.id}
+                    stageOptions={gateMalfunctionStageOptions}
                     variables={variables}
                     onChange={(nextAction) => onUpdate((current) => ({ ...current, actions: current.actions.map((item) => item.id === action.id ? nextAction : item) }))}
                     onRemove={() => onUpdate((current) => ({ ...current, actions: current.actions.filter((item) => item.id !== action.id) }))}
@@ -15618,24 +16030,34 @@ function PlainTemplateEditor({ label, multiline = false, value, onChange }: Temp
 
 function NotificationActionCard({
   action,
+  actionableOptions,
   cameras,
   integration,
+  isGateMalfunctionWorkflow,
+  stageOptions,
   variables,
   onChange,
   onRemove
 }: {
   action: NotificationAction;
+  actionableOptions: NotificationActionableOption[];
   cameras: UnifiProtectCamera[];
   integration?: NotificationIntegration;
+  isGateMalfunctionWorkflow: boolean;
+  stageOptions: NotificationGateMalfunctionStageOption[];
   variables: Array<NotificationVariable & { group: string }>;
   onChange: (action: NotificationAction) => void;
   onRemove: () => void;
 }) {
   const meta = notificationChannelMeta[action.type];
   const Icon = meta.icon;
-  const supportsTitle = action.type !== "voice";
+  const supportsTitle = action.type !== "voice" && !isGateMalfunctionWorkflow;
+  const supportsMessageTemplate = !isGateMalfunctionWorkflow;
   const supportsMedia = action.type === "mobile" || action.type === "in_app" || action.type === "discord";
+  const supportsActionable = action.type === "mobile" && actionableOptions.length > 0;
   const actionMedia = normalizeNotificationMedia(action.media);
+  const actionActionable = normalizeNotificationActionable(action.actionable);
+  const selectedActionable = actionableOptions.find((item) => item.value === actionActionable.action) ?? actionableOptions[0];
   const selectedCamera = cameras.find((camera) => camera.id === actionMedia.camera_id);
   const cameraSnapshotUrl = selectedCamera
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
@@ -15660,6 +16082,23 @@ function NotificationActionCard({
       ],
     });
   };
+  const selectedGateStages = normalizeGateMalfunctionStages(action.gate_malfunction_stages);
+  const activeGateStages = selectedGateStages.length
+    ? selectedGateStages
+    : stageOptions.map((stage) => stage.value);
+  const toggleGateMalfunctionStage = (stage: NotificationGateMalfunctionStage) => {
+    const base = selectedGateStages.length
+      ? selectedGateStages
+      : stageOptions.map((item) => item.value);
+    const next = base.includes(stage)
+      ? base.filter((item) => item !== stage)
+      : [...base, stage];
+    const normalized = normalizeGateMalfunctionStages(next);
+    onChange({
+      ...action,
+      gate_malfunction_stages: normalized.length === stageOptions.length || normalized.length === 0 ? [] : normalized,
+    });
+  };
   return (
     <article className="workflow-action-card">
       <div className="workflow-card-title">
@@ -15682,6 +16121,31 @@ function NotificationActionCard({
         ))}
       </div>
 
+      {isGateMalfunctionWorkflow ? (
+        <section className="workflow-stage-row" aria-label={`${meta.label} gate malfunction stages`}>
+          <div className="workflow-stage-row-head">
+            <AlertTriangle size={14} />
+            <span>Gate Malfunction Stages</span>
+          </div>
+          <div className="workflow-stage-toggles">
+            {stageOptions.map((stage) => {
+              const selected = activeGateStages.includes(stage.value);
+              return (
+                <button
+                  className={selected ? "workflow-stage-toggle selected" : "workflow-stage-toggle"}
+                  key={stage.value}
+                  onClick={() => toggleGateMalfunctionStage(stage.value)}
+                  type="button"
+                >
+                  {selected ? <Check size={13} /> : null}
+                  {stage.label}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
       {action.type === "whatsapp" ? (
         <PlainTemplateEditor
           label="Phone numbers or @Variables"
@@ -15700,13 +16164,20 @@ function NotificationActionCard({
           onChange={(title_template) => onChange({ ...action, title_template })}
         />
       ) : null}
-      <SafeVariableRichTextEditor
-        label={action.type === "voice" ? "Spoken message" : "Message"}
-        multiline
-        value={action.message_template}
-        variables={variables}
-        onChange={(message_template) => onChange({ ...action, message_template })}
-      />
+      {supportsMessageTemplate ? (
+        <SafeVariableRichTextEditor
+          label={action.type === "voice" ? "Spoken message" : "Message"}
+          multiline
+          value={action.message_template}
+          variables={variables}
+          onChange={(message_template) => onChange({ ...action, message_template })}
+        />
+      ) : (
+        <div className="workflow-generated-copy">
+          <Sparkles size={14} />
+          <span>LLM generated content</span>
+        </div>
+      )}
 
       {supportsMedia ? (
         <section className="workflow-media-row">
@@ -15729,6 +16200,33 @@ function NotificationActionCard({
               <img src={cameraSnapshotUrl} alt={`${selectedCamera?.name ?? "Camera"} snapshot preview`} />
               <span>{selectedCamera?.name ?? "Camera snapshot"}</span>
             </div>
+          ) : null}
+          {supportsActionable ? (
+            <>
+              <label className={actionActionable.enabled ? "notification-switch active" : "notification-switch"}>
+                <input
+                  checked={actionActionable.enabled}
+                  onChange={(event) => onChange({
+                    ...action,
+                    actionable: {
+                      enabled: event.target.checked,
+                      action: event.target.checked ? selectedActionable.value : actionActionable.action,
+                    },
+                  })}
+                  type="checkbox"
+                />
+                <span>Actionable Notification</span>
+              </label>
+              {actionActionable.enabled ? (
+                <select
+                  value={selectedActionable.value}
+                  onChange={(event) => onChange({ ...action, actionable: { enabled: true, action: event.target.value } })}
+                  aria-label="Actionable notification action"
+                >
+                  {actionableOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              ) : null}
+            </>
           ) : null}
         </section>
       ) : null}
@@ -15765,6 +16263,7 @@ function NotificationLivePreviewPanel({
                 {action.title ? <h3>{action.title}</h3> : null}
                 <p>{action.message}</p>
                 {action.media.attach_camera_snapshot ? <span className="preview-media-chip"><Camera size={13} /> Camera Screenshot</span> : null}
+                {action.actionable.enabled ? <span className="preview-media-chip"><DoorOpen size={13} /> {notificationActionableLabel(action.actionable.action)}</span> : null}
               </article>
             );
           })}
@@ -16235,6 +16734,34 @@ function normalizeTriggerGroups(groups: NotificationTriggerGroup[], selected: st
   return normalized.sort((a, b) => a.label.localeCompare(b.label));
 }
 
+function notificationTriggerGroupsForDisplay(groups: NotificationTriggerGroup[]): NotificationTriggerGroup[] {
+  let hasGateMalfunctionGroup = false;
+  const normalized = groups
+    .map((group) => {
+      if (group.id === "gate_malfunctions") {
+        hasGateMalfunctionGroup = true;
+        return {
+          ...group,
+          events: [canonicalGateMalfunctionTrigger],
+        };
+      }
+      return {
+        ...group,
+        events: group.events.filter((event) => !legacyGateMalfunctionStage(event.value)),
+      };
+    })
+    .filter((group) => group.events.length > 0);
+
+  if (!hasGateMalfunctionGroup) {
+    normalized.push({
+      id: "gate_malfunctions",
+      label: "Gate Malfunctions",
+      events: [canonicalGateMalfunctionTrigger],
+    });
+  }
+  return normalized;
+}
+
 function notificationTriggerGroupIcon(groupId: string) {
   if (groupId === "ai_agents") return Bot;
   if (groupId === "compliance") return ShieldCheck;
@@ -16515,7 +17042,9 @@ function createWorkflowAction(
     target_ids: overrides.target_ids ?? [],
     title_template: templates.title_template,
     message_template: templates.message_template,
-    media: { attach_camera_snapshot: false, camera_id: "" }
+    gate_malfunction_stages: [],
+    media: { attach_camera_snapshot: false, camera_id: "" },
+    actionable: { enabled: false, action: "" }
   };
 }
 
@@ -16535,17 +17064,31 @@ function workflowRulePayload(rule: NotificationRule) {
 }
 
 function normalizeNotificationRule(rule: Partial<NotificationRule>): NotificationRule {
+  const rawTrigger = stringifyTemplateValue(rule.trigger_event);
+  const legacyStage = legacyGateMalfunctionStage(rawTrigger);
+  const actions = Array.isArray(rule.actions) ? rule.actions.map(normalizeNotificationAction) : [];
   return {
     id: stringifyTemplateValue(rule.id) || draftId("workflow"),
     name: stringifyTemplateValue(rule.name) || "Notification Workflow",
-    trigger_event: stringifyTemplateValue(rule.trigger_event),
+    trigger_event: legacyStage ? "gate_malfunction" : rawTrigger,
     conditions: Array.isArray(rule.conditions) ? rule.conditions.map(normalizeNotificationCondition) : [],
-    actions: Array.isArray(rule.actions) ? rule.actions.map(normalizeNotificationAction) : [],
+    actions: legacyStage
+      ? actions.map((action) => ({ ...action, gate_malfunction_stages: [legacyStage] }))
+      : actions,
     is_active: rule.is_active !== false,
     last_fired_at: rule.last_fired_at ?? null,
     created_at: rule.created_at,
     updated_at: rule.updated_at,
   };
+}
+
+function legacyGateMalfunctionStage(value: string): NotificationGateMalfunctionStage | "" {
+  if (value === "gate_malfunction_initial") return "initial";
+  if (value === "gate_malfunction_30m") return "30m";
+  if (value === "gate_malfunction_60m") return "60m";
+  if (value === "gate_malfunction_2hrs") return "2hrs";
+  if (value === "gate_malfunction_fubar") return "fubar";
+  return "";
 }
 
 function normalizeNotificationCondition(condition: Partial<NotificationCondition>): NotificationCondition {
@@ -16565,6 +17108,20 @@ function normalizePresenceConditionMode(value: unknown): PresenceConditionMode {
   return "someone_home";
 }
 
+function normalizeGateMalfunctionStages(value: unknown): NotificationGateMalfunctionStage[] {
+  if (!Array.isArray(value)) return [];
+  const stages: NotificationGateMalfunctionStage[] = [];
+  value.forEach((item) => {
+    const stage = stringifyTemplateValue(item);
+    if (isGateMalfunctionStage(stage) && !stages.includes(stage)) stages.push(stage);
+  });
+  return stages;
+}
+
+function isGateMalfunctionStage(value: string): value is NotificationGateMalfunctionStage {
+  return value === "initial" || value === "30m" || value === "60m" || value === "2hrs" || value === "fubar" || value === "resolved";
+}
+
 function normalizeNotificationAction(action: Partial<NotificationAction>): NotificationAction {
   const rawType = stringifyTemplateValue(action.type);
   const type = isNotificationActionType(rawType) ? rawType : "in_app";
@@ -16576,7 +17133,9 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
     target_ids: Array.isArray(action.target_ids) ? action.target_ids.map(stringifyTemplateValue).filter(Boolean) : [],
     title_template: stringifyTemplateValue(action.title_template) || templates.title_template,
     message_template: stringifyTemplateValue(action.message_template) || templates.message_template,
+    gate_malfunction_stages: normalizeGateMalfunctionStages(action.gate_malfunction_stages),
     media: normalizeNotificationMedia(action.media),
+    actionable: normalizeNotificationActionable(action.actionable),
   };
 }
 
@@ -16595,6 +17154,27 @@ function normalizeNotificationMedia(media: unknown): NotificationAction["media"]
     attach_camera_snapshot: raw.attach_camera_snapshot === true,
     camera_id: stringifyTemplateValue(raw.camera_id),
   };
+}
+
+function normalizeNotificationActionable(actionable: unknown): NotificationAction["actionable"] {
+  const raw = actionable && typeof actionable === "object" ? actionable as Partial<NotificationAction["actionable"]> : {};
+  const action = stringifyTemplateValue(raw.action);
+  return {
+    enabled: raw.enabled === true && action === "gate.open",
+    action: action === "gate.open" ? action : "",
+  };
+}
+
+function notificationActionWithSupportedActionable(action: NotificationAction, options: NotificationActionableOption[]) {
+  const normalized = normalizeNotificationAction(action);
+  if (!normalized.actionable.enabled) return normalized;
+  if (options.some((option) => option.value === normalized.actionable.action)) return normalized;
+  return { ...normalized, actionable: { enabled: false, action: "" } };
+}
+
+function notificationActionableLabel(action: string) {
+  if (action === "gate.open") return "Open Gate";
+  return titleCase(action || "Action");
 }
 
 function stringifyTemplateValue(value: unknown) {
@@ -16616,10 +17196,13 @@ function notificationSeverityTone(value: string): BadgeTone {
   return "gray";
 }
 
-function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>) {
+function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>, triggerEvent = "") {
   return actions.map(normalizeNotificationAction).map((action) => {
-    const title = renderWorkflowTemplate(action.title_template, context);
-    const message = renderWorkflowTemplate(action.message_template, context);
+    const generated = triggerEvent === "gate_malfunction"
+      ? gateMalfunctionPreviewContent(action.type, context)
+      : null;
+    const title = generated?.title ?? renderWorkflowTemplate(action.title_template, context);
+    const message = generated?.message ?? renderWorkflowTemplate(action.message_template, context);
     return {
       ...action,
       title,
@@ -16627,6 +17210,26 @@ function renderWorkflowPreview(actions: NotificationAction[], context: Record<st
       phoneticsApplied: action.type === "voice" && hasVehicleTtsPhoneticMatch(message),
     };
   });
+}
+
+function gateMalfunctionPreviewContent(actionType: NotificationActionType, context: Record<string, string>) {
+  const stage = isGateMalfunctionStage(context.MalfunctionStage) ? context.MalfunctionStage : "initial";
+  const stageLabel = defaultGateMalfunctionStageOptions.find((item) => item.value === stage)?.label ?? "Gate Malfunction";
+  const title = stage === "resolved" ? "Gate malfunction resolved" : `Gate Malfunction - ${stageLabel}`;
+  const body = gateMalfunctionPlainPreviewBody(stage);
+  return {
+    title,
+    message: actionType === "voice" ? `Attention. ${body}` : body,
+  };
+}
+
+function gateMalfunctionPlainPreviewBody(stage: NotificationGateMalfunctionStage) {
+  if (stage === "initial") return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it.";
+  if (stage === "30m") return "The gate is still stuck open. Alfred is still working on it.";
+  if (stage === "60m") return "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case.";
+  if (stage === "2hrs") return "The gate has been stuck open for over two hours. Alfred has not been able to fix it yet.";
+  if (stage === "fubar") return "The gate is still stuck open and Alfred has run out of automatic fixes. Please check the gate when you can.";
+  return "The gate malfunction has been resolved and the gate is closed again.";
 }
 
 function renderWorkflowTemplate(template: string, context: Record<string, string>) {
@@ -17290,13 +17893,26 @@ function UserModal({
   );
 }
 
-function Toolbar({ title, count, icon: Icon, children }: { title: string; count?: number; icon: React.ElementType; children?: React.ReactNode }) {
+function Toolbar({
+  title,
+  count,
+  badge,
+  icon: Icon,
+  children
+}: {
+  title: string;
+  count?: number;
+  badge?: React.ReactNode;
+  icon: React.ElementType;
+  children?: React.ReactNode;
+}) {
+  const badgeContent = badge ?? (typeof count === "number" ? count : null);
   return (
     <div className="toolbar">
       <div className="card-title">
         <Icon size={18} />
         <h2>{title}</h2>
-        {typeof count === "number" ? <Badge tone="gray">{count}</Badge> : null}
+        {badgeContent !== null ? <Badge tone="gray">{badgeContent}</Badge> : null}
       </div>
       {children}
     </div>
@@ -17529,12 +18145,6 @@ function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefin
     { key: "lpr_debounce_max_seconds", label: "Debounce max seconds", type: "number", min: 1, step: 0.1 },
     { key: "lpr_vehicle_session_idle_seconds", label: "Vehicle session idle seconds", type: "number", min: 10, step: 5 },
     { key: "lpr_similarity_threshold", label: "Similarity threshold", type: "number", min: 0, max: 1, step: 0.01 },
-    {
-      key: "lpr_allowed_smart_zones",
-      label: "Gate LPR smart zone",
-      type: "select",
-      help: "Selected UniFi smart zone for LPR access processing."
-    }
   ];
 }
 

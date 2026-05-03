@@ -407,6 +407,14 @@ class AutomationError(RuntimeError):
     """Raised when an automation rule or action cannot be evaluated safely."""
 
 
+@dataclass(frozen=True)
+class ScheduledAutomationClaim:
+    rule_id: str
+    run_id: str
+    trigger_key: str
+    trigger_payload: dict[str, Any]
+
+
 class AutomationService:
     def __init__(self) -> None:
         self._started = False
@@ -701,11 +709,19 @@ class AutomationService:
         context: AutomationContext | None = None,
         actor: str = "Automation Engine",
         source: str = "automation",
+        claimed_run_id: str | None = None,
     ) -> dict[str, Any]:
         rule_uuid = uuid.UUID(str(rule_id))
         async with AsyncSessionLocal() as session:
             rule = await session.get(AutomationRule, rule_uuid)
             if not rule or not rule.is_active:
+                if claimed_run_id:
+                    run = await session.get(AutomationRun, uuid.UUID(str(claimed_run_id)))
+                    if run and run.status == "claimed":
+                        run.status = "skipped"
+                        run.finished_at = datetime.now(tz=UTC)
+                        run.error = "rule_not_active"
+                        await session.commit()
                 return {"executed": False, "status": "skipped", "reason": "rule_not_active"}
             context = context or await self.context_for_trigger(trigger_key, trigger_payload)
             trace = telemetry.start_trace(
@@ -715,18 +731,32 @@ class AutomationService:
                 source=source,
                 context={"rule_id": str(rule.id), "trigger_key": trigger_key},
             )
-            run = AutomationRun(
-                rule_id=rule.id,
-                trigger_key=trigger_key,
-                status="running",
-                started_at=datetime.now(tz=UTC),
-                trigger_payload=sanitize_payload(trigger_payload),
-                context=context.to_payload(),
-                trace_id=trace.trace_id,
-                actor=actor,
-                source=source,
-            )
-            session.add(run)
+            run = None
+            if claimed_run_id:
+                run = await session.get(AutomationRun, uuid.UUID(str(claimed_run_id)))
+                if run and run.rule_id != rule.id:
+                    run = None
+            if run:
+                run.trigger_key = trigger_key
+                run.status = "running"
+                run.trigger_payload = sanitize_payload(trigger_payload)
+                run.context = context.to_payload()
+                run.trace_id = trace.trace_id
+                run.actor = actor
+                run.source = source
+            else:
+                run = AutomationRun(
+                    rule_id=rule.id,
+                    trigger_key=trigger_key,
+                    status="running",
+                    started_at=datetime.now(tz=UTC),
+                    trigger_payload=sanitize_payload(trigger_payload),
+                    context=context.to_payload(),
+                    trace_id=trace.trace_id,
+                    actor=actor,
+                    source=source,
+                )
+                session.add(run)
             await session.flush()
 
             condition_results: list[dict[str, Any]] = []
@@ -962,6 +992,19 @@ class AutomationService:
 
     async def _process_due_rules(self) -> None:
         now = datetime.now(tz=UTC)
+        claims = await self._claim_due_rules(now)
+        for claim in claims:
+            await self.execute_rule(
+                claim.rule_id,
+                trigger_key=claim.trigger_key,
+                trigger_payload=claim.trigger_payload,
+                actor="Automation Scheduler",
+                source="scheduler",
+                claimed_run_id=claim.run_id,
+            )
+
+    async def _claim_due_rules(self, now: datetime) -> list[ScheduledAutomationClaim]:
+        claims: list[ScheduledAutomationClaim] = []
         async with AsyncSessionLocal() as session:
             rules = (
                 await session.scalars(
@@ -974,26 +1017,54 @@ class AutomationService:
                     .with_for_update(skip_locked=True)
                 )
             ).all()
-        for rule in rules:
-            trigger = due_time_trigger(
-                normalize_triggers(rule.triggers),
-                now=now,
-                last_fired_at=rule.last_fired_at,
-                scheduled_for=rule.next_run_at,
-            )
-            if not trigger:
-                continue
-            await self.execute_rule(
-                str(rule.id),
-                trigger_key=str(trigger["type"]),
-                trigger_payload={
+            for rule in rules:
+                triggers = normalize_triggers(rule.triggers)
+                scheduled_for = rule.next_run_at
+                trigger = due_time_trigger(
+                    triggers,
+                    now=now,
+                    last_fired_at=rule.last_fired_at,
+                    scheduled_for=scheduled_for,
+                )
+                if not trigger:
+                    rule.next_run_at = next_run_for_triggers(
+                        triggers,
+                        now=now,
+                        last_fired_at=rule.last_fired_at,
+                    )
+                    continue
+                trigger_payload = {
                     "trigger": trigger,
                     "occurred_at": now.isoformat(),
-                    "scheduled_for": rule.next_run_at.isoformat() if rule.next_run_at else now.isoformat(),
-                },
-                actor="Automation Scheduler",
-                source="scheduler",
-            )
+                    "scheduled_for": scheduled_for.isoformat() if scheduled_for else now.isoformat(),
+                }
+                run = AutomationRun(
+                    rule_id=rule.id,
+                    trigger_key=str(trigger["type"]),
+                    status="claimed",
+                    started_at=now,
+                    trigger_payload=sanitize_payload(trigger_payload),
+                    context={},
+                    actor="Automation Scheduler",
+                    source="scheduler",
+                )
+                session.add(run)
+                rule.next_run_at = next_run_for_triggers(
+                    triggers,
+                    now=now,
+                    last_fired_at=now,
+                )
+                await session.flush()
+                claims.append(
+                    ScheduledAutomationClaim(
+                        rule_id=str(rule.id),
+                        run_id=str(run.id),
+                        trigger_key=str(trigger["type"]),
+                        trigger_payload=trigger_payload,
+                    )
+                )
+            await session.commit()
+        return claims
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         for trigger_key, payload in self._event_to_triggers(event):

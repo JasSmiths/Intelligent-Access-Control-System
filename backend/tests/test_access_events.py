@@ -470,6 +470,47 @@ async def test_gate_malfunction_known_vehicle_last_live_entry_resolves_as_exit()
 
 
 @pytest.mark.asyncio
+async def test_gate_malfunction_uses_latest_person_or_vehicle_history() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
+    vehicle = SimpleNamespace(id=uuid.uuid4())
+    captured_at = datetime(2026, 5, 3, 15, 58, 3, tzinfo=UTC)
+    older_vehicle_entry = SimpleNamespace(
+        id=uuid.uuid4(),
+        person_id=uuid.uuid4(),
+        vehicle_id=vehicle.id,
+        direction=AccessDirection.ENTRY,
+        occurred_at=captured_at - timedelta(days=1),
+        source="ubiquiti",
+        raw_payload={},
+    )
+    latest_person_exit = SimpleNamespace(
+        id=uuid.uuid4(),
+        person_id=person.id,
+        vehicle_id=uuid.uuid4(),
+        direction=AccessDirection.EXIT,
+        occurred_at=captured_at - timedelta(hours=3),
+        source="ubiquiti",
+        raw_payload={},
+    )
+
+    direction, resolution = await service._resolve_direction(
+        FakeVehicleHistorySession([latest_person_exit, older_vehicle_entry]),
+        plate_read_with_gate_malfunction("PE70DHX", captured_at),
+        person,
+        allowed=True,
+        vehicle=vehicle,
+    )
+
+    assert direction == AccessDirection.ENTRY
+    assert resolution["source"] == "gate_malfunction_vehicle_history"
+    assert resolution["history_lookup"] == "person_or_vehicle"
+    assert resolution["previous_live_match_scope"] == "person"
+    assert resolution["previous_live_event_id"] == str(latest_person_exit.id)
+    assert resolution["previous_live_direction"] == "exit"
+
+
+@pytest.mark.asyncio
 async def test_gate_malfunction_vehicle_history_excludes_backfills_for_sylvia_case() -> None:
     service = AccessEventService()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia Smith")
@@ -558,6 +599,30 @@ async def test_duplicate_arrival_uses_camera_tiebreaker_as_source_of_truth(monke
     assert direction == AccessDirection.EXIT
     assert resolution["source"] == "camera_tiebreaker"
     assert resolution["camera_tiebreaker"]["confidence"] == 0.91
+
+
+@pytest.mark.asyncio
+async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_is_uncertain(monkeypatch) -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Ash")
+
+    async def fake_camera_tiebreaker(_read, _person):
+        return {"direction": "exit", "confidence": 0.74, "reason": "Vehicle might be facing away."}
+
+    monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
+
+    direction, resolution = await service._resolve_direction(
+        FakePresenceSession(PresenceState.PRESENT),
+        plate_read_with_gate_state("closed"),
+        person,
+        allowed=True,
+    )
+
+    assert direction == AccessDirection.ENTRY
+    assert resolution["source"] == "gate_state"
+    assert resolution["camera_tiebreaker"]["confidence"] == 0.74
+    assert resolution["camera_tiebreaker_ignored_reason"] == "low_confidence"
+    assert service._automatic_open_allowed(resolution)
 
 
 def test_camera_direction_parser_accepts_json_and_text() -> None:
@@ -650,7 +715,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
 
 
 @pytest.mark.asyncio
-async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_window(monkeypatch) -> None:
+async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debounce_window(monkeypatch) -> None:
     service = AccessEventService()
     service._runtime = SimpleNamespace(
         lpr_similarity_threshold=0.78,
@@ -672,7 +737,7 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
         )
         return FinalizedPlateEvent(
             event_id=str(uuid.uuid4()),
-            direction=AccessDirection.ENTRY,
+            direction=AccessDirection.EXIT,
             decision=AccessDecision.GRANTED,
             occurred_at=window.best_read.captured_at,
         )
@@ -697,7 +762,7 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
     first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
-    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "closed"))
+    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "open"))
     await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen + timedelta(seconds=9), "open"))
 
     assert finalized == [{"candidate_count": 1, "best_registration_number": "PE70DHX"}]
@@ -713,6 +778,74 @@ async def test_exact_known_plate_suppresses_same_gate_cycle_echo_after_debounce_
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_exact_known_plate_allows_departure_state_after_entry_resolution(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+    )
+    finalized = []
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return ["PE70DHX"]
+
+    async def fake_finalize_window(window):
+        direction = AccessDirection.ENTRY if len(finalized) == 0 else AccessDirection.EXIT
+        finalized.append(
+            {
+                "candidate_count": len(window.reads),
+                "best_registration_number": window.best_read.registration_number,
+                "gate_state": window.best_read.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY]["state"],
+                "direction": direction.value,
+            }
+        )
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=direction,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    async def fake_no_gate_malfunction_context(read):
+        return read
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
+    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "closed"))
+    await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen + timedelta(seconds=9), "open"))
+
+    assert finalized == [
+        {
+            "candidate_count": 1,
+            "best_registration_number": "PE70DHX",
+            "gate_state": "closed",
+            "direction": "entry",
+        },
+        {
+            "candidate_count": 1,
+            "best_registration_number": "PE70DHX",
+            "gate_state": "open",
+            "direction": "exit",
+        },
+    ]
+    assert service._pending == []
+    assert published == []
 
 
 @pytest.mark.asyncio
@@ -1127,6 +1260,61 @@ async def test_vehicle_session_suppresses_post_exit_closed_gate_linger(monkeypat
     assert service._pending == []
     assert published[0][0] == "plate_read.suppressed"
     assert published[0][1]["reason"] == "vehicle_session_already_active"
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_allows_departure_state_after_entry(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    finalized = []
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return ["MD25VNO"]
+
+    async def fake_finalize_window(window):
+        finalized.append(window.best_read.registration_number)
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=AccessDirection.EXIT,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    async def fake_no_gate_malfunction_context(read):
+        return read
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MD25VNO", first_seen, state="closed", event_id="entry-event"),
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+    )
+
+    await service._handle_queued_read(
+        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=70), state="open", event_id="exit-event")
+    )
+
+    assert finalized == ["MD25VNO"]
+    assert published == []
 
 
 @pytest.mark.asyncio

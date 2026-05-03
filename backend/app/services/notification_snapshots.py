@@ -2,10 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from app.services.snapshots import (
-    NOTIFICATION_SNAPSHOT_TTL as SNAPSHOT_TTL,
-    get_snapshot_manager,
-)
+from app.services.snapshots import get_snapshot_manager
 
 
 @dataclass(frozen=True)

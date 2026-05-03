@@ -15,6 +15,8 @@ from app.modules.notifications.home_assistant_mobile import (
 from app.modules.notifications.base import ComposedNotification, NotificationContext
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notifications import (
+    ACTIONABLE_NOTIFICATION_CATALOG,
+    GATE_MALFUNCTION_EVENT_TYPE,
     HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
     NotificationSnapshotAttachment,
     NotificationWorkflowResult,
@@ -22,10 +24,17 @@ from app.services.notifications import (
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
     context_variables,
+    gate_malfunction_action_supports_stage,
+    gate_malfunction_fallback_content,
+    gate_malfunction_plain_body,
     home_assistant_notification_actions,
     normalize_actions,
     normalize_conditions,
+    normalize_rule_payload,
     notification_action_buttons,
+    notification_text_looks_like_raw_data,
+    parse_gate_malfunction_llm_content,
+    postprocess_gate_malfunction_body,
     presence_condition_matches,
     render_template,
     visitor_pass_notification_contexts_from_event,
@@ -205,17 +214,14 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "expired_mot_detected",
         "expired_tax_detected",
         "garage_door_open_failed",
-        "gate_malfunction_2hrs",
-        "gate_malfunction_30m",
-        "gate_malfunction_60m",
-        "gate_malfunction_fubar",
-        "gate_malfunction_initial",
+        "gate_malfunction",
         "gate_open_failed",
         "leaderboard_overtake",
         "maintenance_mode_disabled",
         "maintenance_mode_enabled",
         "outside_schedule",
         "unauthorized_plate",
+        "visitor_pass_arranged",
         "visitor_pass_cancelled",
         "visitor_pass_created",
         "visitor_pass_expired",
@@ -224,6 +230,13 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "visitor_pass_vehicle_arrived",
         "visitor_pass_vehicle_exited",
     }.issubset(set(events))
+    assert not {
+        "gate_malfunction_2hrs",
+        "gate_malfunction_30m",
+        "gate_malfunction_60m",
+        "gate_malfunction_fubar",
+        "gate_malfunction_initial",
+    }.intersection(events)
 
 
 def test_context_variables_include_vehicle_aliases_and_time() -> None:
@@ -356,6 +369,7 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
     for trigger in [
         "visitor_pass_created",
         "visitor_pass_cancelled",
+        "visitor_pass_arranged",
         "visitor_pass_used",
         "visitor_pass_expired",
         "visitor_pass_timeframe_change_requested",
@@ -371,6 +385,7 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
             severity="info",
             facts={
                 "visitor_pass_vehicle_registration": "PE70DHX",
+                "visitor_pass_time_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
                 "registration_number": "WRONG",
                 "visitor_pass_vehicle_make": "Peugeot",
                 "vehicle_make": "Tesla",
@@ -385,6 +400,8 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
     )
 
     assert variables["VisitorPassVehicleRegistration"] == "PE70DHX"
+    assert variables["VisitorPassRegistration"] == "PE70DHX"
+    assert variables["VisitorPassTimeWindow"] == "01 May 2026, 10:00 to 01 May 2026, 18:00"
     assert variables["VisitorPassVehicleMake"] == "Peugeot"
     assert variables["VisitorPassVehicleColour"] == "Silver"
     assert variables["VisitorPassDurationOnSite"] == "1h 25m"
@@ -451,6 +468,21 @@ def test_visitor_pass_timeframe_home_assistant_actions_are_available() -> None:
     ]
 
 
+def test_unknown_vehicle_open_gate_actionable_catalog_is_available() -> None:
+    assert ACTIONABLE_NOTIFICATION_CATALOG == [
+        {
+            "trigger_event": "unauthorized_plate",
+            "actions": [
+                {
+                    "value": "gate.open",
+                    "label": "Open Gate",
+                    "description": "Let the selected Home Assistant mobile recipient open the gate for this unknown plate.",
+                }
+            ],
+        }
+    ]
+
+
 def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
     payload = {
         "id": "pass-1",
@@ -460,6 +492,10 @@ def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
         "number_plate": "PE70DHX",
         "vehicle_make": "Peugeot",
         "vehicle_colour": "Silver",
+        "valid_from": "2026-04-29T14:00:00+01:00",
+        "valid_until": "2026-04-29T18:00:00+01:00",
+        "window_start": "2026-04-29T14:00:00+01:00",
+        "window_end": "2026-04-29T18:00:00+01:00",
         "arrival_time": "2026-04-29T15:03:00+01:00",
         "departure_time": "2026-04-29T16:28:00+01:00",
         "duration_on_site_seconds": 5100,
@@ -469,6 +505,21 @@ def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
         "created_at": "2026-04-29T14:00:00+01:00",
         "updated_at": "2026-04-29T16:28:00+01:00",
     }
+
+    arranged_contexts = visitor_pass_notification_contexts_from_event(
+        RealtimeEvent(
+            type="visitor_pass.arranged",
+            payload={"visitor_pass": payload, "source": "whatsapp_visitor"},
+            created_at="2026-04-29T14:05:01+01:00",
+        )
+    )
+    assert [context.event_type for context in arranged_contexts] == ["visitor_pass_arranged"]
+    assert arranged_contexts[0].facts["visitor_pass_registration"] == "PE70DHX"
+    assert arranged_contexts[0].facts["visitor_pass_time_window"] == "29 Apr 2026, 14:00 to 29 Apr 2026, 18:00"
+    arranged_variables = context_variables(arranged_contexts[0])
+    assert arranged_variables["VisitorPassName"] == "Sarah"
+    assert arranged_variables["VisitorPassRegistration"] == "PE70DHX"
+    assert arranged_variables["VisitorPassTimeWindow"] == "29 Apr 2026, 14:00 to 29 Apr 2026, 18:00"
 
     used_contexts = visitor_pass_notification_contexts_from_event(
         RealtimeEvent(
@@ -532,21 +583,17 @@ def test_visitor_pass_status_changed_only_notifies_expired() -> None:
 
 def test_gate_malfunction_triggers_and_variables_are_available() -> None:
     events = [event for group in TRIGGER_CATALOG for event in group["events"]]
-    for trigger in [
-        "gate_malfunction_initial",
-        "gate_malfunction_30m",
-        "gate_malfunction_60m",
-        "gate_malfunction_2hrs",
-        "gate_malfunction_fubar",
-    ]:
-        assert any(event["value"] == trigger for event in events)
+    assert [event["value"] for event in events if event["value"].startswith("gate_malfunction")] == [
+        GATE_MALFUNCTION_EVENT_TYPE
+    ]
 
     variables = context_variables(
         NotificationContext(
-            event_type="gate_malfunction_initial",
+            event_type=GATE_MALFUNCTION_EVENT_TYPE,
             subject="Gate malfunction detected",
             severity="warning",
             facts={
+                "malfunction_stage": "initial",
                 "malfunction_duration": "5m 0s",
                 "malfunction_opened_time": "2026-04-26T07:30:00+01:00",
                 "malfunction_fix_attempt_time": "2026-04-26T07:35:00+01:00",
@@ -562,7 +609,208 @@ def test_gate_malfunction_triggers_and_variables_are_available() -> None:
     assert variables["MalfunctionFixAttemptTime"] == "2026-04-26T07:35:00+01:00"
     assert variables["MalfunctionFixAttempts"] == "1"
     assert variables["MalfunctionResolutionTime"] == "2026-04-26T07:45:00+01:00"
+    assert variables["MalfunctionStage"] == "initial"
     assert variables["LastKnownVehicle"] == "Steph Smith exited in Tesla Model Y"
+
+
+def test_gate_malfunction_legacy_rules_normalize_to_stage_filter() -> None:
+    normalized = normalize_rule_payload(
+        {
+            "name": "Thirty minute voice",
+            "trigger_event": "gate_malfunction_30m",
+            "actions": [
+                {
+                    "type": "voice",
+                    "message_template": "Gate stuck.",
+                }
+            ],
+        }
+    )
+
+    assert normalized["trigger_event"] == GATE_MALFUNCTION_EVENT_TYPE
+    assert normalized["actions"][0]["gate_malfunction_stages"] == ["30m"]
+    assert gate_malfunction_action_supports_stage(normalized["actions"][0], "30m") is True
+    assert gate_malfunction_action_supports_stage(normalized["actions"][0], "60m") is False
+
+
+def test_gate_malfunction_text_post_processing_strips_duplicate_prefixes() -> None:
+    body = postprocess_gate_malfunction_body(
+        "voice",
+        "Attention. Gate Malfunction Update: Gate is still open.",
+        previous_notification=True,
+        fallback_body="Gate is still open.",
+    )
+
+    assert body == "Attention. Gate Malfunction Update: Gate is still open."
+
+    fallback = gate_malfunction_fallback_content(
+        "mobile",
+        NotificationContext(
+            event_type=GATE_MALFUNCTION_EVENT_TYPE,
+            subject="Gate alert",
+            severity="warning",
+            facts={
+                "gate_name": "Top Gate",
+                "malfunction_stage": "resolved",
+                "malfunction_duration": "14m 2s",
+                "malfunction_has_previous_notification": "true",
+            },
+        ),
+        previous_notification=True,
+    )
+    assert fallback["title"] == "Gate malfunction resolved"
+    assert fallback["body"].startswith("Gate Malfunction Update:")
+    assert "vehicle" not in fallback["body"].lower()
+    assert "recovery attempts" not in fallback["body"].lower()
+
+
+def test_gate_malfunction_plain_body_is_household_friendly() -> None:
+    assert gate_malfunction_plain_body("initial") == (
+        "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
+    )
+    assert gate_malfunction_plain_body("30m") == (
+        "The gate is still stuck open. Alfred is still working on it."
+    )
+    assert gate_malfunction_plain_body("60m") == (
+        "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case."
+    )
+    assert gate_malfunction_plain_body("resolved") == (
+        "The gate malfunction has been resolved and the gate is closed again."
+    )
+    assert notification_text_looks_like_raw_data('{"malfunction_id": "abc"}') is True
+    assert notification_text_looks_like_raw_data("The gate is still stuck open.") is False
+
+
+def test_gate_malfunction_llm_content_parser_accepts_fenced_json() -> None:
+    assert parse_gate_malfunction_llm_content(
+        '```json\n{"title": "Gate alert", "body": "Top Gate is still open."}\n```'
+    ) == {
+        "title": "Gate alert",
+        "body": "Top Gate is still open.",
+    }
+    assert parse_gate_malfunction_llm_content("Gate alert: still open") is None
+
+
+async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(llm_provider="local")
+
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(NotificationService, "_record_notification_span", lambda *_args, **_kwargs: None)
+
+    actions = await NotificationService()._gate_malfunction_actions_for_delivery(
+        [
+            {"type": "mobile", "gate_malfunction_stages": ["30m"]},
+            {"type": "in_app", "gate_malfunction_stages": []},
+            {"type": "voice", "gate_malfunction_stages": ["resolved"]},
+            {"type": "discord", "gate_malfunction_stages": ["30m", "resolved"]},
+            {"type": "whatsapp", "gate_malfunction_stages": ["initial"]},
+        ],
+        NotificationContext(
+            event_type=GATE_MALFUNCTION_EVENT_TYPE,
+            subject="Gate malfunction open for 30 minutes",
+            severity="warning",
+            facts={
+                "gate_name": "Top Gate",
+                "malfunction_stage": "30m",
+                "malfunction_duration": "30m 0s",
+            },
+        ),
+    )
+
+    assert [action["type"] for action in actions] == ["mobile", "in_app", "discord"]
+    assert all(action["message"] for action in actions)
+
+
+async def test_gate_malfunction_llm_composer_generates_voice_update(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(llm_provider="openai")
+
+    class FakeProvider:
+        async def complete(self, messages):
+            assert messages[-1].content
+            return SimpleNamespace(
+                text='{"title": " Gate check ", "body": "Attention. Gate Malfunction Update: Top Gate is still open."}'
+            )
+
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr("app.services.notifications.get_llm_provider", lambda _provider: FakeProvider())
+
+    content = await NotificationService()._compose_gate_malfunction_content(
+        "voice",
+        NotificationContext(
+            event_type=GATE_MALFUNCTION_EVENT_TYPE,
+            subject="Gate malfunction open for 30 minutes",
+            severity="warning",
+            facts={
+                "gate_name": "Top Gate",
+                "malfunction_stage": "30m",
+                "malfunction_has_previous_notification": "true",
+            },
+        ),
+    )
+
+    assert content["title"] == "Gate check"
+    assert content["body"] == "Attention. Gate Malfunction Update: Top Gate is still open."
+
+
+async def test_gate_malfunction_llm_fallback_records_telemetry_for_invalid_output(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(llm_provider="openai")
+
+    class FakeProvider:
+        async def complete(self, _messages):
+            return SimpleNamespace(text="Top Gate is still open.")
+
+    spans = []
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr("app.services.notifications.get_llm_provider", lambda _provider: FakeProvider())
+    monkeypatch.setattr(
+        NotificationService,
+        "_record_notification_span",
+        lambda _self, *args, **kwargs: spans.append((args, kwargs)),
+    )
+
+    content = await NotificationService()._compose_gate_malfunction_content(
+        "mobile",
+        NotificationContext(
+            event_type=GATE_MALFUNCTION_EVENT_TYPE,
+            subject="Gate malfunction detected",
+            severity="warning",
+            facts={
+                "gate_name": "Top Gate",
+                "malfunction_stage": "initial",
+            },
+        ),
+    )
+
+    assert content["title"] == "Gate malfunction detected"
+    assert "Alfred" in content["body"]
+    assert spans[0][1]["output_payload"]["reason"] == "invalid_llm_content"
+
+
+async def test_notification_catalog_exposes_single_gate_malfunction_trigger_and_stages(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(apprise_urls="")
+
+    async def fake_integrations(_self, _config):
+        return []
+
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(NotificationService, "available_integrations", fake_integrations)
+
+    catalog = await NotificationService().catalog()
+    events = [event["value"] for group in catalog["triggers"] for event in group["events"]]
+
+    assert events.count(GATE_MALFUNCTION_EVENT_TYPE) == 1
+    assert [stage["value"] for stage in catalog["gate_malfunction_stages"]] == [
+        "initial",
+        "30m",
+        "60m",
+        "2hrs",
+        "fubar",
+        "resolved",
+    ]
 
 
 def test_normalizers_keep_workflow_shape_strict() -> None:
@@ -575,6 +823,7 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
                 "title_template": "@Subject",
                 "message_template": "@Message",
                 "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
+                "actionable": {"enabled": True, "action": "gate.open"},
             },
             {
                 "type": "discord",
@@ -603,6 +852,7 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
 
     assert len(actions) == 3
     assert actions[0]["media"]["attach_camera_snapshot"] is True
+    assert actions[0]["actionable"] == {"enabled": True, "action": "gate.open"}
     assert actions[1]["type"] == "discord"
     assert actions[1]["target_ids"] == ["discord:123"]
     assert actions[1]["media"]["camera_id"] == "camera-2"
@@ -706,6 +956,35 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
     ]
 
 
+async def test_mobile_workflow_adds_configured_home_assistant_gate_action(monkeypatch) -> None:
+    service = NotificationService()
+    calls = []
+
+    class FakeActionableService:
+        async def create_gate_open_action(self, *, context, notify_service):
+            calls.append((context.event_type, notify_service, context.facts["registration_number"]))
+            return {"action": "iacs:gate_open:token", "title": "Open Gate"}
+
+    monkeypatch.setattr(
+        "app.services.notifications.get_actionable_notification_service",
+        lambda: FakeActionableService(),
+    )
+
+    actions = await service._home_assistant_mobile_actions_for_target(
+        {"actionable": {"enabled": True, "action": "gate.open"}},
+        NotificationContext(
+            event_type="unauthorized_plate",
+            subject="AB12CDE",
+            severity="warning",
+            facts={"registration_number": "AB12CDE"},
+        ),
+        "notify.mobile_app_jason",
+    )
+
+    assert calls == [("unauthorized_plate", "notify.mobile_app_jason", "AB12CDE")]
+    assert actions == [{"action": "iacs:gate_open:token", "title": "Open Gate"}]
+
+
 async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base_url(monkeypatch) -> None:
     service = NotificationService()
     calls = []
@@ -767,6 +1046,26 @@ async def test_home_assistant_mobile_action_decides_visitor_timeframe(monkeypatc
     )
 
     assert calls == [("pass-1", "request-1", "allow", "Home Assistant Notification")]
+
+
+async def test_home_assistant_mobile_action_routes_actionable_gate_event(monkeypatch) -> None:
+    calls = []
+
+    class FakeActionableService:
+        async def handle_home_assistant_action(self, action_id, event_data):
+            calls.append((action_id, event_data))
+            return True
+
+    monkeypatch.setattr(
+        "app.services.actionable_notifications.get_actionable_notification_service",
+        lambda: FakeActionableService(),
+    )
+
+    await HomeAssistantIntegrationService()._handle_mobile_notification_action(
+        {"data": {"action": "iacs:gate_open:token", "device_id": "device-1"}}
+    )
+
+    assert calls == [("iacs:gate_open:token", {"action": "iacs:gate_open:token", "device_id": "device-1"})]
 
 
 def test_presence_condition_modes() -> None:
@@ -858,6 +1157,26 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape() -> None:
         session=session,
     )
     assert session.deleted is not None
+
+
+def test_notification_rule_serialization_normalizes_legacy_gate_malfunction_trigger() -> None:
+    now = datetime(2026, 4, 26, 18, 42, tzinfo=UTC)
+    serialized = notification_api.serialize_rule(
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            name="Old 60 minute alert",
+            trigger_event="gate_malfunction_60m",
+            conditions=[],
+            actions=[{"type": "voice", "message_template": "Gate stuck."}],
+            is_active=True,
+            last_fired_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    assert serialized["trigger_event"] == GATE_MALFUNCTION_EVENT_TYPE
+    assert serialized["actions"][0]["gate_malfunction_stages"] == ["60m"]
 
 
 async def test_preview_endpoint_resolves_mock_variables() -> None:

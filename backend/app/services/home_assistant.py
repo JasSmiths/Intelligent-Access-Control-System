@@ -220,44 +220,63 @@ class HomeAssistantIntegrationService:
         )
 
         decision = parse_visitor_pass_timeframe_button_id(action_id)
-        if not decision:
-            return
+        if decision:
+            try:
+                result = await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
+                    decision.pass_id,
+                    decision.request_id,
+                    decision.decision,
+                    actor_label="Home Assistant Notification",
+                )
+                logger.info(
+                    "home_assistant_notification_action_processed",
+                    extra={
+                        "action": action_id,
+                        "decision": decision.decision,
+                        "visitor_pass_id": decision.pass_id,
+                        "request_id": decision.request_id,
+                        "admin_message": result.get("admin_message"),
+                    },
+                )
+                await event_bus.publish(
+                    "home_assistant.notification_action_processed",
+                    {
+                        "action": action_id,
+                        "decision": decision.decision,
+                        "visitor_pass_id": decision.pass_id,
+                        "request_id": decision.request_id,
+                    },
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "home_assistant_notification_action_failed",
+                    extra={
+                        "action": action_id,
+                        "decision": decision.decision,
+                        "visitor_pass_id": decision.pass_id,
+                        "request_id": decision.request_id,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+        from app.services.actionable_notifications import get_actionable_notification_service
+
         try:
-            result = await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
-                decision.pass_id,
-                decision.request_id,
-                decision.decision,
-                actor_label="Home Assistant Notification",
+            handled = await get_actionable_notification_service().handle_home_assistant_action(
+                action_id,
+                data,
             )
-            logger.info(
-                "home_assistant_notification_action_processed",
-                extra={
-                    "action": action_id,
-                    "decision": decision.decision,
-                    "visitor_pass_id": decision.pass_id,
-                    "request_id": decision.request_id,
-                    "admin_message": result.get("admin_message"),
-                },
-            )
-            await event_bus.publish(
-                "home_assistant.notification_action_processed",
-                {
-                    "action": action_id,
-                    "decision": decision.decision,
-                    "visitor_pass_id": decision.pass_id,
-                    "request_id": decision.request_id,
-                },
-            )
+            if handled:
+                logger.info(
+                    "home_assistant_actionable_notification_processed",
+                    extra={"action": action_id},
+                )
         except Exception as exc:
             logger.warning(
-                "home_assistant_notification_action_failed",
-                extra={
-                    "action": action_id,
-                    "decision": decision.decision,
-                    "visitor_pass_id": decision.pass_id,
-                    "request_id": decision.request_id,
-                    "error": str(exc),
-                },
+                "home_assistant_actionable_notification_failed",
+                extra={"action": action_id, "error": str(exc)},
             )
 
     async def _sync_gate_state(
