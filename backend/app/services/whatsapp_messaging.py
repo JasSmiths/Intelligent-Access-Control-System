@@ -245,7 +245,7 @@ class WhatsAppMessagingService:
 
     def validate_signature(self, raw_body: bytes, signature_header: str | None, app_secret: str) -> bool:
         if not app_secret:
-            return True
+            return False
         if not signature_header or not signature_header.startswith("sha256="):
             return False
         supplied = signature_header.split("=", 1)[1].strip().lower()

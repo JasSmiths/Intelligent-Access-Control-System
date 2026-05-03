@@ -159,6 +159,32 @@ async def test_webhook_verification_returns_challenge_on_token_match(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_webhook_verification_uses_constant_time_token_compare(monkeypatch) -> None:
+    calls = []
+
+    async def load_config():
+        return await async_enabled_config(webhook_verify_token="match-me")
+
+    def compare_digest(left, right):
+        calls.append((left, right))
+        return True
+
+    monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+    monkeypatch.setattr(webhooks.hmac, "compare_digest", compare_digest)
+
+    response = await webhooks.verify_whatsapp_webhook(
+        make_request(
+            "GET",
+            "/api/v1/webhooks/whatsapp",
+            query="hub.mode=subscribe&hub.verify_token=match-me&hub.challenge=abc123",
+        )
+    )
+
+    assert response.status_code == 200
+    assert calls == [("match-me", "match-me")]
+
+
+@pytest.mark.asyncio
 async def test_webhook_verification_rejects_bad_token(monkeypatch) -> None:
     async def load_config():
         return await async_enabled_config(webhook_verify_token="match-me")
@@ -175,6 +201,23 @@ async def test_webhook_verification_rejects_bad_token(monkeypatch) -> None:
         )
 
     assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_webhook_post_rejects_disabled_whatsapp_before_body_parse(monkeypatch) -> None:
+    async def load_config():
+        return await async_enabled_config(enabled=False, app_secret="")
+
+    monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_whatsapp_webhook(
+            make_request("POST", "/api/v1/webhooks/whatsapp", body=b"not-json"),
+            BackgroundTasks(),
+        )
+
+    assert exc.value.status_code == 403
+    assert "not enabled" in str(exc.value.detail).lower()
 
 
 @pytest.mark.asyncio
@@ -249,6 +292,14 @@ async def test_webhook_post_accepts_valid_signature(monkeypatch) -> None:
     assert result == {"status": "accepted"}
     assert handled["signature_verified"] is True
     assert handled["unsigned_allowed"] is False
+
+
+def test_whatsapp_signature_validation_fails_closed_without_secret() -> None:
+    service = get_whatsapp_messaging_service()
+    body = json.dumps({"entry": []}).encode()
+    signature = hmac.new(b"", body, hashlib.sha256).hexdigest()
+
+    assert service.validate_signature(body, f"sha256={signature}", "") is False
 
 
 @pytest.mark.asyncio

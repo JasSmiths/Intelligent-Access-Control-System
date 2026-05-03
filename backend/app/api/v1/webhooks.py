@@ -1,4 +1,5 @@
 import json
+import hmac
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -39,7 +40,12 @@ async def verify_whatsapp_webhook(request: Request) -> PlainTextResponse:
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-    if mode == "subscribe" and challenge is not None and token and token == config.webhook_verify_token:
+    token_matches = bool(
+        token
+        and config.webhook_verify_token
+        and hmac.compare_digest(token, config.webhook_verify_token)
+    )
+    if mode == "subscribe" and challenge is not None and token_matches:
         logger.info("whatsapp_webhook_verified")
         return PlainTextResponse(challenge, status_code=status.HTTP_200_OK)
     logger.warning(
@@ -56,6 +62,11 @@ async def receive_whatsapp_webhook(
 ) -> dict[str, str]:
     """Accept WhatsApp Cloud API message and status webhooks."""
 
+    config = await load_whatsapp_config()
+    if not config.enabled:
+        logger.warning("whatsapp_webhook_rejected_disabled")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="WhatsApp webhook is not enabled.")
+
     raw_body = await request.body()
     try:
         payload = json.loads(raw_body.decode("utf-8") or "{}")
@@ -65,26 +76,22 @@ async def receive_whatsapp_webhook(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="WhatsApp webhook payload must be a JSON object.")
 
     service = get_whatsapp_messaging_service()
-    config = await load_whatsapp_config()
     signature_header = request.headers.get("x-hub-signature-256")
     signature_verified = False
     unsigned_allowed = False
-    if config.enabled and not config.app_secret:
+    if not config.app_secret:
         logger.warning("whatsapp_webhook_signature_secret_missing")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="WhatsApp app secret is required before incoming webhooks can be accepted.",
         )
-    if config.app_secret:
-        signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
-        if not signature_verified:
-            logger.warning(
-                "whatsapp_webhook_signature_invalid",
-                extra={"signature_present": bool(signature_header)},
-            )
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid WhatsApp webhook signature.")
-    else:
-        unsigned_allowed = True
+    signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
+    if not signature_verified:
+        logger.warning(
+            "whatsapp_webhook_signature_invalid",
+            extra={"signature_present": bool(signature_header)},
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid WhatsApp webhook signature.")
 
     telemetry.record_span(
         "Webhook payload received",
