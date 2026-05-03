@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
 import uuid
@@ -51,20 +52,28 @@ async def async_enabled_config(**overrides):
     return enabled_config(**overrides)
 
 
-def make_request(method: str, path: str, *, query: str = "", body: bytes = b"", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+def make_request(
+    method: str,
+    path: str,
+    *,
+    query: str = "",
+    body: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+    client: tuple[str, int] | None = None,
+) -> Request:
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
 
-    return Request(
-        {
-            "type": "http",
-            "method": method,
-            "path": path,
-            "query_string": query.encode(),
-            "headers": headers or [],
-        },
-        receive,
-    )
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": query.encode(),
+        "headers": headers or [],
+    }
+    if client:
+        scope["client"] = client
+    return Request(scope, receive)
 
 
 @pytest.fixture(autouse=True)
@@ -159,6 +168,33 @@ async def test_webhook_verification_returns_challenge_on_token_match(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_webhook_verification_logs_authorized_attempt_with_ip(monkeypatch, caplog) -> None:
+    async def load_config():
+        return await async_enabled_config(webhook_verify_token="match-me")
+
+    monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+    caplog.set_level(logging.INFO, logger=webhooks.logger.name)
+
+    response = await webhooks.verify_whatsapp_webhook(
+        make_request(
+            "GET",
+            "/api/v1/webhooks/whatsapp",
+            query="hub.mode=subscribe&hub.verify_token=match-me&hub.challenge=abc123",
+            headers=[(b"x-forwarded-for", b"203.0.113.8, 10.0.0.12")],
+            client=("172.18.0.2", 53210),
+        )
+    )
+
+    record = next(item for item in caplog.records if item.message == "whatsapp_webhook_hit")
+    assert response.status_code == 200
+    assert record.source_ip == "203.0.113.8"
+    assert record.direct_client_ip == "172.18.0.2"
+    assert record.authorized is True
+    assert record.authorization_status == "authorized"
+    assert record.authorization_reason == "verify_token_match"
+
+
+@pytest.mark.asyncio
 async def test_webhook_verification_uses_constant_time_token_compare(monkeypatch) -> None:
     calls = []
 
@@ -204,20 +240,32 @@ async def test_webhook_verification_rejects_bad_token(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_webhook_post_rejects_disabled_whatsapp_before_body_parse(monkeypatch) -> None:
+async def test_webhook_post_rejects_disabled_whatsapp_before_body_parse(monkeypatch, caplog) -> None:
     async def load_config():
         return await async_enabled_config(enabled=False, app_secret="")
 
     monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+    caplog.set_level(logging.WARNING, logger=webhooks.logger.name)
 
     with pytest.raises(HTTPException) as exc:
         await webhooks.receive_whatsapp_webhook(
-            make_request("POST", "/api/v1/webhooks/whatsapp", body=b"not-json"),
+            make_request(
+                "POST",
+                "/api/v1/webhooks/whatsapp",
+                body=b"not-json",
+                headers=[(b"x-real-ip", b"198.51.100.20")],
+                client=("172.18.0.2", 53210),
+            ),
             BackgroundTasks(),
         )
 
+    record = next(item for item in caplog.records if item.message == "whatsapp_webhook_hit")
     assert exc.value.status_code == 403
     assert "not enabled" in str(exc.value.detail).lower()
+    assert record.source_ip == "198.51.100.20"
+    assert record.authorized is False
+    assert record.authorization_status == "unauthorized"
+    assert record.authorization_reason == "integration_disabled"
 
 
 @pytest.mark.asyncio
@@ -256,12 +304,13 @@ async def test_webhook_post_rejects_enabled_whatsapp_without_app_secret(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_webhook_post_accepts_valid_signature(monkeypatch) -> None:
+async def test_webhook_post_accepts_valid_signature(monkeypatch, caplog) -> None:
     handled = {}
     async def load_config():
         return await async_enabled_config(app_secret="secret")
 
     monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
+    caplog.set_level(logging.INFO, logger=webhooks.logger.name)
 
     async def handle(payload, *, signature_verified, unsigned_allowed):
         handled.update(
@@ -283,15 +332,25 @@ async def test_webhook_post_accepts_valid_signature(monkeypatch) -> None:
             "POST",
             "/api/v1/webhooks/whatsapp",
             body=body,
-            headers=[(b"x-hub-signature-256", f"sha256={signature}".encode())],
+            headers=[
+                (b"x-hub-signature-256", f"sha256={signature}".encode()),
+                (b"cf-connecting-ip", b"192.0.2.44"),
+            ],
+            client=("172.18.0.2", 53210),
         ),
         background,
     )
     await background()
 
+    record = next(item for item in caplog.records if item.message == "whatsapp_webhook_hit")
     assert result == {"status": "accepted"}
     assert handled["signature_verified"] is True
     assert handled["unsigned_allowed"] is False
+    assert record.source_ip == "192.0.2.44"
+    assert record.authorized is True
+    assert record.authorization_status == "authorized"
+    assert record.authorization_reason == "signature_valid"
+    assert record.signature_verified is True
 
 
 def test_whatsapp_signature_validation_fails_closed_without_secret() -> None:

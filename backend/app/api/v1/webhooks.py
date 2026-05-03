@@ -1,5 +1,5 @@
-import json
 import hmac
+import json
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -46,11 +46,37 @@ async def verify_whatsapp_webhook(request: Request) -> PlainTextResponse:
         and hmac.compare_digest(token, config.webhook_verify_token)
     )
     if mode == "subscribe" and challenge is not None and token_matches:
-        logger.info("whatsapp_webhook_verified")
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=True,
+            reason="verify_token_match",
+            mode=mode,
+            has_challenge=True,
+            verify_token_present=bool(token),
+            verify_token_configured=bool(config.webhook_verify_token),
+        )
         return PlainTextResponse(challenge, status_code=status.HTTP_200_OK)
+    failure_reason = _whatsapp_verify_failure_reason(mode, token, challenge, config.webhook_verify_token)
+    _log_whatsapp_webhook_hit(
+        request,
+        authorized=False,
+        reason=failure_reason,
+        level="warning",
+        mode=mode,
+        has_challenge=challenge is not None,
+        verify_token_present=bool(token),
+        verify_token_configured=bool(config.webhook_verify_token),
+    )
     logger.warning(
         "whatsapp_webhook_verification_failed",
-        extra={"mode": mode, "has_challenge": challenge is not None, "verify_token_configured": bool(config.webhook_verify_token)},
+        extra={
+            **_whatsapp_webhook_network_context(request),
+            "authorization_status": "unauthorized",
+            "authorization_reason": failure_reason,
+            "mode": mode,
+            "has_challenge": challenge is not None,
+            "verify_token_configured": bool(config.webhook_verify_token),
+        },
     )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="WhatsApp webhook verification failed.")
 
@@ -64,41 +90,86 @@ async def receive_whatsapp_webhook(
 
     config = await load_whatsapp_config()
     if not config.enabled:
-        logger.warning("whatsapp_webhook_rejected_disabled")
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=False,
+            reason="integration_disabled",
+            level="warning",
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="WhatsApp webhook is not enabled.")
 
     raw_body = await request.body()
-    try:
-        payload = json.loads(raw_body.decode("utf-8") or "{}")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid WhatsApp webhook JSON.") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="WhatsApp webhook payload must be a JSON object.")
-
-    service = get_whatsapp_messaging_service()
     signature_header = request.headers.get("x-hub-signature-256")
-    signature_verified = False
-    unsigned_allowed = False
     if not config.app_secret:
-        logger.warning("whatsapp_webhook_signature_secret_missing")
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=False,
+            reason="missing_app_secret",
+            level="warning",
+            body_size_bytes=len(raw_body),
+            signature_present=bool(signature_header),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="WhatsApp app secret is required before incoming webhooks can be accepted.",
         )
+
+    service = get_whatsapp_messaging_service()
     signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
+    unsigned_allowed = False
     if not signature_verified:
-        logger.warning(
-            "whatsapp_webhook_signature_invalid",
-            extra={"signature_present": bool(signature_header)},
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=False,
+            reason="invalid_signature",
+            level="warning",
+            body_size_bytes=len(raw_body),
+            signature_present=bool(signature_header),
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid WhatsApp webhook signature.")
 
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except json.JSONDecodeError as exc:
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=True,
+            reason="signature_valid_invalid_json",
+            level="warning",
+            body_size_bytes=len(raw_body),
+            signature_present=bool(signature_header),
+            signature_verified=True,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid WhatsApp webhook JSON.") from exc
+    if not isinstance(payload, dict):
+        _log_whatsapp_webhook_hit(
+            request,
+            authorized=True,
+            reason="signature_valid_invalid_payload_type",
+            level="warning",
+            body_size_bytes=len(raw_body),
+            payload_type=type(payload).__name__,
+            signature_present=bool(signature_header),
+            signature_verified=True,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="WhatsApp webhook payload must be a JSON object.")
+
+    payload_shape = _payload_shape(payload)
+    _log_whatsapp_webhook_hit(
+        request,
+        authorized=True,
+        reason="signature_valid",
+        body_size_bytes=len(raw_body),
+        payload_shape=payload_shape,
+        signature_present=bool(signature_header),
+        signature_verified=True,
+    )
     telemetry.record_span(
         "Webhook payload received",
         category=TELEMETRY_CATEGORY_WEBHOOKS_API,
         attributes={"source": "whatsapp"},
         output_payload={
-            "payload_shape": _payload_shape(payload),
+            "payload_shape": payload_shape,
             "signature_verified": signature_verified,
             "unsigned_allowed": unsigned_allowed,
         },
@@ -302,6 +373,60 @@ def _payload_shape(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_payload_shape(value[0], depth + 1)] if value else []
     return type(value).__name__
+
+
+def _log_whatsapp_webhook_hit(
+    request: Request,
+    *,
+    authorized: bool,
+    reason: str,
+    level: str = "info",
+    **extra: Any,
+) -> None:
+    log_context = {
+        **_whatsapp_webhook_network_context(request),
+        "method": request.method,
+        "path": str(request.scope.get("path") or request.url.path),
+        "authorized": authorized,
+        "authorization_status": "authorized" if authorized else "unauthorized",
+        "authorization_reason": reason,
+        **extra,
+    }
+    log = logger.warning if level == "warning" else logger.info
+    log("whatsapp_webhook_hit", extra=log_context)
+
+
+def _whatsapp_webhook_network_context(request: Request) -> dict[str, Any]:
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    forwarded_ips = [part.strip() for part in forwarded_for.split(",") if part.strip()]
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    cloudflare_ip = str(request.headers.get("cf-connecting-ip") or "").strip()
+    direct_client_ip = request.client.host if request.client else ""
+    source_ip = forwarded_ips[0] if forwarded_ips else real_ip or cloudflare_ip or direct_client_ip
+    return {
+        "source_ip": source_ip or "unknown",
+        "direct_client_ip": direct_client_ip,
+        "x_forwarded_for": forwarded_for,
+        "x_real_ip": real_ip,
+        "cf_connecting_ip": cloudflare_ip,
+    }
+
+
+def _whatsapp_verify_failure_reason(
+    mode: str | None,
+    token: str | None,
+    challenge: str | None,
+    configured_token: str,
+) -> str:
+    if mode != "subscribe":
+        return "invalid_verify_mode"
+    if challenge is None:
+        return "missing_challenge"
+    if not configured_token:
+        return "verify_token_unconfigured"
+    if not token:
+        return "missing_verify_token"
+    return "verify_token_mismatch"
 
 
 def _looks_like_numeric_zone_id(value: Any) -> bool:
