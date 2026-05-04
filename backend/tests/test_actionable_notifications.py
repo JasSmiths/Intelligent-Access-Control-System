@@ -2,8 +2,6 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 import uuid
 
-import pytest
-
 from app.services import actionable_notifications as actionable
 from app.services.actionable_notifications import (
     ActionableNotificationService,

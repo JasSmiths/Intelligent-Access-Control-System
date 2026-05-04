@@ -1,0 +1,3202 @@
+.schedule-chip {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.inherit-chip {
+  color: var(--muted-strong);
+}
+
+.schedules-page {
+  max-width: 1540px;
+}
+
+.schedule-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.users-hero.schedules-hero {
+  width: 100%;
+  display: grid;
+  align-items: stretch;
+  justify-content: stretch;
+  gap: 14px;
+}
+
+.schedules-hero-main {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.schedule-policy-card {
+  width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.schedule-policy-card .schedule-card-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-policy-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.schedule-policy-copy h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.schedule-policy-copy p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.schedule-policy-actions {
+  grid-column: 3;
+  width: max-content;
+  max-width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.schedule-policy-option {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.policy-label-short {
+  display: none;
+}
+
+.schedule-policy-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.schedule-policy-option.allow.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 66%, var(--surface));
+  color: var(--green-strong);
+}
+
+.schedule-policy-option.deny.active {
+  border-color: color-mix(in srgb, var(--red) 30%, var(--line));
+  background: color-mix(in srgb, var(--red-soft) 66%, var(--surface));
+  color: var(--red);
+}
+
+.schedule-policy-status {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.schedule-policy-saved-pill {
+  animation: scheduleSavedFade 5.2s ease forwards;
+}
+
+@keyframes scheduleSavedFade {
+  0%,
+  82% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.schedule-card {
+  min-height: 206px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.schedule-card-main {
+  width: 100%;
+  min-height: 82px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.schedule-card-copy {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.schedule-card-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.schedule-card-main strong,
+.schedule-card-main div > span {
+  display: block;
+  min-width: 0;
+}
+
+.schedule-card-main strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-card-main div > span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.schedule-card-main .badge {
+  width: max-content;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  align-self: start;
+  line-height: 1;
+}
+
+.schedule-card-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.schedule-card-days span {
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.schedule-card-days span.active {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 70%, var(--surface));
+  color: var(--green-strong);
+}
+
+.schedule-card-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.schedule-empty-card {
+  grid-column: 1 / -1;
+}
+
+.passes-page {
+  max-width: 1540px;
+}
+
+.users-hero.passes-hero {
+  min-height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.passes-toolbar {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.pass-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pass-filter-bar button,
+.visitor-pass-window-select button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.pass-filter-bar button.active,
+.visitor-pass-window-select button.active {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
+.pass-filter-bar button span {
+  min-width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.visitor-pass-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.visitor-pass-card {
+  min-height: 246px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  border-left: 4px solid var(--line-strong);
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.visitor-pass-card:hover,
+.visitor-pass-card:focus-visible {
+  box-shadow: var(--shadow);
+  transform: translateY(-1px);
+}
+
+.visitor-pass-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.visitor-pass-card.active {
+  border-left-color: var(--green);
+}
+
+.visitor-pass-card.scheduled {
+  border-left-color: var(--blue);
+}
+
+.visitor-pass-card.used {
+  border-left-color: var(--violet);
+}
+
+.visitor-pass-card.cancelled {
+  border-left-color: var(--red);
+}
+
+.visitor-pass-card-head {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.visitor-pass-card-head .badge {
+  align-self: start;
+  margin-top: 1px;
+}
+
+.visitor-pass-card-head strong,
+.visitor-pass-card-head span:not(.badge),
+.visitor-pass-window span,
+.visitor-pass-vehicle strong,
+.visitor-pass-vehicle span,
+.visitor-pass-duration span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-card-head strong,
+.visitor-pass-vehicle strong {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.visitor-pass-card-head span:not(.badge),
+.visitor-pass-window span,
+.visitor-pass-vehicle span,
+.visitor-pass-duration span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.visitor-pass-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-window {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-window div,
+.visitor-pass-vehicle {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.visitor-pass-window svg,
+.visitor-pass-vehicle svg {
+  color: var(--muted);
+}
+
+.visitor-pass-whatsapp-status {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue-soft) 54%, var(--surface));
+  color: var(--blue-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.visitor-pass-whatsapp-status.has-tooltip {
+  cursor: help;
+}
+
+.visitor-pass-whatsapp-status.has-tooltip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.visitor-pass-whatsapp-status.message_sending_failed,
+.visitor-pass-whatsapp-status.failed,
+.visitor-pass-whatsapp-status.timeframe_denied,
+.visitor-pass-whatsapp-status.user_not_on_whatsapp {
+  background: color-mix(in srgb, var(--red-soft) 58%, var(--surface));
+  color: var(--red);
+}
+
+.visitor-pass-whatsapp-status.complete,
+.visitor-pass-whatsapp-status.message_read,
+.visitor-pass-whatsapp-status.timeframe_approved {
+  background: color-mix(in srgb, var(--green-soft) 58%, var(--surface));
+  color: var(--green);
+}
+
+.visitor-pass-whatsapp-status.timeframe_approval_pending,
+.visitor-pass-whatsapp-status.timeframe_confirmation_pending {
+  background: color-mix(in srgb, var(--amber-soft) 58%, var(--surface));
+  color: var(--amber);
+}
+
+.visitor-pass-whatsapp-status span {
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.iacs-tooltip {
+  position: fixed;
+  z-index: 260;
+  width: min(320px, calc(100vw - 24px));
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 98%, transparent);
+  box-shadow: var(--shadow-strong);
+  color: var(--text);
+  pointer-events: none;
+  text-align: left;
+  transform: translateX(-50%);
+}
+
+.iacs-tooltip::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.iacs-tooltip.bottom::before {
+  top: -5px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.iacs-tooltip.top::before {
+  bottom: -5px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.iacs-tooltip strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.25;
+}
+
+.iacs-tooltip span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 520;
+  line-height: 1.45;
+}
+
+.visitor-pass-telemetry {
+  display: grid;
+  gap: 10px;
+}
+
+.visitor-pass-duration {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.visitor-pass-duration .badge {
+  flex: 0 0 auto;
+}
+
+.visitor-pass-detail-modal {
+  width: min(860px, calc(100vw - 32px));
+  max-height: calc(var(--app-viewport-height) - 36px);
+  overflow: auto;
+  display: grid;
+}
+
+.visitor-pass-detail-header {
+  align-items: center;
+}
+
+.visitor-pass-detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.visitor-pass-detail-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-detail-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.visitor-pass-detail-tabs button.active {
+  background: var(--surface);
+  color: var(--blue);
+  box-shadow: var(--shadow-soft);
+}
+
+.visitor-pass-detail-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.visitor-pass-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.visitor-pass-detail-tile {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-detail-tile span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.visitor-pass-detail-tile strong,
+.visitor-pass-detail-tile small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-detail-tile strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.visitor-pass-detail-tile small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.visitor-pass-whatsapp-panel {
+  min-height: 0;
+  display: grid;
+}
+
+.visitor-pass-whatsapp-thread {
+  min-height: 360px;
+  max-height: min(560px, calc(var(--app-viewport-height) - 310px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--green-soft) 22%, var(--surface)) 0%, var(--surface-soft) 100%);
+}
+
+.visitor-pass-whatsapp-row {
+  display: flex;
+  justify-content: flex-start;
+  will-change: transform, opacity;
+}
+
+.visitor-pass-whatsapp-row.outbound {
+  justify-content: flex-end;
+}
+
+.visitor-pass-whatsapp-bubble {
+  max-width: min(72%, 520px);
+  display: grid;
+  gap: 4px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.visitor-pass-whatsapp-row.outbound .visitor-pass-whatsapp-bubble {
+  border-color: color-mix(in srgb, var(--green) 32%, var(--line));
+  background: color-mix(in srgb, var(--green-soft) 68%, var(--surface));
+}
+
+.visitor-pass-whatsapp-bubble span,
+.visitor-pass-whatsapp-bubble small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.visitor-pass-whatsapp-bubble p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.visitor-pass-thread-empty {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.visitor-pass-detail-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.visitor-pass-log-panel {
+  min-height: 0;
+  max-height: min(560px, calc(var(--app-viewport-height) - 310px));
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.visitor-pass-log-list {
+  position: relative;
+  display: grid;
+  gap: 12px;
+}
+
+.visitor-pass-log-list::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 7px;
+  width: 2px;
+  background: var(--line);
+}
+
+.visitor-pass-log-entry {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.visitor-pass-log-dot {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;
+  border: 3px solid var(--surface);
+  border-radius: 999px;
+  background: var(--gray);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.visitor-pass-log-dot.green {
+  background: var(--green);
+}
+
+.visitor-pass-log-dot.blue {
+  background: var(--blue);
+}
+
+.visitor-pass-log-dot.amber {
+  background: var(--amber);
+}
+
+.visitor-pass-log-dot.red {
+  background: var(--red);
+}
+
+.visitor-pass-log-dot.purple {
+  background: var(--violet);
+}
+
+.visitor-pass-log-entry > div {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-log-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.visitor-pass-log-head strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.visitor-pass-log-head time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.visitor-pass-log-entry p {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.visitor-pass-log-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.visitor-pass-log-fields span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.visitor-pass-log-fields small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.visitor-pass-log-fields strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.solid-danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #ffffff;
+}
+
+.solid-danger:hover {
+  background: color-mix(in srgb, var(--red) 88%, black);
+  border-color: color-mix(in srgb, var(--red) 88%, black);
+}
+
+.visitor-pass-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.visitor-pass-actions > span {
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.visitor-pass-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.visitor-pass-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  gap: 16px;
+}
+
+.visitor-pass-card {
+  position: relative;
+  min-height: 0;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--blue) 16%, var(--line));
+  border-left: 4px solid var(--blue);
+  background: linear-gradient(145deg, var(--surface) 0%, color-mix(in srgb, var(--blue-soft) 22%, var(--surface)) 100%);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+}
+
+.visitor-pass-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 18% 0%, rgba(47, 111, 228, 0.08), transparent 30%);
+}
+
+.visitor-pass-card-head {
+  position: relative;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.visitor-pass-card-head strong {
+  font-size: 22px;
+  font-weight: 740;
+  letter-spacing: 0;
+}
+
+.visitor-pass-card-subtitle {
+  margin-top: 5px;
+  color: var(--muted-strong);
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.visitor-pass-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  color: var(--blue);
+  background: linear-gradient(145deg, var(--blue-soft), color-mix(in srgb, var(--blue-soft) 54%, var(--surface)));
+}
+
+.visitor-pass-icon svg {
+  width: 27px;
+  height: 27px;
+  stroke-width: 2.1;
+}
+
+.visitor-pass-status-pill {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 74%, var(--surface));
+  font-size: 14px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.visitor-pass-status-pill span {
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.visitor-pass-status-label {
+  height: 100%;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  margin: 0 !important;
+  padding: 0 !important;
+  color: inherit !important;
+  font: inherit !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+  transform: translateY(0);
+}
+
+.visitor-pass-status-pill.active,
+.visitor-pass-status-pill.used {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-soft) 78%, var(--surface));
+}
+
+.visitor-pass-status-pill.expired {
+  color: var(--gray);
+  background: var(--gray-soft);
+}
+
+.visitor-pass-status-pill.cancelled {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.visitor-pass-window {
+  position: relative;
+  gap: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, var(--blue-soft));
+}
+
+.visitor-pass-window-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+}
+
+.visitor-pass-window .visitor-pass-window-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.visitor-pass-window-row + .visitor-pass-window-row {
+  border-top: 1px solid var(--line);
+}
+
+.visitor-pass-window-row svg {
+  width: 26px;
+  height: 26px;
+  padding: 6px;
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-window-row span {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 14px;
+  font-weight: 560;
+}
+
+.visitor-pass-card-whatsapp {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 22%, var(--line));
+  border-radius: 14px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--green-soft) 86%, var(--surface)), color-mix(in srgb, var(--green-soft) 56%, var(--surface)));
+  color: var(--green);
+}
+
+.visitor-pass-card-whatsapp > svg:first-child,
+.visitor-pass-card-whatsapp > svg:last-child {
+  width: 38px;
+  height: 38px;
+  padding: 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green-soft) 74%, var(--surface));
+}
+
+.visitor-pass-card-whatsapp strong {
+  min-width: 0;
+  color: var(--green);
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.visitor-pass-card-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.visitor-pass-card-stat {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 3px 14px 3px 0;
+}
+
+.visitor-pass-card-stat + .visitor-pass-card-stat {
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+}
+
+.visitor-pass-stat-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+}
+
+.visitor-pass-stat-icon.vehicle {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-stat-icon.duration {
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.visitor-pass-card-stat strong,
+.visitor-pass-card-stat span:not(.visitor-pass-stat-icon) {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-card-stat strong {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 730;
+}
+
+.visitor-pass-card-stat span:not(.visitor-pass-stat-icon) {
+  margin-top: 2px;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.visitor-pass-detail-modal {
+  width: min(980px, calc(100vw - 48px));
+  gap: 18px;
+  padding: 26px 30px 24px;
+  border-radius: 14px;
+  background: linear-gradient(145deg, var(--surface) 0%, color-mix(in srgb, var(--blue-soft) 12%, var(--surface)) 100%);
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.16);
+}
+
+.visitor-pass-detail-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+}
+
+.visitor-pass-avatar {
+  width: 70px;
+  height: 70px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  color: var(--blue);
+  background: linear-gradient(145deg, var(--blue-soft), color-mix(in srgb, var(--blue-soft) 42%, var(--surface)));
+  font-size: 24px;
+  font-weight: 780;
+}
+
+.visitor-pass-detail-title > span {
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.visitor-pass-detail-title h2 {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 32px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.visitor-pass-detail-title p {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+  color: var(--muted-strong);
+  font-size: 15px;
+  font-weight: 560;
+}
+
+.visitor-pass-detail-title p svg {
+  color: var(--muted);
+}
+
+.visitor-pass-detail-header-actions .icon-button {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+}
+
+.visitor-pass-detail-header-actions .visitor-pass-status-pill {
+  min-height: 36px;
+  font-size: 14px;
+  padding: 0 14px;
+}
+
+.visitor-pass-detail-tabs {
+  display: flex;
+  gap: 18px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.visitor-pass-detail-tabs button {
+  position: relative;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 0;
+  color: var(--muted-strong);
+  font-size: 16px;
+  font-weight: 720;
+}
+
+.visitor-pass-detail-tabs button.active {
+  background: transparent;
+  box-shadow: none;
+}
+
+.visitor-pass-detail-tabs button.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  background: var(--blue);
+}
+
+.visitor-pass-detail-body {
+  display: grid;
+  gap: 16px;
+}
+
+.visitor-pass-detail-window-card {
+  display: grid;
+  grid-template-columns: 62px minmax(150px, 1fr) 28px minmax(150px, 1fr) minmax(210px, 0.9fr);
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--blue) 28%, var(--line));
+  border-radius: 14px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--blue-soft) 60%, var(--surface)), var(--surface));
+}
+
+.visitor-pass-window-orb {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: white;
+  background: var(--blue);
+  box-shadow: 0 14px 28px rgba(47, 111, 228, 0.22);
+}
+
+.visitor-pass-window-times {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: none;
+  gap: 5px;
+}
+
+.visitor-pass-detail-window-card .visitor-pass-window-times,
+.visitor-pass-detail-window-card .visitor-pass-window-source > div {
+  display: grid;
+  grid-template-columns: none;
+  align-items: stretch;
+}
+
+.visitor-pass-window-times span,
+.visitor-pass-window-source span:not(.visitor-pass-window-source-icon),
+.visitor-pass-detail-tile span:not(.visitor-pass-detail-tile-icon) {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.visitor-pass-window-times strong {
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.visitor-pass-window-times small,
+.visitor-pass-window-source small {
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.visitor-pass-window-arrow {
+  color: var(--muted);
+}
+
+.visitor-pass-window-source {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+}
+
+.visitor-pass-window-source-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-window-source strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.visitor-pass-detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.visitor-pass-detail-tile {
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 98px;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+
+.visitor-pass-detail-tile .visitor-pass-detail-tile-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.visitor-pass-detail-tile.blue .visitor-pass-detail-tile-icon,
+.visitor-pass-detail-tile.blue span:not(.visitor-pass-detail-tile-icon) {
+  color: var(--blue);
+}
+
+.visitor-pass-detail-tile.blue .visitor-pass-detail-tile-icon {
+  background: var(--blue-soft);
+}
+
+.visitor-pass-detail-tile.green .visitor-pass-detail-tile-icon,
+.visitor-pass-detail-tile.green span:not(.visitor-pass-detail-tile-icon) {
+  color: var(--green);
+}
+
+.visitor-pass-detail-tile.green .visitor-pass-detail-tile-icon {
+  background: var(--green-soft);
+}
+
+.visitor-pass-detail-tile.amber .visitor-pass-detail-tile-icon,
+.visitor-pass-detail-tile.amber span:not(.visitor-pass-detail-tile-icon) {
+  color: var(--amber);
+}
+
+.visitor-pass-detail-tile.amber .visitor-pass-detail-tile-icon {
+  background: var(--amber-soft);
+}
+
+.visitor-pass-detail-tile.purple .visitor-pass-detail-tile-icon,
+.visitor-pass-detail-tile.purple span:not(.visitor-pass-detail-tile-icon) {
+  color: var(--violet);
+}
+
+.visitor-pass-detail-tile.purple .visitor-pass-detail-tile-icon {
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.visitor-pass-detail-tile strong {
+  margin-top: 5px;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.visitor-pass-detail-tile small {
+  margin-top: 5px;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.visitor-pass-detail-tile strong,
+.visitor-pass-detail-tile small {
+  white-space: nowrap;
+}
+
+.visitor-pass-whatsapp-panel,
+.visitor-pass-log-panel {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.visitor-pass-whatsapp-thread {
+  min-height: 430px;
+  max-height: min(540px, calc(var(--app-viewport-height) - 280px));
+  gap: 14px;
+  padding: 14px;
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 20px 20px, rgba(100, 116, 139, 0.05) 0 2px, transparent 3px),
+    radial-gradient(circle at 72px 52px, rgba(100, 116, 139, 0.045) 0 2px, transparent 3px),
+    linear-gradient(180deg, var(--surface) 0%, color-mix(in srgb, var(--gray-soft) 54%, var(--surface)) 100%);
+  background-size: 92px 92px, 112px 112px, auto;
+}
+
+.visitor-pass-whatsapp-row {
+  align-items: end;
+  gap: 10px;
+}
+
+.visitor-pass-whatsapp-row.outbound {
+  justify-content: flex-end;
+}
+
+.visitor-pass-whatsapp-row.outbound .visitor-pass-whatsapp-avatar {
+  order: 0;
+}
+
+.visitor-pass-whatsapp-avatar {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  color: white;
+  background: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.visitor-pass-whatsapp-avatar.iacs {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.visitor-pass-whatsapp-bubble {
+  max-width: min(70%, 650px);
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.visitor-pass-whatsapp-row.outbound .visitor-pass-whatsapp-bubble {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--green-soft) 74%, var(--surface)), var(--surface));
+}
+
+.visitor-pass-whatsapp-bubble span {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.visitor-pass-whatsapp-row.outbound .visitor-pass-whatsapp-bubble span {
+  color: var(--green);
+}
+
+.visitor-pass-whatsapp-bubble p {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.visitor-pass-whatsapp-bubble small {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.visitor-pass-whatsapp-row.status {
+  justify-content: flex-start;
+}
+
+.visitor-pass-whatsapp-status-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  max-width: 230px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  box-shadow: var(--shadow-soft);
+}
+
+.visitor-pass-whatsapp-status-card svg {
+  color: var(--green);
+}
+
+.visitor-pass-whatsapp-status-card strong,
+.visitor-pass-whatsapp-status-card small {
+  display: block;
+}
+
+.visitor-pass-whatsapp-status-card strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.visitor-pass-whatsapp-status-card small {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.visitor-pass-whatsapp-composer {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.visitor-pass-whatsapp-composer input {
+  min-width: 0;
+  height: 34px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.visitor-pass-whatsapp-composer input::placeholder {
+  color: var(--muted);
+}
+
+.visitor-pass-whatsapp-composer .icon-button {
+  width: 34px;
+  height: 34px;
+  color: var(--blue);
+}
+
+.visitor-pass-whatsapp-composer .icon-button:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.visitor-pass-log-panel {
+  max-height: min(540px, calc(var(--app-viewport-height) - 280px));
+  padding-left: 26px;
+}
+
+.visitor-pass-log-list {
+  gap: 18px;
+}
+
+.visitor-pass-log-list::before {
+  left: 11px;
+  background: color-mix(in srgb, var(--blue) 18%, var(--line));
+}
+
+.visitor-pass-log-entry {
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.visitor-pass-log-dot {
+  width: 16px;
+  height: 16px;
+  margin-top: 14px;
+  border-width: 3px;
+}
+
+.visitor-pass-log-entry > div {
+  gap: 14px;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+}
+
+.visitor-pass-log-head {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.visitor-pass-log-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.visitor-pass-log-icon.green {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.visitor-pass-log-icon.amber {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.visitor-pass-log-icon.red {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.visitor-pass-log-icon.purple {
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.visitor-pass-log-head strong {
+  font-size: 16px;
+}
+
+.visitor-pass-log-head p {
+  margin-top: 7px;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.visitor-pass-log-head time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.visitor-pass-log-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-left: 62px;
+}
+
+.visitor-pass-log-fields span {
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--blue-soft) 34%, var(--surface));
+}
+
+.visitor-pass-log-fields strong {
+  font-size: 13px;
+}
+
+.visitor-pass-detail-actions {
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 18px;
+}
+
+.visitor-pass-detail-actions .primary-button,
+.visitor-pass-detail-actions .secondary-button,
+.visitor-pass-detail-actions .danger-button {
+  min-width: 104px;
+  min-height: 42px;
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.visitor-pass-unblock-button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-color: color-mix(in srgb, var(--amber) 46%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 52%, var(--surface));
+  color: var(--amber);
+  font-weight: 700;
+}
+
+/* Compact operational scale for the redesigned Visitor Pass surfaces. */
+.visitor-pass-grid {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 360px));
+  justify-content: start;
+  align-items: start;
+  gap: 12px;
+}
+
+.visitor-pass-card {
+  width: 100%;
+  gap: 10px;
+  padding: 13px;
+  border-left-width: 3px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.visitor-pass-card-head {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.visitor-pass-card-head strong {
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.visitor-pass-card-subtitle {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.visitor-pass-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+}
+
+.visitor-pass-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.visitor-pass-status-pill {
+  min-height: 26px;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 11px;
+  line-height: 1;
+  transition: color 180ms ease, background 180ms ease;
+}
+
+.visitor-pass-status-pill svg {
+  width: 13px;
+  height: 13px;
+}
+
+.visitor-pass-status-pill.tone-blue {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 74%, var(--surface));
+}
+
+.visitor-pass-status-pill.tone-green {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-soft) 78%, var(--surface));
+}
+
+.visitor-pass-status-pill.tone-orange {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber-soft) 78%, var(--surface));
+}
+
+.visitor-pass-status-pill.tone-red {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-soft) 82%, var(--surface));
+}
+
+.visitor-pass-status-pill.tone-gray {
+  color: var(--gray);
+  background: var(--gray-soft);
+}
+
+.visitor-pass-card-head .visitor-pass-status-pill {
+  align-self: start;
+  min-height: 0;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  padding: 0 12px;
+  line-height: 1;
+}
+
+.visitor-pass-card-head .visitor-pass-status-label {
+  transform: translateY(0);
+}
+
+.visitor-pass-window {
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.visitor-pass-window-row,
+.visitor-pass-window .visitor-pass-window-row {
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 30px;
+}
+
+.visitor-pass-window-row svg {
+  width: 20px;
+  height: 20px;
+  padding: 4px;
+}
+
+.visitor-pass-window-row span {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.visitor-pass-card-whatsapp {
+  grid-template-columns: 28px minmax(0, 1fr) 24px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.visitor-pass-card-whatsapp > svg:first-child,
+.visitor-pass-card-whatsapp > svg:last-child {
+  width: 24px;
+  height: 24px;
+  padding: 6px;
+}
+
+.visitor-pass-card-whatsapp strong {
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.visitor-pass-more-info {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.25;
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.visitor-pass-more-info.has-tooltip {
+  cursor: help;
+}
+
+.visitor-pass-more-info.has-tooltip:focus-visible {
+  outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
+  outline-offset: 2px;
+}
+
+.visitor-pass-more-info.green {
+  border-color: color-mix(in srgb, var(--green) 22%, var(--line));
+  color: var(--green);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--green-soft) 86%, var(--surface)), color-mix(in srgb, var(--green-soft) 56%, var(--surface)));
+}
+
+.visitor-pass-more-info.orange {
+  border-color: color-mix(in srgb, var(--amber) 28%, var(--line));
+  color: var(--amber);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--amber-soft) 88%, var(--surface)), color-mix(in srgb, var(--amber-soft) 60%, var(--surface)));
+}
+
+.visitor-pass-more-info.red {
+  border-color: color-mix(in srgb, var(--red) 32%, var(--line));
+  color: var(--red);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red-soft) 88%, var(--surface)), color-mix(in srgb, var(--red-soft) 60%, var(--surface)));
+}
+
+.visitor-pass-more-info > svg {
+  width: 24px;
+  height: 24px;
+  padding: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.visitor-pass-more-info > svg:last-child {
+  justify-self: end;
+}
+
+.visitor-pass-more-info strong {
+  min-width: 0;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-card-stat {
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+  padding: 1px 8px 1px 0;
+}
+
+.visitor-pass-card-stat + .visitor-pass-card-stat {
+  padding-left: 8px;
+}
+
+.visitor-pass-stat-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.visitor-pass-stat-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.visitor-pass-card-stat strong {
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.visitor-pass-card-stat span:not(.visitor-pass-stat-icon) {
+  font-size: 11px;
+  max-width: 100%;
+}
+
+.modal-card.visitor-pass-detail-modal {
+  width: min(940px, calc(100vw - 40px));
+  max-height: calc(var(--app-viewport-height) - 40px);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 16px;
+  overflow: hidden;
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.modal-header.visitor-pass-detail-header {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.visitor-pass-avatar {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  font-size: 21px;
+}
+
+.visitor-pass-detail-title {
+  min-width: 0;
+}
+
+.visitor-pass-detail-title > span {
+  display: block;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.visitor-pass-detail-title h2 {
+  margin-top: 8px;
+  font-size: 30px;
+  line-height: 1.08;
+}
+
+.visitor-pass-detail-title p {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.visitor-pass-detail-title p svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.visitor-pass-detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.visitor-pass-detail-header-actions .icon-button {
+  width: 38px;
+  min-height: 38px;
+  border-radius: 10px;
+}
+
+.visitor-pass-detail-header-actions .visitor-pass-status-pill {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.visitor-pass-detail-tabs {
+  gap: 16px;
+}
+
+.visitor-pass-detail-tabs button {
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.visitor-pass-detail-body {
+  position: relative;
+  min-height: 0;
+  overflow: auto;
+  gap: 14px;
+  padding: 0 2px 42px 0;
+  background:
+    radial-gradient(ellipse 28% 22% at 26% 70%, rgba(100, 116, 139, 0.16) 0%, rgba(100, 116, 139, 0.08) 46%, rgba(100, 116, 139, 0) 82%),
+    radial-gradient(ellipse 28% 22% at 74% 70%, rgba(100, 116, 139, 0.16) 0%, rgba(100, 116, 139, 0.08) 46%, rgba(100, 116, 139, 0) 82%),
+    radial-gradient(ellipse 44% 18% at 50% 84%, rgba(100, 116, 139, 0.13) 0%, rgba(100, 116, 139, 0.06) 44%, rgba(100, 116, 139, 0) 84%);
+  background-repeat: no-repeat;
+}
+
+.visitor-pass-detail-window-card {
+  grid-template-columns: 52px minmax(180px, max-content) 64px minmax(180px, max-content) minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+}
+
+.visitor-pass-window-orb {
+  width: 48px;
+  height: 48px;
+}
+
+.visitor-pass-window-orb svg {
+  width: 24px;
+  height: 24px;
+}
+
+.visitor-pass-window-times,
+.visitor-pass-detail-window-card .visitor-pass-window-source > div {
+  min-width: 0;
+  gap: 4px;
+}
+
+.visitor-pass-window-times span,
+.visitor-pass-window-source span:not(.visitor-pass-window-source-icon),
+.visitor-pass-detail-tile span:not(.visitor-pass-detail-tile-icon) {
+  display: block;
+  font-size: 10px;
+  line-height: 1.15;
+}
+
+.visitor-pass-window-times strong,
+.visitor-pass-window-source strong {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  font-size: 15px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visitor-pass-window-times small,
+.visitor-pass-window-source small {
+  display: block;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.visitor-pass-window-source {
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  padding-left: 14px;
+}
+
+.visitor-pass-window-source-icon {
+  width: 34px;
+  height: 34px;
+}
+
+.visitor-pass-window-source-icon svg,
+.visitor-pass-window-arrow {
+  width: 20px;
+  height: 20px;
+}
+
+.visitor-pass-window-arrow {
+  justify-self: center;
+  align-self: center;
+  transform: translateX(-30px);
+}
+
+.visitor-pass-detail-grid {
+  position: relative;
+  isolation: isolate;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.visitor-pass-detail-tile {
+  position: relative;
+  z-index: 0;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 82px;
+  padding: 13px 14px;
+  border-radius: 12px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 18px 40px -22px rgba(100, 116, 139, 0.38),
+    0 42px 82px -46px rgba(100, 116, 139, 0.46);
+}
+
+.visitor-pass-detail-tile > div {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.visitor-pass-detail-tile .visitor-pass-detail-tile-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+}
+
+.visitor-pass-detail-tile .visitor-pass-detail-tile-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.visitor-pass-detail-tile strong {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.visitor-pass-detail-tile small {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.visitor-pass-whatsapp-panel,
+.visitor-pass-log-panel {
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.visitor-pass-whatsapp-thread {
+  min-height: 300px;
+  max-height: min(400px, calc(var(--app-viewport-height) - 225px));
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+}
+
+.visitor-pass-whatsapp-avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 11px;
+}
+
+.visitor-pass-whatsapp-bubble {
+  gap: 5px;
+  padding: 9px 11px;
+  border-radius: 10px;
+}
+
+.visitor-pass-whatsapp-bubble span {
+  font-size: 12px;
+}
+
+.visitor-pass-whatsapp-bubble p {
+  font-size: 13px;
+}
+
+.visitor-pass-whatsapp-bubble small {
+  font-size: 11px;
+}
+
+.visitor-pass-whatsapp-composer {
+  grid-template-columns: 24px minmax(0, 1fr) 30px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.visitor-pass-whatsapp-composer .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.visitor-pass-log-panel {
+  max-height: min(400px, calc(var(--app-viewport-height) - 225px));
+  padding-left: 18px;
+}
+
+.visitor-pass-log-list {
+  gap: 12px;
+}
+
+.visitor-pass-log-list::before {
+  left: 7px;
+}
+
+.visitor-pass-log-entry {
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.visitor-pass-log-dot {
+  width: 12px;
+  height: 12px;
+  margin-top: 12px;
+  border-width: 2px;
+}
+
+.visitor-pass-log-entry > div {
+  gap: 10px;
+  padding: 12px;
+}
+
+.visitor-pass-log-head {
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.visitor-pass-log-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.visitor-pass-log-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.visitor-pass-log-head strong {
+  font-size: 14px;
+}
+
+.visitor-pass-log-head p {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.visitor-pass-log-head time {
+  font-size: 11px;
+}
+
+.visitor-pass-log-fields {
+  gap: 8px;
+  padding-left: 46px;
+}
+
+.visitor-pass-log-fields span {
+  padding: 8px 10px;
+}
+
+.visitor-pass-log-fields strong {
+  font-size: 12px;
+}
+
+.modal-actions.visitor-pass-detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.modal-actions.visitor-pass-detail-actions .secondary-button:first-child {
+  margin-right: auto;
+}
+
+.visitor-pass-detail-actions .primary-button,
+.visitor-pass-detail-actions .secondary-button,
+.visitor-pass-detail-actions .danger-button {
+  min-width: 104px;
+  min-height: 38px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.passes-loading,
+.passes-empty-card {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.passes-loading {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.visitor-pass-modal {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.visitor-date-picker {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-date-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.visitor-date-picker-head strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.visitor-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.visitor-calendar-grid span,
+.visitor-calendar-grid button {
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.visitor-calendar-grid span {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.visitor-calendar-grid button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 620;
+}
+
+.visitor-calendar-grid button.muted {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 70%, var(--surface-soft));
+}
+
+.visitor-calendar-grid button.active {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.visitor-pass-window-select {
+  display: grid;
+  gap: 8px;
+}
+
+.visitor-pass-window-select > span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.visitor-pass-window-select > div {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.visitor-pass-type-select > div {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.visitor-pass-duration-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.visitor-pass-duration-fields .field:first-child {
+  grid-column: 1 / -1;
+}
+
+.rotate-90 {
+  transform: rotate(90deg);
+}
+
+.schedule-modal {
+  width: min(1220px, calc(100vw - 32px));
+  max-height: calc(var(--app-viewport-height) - 36px);
+  overflow: auto;
+}
+
+.schedule-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.32fr) minmax(640px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.schedule-details-panel,
+.weekly-schedule-panel,
+.schedule-dependencies {
+  display: grid;
+  gap: 14px;
+}
+
+.schedule-dependencies {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.schedule-dependency-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-dependency-pill {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.schedule-dependency-pill.blue {
+  border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-dependency-pill.green {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.schedule-dependency-pill.amber {
+  border-color: color-mix(in srgb, var(--amber) 28%, var(--line));
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.schedule-dependency-empty {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.weekly-schedule-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.weekly-schedule-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.weekly-schedule-toolbar strong,
+.weekly-schedule-toolbar span {
+  display: block;
+}
+
+.weekly-schedule-toolbar strong {
+  font-size: 15px;
+  font-weight: 680;
+}
+
+.weekly-schedule-toolbar span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.weekly-schedule-toolbar > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.weekly-schedule-toolbar .secondary-button {
+  min-height: 32px;
+  padding-inline: 11px;
+}
+
+.schedule-calendar {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overscroll-behavior: contain;
+}
+
+.schedule-calendar-head {
+  min-width: 760px;
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(72px, 1fr));
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.schedule-calendar-head strong {
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-left: 1px solid var(--line);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.schedule-calendar-body {
+  min-width: 760px;
+  display: grid;
+  grid-template-columns: 56px repeat(7, minmax(72px, 1fr));
+}
+
+.schedule-time-axis,
+.schedule-day-column {
+  display: grid;
+  grid-template-rows: repeat(48, 15px);
+}
+
+.schedule-time-axis {
+  border-right: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.schedule-time-axis span {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 1px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.schedule-day-column {
+  border-right: 1px solid var(--line);
+}
+
+.schedule-day-column:last-child {
+  border-right: 0;
+}
+
+.schedule-cell {
+  min-height: 15px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+  background: transparent;
+  padding: 0;
+  touch-action: none;
+}
+
+.schedule-cell:nth-child(2n) {
+  border-bottom-color: var(--line);
+}
+
+.schedule-cell:hover {
+  background: color-mix(in srgb, var(--green-soft) 38%, transparent);
+}
+
+.schedule-cell.selected {
+  border-bottom-color: color-mix(in srgb, var(--green) 18%, transparent);
+  background: color-mix(in srgb, var(--green) 28%, transparent);
+}
+
+.schedule-cell.selected:not(.selected-start) {
+  border-top-color: transparent;
+}
+
+.schedule-cell.selected:not(.selected-end) {
+  border-bottom-color: transparent;
+}
+
+.schedule-cell.selected-start {
+  border-radius: 6px 6px 1px 1px;
+}
+
+.schedule-cell.selected-end {
+  border-bottom-color: color-mix(in srgb, var(--green) 24%, var(--line));
+  border-radius: 1px 1px 6px 6px;
+}
+
+.schedule-cell.selected-start.selected-end {
+  border-radius: 6px;
+}
+
+.schedule-context-menu {
+  position: fixed;
+  z-index: 130;
+  width: min(232px, calc(100vw - 24px));
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: var(--shadow-strong);
+  backdrop-filter: blur(16px);
+}
+
+.schedule-context-menu-label {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-context-menu-label span,
+.schedule-context-menu-label strong {
+  display: block;
+}
+
+.schedule-context-menu-label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.schedule-context-menu-label strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 640;
+}
+
+.schedule-context-menu button {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 560;
+  text-align: left;
+}
+
+.schedule-context-menu button svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.schedule-context-menu button:hover:not(:disabled) {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.schedule-context-menu button:hover:not(:disabled) svg {
+  color: var(--blue);
+}
+
+.schedule-context-menu-separator {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--line);
+}
+
+.schedule-context-menu button.danger {
+  color: var(--red);
+}
+
+.schedule-context-menu button.danger svg {
+  color: var(--red);
+}
+
+.schedule-context-menu button.danger:hover:not(:disabled) {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.schedule-context-menu button.danger:hover:not(:disabled) svg {
+  color: var(--red);
+}
+
+.schedule-context-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.apprise-manager {
+  display: grid;
+  gap: 13px;
+}
+
+.apprise-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.apprise-manager-header > div {
+  min-width: 0;
+}
+
+.apprise-manager-header strong,
+.apprise-manager-header span {
+  display: block;
+}
+
+.apprise-manager-header strong {
+  font-size: 15px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.apprise-manager-header span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.apprise-manager-header .primary-button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding-inline: 12px;
+  font-size: 12px;
+}
+
+.apprise-add-row {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--surface));
+}
+
+.apprise-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.apprise-url-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.apprise-url-head,
+.apprise-url-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 12px;
+}
+
+.apprise-url-head {
+  min-height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+  text-transform: uppercase;
+}
+
+.apprise-url-row {
+  min-height: 58px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.apprise-url-row:last-child {
+  border-bottom: 0;
+}
+
+.apprise-url-row strong,
+.apprise-url-row > div > span:not(.badge) {
+  display: block;
+}
+
+.apprise-url-row strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.apprise-url-row > div > span:not(.badge) {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.apprise-url-row .badge {
+  width: max-content;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  line-height: 1;
+}
+
+.apprise-empty {
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.discord-settings {
+  display: grid;
+  gap: 13px;
+}
+
+.discord-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.discord-overview-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.discord-overview-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.discord-overview-main strong,
+.discord-overview-main span,
+.discord-identity-row strong,
+.discord-identity-row span {
+  display: block;
+  min-width: 0;
+}
+
+.discord-overview-main strong,
+.discord-section .icloud-section-heading strong,
+.discord-identity-row strong {
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.discord-overview-main span,
+.discord-section .icloud-section-heading span,
+.discord-identity-row span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.discord-section {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.discord-channel-list,
+.discord-identity-list {
+  display: grid;
+  gap: 9px;
+}
+
+.discord-channel-row,
+.discord-identity-row {
+  min-width: 0;
+  min-height: 50px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.discord-channel-row {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text);
+  text-align: left;
+}
+
+.discord-channel-row:hover {
+  border-color: color-mix(in srgb, var(--violet) 30%, var(--line));
+  background: color-mix(in srgb, var(--violet) 10%, var(--surface));
+}
+
+.discord-channel-row > span:first-child {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discord-channel-row svg {
+  flex: 0 0 auto;
+  color: var(--violet);
+}
+
+.discord-channel-row .badge {
+  max-width: 210px;
+}
+
+.discord-identity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.6fr) minmax(150px, 0.6fr);
+}
+
+.discord-identity-row select {
+  min-width: 0;
+}
+
+.icloud-calendar-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.icloud-overview {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.icloud-overview-icon,
+.icloud-account-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.icloud-overview-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+}
+
+.icloud-overview-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.icloud-overview-copy strong,
+.icloud-section-heading strong,
+.icloud-auth-heading strong,
+.icloud-account-main strong {
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.icloud-overview-copy span,
+.icloud-section-heading span,
+.icloud-auth-heading span,
+.icloud-account-main span,
+.icloud-account-status span,
+.icloud-account-status small,
+.icloud-sync-summary span,
+.icloud-sync-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.icloud-overview .badge,
+.icloud-account-status .badge,
+.icloud-sync-summary .badge {
+  width: max-content;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  line-height: 1;
+}
+
+.icloud-actions,
+.icloud-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.icloud-auth-panel,
+.icloud-section,
+.icloud-sync-summary {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.icloud-auth-panel {
+  border-color: color-mix(in srgb, var(--blue) 25%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 32%, var(--surface));
+}
+
+.icloud-auth-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.icloud-auth-heading > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--blue);
+}
+
+.icloud-auth-heading > div,
+.icloud-section-heading,
+.icloud-account-main > div,
+.icloud-account-status,
+.icloud-sync-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.icloud-auth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.icloud-code-field {
+  max-width: 320px;
+}
+
+.icloud-section-heading {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+}
+
+.icloud-account-list {
+  display: grid;
+  gap: 10px;
+}
+
+.icloud-account-card {
+  min-height: 70px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, max-content) 36px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.icloud-account-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icloud-account-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+
+.icloud-account-status {
+  justify-items: start;
+}
+
+.icloud-account-status small,
+.icloud-sync-summary small {
+  color: var(--red);
+}
+
+.icloud-sync-summary {
+  background: var(--surface-soft);
+}
+
+.icloud-sync-summary > div {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.icloud-empty {
+  min-height: 70px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
