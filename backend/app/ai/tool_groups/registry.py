@@ -11,6 +11,7 @@ from app.ai.tool_groups import (
     general,
     notifications,
     schedules,
+    system_operations,
     visitor_passes,
 )
 
@@ -23,6 +24,7 @@ _TOOL_GROUP_BUILDERS = (
     notifications.build_tools,
     automations.build_tools,
     schedules.build_tools,
+    system_operations.build_tools,
 )
 
 

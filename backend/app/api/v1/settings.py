@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 from app.api.dependencies import admin_user, current_user
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.services.auth_secret_management import (
+    AuthSecretRotationError,
+    auth_secret_security_status,
+    rotate_auth_secret,
+)
 from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
@@ -34,6 +39,11 @@ class ConnectionTestRequest(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+class AuthSecretRotateRequest(BaseModel):
+    confirmed: bool = False
+    new_secret: str | None = Field(default=None, max_length=512)
+
+
 @router.get("")
 async def get_settings(
     category: str | None = None,
@@ -50,7 +60,28 @@ async def runtime_settings(_: User = Depends(current_user)) -> dict[str, Any]:
         "log_level": config.log_level,
         "site_timezone": config.site_timezone,
         "llm_provider": config.llm_provider,
+        "alfred_agent_mode": config.alfred_agent_mode,
     }
+
+
+@router.get("/security/auth-secret")
+async def get_auth_secret_status(_: User = Depends(admin_user)) -> dict[str, object]:
+    return await auth_secret_security_status()
+
+
+@router.post("/security/auth-secret/rotate")
+async def rotate_auth_secret_endpoint(
+    request: AuthSecretRotateRequest,
+    user: User = Depends(admin_user),
+) -> dict[str, object]:
+    try:
+        return await rotate_auth_secret(
+            user=user,
+            confirmed=request.confirmed,
+            new_secret=request.new_secret,
+        )
+    except AuthSecretRotationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("")

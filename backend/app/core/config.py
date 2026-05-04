@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     auto_create_schema: bool = True
     seed_demo_data: bool = False
 
-    auth_secret_key: str = "change-me-before-production"
+    auth_secret_key: str = ""
+    auth_secret_file: Path = Path("/app/data/auth-secret.key")
     auth_cookie_name: str = "iacs_session"
     auth_access_token_minutes: int = 720
     auth_remember_days: int = 30

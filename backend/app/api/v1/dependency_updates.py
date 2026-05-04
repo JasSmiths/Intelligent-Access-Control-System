@@ -34,7 +34,7 @@ class DependencyRestoreRequest(BaseModel):
 class DependencyStorageConfigRequest(BaseModel):
     mode: str = Field(pattern="^(local|nfs|samba)$")
     mount_source: str = Field(default="", max_length=600)
-    mount_options: str = Field(default="", max_length=1200)
+    mount_options: str | None = Field(default=None, max_length=1200)
     retention_days: str | None = Field(default="", max_length=20)
     min_free_bytes: int = Field(default=1073741824, ge=0)
 
@@ -170,7 +170,7 @@ async def configure_dependency_update_storage(
     user: User = Depends(admin_user),
 ) -> dict[str, Any]:
     try:
-        return await get_dependency_update_service().save_storage_config(request.model_dump(), user=user)
+        return await get_dependency_update_service().save_storage_config(request.model_dump(exclude_unset=True), user=user)
     except DependencyUpdateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

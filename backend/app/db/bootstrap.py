@@ -4,6 +4,8 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import Base
 from app.db.session import engine
+from app.services.alfred.feedback import alfred_feedback_service
+from app.services.auth_secret_management import migrate_encrypted_payloads_for_active_auth_secret
 from app.services.settings import seed_dynamic_settings
 
 logger = get_logger(__name__)
@@ -119,6 +121,15 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_last_fired_at ON notification_rules (last_fired_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_rules_trigger_active_created ON notification_rules (trigger_event, is_active, created_at DESC)"))
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_action_confirmations_token_hash ON action_confirmations (token_hash)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_action ON action_confirmations (action)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_payload_hash ON action_confirmations (payload_hash)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_actor_user_id ON action_confirmations (actor_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_target_entity ON action_confirmations (target_entity)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_target_id ON action_confirmations (target_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_expires_at ON action_confirmations (expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_consumed_at ON action_confirmations (consumed_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_action_confirmations_outcome ON action_confirmations (outcome)"))
             await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_notification_action_contexts_token_hash ON notification_action_contexts (token_hash)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_action ON notification_action_contexts (action)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_action_contexts_notify_service ON notification_action_contexts (notify_service)"))
@@ -431,7 +442,12 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_last_seen_at ON messaging_identities (last_seen_at)"))
         logger.info("database_schema_ready")
 
+    migration = await migrate_encrypted_payloads_for_active_auth_secret()
+    if migration["settings"] or migration["icloud_accounts"]:
+        logger.info("auth_secret_encrypted_payloads_migrated", extra=migration)
+
     await seed_dynamic_settings()
+    await alfred_feedback_service.seed_default_lessons()
 
     if settings.seed_demo_data:
         logger.warning("seed_demo_data_ignored")

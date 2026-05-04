@@ -106,6 +106,7 @@ SECRET_KEY_PATTERNS = (
     "cookie",
     "csrf",
     "jwt",
+    "mount_options",
     "password",
     "secret",
     "session",
@@ -126,6 +127,7 @@ MAX_STRING_LENGTH = 2000
 MAX_LIST_ITEMS = 40
 MAX_DICT_KEYS = 80
 MAX_DEPTH = 6
+CHAT_FILE_URL_RE = re.compile(r"/api/v1/ai/chat/files/[A-Za-z0-9_-]+")
 
 
 def trace_id() -> str:
@@ -198,7 +200,7 @@ def sanitize_payload(value: Any, *, depth: int = 0, key: str | None = None) -> A
     if isinstance(value, str):
         if _looks_like_data_url(value):
             return _media_placeholder(value)
-        return _truncate_string(value)
+        return _truncate_string(CHAT_FILE_URL_RE.sub("/api/v1/ai/chat/files/[redacted]", value))
     if isinstance(value, bytes | bytearray):
         return f"[bytes {len(value)}]"
     if isinstance(value, uuid.UUID):

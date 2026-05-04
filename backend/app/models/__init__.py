@@ -2,6 +2,11 @@
 
 from app.models.core import (
     AccessEvent,
+    ActionConfirmation,
+    AlfredEvalExample,
+    AlfredFeedback,
+    AlfredLesson,
+    AlfredMemory,
     AutomationRule,
     AutomationRun,
     AutomationWebhookSender,
@@ -39,6 +44,11 @@ from app.models.core import (
 
 __all__ = [
     "AccessEvent",
+    "ActionConfirmation",
+    "AlfredEvalExample",
+    "AlfredFeedback",
+    "AlfredLesson",
+    "AlfredMemory",
     "AutomationRule",
     "AutomationRun",
     "AutomationWebhookSender",

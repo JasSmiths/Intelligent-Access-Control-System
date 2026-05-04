@@ -24,7 +24,7 @@ def build_tools() -> list[AgentTool]:
                             "query": {"type": "string", "description": "Natural language entity reference, for example Steph, the Tesla, PE70, or main garage."},
                             "entity_types": {
                                 "type": "array",
-                                "items": {"type": "string", "enum": ["person", "vehicle", "group", "device"]},
+                                "items": {"type": "string", "enum": ["person", "vehicle", "group", "device", "visitor_pass"]},
                                 "description": "Optional entity types to search. Defaults to all.",
                             },
                             "include_inactive": {"type": "boolean"},

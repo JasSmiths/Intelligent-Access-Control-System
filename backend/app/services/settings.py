@@ -26,7 +26,10 @@ SECRET_KEYS = {
     "openai_api_key",
     "gemini_api_key",
     "anthropic_api_key",
+    "dependency_update_backup_mount_options",
 }
+
+CLEARABLE_SECRET_KEYS = {"apprise_urls", "dependency_update_backup_mount_options"}
 
 LEGACY_DEFAULT_REPLACEMENTS = {
     "openai_model": {"gpt-5": "gpt-4o"},
@@ -131,6 +134,12 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "unifi_protect_snapshot_width": ("integrations", 1280, "Default UniFi Protect snapshot width."),
     "unifi_protect_snapshot_height": ("integrations", 720, "Default UniFi Protect snapshot height."),
     "llm_provider": ("llm", settings.llm_provider, "Active LLM provider."),
+    "alfred_agent_mode": ("llm", "v3", "Alfred agent runtime mode. Use v3 normally; v2 is rollback-only."),
+    "alfred_learning_mode": (
+        "llm",
+        "review_then_learn",
+        "How Alfred applies response feedback. Use review_then_learn or auto_learn.",
+    ),
     "llm_timeout_seconds": ("llm", settings.llm_timeout_seconds, "LLM HTTP timeout."),
     "openai_api_key": ("llm", settings.openai_api_key or "", "OpenAI API key."),
     "openai_model": ("llm", "gpt-4o", "OpenAI model."),
@@ -231,6 +240,8 @@ class RuntimeConfig:
     unifi_protect_snapshot_width: int
     unifi_protect_snapshot_height: int
     llm_provider: str
+    alfred_agent_mode: str
+    alfred_learning_mode: str
     llm_timeout_seconds: float
     openai_api_key: str
     openai_model: str
@@ -285,6 +296,15 @@ def setting_payload(key: str, value: Any) -> dict[str, Any]:
     return {"plain": value}
 
 
+def _migrate_secret_record(record: SystemSetting) -> bool:
+    if record.key not in SECRET_KEYS or record.is_secret:
+        return False
+    plain_value = record.value.get("plain") if isinstance(record.value, dict) else record.value
+    record.value = setting_payload(record.key, plain_value)
+    record.is_secret = True
+    return True
+
+
 def bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -328,6 +348,8 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
         )
     records = (await session.scalars(select(SystemSetting))).all()
     records_by_key = {record.key: record for record in records}
+    for record in records:
+        _migrate_secret_record(record)
     for record in records:
         if record.key in OBSOLETE_DYNAMIC_SETTINGS:
             await session.delete(record)
@@ -449,6 +471,14 @@ async def get_runtime_config() -> RuntimeConfig:
         unifi_protect_snapshot_width=int(values["unifi_protect_snapshot_width"] or 1280),
         unifi_protect_snapshot_height=int(values["unifi_protect_snapshot_height"] or 720),
         llm_provider=str(values["llm_provider"]),
+        alfred_agent_mode=(
+            "v2" if str(values["alfred_agent_mode"]).strip().lower() == "v2" else "v3"
+        ),
+        alfred_learning_mode=(
+            "auto_learn"
+            if str(values["alfred_learning_mode"]).strip().lower() == "auto_learn"
+            else "review_then_learn"
+        ),
         llm_timeout_seconds=float(values["llm_timeout_seconds"]),
         openai_api_key=str(values["openai_api_key"] or ""),
         openai_model=str(values["openai_model"]),
@@ -513,9 +543,10 @@ async def update_settings(updates: dict[str, Any]) -> list[dict[str, Any]]:
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)
             if record:
-                if record.is_secret and value in {None, ""} and key != "apprise_urls":
+                if record.is_secret and value in {None, ""} and key not in CLEARABLE_SECRET_KEYS:
                     continue
                 record.value = setting_payload(key, value)
+                record.is_secret = key in SECRET_KEYS
             else:
                 record = SystemSetting(
                     key=key,

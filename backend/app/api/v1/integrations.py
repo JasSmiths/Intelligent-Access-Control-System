@@ -45,6 +45,10 @@ from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config, update_settings
+from app.services.action_confirmations import (
+    ActionConfirmationError,
+    consume_action_confirmation,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
@@ -67,8 +71,29 @@ async def _raise_if_maintenance_active() -> None:
         )
 
 
+async def _require_real_world_confirmation(
+    session: AsyncSession,
+    *,
+    user: User,
+    action: str,
+    payload: dict,
+    confirmation_token: str | None,
+) -> None:
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action=action,
+            payload=payload,
+            confirmation_token=confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
 class GateOpenRequest(BaseModel):
     reason: str = Field(default="Manual dashboard command", max_length=240)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class CoverCommandRequest(BaseModel):
@@ -76,11 +101,13 @@ class CoverCommandRequest(BaseModel):
     target: str | None = Field(default=None, max_length=120)
     action: str = Field(pattern="^(open|close)$")
     reason: str = Field(default="Manual dashboard command", max_length=240)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class AnnouncementRequest(BaseModel):
     message: str = Field(min_length=1, max_length=500)
     entity_id: str | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class TestNotificationRequest(BaseModel):
@@ -271,8 +298,20 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
 
 
 @router.post("/gate/open")
-async def open_gate(request: GateOpenRequest, user: User = Depends(current_user)) -> dict:
+async def open_gate(
+    request: GateOpenRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     await _raise_if_maintenance_active()
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await _require_real_world_confirmation(
+        session,
+        user=user,
+        action="gate.open",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     result = await HomeAssistantGateController().open_gate(request.reason)
     if not result.accepted:
         emit_audit_log(
@@ -306,7 +345,7 @@ async def open_gate(request: GateOpenRequest, user: User = Depends(current_user)
 @router.post("/cover/command")
 async def cover_command(
     request: CoverCommandRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     await _raise_if_maintenance_active()
@@ -325,6 +364,15 @@ async def cover_command(
     entity = configured_entities.get(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
+
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await _require_real_world_confirmation(
+        session,
+        user=user,
+        action=f"cover.{request.action}",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
 
     if request.action == "open":
         schedule_evaluation = await evaluate_schedule_id(
@@ -378,12 +426,25 @@ async def cover_command(
 
 
 @router.post("/announcements/say")
-async def say_announcement(request: AnnouncementRequest, user: User = Depends(current_user)) -> dict[str, str]:
+async def say_announcement(
+    request: AnnouncementRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
     await _raise_if_maintenance_active()
     config = await get_runtime_config()
     target = request.entity_id or config.home_assistant_default_media_player
     if not target:
         raise HTTPException(status_code=400, detail="No media_player entity configured or supplied.")
+
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await _require_real_world_confirmation(
+        session,
+        user=user,
+        action="announcement.say",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
 
     try:
         await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), request.message)

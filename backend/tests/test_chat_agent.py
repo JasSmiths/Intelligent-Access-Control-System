@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 import time
 import uuid
@@ -9,7 +10,18 @@ import pytest
 from app.ai import tools as ai_tools
 from app.ai.providers import ChatMessageInput, LlmResult, LocalProvider, ToolCall
 from app.api.v1 import ai as ai_api
+from app.services.alfred.feedback import (
+    AlfredFeedbackError,
+    AlfredFeedbackService,
+    DEFAULT_SEEDED_LESSONS,
+    _safe_corrected_answer,
+    parse_feedback_command,
+)
+from app.services.alfred import memory as alfred_memory_module
+from app.services.alfred.permissions import filter_tools_for_actor
+from app.services.alfred.runtime import provider_agent_capability
 from app.services.chat import ChatService, IntentRoute, IntentRouterError, SYSTEM_PROMPT
+from app.services.chat_contracts import ChatTurnResult
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +151,8 @@ async def test_http_chat_api_uses_shared_chat_service(monkeypatch) -> None:
                 tool_results=[],
                 attachments=[],
                 pending_action=None,
+                user_message_id="user-message-1",
+                assistant_message_id="assistant-message-1",
             )
 
     monkeypatch.setattr(ai_api, "chat_service", FakeChatService())
@@ -148,11 +162,196 @@ async def test_http_chat_api_uses_shared_chat_service(monkeypatch) -> None:
     response = await ai_api.chat(request, current_user=user)
 
     assert response.text == "I'm Alfred: warm gatehouse brain, sensible clipboard."
+    assert response.user_message_id == "user-message-1"
+    assert response.assistant_message_id == "assistant-message-1"
     assert captured["message"] == "hello Alfred"
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["client_context"] == {"timezone": "Europe/London"}
     assert kwargs["user_role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_feedback_api_delegates_to_learning_service(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeFeedbackService:
+        async def submit_feedback(self, **kwargs):
+            captured.update(kwargs)
+            return {"feedback": {"id": "feedback-1"}, "corrected_answer": ""}
+
+    monkeypatch.setattr(ai_api, "alfred_feedback_service", FakeFeedbackService())
+    user = SimpleNamespace(id=uuid.uuid4(), role=SimpleNamespace(value="admin"))
+    request = ai_api.AlfredFeedbackRequest(
+        assistant_message_id="assistant-message-1",
+        rating="up",
+        source_channel="dashboard",
+    )
+
+    response = await ai_api.submit_feedback(request, current_user=user)
+
+    assert response["feedback"]["id"] == "feedback-1"
+    assert captured["assistant_message_id"] == "assistant-message-1"
+    assert captured["rating"] == "up"
+    assert captured["user"] is user
+
+
+def test_feedback_repair_does_not_accept_placeholder_answers() -> None:
+    assert (
+        _safe_corrected_answer(
+            "Stu left at [time].",
+            ideal_answer="Stu left at [time].",
+            turn_snapshot={"tool_results": []},
+        )
+        == ""
+    )
+    assert (
+        _safe_corrected_answer(
+            "Stu left at 10:35.",
+            ideal_answer="Stu left at 10:35.",
+            turn_snapshot={"tool_results": []},
+        )
+        == "Stu left at 10:35."
+    )
+
+
+@pytest.mark.asyncio
+async def test_feedback_thumbs_down_requires_reason_before_database_access() -> None:
+    with pytest.raises(AlfredFeedbackError):
+        await AlfredFeedbackService().submit_feedback(
+            assistant_message_id=str(uuid.uuid4()),
+            rating="down",
+            reason="",
+            ideal_answer="",
+            source_channel="dashboard",
+            actor_user_id=str(uuid.uuid4()),
+            actor_role="admin",
+        )
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypatch) -> None:
+    service = ChatService()
+    provider = V3PlannerProvider()
+    session_id = uuid.uuid4()
+    saved_assistant: list[str] = []
+
+    class Memory:
+        async def recall(self, **_kwargs):
+            return [{"scope": "user", "title": "Call me Jas", "content": {"note": "Prefers short answers."}}]
+
+        async def remember_from_turn(self, *_args, **_kwargs):
+            return 0
+
+    class Feedback:
+        async def recall_active_lessons(self, **_kwargs):
+            return [{"title": "Short answers", "lesson": "Keep routine answers concise."}]
+
+    async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {"presence": [{"person": "Jas", "state": "present"}]},
+        }
+
+    async def fake_build_messages(_session_id, tool_results, selected_tools, route=None, actor_context=None):
+        return [
+            ChatMessageInput("system", json.dumps({"actor_context": actor_context, "tools": [tool.name for tool in selected_tools]})),
+            ChatMessageInput("user", "Am I home?"),
+        ]
+
+    async def fake_append_message(_session_id, role, content, **_kwargs):
+        if role == "assistant":
+            saved_assistant.append(content)
+        return uuid.uuid4()
+
+    async def no_schedule_conflict(_session_id, _memory, _tool_results):
+        return None
+
+    monkeypatch.setattr("app.services.chat.alfred_memory_service", Memory())
+    monkeypatch.setattr("app.services.chat.alfred_feedback_service", Feedback())
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_build_agent_messages", fake_build_messages)
+    monkeypatch.setattr(service, "_append_message", fake_append_message)
+    monkeypatch.setattr(service, "_update_memory", lambda *_args, **_kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(service, "_pending_action_for_response", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+    monkeypatch.setattr("app.services.chat.event_bus.publish", lambda *_args, **_kwargs: asyncio.sleep(0))
+
+    result = await service._handle_message_v3(
+        provider,
+        SimpleNamespace(llm_provider="openai", openai_api_key="key"),
+        session_id,
+        "Check my presence",
+        {},
+        [],
+        {
+            "user": {"id": "user-1", "role": "admin", "username": "jas"},
+            "person": {"id": "person-1", "display_name": "Jas"},
+            "vehicles": [{"id": "vehicle-1", "registration_number": "VIP123"}],
+        },
+        status_callback=None,
+    )
+
+    planner_payload = json.loads(provider.messages[0][1].content)
+    assert planner_payload["actor_context"]["user"]["username"] == "jas"
+    assert planner_payload["actor_context"]["vehicles"][0]["registration_number"] == "VIP123"
+    assert planner_payload["actor_context"]["alfred_lessons"][0]["title"] == "Short answers"
+    assert planner_payload["memory"][0]["title"] == "Call me Jas"
+    assert result.text == "You are present."
+    assert saved_assistant == ["You are present."]
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
+    service = ChatService()
+
+    async def fake_direct_response(session_id, text, **kwargs):
+        return ChatTurnResult(str(session_id), kwargs.get("provider", "provider_error"), text, [], [])
+
+    monkeypatch.setattr(service, "_direct_response", fake_direct_response)
+
+    result = await service._handle_message_v3(
+        SimpleNamespace(name="local"),
+        SimpleNamespace(llm_provider="local"),
+        uuid.uuid4(),
+        "Who is home?",
+        {},
+        [],
+        {"user": {"id": "user-1", "role": "admin"}},
+        status_callback=None,
+    )
+
+    assert result.provider == "provider_error"
+    assert "requires a configured hosted LLM provider" in result.text
+    assert "I did not run any system action" in result.text
+
+
+def test_standard_users_do_not_see_mutation_or_admin_tools() -> None:
+    service = ChatService()
+
+    names = {
+        tool.name
+        for tool in filter_tools_for_actor(
+            service._tools.values(),
+            {"user": {"id": "user-1", "role": "standard"}},
+        )
+    }
+
+    assert "query_presence" in names
+    assert "open_gate" not in names
+    assert "update_system_settings" not in names
+    assert "query_auth_secret_status" not in names
+    assert "query_alfred_runtime_events" not in names
+
+
+def test_local_provider_is_reported_as_non_agent_capable() -> None:
+    status = provider_agent_capability(SimpleNamespace(llm_provider="local"), "local")
+
+    assert status["configured"] is True
+    assert status["agent_capable"] is False
+    assert status["reason"] == "local_provider_non_agent"
 
 
 class ParallelToolProvider:
@@ -173,6 +372,49 @@ class ParallelToolProvider:
                 )
             )
         return LlmResult(text='{"final":"Checked both."}')
+
+
+class V3PlannerProvider:
+    name = "openai"
+
+    def __init__(self) -> None:
+        self.messages: list[list[ChatMessageInput]] = []
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        self.calls += 1
+        self.messages.append(messages)
+        if self.calls == 1:
+            return LlmResult(
+                text=(
+                    '{"selected_domains":["Access_Logs"],'
+                    '"selected_tool_names":["query_presence"],'
+                    '"needs_clarification":false,'
+                    '"safety_posture":"read_only",'
+                    '"confidence":0.95,'
+                    '"reason":"presence check"}'
+                )
+            )
+        if self.calls == 2:
+            return LlmResult(
+                text="",
+                tool_calls=[ToolCall("presence", "query_presence", {"person": "me"})],
+            )
+        return LlmResult(text='{"final":"You are present."}')
+
+
+class DualActionPreviewProvider:
+    name = "action-preview-test"
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        return LlmResult(
+            text=(
+                '{"tool_calls":['
+                '{"id":"schedule","name":"create_schedule","arguments":{"name":"A","confirm":true}},'
+                '{"id":"pass","name":"create_visitor_pass","arguments":{"visitor_name":"Chris","expected_time":"2026-05-05T11:00:00+01:00","confirm":true}}'
+                ']}'
+            )
+        )
 
 
 class ActionToolProvider:
@@ -554,6 +796,133 @@ def test_assistant_text_cleanup_removes_local_time_label() -> None:
     assert cleaned == "Create a Visitor Pass at 30 Apr 2026, 11:00 with a +/- 30 minute window?"
 
 
+def test_assistant_text_cleanup_removes_redundant_seconds_parentheses() -> None:
+    service = ChatService()
+
+    cleaned = service._clean_assistant_text("Steph left this morning at 07:38 (07:38:12).", [])
+
+    assert cleaned == "Steph left this morning at 07:38."
+
+
+def test_noop_malfunction_guidance_is_a_lesson_not_keyword_filter() -> None:
+    service = ChatService()
+    seeded_text = " ".join(item["lesson"] for item in DEFAULT_SEEDED_LESSONS)
+
+    assert not hasattr(service, "_should_suppress_tool_result_for_prompt")
+    assert "Do not mention inactive malfunctions" in seeded_text
+
+
+def test_messaging_feedback_commands_parse_without_keyword_routing() -> None:
+    assert parse_feedback_command("thumbs up") == {"rating": "up", "reason": "", "ideal_answer": ""}
+    assert parse_feedback_command("thumbs down Too much detail. ideal: Just say the gate is closed.") == {
+        "rating": "down",
+        "reason": "Too much detail.",
+        "ideal_answer": "Just say the gate is closed.",
+    }
+    assert parse_feedback_command("is the top gate open") is None
+
+
+def test_visitor_pass_resolution_direct_text_reports_arrival_time() -> None:
+    service = ChatService()
+
+    text = service._entity_resolution_direct_text(
+        {
+            "status": "unique",
+            "match": {
+                "type": "visitor_pass",
+                "visitor_name": "Stu",
+                "display_name": "Stu",
+                "arrival_time": "2026-05-04T10:12:45+01:00",
+            },
+        }
+    )
+
+    assert text == "Stu's Visitor Pass shows arrival at 10:12."
+
+
+def test_query_visitor_pass_fallback_prioritizes_arrival_time() -> None:
+    service = ChatService()
+
+    text = service._fallback_text(
+        [
+            {
+                "name": "query_visitor_passes",
+                "output": {
+                    "visitor_passes": [
+                        {
+                            "visitor_name": "Stu",
+                            "arrival_time": "2026-05-04T10:12:45+01:00",
+                            "vehicle_summary": "Blue Ford - AB12CDE",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+    assert text == "Stu arrived at 10:12."
+
+
+@pytest.mark.asyncio
+async def test_alfred_memory_recall_serializes_rows_before_session_closes(monkeypatch) -> None:
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class Row:
+        def __init__(self, owner_session):
+            self._session = owner_session
+            self.id = uuid.uuid4()
+            self.scope = "user"
+            self.kind = "preference"
+            self.title = "Short answers"
+            self.content = {"note": "Keep it concise."}
+            self.tags = ["style"]
+            self.confidence = 0.8
+            self.last_used_at = None
+            self.created_at = datetime.now(tz=UTC)
+            self.owner_user_id = uuid.uuid4()
+
+        @property
+        def updated_at(self):
+            assert not self._session.closed, "memory row was serialized after the DB session closed"
+            return datetime.now(tz=UTC)
+
+    class Session:
+        def __init__(self):
+            self.closed = False
+            self.row = Row(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            self.closed = True
+
+        async def scalars(self, _query):
+            return Result([self.row])
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, _row):
+            return None
+
+    monkeypatch.setattr(alfred_memory_module, "AsyncSessionLocal", Session)
+
+    rows = await alfred_memory_module.AlfredMemoryService().recall(
+        user_id=str(uuid.uuid4()),
+        user_role="admin",
+        session_id=str(uuid.uuid4()),
+    )
+
+    assert rows[0]["title"] == "Short answers"
+    assert rows[0]["updated_at"]
+
+
 def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
     tools = ai_tools.build_agent_tools()
 
@@ -564,16 +933,29 @@ def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
     assert "Schedules" in tools["override_schedule"].categories
 
 
+def test_resolve_human_entity_schema_includes_visitor_passes() -> None:
+    tools = ai_tools.build_agent_tools()
+    schema = tools["resolve_human_entity"].parameters
+
+    enum = schema["properties"]["entity_types"]["items"]["enum"]
+
+    assert "visitor_pass" in enum
+
+
 def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
     tools = ai_tools.build_agent_tools()
 
     expected_tool_names = {
         "analyze_camera_snapshot",
+        "analyze_dependency_update",
+        "apply_dependency_update",
         "assign_schedule_to_entity",
         "backfill_access_event_from_protect",
         "calculate_visit_duration",
         "cancel_visitor_pass",
+        "check_dependency_updates",
         "command_device",
+        "configure_dependency_backup_storage",
         "create_automation",
         "create_notification_workflow",
         "create_schedule",
@@ -607,9 +989,15 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "preview_notification_workflow",
         "query_access_events",
         "query_anomalies",
+        "query_alfred_runtime_events",
         "query_automation_catalog",
         "query_automations",
+        "query_auth_secret_status",
+        "query_dependency_backups",
+        "query_dependency_update_job",
+        "query_dependency_updates",
         "query_device_states",
+        "query_integration_health",
         "query_leaderboard",
         "query_lpr_timing",
         "query_notification_catalog",
@@ -617,28 +1005,38 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "query_presence",
         "query_schedule_targets",
         "query_schedules",
+        "query_system_settings",
         "query_unifi_protect_events",
         "query_vehicle_detection_history",
         "query_visitor_passes",
         "read_chat_attachment",
         "resolve_human_entity",
+        "restore_dependency_backup",
+        "rotate_auth_secret",
         "summarize_access_rhythm",
+        "test_integration_connection",
         "test_notification_workflow",
         "test_unifi_alarm_webhook",
         "toggle_maintenance_mode",
         "trigger_anomaly_alert",
         "trigger_icloud_sync",
         "trigger_manual_malfunction_override",
+        "update_system_settings",
         "update_notification_workflow",
         "update_schedule",
         "update_visitor_pass",
+        "validate_dependency_backup_storage",
         "verify_schedule_access",
     }
     state_changing_tools = {
+        "analyze_dependency_update",
+        "apply_dependency_update",
         "assign_schedule_to_entity",
         "backfill_access_event_from_protect",
         "cancel_visitor_pass",
+        "check_dependency_updates",
         "command_device",
+        "configure_dependency_backup_storage",
         "create_automation",
         "create_notification_workflow",
         "create_schedule",
@@ -655,15 +1053,20 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "open_device",
         "open_gate",
         "override_schedule",
+        "restore_dependency_backup",
+        "rotate_auth_secret",
+        "test_integration_connection",
         "test_notification_workflow",
         "test_unifi_alarm_webhook",
         "toggle_maintenance_mode",
         "trigger_anomaly_alert",
         "trigger_icloud_sync",
         "trigger_manual_malfunction_override",
+        "update_system_settings",
         "update_notification_workflow",
         "update_schedule",
         "update_visitor_pass",
+        "validate_dependency_backup_storage",
     }
 
     assert set(tools) == expected_tool_names
@@ -719,6 +1122,69 @@ async def test_react_loop_executes_read_tools_in_parallel(monkeypatch) -> None:
     assert len(started) == 2
     assert abs(started[0] - started[1]) < 0.03
     assert elapsed < 0.09
+    assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monkeypatch) -> None:
+    service = ChatService()
+    started: list[float] = []
+    statuses: list[dict] = []
+    memory: dict[str, object] = {}
+
+    async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
+        started.append(time.perf_counter())
+        await asyncio.sleep(0.05)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": {
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "target": call.name,
+                "detail": f"Confirm {call.name}?",
+            },
+        }
+
+    async def fake_load_memory(session_id):
+        return dict(memory)
+
+    async def fake_save_memory(session_id, next_memory):
+        memory.clear()
+        memory.update(next_memory)
+
+    async def no_schedule_conflict(session_id, memory, tool_results):
+        return None
+
+    async def status_callback(status):
+        statuses.append(status)
+
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_load_memory", fake_load_memory)
+    monkeypatch.setattr(service, "_save_memory", fake_save_memory)
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+
+    before = time.perf_counter()
+    result = await service._run_provider_agent_loop(
+        DualActionPreviewProvider(),
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["create_schedule"], service._tools["create_visitor_pass"]],
+        {},
+        route=IntentRoute(("Schedules", "Visitor_Passes"), 0.8, False, "test"),
+        user_message="prepare a schedule and pass",
+        actor_context={"user": {"id": "user-1", "role": "admin"}},
+        status_callback=status_callback,
+    )
+    elapsed = time.perf_counter() - before
+
+    assert len(started) == 2
+    assert abs(started[0] - started[1]) < 0.03
+    assert elapsed < 0.09
+    assert memory["pending_agent_action"]["tool_name"] in {"create_schedule", "create_visitor_pass"}
+    assert "Confirm" in result.text
     assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
 
 
@@ -800,7 +1266,7 @@ async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
         {},
         route=IntentRoute(("Gate_Hardware",), 0.9, False, "test"),
         user_message="open the gate",
-        actor_context={"user": {"id": "user-1"}},
+        actor_context={"user": {"id": "user-1", "role": "admin"}},
         status_callback=None,
     )
 
@@ -1281,6 +1747,56 @@ async def test_resolve_human_entity_resolves_fuzzy_vehicle(monkeypatch) -> None:
     assert result["status"] == "unique"
     assert result["match"]["type"] == "vehicle"
     assert result["match"]["registration_number"] == "PE70DHX"
+
+
+@pytest.mark.asyncio
+async def test_resolve_human_entity_resolves_visitor_pass(monkeypatch) -> None:
+    visitor_pass = SimpleNamespace(
+        id=uuid.uuid4(),
+        visitor_name="Stu",
+        number_plate="STU123",
+        vehicle_make="Ford",
+        vehicle_colour="Blue",
+        status=SimpleNamespace(value="active"),
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class VisitorPassService:
+        async def refresh_statuses(self, *, session, publish):
+            return False
+
+        async def list_passes(self, session, *, statuses=None, search=None, limit=10):
+            assert search == "Stu"
+            return [visitor_pass]
+
+    async def fake_runtime_config():
+        return SimpleNamespace(site_timezone="Europe/London")
+
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(ai_tools, "get_visitor_pass_service", lambda: VisitorPassService())
+    monkeypatch.setattr(
+        ai_tools,
+        "_visitor_pass_agent_payload",
+        lambda pass_, timezone_name: {
+            "id": str(pass_.id),
+            "visitor_name": pass_.visitor_name,
+            "arrival_time": "2026-05-04T10:12:45+01:00",
+        },
+    )
+
+    result = await ai_tools.resolve_human_entity({"query": "Stu", "entity_types": ["visitor_pass"]})
+
+    assert result["status"] == "unique"
+    assert result["match"]["type"] == "visitor_pass"
+    assert result["match"]["visitor_name"] == "Stu"
+    assert result["match"]["arrival_time"] == "2026-05-04T10:12:45+01:00"
 
 
 @pytest.mark.asyncio

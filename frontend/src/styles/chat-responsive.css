@@ -222,6 +222,10 @@
   justify-items: end;
 }
 
+.chat-message.assistant .chat-message-stack {
+  align-items: start;
+}
+
 .chat-sender-label {
   padding: 0 6px;
   color: var(--muted);
@@ -255,6 +259,110 @@
   border-color: color-mix(in srgb, var(--blue) 35%, var(--line));
   border-top-right-radius: 8px;
   background: var(--blue-soft);
+  color: var(--text);
+}
+
+.chat-feedback-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 4px;
+}
+
+.chat-feedback-button {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.chat-feedback-button:hover,
+.chat-feedback-button.active {
+  border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
+  background: var(--surface-soft);
+  color: var(--blue-strong);
+}
+
+.chat-feedback-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.chat-feedback-row small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.chat-feedback-row small.error,
+.chat-feedback-error {
+  color: var(--danger);
+}
+
+.chat-feedback-panel {
+  width: min(340px, 82vw);
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
+}
+
+.chat-feedback-panel label {
+  display: grid;
+  gap: 5px;
+}
+
+.chat-feedback-panel label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chat-feedback-panel textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 9px;
+}
+
+.chat-feedback-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.chat-feedback-submit {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--blue);
+  border-radius: 9px;
+  background: var(--blue);
+  color: white;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0 10px;
+}
+
+.chat-feedback-submit.secondary {
+  border-color: var(--line);
+  background: var(--surface);
   color: var(--text);
 }
 

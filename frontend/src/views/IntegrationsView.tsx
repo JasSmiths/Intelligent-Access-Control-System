@@ -413,6 +413,8 @@ export type DependencyStorageStatus = {
   mode: "local" | "nfs" | "samba" | string;
   mount_source: string;
   mount_options: string;
+  mount_options_configured: boolean;
+  mount_options_redacted: boolean;
   config_status: "active" | "pending_reboot" | "error" | string;
   backup_root: string;
   exists: boolean;
@@ -2294,7 +2296,8 @@ export function DependencyUpdateConfirmModal({
 export function DependencyStoragePanel({ storage, onChanged }: { storage: DependencyStorageStatus | null; onChanged: () => Promise<void> }) {
   const [mode, setMode] = React.useState(storage?.mode || "local");
   const [source, setSource] = React.useState(storage?.mount_source || "");
-  const [options, setOptions] = React.useState(storage?.mount_options || "");
+  const [options, setOptions] = React.useState("");
+  const [optionsTouched, setOptionsTouched] = React.useState(false);
   const [minFree, setMinFree] = React.useState(String(storage?.min_free_bytes ?? 1073741824));
   const [retentionDays, setRetentionDays] = React.useState(String(storage?.retention_days || ""));
   const [saving, setSaving] = React.useState(false);
@@ -2302,22 +2305,43 @@ export function DependencyStoragePanel({ storage, onChanged }: { storage: Depend
   React.useEffect(() => {
     setMode(storage?.mode || "local");
     setSource(storage?.mount_source || "");
-    setOptions(storage?.mount_options || "");
+    setOptions("");
+    setOptionsTouched(false);
     setMinFree(String(storage?.min_free_bytes ?? 1073741824));
     setRetentionDays(String(storage?.retention_days || ""));
   }, [storage]);
+
+  const savedMountOptions = Boolean(storage?.mount_options_configured);
+  const mountOptionsHint = mode === "local"
+    ? "Remote mount options are not used for local backup storage."
+    : savedMountOptions && !optionsTouched
+      ? "Sensitive options are saved and hidden. Enter a new value to replace them."
+      : optionsTouched && options.trim()
+        ? "New mount options will replace the saved sensitive value."
+        : optionsTouched
+          ? "Saved mount options will be cleared when you save."
+          : "Optional Docker mount options for this remote share.";
 
   const saveStorage = async () => {
     setSaving(true);
     setError("");
     try {
-      await api.post("/api/v1/dependency-updates/storage/config", {
+      const payload: {
+        mode: string;
+        mount_source: string;
+        mount_options?: string;
+        retention_days: string;
+        min_free_bytes: number;
+      } = {
         mode,
-        mount_source: source,
-        mount_options: options,
+        mount_source: mode === "local" ? "" : source,
         retention_days: retentionDays,
         min_free_bytes: Number(minFree) || 0
-      });
+      };
+      if (mode === "local" || optionsTouched) {
+        payload.mount_options = mode === "local" ? "" : options;
+      }
+      await api.post("/api/v1/dependency-updates/storage/config", payload);
       await onChanged();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save storage configuration.");
@@ -2366,8 +2390,32 @@ export function DependencyStoragePanel({ storage, onChanged }: { storage: Depend
         </label>
         <label className="field">
           <span>Mount options</span>
-          <input value={options} onChange={(event) => setOptions(event.target.value)} placeholder={mode === "local" ? "not used for local mode" : mode === "samba" ? "username=iacs,password=...,vers=3.0,rw" : "addr=nas.local,rw"} disabled={mode === "local"} />
+          <input
+            value={options}
+            onChange={(event) => {
+              setOptions(event.target.value);
+              setOptionsTouched(true);
+            }}
+            placeholder={mode === "local" ? "not used for local mode" : mode === "samba" ? "username=iacs,password=...,vers=3.0,rw" : "addr=nas.local,rw"}
+            disabled={mode === "local"}
+          />
+          <small className="field-hint">{mountOptionsHint}</small>
         </label>
+        {mode !== "local" && savedMountOptions ? (
+          <div className="dependency-storage-secret-controls">
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setOptions("");
+                setOptionsTouched(true);
+              }}
+              disabled={saving}
+              type="button"
+            >
+              Clear Saved Options
+            </button>
+          </div>
+        ) : null}
         <label className="field">
           <span>Minimum free bytes</span>
           <input value={minFree} onChange={(event) => setMinFree(event.target.value)} inputMode="numeric" />

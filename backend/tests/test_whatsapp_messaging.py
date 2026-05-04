@@ -1793,7 +1793,11 @@ async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> N
         return {"found": True, "visitor_pass": {"id": str(visitor_pass.id)}}
 
     async def runtime():
-        return SimpleNamespace(llm_provider="local", site_timezone="Europe/London")
+        return SimpleNamespace(llm_provider="openai", site_timezone="Europe/London")
+
+    class Provider:
+        async def complete(self, _messages, **_kwargs):
+            return LlmResult('{"action":"unsupported","message":"Sorry, I can only discuss details about your visitor pass and vehicle registration."}')
 
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
@@ -1805,6 +1809,7 @@ async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> N
     monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
     monkeypatch.setattr(service, "get_pass_details", pass_details)
     monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
+    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
     monkeypatch.setattr(service, "send_text_message", send_text)
     monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
 
@@ -1849,7 +1854,11 @@ async def test_visitor_vip_list_request_gets_restricted_reply(monkeypatch) -> No
         return {"found": True, "visitor_pass": {"id": str(visitor_pass.id)}}
 
     async def runtime():
-        return SimpleNamespace(llm_provider="local", site_timezone="Europe/London")
+        return SimpleNamespace(llm_provider="openai", site_timezone="Europe/London")
+
+    class Provider:
+        async def complete(self, _messages, **_kwargs):
+            return LlmResult('{"action":"unsupported","message":"Sorry, I can only discuss details about your visitor pass and vehicle registration."}')
 
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
@@ -1861,6 +1870,7 @@ async def test_visitor_vip_list_request_gets_restricted_reply(monkeypatch) -> No
     monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
     monkeypatch.setattr(service, "get_pass_details", pass_details)
     monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
+    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
     monkeypatch.setattr(service, "send_text_message", send_text)
     monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
 
@@ -2152,7 +2162,7 @@ async def test_visitor_timeframe_change_is_not_keyword_parsed_without_llm(monkey
 
     assert result == {
         "action": "reply",
-        "message": "Sorry, I can't safely process time changes right now. Please contact your host.",
+        "message": "Sorry, I can't safely process visitor chat right now. Please contact your host.",
     }
 
 
@@ -2235,7 +2245,7 @@ async def test_visitor_random_text_after_confirmed_plate_is_not_treated_as_new_p
 
 
 @pytest.mark.asyncio
-async def test_visitor_random_text_after_confirmed_plate_is_not_locally_parsed_as_new_plate(monkeypatch) -> None:
+async def test_visitor_random_text_after_confirmed_plate_fails_closed_without_llm(monkeypatch) -> None:
     service = get_whatsapp_messaging_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
@@ -2265,11 +2275,14 @@ async def test_visitor_random_text_after_confirmed_plate_is_not_locally_parsed_a
         "Random reference AB12 CDE, lol",
     )
 
-    assert result == {"action": "reply", "message": "Haha, thanks Josh! You're all set."}
+    assert result == {
+        "action": "reply",
+        "message": "Sorry, I can't safely process visitor chat right now. Please contact your host.",
+    }
 
 
 @pytest.mark.asyncio
-async def test_visitor_confirmed_pass_can_still_send_new_plate_without_llm(monkeypatch) -> None:
+async def test_visitor_confirmed_pass_cannot_send_new_plate_without_llm(monkeypatch) -> None:
     service = get_whatsapp_messaging_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
@@ -2299,7 +2312,10 @@ async def test_visitor_confirmed_pass_can_still_send_new_plate_without_llm(monke
         "Actually I brought AB12 CDE today",
     )
 
-    assert result == {"action": "plate_detected", "registration_number": "AB12CDE"}
+    assert result == {
+        "action": "reply",
+        "message": "Sorry, I can't safely process visitor chat right now. Please contact your host.",
+    }
 
 
 def test_visitor_timeframe_auto_limit_uses_original_window_for_cumulative_changes() -> None:

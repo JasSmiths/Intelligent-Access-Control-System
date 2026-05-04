@@ -232,6 +232,21 @@ export type MaintenanceStatus = {
   ha_entity_id?: string;
 };
 
+export type ActionConfirmation = {
+  confirmation_id: string;
+  confirmation_token: string;
+  action: string;
+  expires_at: string;
+};
+
+export type ActionConfirmationOptions = {
+  target_entity?: string;
+  target_id?: string;
+  target_label?: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type RealtimeMessage = {
   type: string;
   payload: Record<string, unknown>;
@@ -404,6 +419,7 @@ export type ViewKey =
   | "settings"
   | "settings_general"
   | "settings_auth"
+  | "alfred_training"
   | "settings_automations"
   | "settings_notifications"
   | "settings_lpr"
@@ -451,6 +467,18 @@ export const api = {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 };
+
+export async function createActionConfirmation(
+  action: string,
+  payload: Record<string, unknown>,
+  options: ActionConfirmationOptions = {}
+): Promise<ActionConfirmation> {
+  return api.post<ActionConfirmation>("/api/v1/action-confirmations", {
+    action,
+    payload,
+    ...options
+  });
+}
 
 export async function apiError(response: Response) {
   const statusLabel = `${response.status} ${response.statusText || "Request failed"}`;
@@ -611,11 +639,11 @@ export function useScheduleDefaultPolicyOptionLabel() {
 }
 
 export const llmProviderDefinitions = [
-  { key: "local", label: "Local fallback" },
-  { key: "openai", label: "OpenAI" },
-  { key: "gemini", label: "Gemini" },
-  { key: "anthropic", label: "Claude" },
-  { key: "ollama", label: "Ollama" }
+  { key: "local", label: "Local fallback", agentCapable: false },
+  { key: "openai", label: "OpenAI", agentCapable: true },
+  { key: "gemini", label: "Gemini", agentCapable: true },
+  { key: "anthropic", label: "Claude", agentCapable: true },
+  { key: "ollama", label: "Ollama", agentCapable: true }
 ] as const;
 
 export type LlmProviderKey = typeof llmProviderDefinitions[number]["key"];

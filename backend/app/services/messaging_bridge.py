@@ -13,6 +13,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import MessagingIdentity, Person, User
 from app.models.enums import UserRole
 from app.modules.messaging.base import IncomingChatMessage, MessagingActor, MessagingBridgeResult
+from app.services.alfred.feedback import AlfredFeedbackError, alfred_feedback_service, parse_feedback_command
 from app.services.chat import chat_service
 
 logger = get_logger(__name__)
@@ -29,6 +30,29 @@ class MessagingBridgeService:
     ) -> MessagingBridgeResult:
         actor = await self.resolve_actor(message, is_admin_hint=is_admin_hint)
         session_id = deterministic_session_id(message)
+        feedback_command = parse_feedback_command(message.text)
+        if feedback_command and actor.is_admin:
+            try:
+                feedback = await alfred_feedback_service.submit_feedback_for_last_response(
+                    session_id=session_id,
+                    rating=feedback_command["rating"],
+                    reason=feedback_command.get("reason"),
+                    ideal_answer=feedback_command.get("ideal_answer"),
+                    source_channel=message.provider,
+                    actor_user_id=actor.user_id,
+                    actor_role=actor.user_role,
+                )
+            except AlfredFeedbackError as exc:
+                return MessagingBridgeResult(
+                    session_id=session_id,
+                    response_text=f"I could not attach that feedback: {exc}",
+                    actor=actor,
+                )
+            corrected = str(feedback.get("corrected_answer") or "").strip()
+            response_text = "Thanks, I logged that Alfred feedback."
+            if corrected and feedback_command["rating"] == "down":
+                response_text = f"{response_text}\n\nCorrected answer:\n{corrected}"
+            return MessagingBridgeResult(session_id=session_id, response_text=response_text, actor=actor)
         result = await chat_service.handle_message(
             message.text,
             session_id=session_id,
@@ -257,7 +281,7 @@ def _malfunction_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | Non
     malfunctions = output.get("malfunctions") if isinstance(output.get("malfunctions"), list) else []
     count = int(output.get("count") or len(malfunctions))
     if count <= 0:
-        return "No active gate malfunctions. The gate is behaving itself."
+        return None
     labels = [
         str(item.get("title") or item.get("status") or item.get("malfunction_type") or "gate malfunction")
         for item in malfunctions[:3]

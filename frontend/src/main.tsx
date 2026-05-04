@@ -128,6 +128,7 @@ const AlertsView = React.lazy(() => import("./views/AlertsView").then((module) =
 const ReportsView = React.lazy(() => import("./views/ReportsView").then((module) => ({ default: module.ReportsView })));
 const IntegrationsView = React.lazy(() => import("./views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
 const LogsView = React.lazy(() => import("./views/LogsView").then((module) => ({ default: module.LogsView })));
+const AlfredTrainingView = React.lazy(() => import("./views/AlfredTrainingView").then((module) => ({ default: module.AlfredTrainingView })));
 const AutomationsView = React.lazy(() => import("./views/WorkflowViews").then((module) => ({ default: module.AutomationsView })));
 const NotificationsView = React.lazy(() => import("./views/WorkflowViews").then((module) => ({ default: module.NotificationsView })));
 const SettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.SettingsView })));
@@ -194,13 +195,14 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
   { key: "settings", label: "Settings", icon: Settings }
 ];
 
-const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType }> = [
+const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType; adminOnly?: boolean }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
+  { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true },
   { key: "settings_automations", label: "Automations", icon: GitBranch },
   { key: "settings_notifications", label: "Notifications", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
-  { key: "users", label: "Users", icon: Users }
+  { key: "users", label: "Users", icon: Users, adminOnly: true }
 ];
 
 const viewPaths: Record<ViewKey, string> = {
@@ -219,6 +221,7 @@ const viewPaths: Record<ViewKey, string> = {
   settings: "/settings",
   settings_general: "/settings/general",
   settings_auth: "/settings/auth-security",
+  alfred_training: "/settings/alfred-training",
   settings_automations: "/settings/automations",
   settings_notifications: "/settings/notifications",
   settings_lpr: "/settings/lpr-tuning",
@@ -1009,10 +1012,20 @@ function App() {
     }
   }, [authStatus, navigateToView, view]);
 
+  React.useEffect(() => {
+    if (currentUser?.role !== "admin" && view === "users") {
+      navigateToView("settings", { replace: true });
+    }
+  }, [currentUser?.role, navigateToView, view]);
+
   const sidebarCollapsed = profilePreferences.sidebarCollapsed;
   const navigationCollapsed = !isMobileNavigation && sidebarCollapsed;
   const navigationExpanded = isMobileNavigation ? mobileNavOpen : !sidebarCollapsed;
   const settingsActive = view === "settings" || view.startsWith("settings_") || view === "users";
+  const visibleSettingsNavItems = React.useMemo(
+    () => settingsNavItems.filter((item) => !item.adminOnly || currentUser?.role === "admin"),
+    [currentUser?.role]
+  );
   const bellAlerts = React.useMemo(() => anomalies.filter(isBellAlert), [anomalies]);
 
   const navigateFromNav = React.useCallback((nextView: ViewKey) => {
@@ -1162,7 +1175,7 @@ function App() {
                   </button>
                   {settingsExpanded && !navigationCollapsed ? (
                     <div className="nav-submenu">
-                      {settingsNavItems.map((subItem) => {
+                      {visibleSettingsNavItems.map((subItem) => {
                         const SubIcon = subItem.icon;
                         return (
                           <button
@@ -1386,25 +1399,32 @@ function View(props: {
       content = <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
       break;
     case "settings_general":
-      content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} />;
+      content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} />;
       break;
-    case "settings_auth":
-      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} />;
-      break;
-    case "settings_automations":
+	    case "settings_auth":
+	      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} />;
+	      break;
+	    case "alfred_training":
+	      content = props.currentUser.role === "admin"
+	        ? <AlfredTrainingView />
+	        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
+	      break;
+	    case "settings_automations":
       content = <AutomationsView people={props.people} vehicles={props.vehicles} />;
       break;
     case "settings_notifications":
       content = <NotificationsView currentUser={props.currentUser} people={props.people} schedules={props.schedules} />;
       break;
     case "settings_lpr":
-      content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} />;
+      content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} />;
       break;
     case "settings":
       content = <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "users":
-      content = <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />;
+      content = props.currentUser.role === "admin"
+        ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />
+        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     default:
       content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;

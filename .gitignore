@@ -9,6 +9,9 @@ __pycache__/
 node_modules/
 dist/
 build/
+docker-compose.update-backups.generated.yml
+auth-secret.key
+auth-secret.key.previous
 
 # Runtime state is mounted into containers as host directories.
 data/

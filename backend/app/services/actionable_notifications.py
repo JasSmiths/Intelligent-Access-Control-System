@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.core.auth_secret import get_auth_secret
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -677,7 +678,7 @@ def _new_token() -> str:
 
 
 def _token_hash(token: str) -> str:
-    return hmac.new(settings.auth_secret_key.encode(), token.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(get_auth_secret().encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
 def _strip_prefix(value: str, prefix: str) -> str | None:

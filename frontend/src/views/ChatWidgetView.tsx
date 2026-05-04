@@ -67,6 +67,8 @@ import {
   Sun,
   Terminal,
   Ticket,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Trophy,
   Type,
@@ -81,6 +83,7 @@ import {
 } from "lucide-react";
 
 import {
+  api,
   apiError,
   displayUserName,
   formatFileSize,
@@ -148,6 +151,13 @@ export type ChatMessageItem = {
   attachments?: ChatAttachment[];
   confirmationAction?: ChatConfirmationAction | null;
   streaming?: boolean;
+  userMessageId?: string | null;
+  assistantMessageId?: string | null;
+  feedback?: {
+    rating?: "up" | "down";
+    status?: "saving" | "saved" | "error";
+    error?: string;
+  };
 };
 
 type ChatCopyMenuState = {
@@ -155,6 +165,22 @@ type ChatCopyMenuState = {
   text: string;
   x: number;
   y: number;
+};
+
+type ChatFeedbackDraft = {
+  messageId: string;
+  assistantMessageId: string;
+  reason: string;
+  idealAnswer: string;
+  saving: boolean;
+  error: string;
+};
+
+type AlfredFeedbackResponse = {
+  corrected_answer?: string;
+  feedback?: {
+    id: string;
+  };
 };
 
 export async function uploadChatAttachment(file: File, sessionId: string | null): Promise<ChatAttachment> {
@@ -397,6 +423,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   const [dragActive, setDragActive] = React.useState(false);
   const [copyMenu, setCopyMenu] = React.useState<ChatCopyMenuState | null>(null);
   const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
+  const [feedbackDraft, setFeedbackDraft] = React.useState<ChatFeedbackDraft | null>(null);
   const [viewportHeight, setViewportHeight] = React.useState(() => window.visualViewport?.height ?? window.innerHeight);
   const [viewportTop, setViewportTop] = React.useState(() => window.visualViewport?.offsetTop ?? 0);
   const socketRef = React.useRef<WebSocket | null>(null);
@@ -404,6 +431,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const feedRef = React.useRef<HTMLDivElement | null>(null);
   const activeAssistantMessageRef = React.useRef<string | null>(null);
+  const awaitingResponseRef = React.useRef(false);
   const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
   const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
@@ -546,9 +574,18 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         return;
       }
       if (data.type === "chat.thinking") {
+        awaitingResponseRef.current = true;
         setThinking(true);
         setToolStatus("Thinking...");
         setToolActivities([]);
+        return;
+      }
+      if (data.type === "chat.agent_state") {
+        awaitingResponseRef.current = true;
+        setThinking(true);
+        const label = typeof payload.label === "string" ? payload.label : "Working...";
+        const detail = typeof payload.detail === "string" ? payload.detail : "";
+        setToolStatus(detail ? `${label} - ${detail}` : label);
         return;
       }
       if (data.type === "chat.tool_batch") {
@@ -577,6 +614,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         return;
       }
       if (data.type === "chat.tool_status") {
+        awaitingResponseRef.current = true;
         setThinking(true);
         const label = typeof payload.label === "string" ? payload.label : "Running system tool...";
         setToolStatus(label);
@@ -605,11 +643,13 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         return;
       }
       if (data.type === "chat.confirmation_required") {
+        awaitingResponseRef.current = true;
         setThinking(true);
         setToolStatus("Waiting for confirmation...");
         return;
       }
       if (data.type === "chat.response.delta") {
+        awaitingResponseRef.current = true;
         const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
         if (!chunk) return;
         setThinking(true);
@@ -625,9 +665,12 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         return;
       }
       if (data.type === "chat.response") {
+        awaitingResponseRef.current = false;
         const text = typeof payload.text === "string" ? payload.text : "";
         const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
         const confirmationAction = chatPendingAction(payload.pending_action) ?? chatConfirmationAction(payload.tool_results);
+        const userMessageId = typeof payload.user_message_id === "string" ? payload.user_message_id : null;
+        const assistantMessageId = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id : null;
         if (typeof payload.session_id === "string") setSessionId(payload.session_id);
         setMessages((current) => {
           const activeId = activeAssistantMessageRef.current ?? clientId("alfred");
@@ -639,23 +682,27 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                 ? {
                   ...message,
                   text,
-                  attachments: responseAttachments,
-                  confirmationAction,
-                  streaming: false
-                }
-                : message
-            );
+	                  attachments: responseAttachments,
+	                  confirmationAction,
+	                  streaming: false,
+                    userMessageId,
+                    assistantMessageId
+	                }
+	                : message
+	            );
           }
           return [
             ...current,
             {
               id: activeId,
               role: "assistant",
-              text,
-              attachments: responseAttachments,
-              confirmationAction
-            }
-          ];
+	              text,
+	              attachments: responseAttachments,
+	              confirmationAction,
+                userMessageId,
+                assistantMessageId
+	            }
+	          ];
         });
         setThinking(false);
         setToolStatus("");
@@ -663,6 +710,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         return;
       }
       if (data.type === "chat.error") {
+        awaitingResponseRef.current = false;
         setMessages((current) => [
           ...current,
           {
@@ -682,10 +730,23 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     socket.onclose = () => {
       clearConnectionTimeout();
       if (socketRef.current === socket) socketRef.current = null;
+      const interruptedTurn = awaitingResponseRef.current;
+      awaitingResponseRef.current = false;
       setConnected(false);
       setThinking(false);
       setToolStatus("");
       setToolActivities([]);
+      if (!cancelled && interruptedTurn) {
+        activeAssistantMessageRef.current = null;
+        setMessages((current) => [
+          ...current,
+          {
+            id: clientId("alfred-disconnect"),
+            role: "assistant",
+            text: "Alfred disconnected while answering. I logged the failure for review; please try again."
+          }
+        ]);
+      }
       if (!cancelled) {
         const delay = Math.min(8000, 700 + connectionNonce * 600);
         reconnectTimerId = window.setTimeout(() => {
@@ -794,9 +855,87 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         decision
       }
     }));
+    awaitingResponseRef.current = true;
     setThinking(true);
     setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
   }, [connected, sessionId, thinking]);
+
+  const submitFeedback = React.useCallback(async (
+    message: ChatMessageItem,
+    rating: "up" | "down",
+    reason = "",
+    idealAnswer = ""
+  ) => {
+    const assistantMessageId = message.assistantMessageId;
+    if (!assistantMessageId) return;
+    setMessages((current) =>
+      current.map((item) =>
+        item.id === message.id
+          ? { ...item, feedback: { rating, status: "saving" } }
+          : item
+      )
+    );
+    try {
+      const result = await api.post<AlfredFeedbackResponse>("/api/v1/ai/feedback", {
+        assistant_message_id: assistantMessageId,
+        rating,
+        reason,
+        ideal_answer: idealAnswer,
+        source_channel: "dashboard"
+      });
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id
+            ? { ...item, feedback: { rating, status: "saved" } }
+            : item
+        )
+      );
+      const corrected = String(result.corrected_answer || "").trim();
+      if (rating === "down" && corrected) {
+        setMessages((current) => [
+          ...current,
+          {
+            id: clientId("alfred-repair"),
+            role: "assistant",
+            text: corrected
+          }
+        ]);
+      }
+      setFeedbackDraft(null);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "Unable to submit feedback.";
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id
+            ? { ...item, feedback: { rating, status: "error", error: messageText } }
+            : item
+        )
+      );
+      setFeedbackDraft((current) => current?.messageId === message.id ? { ...current, saving: false, error: messageText } : current);
+    }
+  }, []);
+
+  const openNegativeFeedback = React.useCallback((message: ChatMessageItem) => {
+    if (!message.assistantMessageId) return;
+    setFeedbackDraft({
+      messageId: message.id,
+      assistantMessageId: message.assistantMessageId,
+      reason: "",
+      idealAnswer: "",
+      saving: false,
+      error: ""
+    });
+  }, []);
+
+  const submitFeedbackDraft = React.useCallback(async (message: ChatMessageItem) => {
+    if (!feedbackDraft || feedbackDraft.messageId !== message.id) return;
+    if (!feedbackDraft.reason.trim()) {
+      setFeedbackDraft({ ...feedbackDraft, error: "Tell Alfred what was wrong so he can learn the right lesson." });
+      return;
+    }
+    setFeedbackDraft({ ...feedbackDraft, saving: true, error: "" });
+    await submitFeedback(message, "down", feedbackDraft.reason.trim(), feedbackDraft.idealAnswer.trim());
+  }, [feedbackDraft, submitFeedback]);
 
   const selectLlmProvider = React.useCallback(async (provider: LlmProviderKey) => {
     if (llmSaving || llmSettings.loading) return;
@@ -853,6 +992,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       { id: clientId("user"), role: "user", text, attachments }
     ]);
     socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
+    awaitingResponseRef.current = true;
     setDraft("");
     setLlmPickerOpen(false);
     setLlmFeedback("");
@@ -927,10 +1067,21 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                     index={index}
                     key={message.id}
                     message={message}
-                    onConfirm={sendConfirmationAction}
-                    onOpenCopyMenu={setCopyMenu}
-                    senderName={message.role === "assistant" ? "Alfred" : firstName}
-                  />
+	                    onConfirm={sendConfirmationAction}
+                      onFeedback={(targetMessage, rating) => {
+                        if (rating === "up") {
+                          void submitFeedback(targetMessage, "up");
+                        } else {
+                          openNegativeFeedback(targetMessage);
+                        }
+                      }}
+                      feedbackDraft={feedbackDraft?.messageId === message.id ? feedbackDraft : null}
+                      onFeedbackDraftChange={setFeedbackDraft}
+                      onFeedbackDraftClose={() => setFeedbackDraft(null)}
+                      onFeedbackDraftSubmit={submitFeedbackDraft}
+	                    onOpenCopyMenu={setCopyMenu}
+	                    senderName={message.role === "assistant" ? "Alfred" : firstName}
+	                  />
                 ))}
               </AnimatePresence>
               {thinking ? <TypingIndicator activities={toolActivities} status={toolStatus} /> : null}
@@ -1098,7 +1249,7 @@ export function ChatLlmProviderPopover({
               <Icon size={16} />
               <span>
                 <strong>{provider.label}</strong>
-                <small>{active ? "Active" : configured ? "Ready" : "Not configured"}</small>
+                <small>{provider.agentCapable ? active ? "Active" : configured ? "Ready" : "Not configured" : "Diagnostic only"}</small>
               </span>
               {saving && active ? <Loader2 className="spin" size={14} /> : null}
             </button>
@@ -1114,12 +1265,22 @@ export function ChatMessageBubble({
   message,
   index,
   senderName,
+  feedbackDraft,
+  onFeedback,
+  onFeedbackDraftChange,
+  onFeedbackDraftClose,
+  onFeedbackDraftSubmit,
   onOpenCopyMenu,
   onConfirm
 }: {
   message: ChatMessageItem;
   index: number;
   senderName: string;
+  feedbackDraft: ChatFeedbackDraft | null;
+  onFeedback: (message: ChatMessageItem, rating: "up" | "down") => void;
+  onFeedbackDraftChange: (draft: ChatFeedbackDraft | null) => void;
+  onFeedbackDraftClose: () => void;
+  onFeedbackDraftSubmit: (message: ChatMessageItem) => void;
   onOpenCopyMenu: (menu: ChatCopyMenuState) => void;
   onConfirm: (messageId: string, action: ChatConfirmationAction, decision?: "confirm" | "cancel") => void;
 }) {
@@ -1171,16 +1332,91 @@ export function ChatMessageBubble({
               onCancel={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction, "cancel")}
             />
           ) : null}
-          {message.attachments?.length ? (
-            <div className="chat-bubble-attachments">
-              {message.attachments.map((attachment) => (
-                <ChatAttachmentCard attachment={attachment} key={attachment.id} />
-              ))}
-            </div>
-          ) : null}
-        </div>
+	          {message.attachments?.length ? (
+	            <div className="chat-bubble-attachments">
+	              {message.attachments.map((attachment) => (
+	                <ChatAttachmentCard attachment={attachment} key={attachment.id} />
+	              ))}
+	            </div>
+	          ) : null}
+	        </div>
+        {message.role === "assistant" && message.assistantMessageId && !message.streaming ? (
+          <div className="chat-feedback-row" aria-label="Rate Alfred response">
+            <button
+              className={message.feedback?.rating === "up" ? "chat-feedback-button active" : "chat-feedback-button"}
+              disabled={message.feedback?.status === "saving"}
+              onClick={() => onFeedback(message, "up")}
+              title="Good response"
+              type="button"
+            >
+              <ThumbsUp size={13} />
+            </button>
+            <button
+              className={message.feedback?.rating === "down" ? "chat-feedback-button active" : "chat-feedback-button"}
+              disabled={message.feedback?.status === "saving"}
+              onClick={() => onFeedback(message, "down")}
+              title="Needs improvement"
+              type="button"
+            >
+              <ThumbsDown size={13} />
+            </button>
+            {message.feedback?.status === "saved" ? <small>Saved</small> : null}
+            {message.feedback?.status === "error" ? <small className="error">{message.feedback.error}</small> : null}
+          </div>
+        ) : null}
+        {feedbackDraft ? (
+          <ChatFeedbackPanel
+            draft={feedbackDraft}
+            onChange={onFeedbackDraftChange}
+            onClose={onFeedbackDraftClose}
+            onSubmit={() => onFeedbackDraftSubmit(message)}
+          />
+        ) : null}
+	      </div>
+	    </motion.div>
+	  );
+}
+
+export function ChatFeedbackPanel({
+  draft,
+  onChange,
+  onClose,
+  onSubmit
+}: {
+  draft: ChatFeedbackDraft;
+  onChange: (draft: ChatFeedbackDraft | null) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="chat-feedback-panel">
+      <label>
+        <span>What was wrong?</span>
+        <textarea
+          value={draft.reason}
+          onChange={(event) => onChange({ ...draft, reason: event.target.value, error: "" })}
+          placeholder="Tell Alfred what made this answer unhelpful."
+          rows={3}
+        />
+      </label>
+      <label>
+        <span>What should Alfred have said?</span>
+        <textarea
+          value={draft.idealAnswer}
+          onChange={(event) => onChange({ ...draft, idealAnswer: event.target.value })}
+          placeholder="Optional corrected answer."
+          rows={2}
+        />
+      </label>
+      {draft.error ? <small className="chat-feedback-error">{draft.error}</small> : null}
+      <div className="chat-feedback-actions">
+        <button className="chat-feedback-submit secondary" onClick={onClose} type="button">Cancel</button>
+        <button className="chat-feedback-submit" disabled={draft.saving} onClick={onSubmit} type="button">
+          {draft.saving ? <Loader2 className="spin" size={13} /> : <Check size={13} />}
+          <span>{draft.saving ? "Sending" : "Send feedback"}</span>
+        </button>
       </div>
-    </motion.div>
+    </div>
   );
 }
 

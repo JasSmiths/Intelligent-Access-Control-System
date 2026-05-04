@@ -386,7 +386,6 @@ def test_messaging_bridge_naturalizes_raw_status_json() -> None:
 
     assert response == (
         "Maintenance Mode is off. Machinery may proceed with dignity. "
-        "No active gate malfunctions. The gate is behaving itself. "
         "No active alerts. Lovely lack of drama."
     )
     assert "{" not in response

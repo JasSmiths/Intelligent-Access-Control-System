@@ -1,5 +1,11 @@
 # IACS Agent Guide
 
+golden_rules:
+  ask_dont_assume: unclear/underspecified => ask before writing; no silent assumptions about intent, architecture, requirements
+  simplest_solution_first: implement simplest thing that works; no abstractions/layers/flexibility unless explicitly requested
+  dont_touch_unrelated_code: modify only files/functions directly required by current task; no opportunistic cleanup
+  flag_uncertainty: low confidence in approach/library/detail => say so before proceeding; admit gaps over false certainty
+
 meta:
   product: Intelligent Access Control + Presence System
   purpose: LPR ingest -> noisy-read resolution -> presence -> anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops
@@ -45,10 +51,11 @@ hard_rules:
     - ./data/postgres:/var/lib/postgresql/data
     - ./data/redis:/data
     - ./data/backend/dependency-update-backups:/app/update-backups
-  bootstrap_config: .env/Compose only for ports, DB/Redis URLs, auth secret, CORS/trusted hosts/public URL/root path, module selectors
-  dynamic_config: system_settings via UI/API; encrypted secrets via Fernet derived from IACS_AUTH_SECRET_KEY
-  secret_keys: home_assistant_token, apprise_urls, discord_bot_token, whatsapp_access_token, whatsapp_webhook_verify_token, whatsapp_app_secret, dvla_api_key, unifi_protect_username, unifi_protect_password, unifi_protect_api_key, openai_api_key, gemini_api_key, anthropic_api_key
-  real_world_actions: gate/door commands, maintenance, schedule overrides, notification sends/tests, workflow/rule edits require explicit confirmation + audit
+  bootstrap_config: .env/Compose only for ports, DB/Redis URLs, auth secret file/advanced env override, CORS/trusted hosts/public URL/root path, module selectors
+  auth_secret: file-backed at data/backend/auth-secret.key by default; IACS_AUTH_SECRET_KEY is advanced override only; UI rotation file mode only
+  dynamic_config: system_settings via UI/API; encrypted secrets via Fernet derived from active auth root secret; alfred_learning_mode = review_then_learn|auto_learn
+  secret_keys: home_assistant_token, apprise_urls, discord_bot_token, whatsapp_access_token, whatsapp_webhook_verify_token, whatsapp_app_secret, dvla_api_key, unifi_protect_username, unifi_protect_password, unifi_protect_api_key, openai_api_key, gemini_api_key, anthropic_api_key, dependency_update_backup_mount_options
+  real_world_actions: gate/door commands, announcements, maintenance require Admin + server confirmation + audit; schedule overrides, notification sends/tests, workflow/rule edits require explicit confirmation + audit
   modularity: core services consume normalized contracts; vendor I/O stays under backend/app/modules/*
   telemetry: sanitize secrets/media/cookies/tokens; audit durable state changes; realtime logs are not audit history
   error_policy: never return success unless adapter/provider accepted operation
@@ -63,8 +70,9 @@ repo:
   frontend_views: frontend/src/views/*
   frontend_styles: frontend/src/styles.css imports frontend/src/styles/*
   alfred_service: backend/app/services/chat.py
+  alfred_v3: backend/app/services/alfred/*
   alfred_contracts: backend/app/services/chat_contracts.py
-  alfred_routing_policy: backend/app/services/chat_routing.py
+  alfred_routing_policy: backend/app/services/chat_routing.py v2 rollback-only
   alfred_tool_facade: backend/app/ai/tools.py
   alfred_tool_groups: backend/app/ai/tool_groups/*
   generated_ignore: data/, logs/, frontend/node_modules/, frontend/dist/
@@ -91,11 +99,11 @@ data:
     identity: users, messaging_identities
     directory: groups, people, vehicles, schedules, schedule_overrides, presence
     access: access_events, anomalies, visitor_passes
-    chat: chat_sessions, chat_messages
+    chat: chat_sessions, chat_messages, alfred_memories, alfred_feedback, alfred_lessons, alfred_eval_examples
     notifications: notification_rules, notification_action_contexts
     automation: automation_rules, automation_runs, automation_webhook_senders
     integrations: system_settings, icloud_calendar_accounts, icloud_calendar_sync_runs, external_dependencies, dependency_update_analyses, dependency_update_backups, dependency_update_jobs
-    safety: maintenance_mode_state, gate_state_observations, gate_malfunction_states, gate_malfunction_timeline_events, gate_malfunction_notification_outbox
+    safety: action_confirmations, maintenance_mode_state, gate_state_observations, gate_malfunction_states, gate_malfunction_timeline_events, gate_malfunction_notification_outbox
     telemetry: audit_logs, telemetry_traces, telemetry_spans
     leaderboard: leaderboard_state
   filesystem:
@@ -128,8 +136,9 @@ core_api:
     deletions: vehicles yes; people/groups no hard-delete endpoint
   realtime:
     system: WS /api/v1/realtime/ws via event_bus; cookie or bearer/query token
-    alfred: WS /api/v1/ai/chat/ws
+    alfred: HTTP /api/v1/ai/chat, SSE /api/v1/ai/chat/stream, WS /api/v1/ai/chat/ws, status /api/v1/ai/agent/status, feedback /api/v1/ai/feedback, Admin training /api/v1/ai/training/*
     dependency_jobs: WS /api/v1/dependency-updates/jobs/{job_id}/ws
+  action_confirmations: POST /api/v1/action-confirmations; Admin-only short-lived one-use tokens bound to action+payload before dashboard real-world actions
 
 lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
@@ -160,8 +169,8 @@ lpr_pipeline:
     persist: one final access_events row with telemetry trace id in raw_payload.telemetry.trace_id
     presence: update on granted events
     anomalies: unauthorized_plate, outside_schedule, duplicate_entry, duplicate_exit; suppress unauthorized anomaly for matched visitor pass
-    gate: open only granted entry with captured gate state closed
-    garage: open assigned doors only after accepted gate open, entry, captured closed, per-door schedule allowed
+    gate: open only granted entry with captured gate state closed; durable audit for accepted/rejected/skipped/failed auto commands
+    garage: open assigned doors only after accepted gate open, entry, captured closed, per-door schedule allowed; durable audit for accepted/rejected/failed auto commands
     realtime: publish finalized access/presence/anomaly/notification events
   diagnostics: /api/v1/diagnostics/lpr-timing in-memory feed from webhooks + UniFi Protect probes
   restart_backfill: backend/app/services/restart_backfill.py; missed UniFi Protect event repair; auditable; marked restart_backfill source/metadata
@@ -272,12 +281,15 @@ integrations:
     jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream
 
 alfred:
-  services: chat.py orchestration; chat_contracts.py prompts/contracts/constants; chat_routing.py deterministic routing/planning policy; providers.py LLM adapters; tools.py compatibility facade; tool_groups/* domain catalogs; chat_attachments.py file store
+  services: chat.py compatibility facade; services/alfred/* v3 runtime/planner/permissions/memory/feedback/streaming/executor; chat_routing.py v2 rollback only; providers.py LLM adapters; tools.py facade; tool_groups/* catalogs
   behavior:
     name: Alfred
-    mode: LLM intent routing + ReAct loop; existing deterministic routing/planning lives only in chat_routing.py and must stay documented/tested
-    entrypoints: dashboard HTTP/WS, Discord, WhatsApp Admin, future providers all through LLM intent router
-    fail_closed: no provider/router failure => clear configuration/retry message
+    mode: alfred_agent_mode defaults v3; v3 is LLM-owned planner -> scoped agent loop; v2 deterministic routing is rollback-only
+    no_keyword_guardrails: response-quality corrections belong in alfred_lessons/eval examples, not hard-coded user-text filters; deterministic parsing is only for protocols/safety/auth/sanitization
+    entrypoints: dashboard HTTP/SSE/WS, Discord, WhatsApp Admin, future providers all through ChatService facade
+    fail_closed: local provider or provider/planner failure => clear configuration/retry message; no free-form deterministic answer
+    streaming: emit chat.agent_state + tool batch/status microstates; WhatsApp/Discord send final response + confirmation buttons only
+    permissions: actor context injected before planning; Admin sees read/mutation tools, standard sees read-only non-admin tools, visitors use sandboxed Visitor Concierge only
     source_of_truth: tool results; never invent people/vehicles/schedules/events/device states/DVLA/telemetry
     entity_resolution: fuzzy references -> resolve_human_entity before exact IDs
     confirmations: state-changing tools return requires_confirmation; /api/v1/ai/chat/confirm or WS tool_confirmation executes
@@ -290,6 +302,13 @@ alfred:
     attachment_max: 25 MB
     prompt_results: _tool_results_for_prompt compacts outputs; strings >1000 chars truncated; secret-like keys redacted
     tool_outputs: _compact_value trims long strings to 800 chars
+  memory:
+    store: alfred_memories Postgres JSON; scopes user/site/session_summary; no vector store
+    rules: users own user memory; Admin may create/read site memory; visitors no durable memory; redact/skip secrets and transient visitor data
+  learning:
+    feedback: assistant responses expose message IDs; dashboard thumbs and Discord/WhatsApp Admin feedback commands store sanitized turn snapshots
+    lessons: LLM critique drafts user/site scoped lessons; review_then_learn requires Admin approval; auto_learn may activate Admin site lessons
+    repair: thumbs-down may draft a corrected answer; repair is read-only and never executes mutations/confirmations
   tools:
     registry: build_agent_tools() remains the stable public API; domain definitions live in backend/app/ai/tool_groups/* and are assembled by tool_groups/registry.py
     general: resolve_human_entity, get_system_users
@@ -302,7 +321,8 @@ alfred:
     files_reports: read_chat_attachment, export_presence_report_csv, generate_contractor_invoice_pdf
     notifications: query_notification_catalog, query_notification_workflows, get_notification_workflow, create_notification_workflow, update_notification_workflow, delete_notification_workflow, preview_notification_workflow, test_notification_workflow, trigger_anomaly_alert
     automations: query_automation_catalog, query_automations, get_automation, create_automation, edit_automation, delete_automation, enable_automation, disable_automation
-  state_changing: assign_schedule_to_entity, create_notification_workflow, create_automation, create_schedule, create_visitor_pass, cancel_visitor_pass, delete_automation, delete_notification_workflow, delete_schedule, disable_automation, disable_maintenance_mode, edit_automation, enable_automation, enable_maintenance_mode, command_device, open_gate, open_device, override_schedule, trigger_anomaly_alert, trigger_manual_malfunction_override, test_notification_workflow, toggle_maintenance_mode, update_notification_workflow, update_schedule, update_visitor_pass, trigger_icloud_sync, backfill_access_event_from_protect, test_unifi_alarm_webhook
+    system_ops: query_integration_health, test_integration_connection, query_system_settings, update_system_settings, query_auth_secret_status, query_alfred_runtime_events, rotate_auth_secret, query_dependency_updates, check_dependency_updates, analyze_dependency_update, apply_dependency_update, query_dependency_backups, restore_dependency_backup, query_dependency_update_job, configure_dependency_backup_storage, validate_dependency_backup_storage
+  state_changing: assign_schedule_to_entity, create_notification_workflow, create_automation, create_schedule, create_visitor_pass, cancel_visitor_pass, delete_automation, delete_notification_workflow, delete_schedule, disable_automation, disable_maintenance_mode, edit_automation, enable_automation, enable_maintenance_mode, command_device, open_gate, open_device, override_schedule, trigger_anomaly_alert, trigger_manual_malfunction_override, test_notification_workflow, toggle_maintenance_mode, update_notification_workflow, update_schedule, update_visitor_pass, trigger_icloud_sync, backfill_access_event_from_protect, test_unifi_alarm_webhook, test_integration_connection, update_system_settings, rotate_auth_secret, check_dependency_updates, analyze_dependency_update, apply_dependency_update, restore_dependency_backup, configure_dependency_backup_storage, validate_dependency_backup_storage
 
 frontend:
   app_shell: frontend/src/main.tsx owns auth, global refresh, realtime socket, toasts, theme, sidebar, route Suspense, chat launcher
@@ -310,7 +330,7 @@ frontend:
   views: frontend/src/views/* route/domain modules; keep props explicit from shell until a dedicated server-state phase
   styles: frontend/src/styles.css import manifest; domain CSS under frontend/src/styles/* in cascade order
   style: operational console; no landing/marketing hero
-  routes_surfaces: Dashboard, People, Groups, Schedules, Passes, Vehicles, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings
+  routes_surfaces: Dashboard, People, Groups, Schedules, Passes, Vehicles, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training
   code_splitting: non-shell routes are React.lazy chunks; do not re-centralize route bodies into main.tsx or raise Vite chunk limits to hide bundle growth
   design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards; no text overflow
   api: relative URLs only; LAN/NPM compatible
@@ -344,7 +364,7 @@ extension_points:
   new_ai_tool:
     path: add AgentTool in the relevant backend/app/ai/tool_groups/<domain>.py; keep backend/app/ai/tools.py as compatibility facade
     registry: backend/app/ai/tool_groups/registry.py assembles groups and rejects duplicate names
-    definition: AgentTool name/description/JSON schema/handler; metadata applied by _with_tool_metadata in tools.py
+    definition: AgentTool name/description/JSON schema/handler; _with_tool_metadata sets categories/read_only/confirmation; permissions.py sets role visibility; document memory visibility when relevant
     output: compact JSON; redact secrets/media
     state_change: add to state-changing metadata/tests; requires_confirmation before mutation/send/hardware
     tests: update backend/tests/test_chat_agent.py public tool surface + confirmation metadata guard

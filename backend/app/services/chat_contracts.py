@@ -86,6 +86,23 @@ FILE_TOOL_NAMES = (
     "export_presence_report_csv",
     "generate_contractor_invoice_pdf",
 )
+SYSTEM_OPERATION_TOOL_NAMES = (
+    "query_integration_health",
+    "test_integration_connection",
+    "query_system_settings",
+    "update_system_settings",
+    "query_auth_secret_status",
+    "rotate_auth_secret",
+    "query_dependency_updates",
+    "check_dependency_updates",
+    "analyze_dependency_update",
+    "apply_dependency_update",
+    "query_dependency_backups",
+    "restore_dependency_backup",
+    "query_dependency_update_job",
+    "configure_dependency_backup_storage",
+    "validate_dependency_backup_storage",
+)
 STATE_CHANGING_TOOL_NAMES = {
     "assign_schedule_to_entity",
     "backfill_access_event_from_protect",
@@ -107,6 +124,15 @@ STATE_CHANGING_TOOL_NAMES = {
     "command_device",
     "investigate_access_incident",
     "override_schedule",
+    "test_integration_connection",
+    "update_system_settings",
+    "rotate_auth_secret",
+    "check_dependency_updates",
+    "analyze_dependency_update",
+    "apply_dependency_update",
+    "restore_dependency_backup",
+    "configure_dependency_backup_storage",
+    "validate_dependency_backup_storage",
     "test_unifi_alarm_webhook",
     "trigger_manual_malfunction_override",
     "test_notification_workflow",
@@ -150,6 +176,7 @@ Rules of engagement:
 - Keep confirmations, failures, denials, security-sensitive topics, Maintenance Mode, diagnostics, and IDs clear and restrained. A tiny human touch is fine; jokes must never soften risk or hide uncertainty.
 - Do not become verbose, sarcastic, childish, theatrical, or gimmicky. Do not add a quip to every answer.
 - Do not expose internal entity IDs, Home Assistant entity IDs, raw JSON, tool protocol, or hidden reasoning unless the user explicitly asks for diagnostics.
+- For ordinary arrival/departure time questions, round display to HH:MM; do not add seconds in brackets unless the user explicitly asks for exact timestamps.
 - If a tool fails, explain the failure plainly and continue with any safe checks that can still help.
 - Stop after the configured tool iteration limit and summarize what you found so far."""
 
@@ -159,7 +186,7 @@ Return only compact JSON with this exact shape:
 
 Allowed categories:
 Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
-Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Automations, Cameras, Reports_Files, Users_Settings, General.
+Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Automations, Cameras, Reports_Files, System_Operations, Users_Settings, General.
 Use Automations for requests to create, edit, enable, disable, delete, or inspect Trigger/If/Then automation rules.
 
 Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions, missing access events, "nothing logged", and notification failures.
@@ -199,6 +226,7 @@ SUPPORTED_INTENTS = {
     "Automations",
     "Cameras",
     "Reports_Files",
+    "System_Operations",
     "Users_Settings",
     "General",
 }
@@ -245,6 +273,8 @@ class ChatTurnResult:
     tool_results: list[dict[str, Any]]
     attachments: list[dict[str, Any]]
     pending_action: dict[str, Any] | None = None
+    user_message_id: str | None = None
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -85,6 +85,7 @@ import {
   Badge,
   CardHeader,
   coerceSettingsPayload,
+  createActionConfirmation,
   displayUserName,
   fileToDataUrl,
   formatDate,
@@ -163,6 +164,21 @@ export type GateLprSmartZonesState = {
   zones: UnifiProtectCamera["smart_detect_zones"];
 };
 
+export type AuthSecretStatus = {
+  source: string;
+  environment: string;
+  file_path: string;
+  env_configured: boolean;
+  env_default_configured: boolean;
+  rotation_required: boolean;
+  ui_rotation_available: boolean;
+  detail: string;
+  rotated?: boolean;
+  settings_reencrypted?: number;
+  icloud_accounts_reencrypted?: number;
+  action_contexts_invalidated?: number;
+};
+
 export function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
   const [state, setState] = React.useState<GateLprSmartZonesState>({
     loading: false,
@@ -224,12 +240,14 @@ export function DynamicSettingsView({
   category,
   title,
   icon: Icon,
+  currentUser,
   maintenanceStatus,
   onMaintenanceStatusChanged
 }: {
   category: "general" | "auth" | "lpr";
   title: string;
   icon: React.ElementType;
+  currentUser?: UserAccount;
   maintenanceStatus?: MaintenanceStatus | null;
   onMaintenanceStatusChanged?: (status: MaintenanceStatus) => void;
 }) {
@@ -262,6 +280,7 @@ export function DynamicSettingsView({
           <CardHeader icon={Icon} title={title} action={<Badge tone={loading ? "gray" : "green"}>{loading ? "loading" : "database"}</Badge>} />
           {category === "general" ? (
             <MaintenanceModeSettings
+              currentUser={currentUser}
               status={maintenanceStatus ?? null}
               onStatusChanged={onMaintenanceStatusChanged}
             />
@@ -296,12 +315,13 @@ export function DynamicSettingsView({
             <button className="primary-button" type="submit">Save Settings</button>
           </div>
         </div>
+        {category === "auth" ? <AuthSecretSecurityPanel /> : null}
         <div className="card">
           <CardHeader icon={Database} title="Source" />
           <div className="settings-list">
             <SettingRow label="Storage" value="Database" />
             <SettingRow label="Secrets" value="Encrypted at rest" />
-            <SettingRow label="Bootstrap" value=".env only" />
+            <SettingRow label="Bootstrap" value="Secret file + env override" />
           </div>
         </div>
       </form>
@@ -309,24 +329,143 @@ export function DynamicSettingsView({
   );
 }
 
+export function AuthSecretSecurityPanel() {
+  const [status, setStatus] = React.useState<AuthSecretStatus | null>(null);
+  const [customSecret, setCustomSecret] = React.useState("");
+  const [confirmed, setConfirmed] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setStatus(await api.get<AuthSecretStatus>("/api/v1/settings/security/auth-secret"));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load auth secret status.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load().catch(() => undefined);
+  }, [load]);
+
+  const rotate = async () => {
+    if (!confirmed || saving) return;
+    setSaving(true);
+    setSaved("");
+    setError("");
+    try {
+      const payload = {
+        confirmed: true,
+        new_secret: customSecret.trim() || undefined
+      };
+      const next = await api.post<AuthSecretStatus>("/api/v1/settings/security/auth-secret/rotate", payload);
+      setStatus(next);
+      setCustomSecret("");
+      setConfirmed(false);
+      setSaved("Auth secret rotated. Existing sessions and pending action links were invalidated.");
+    } catch (rotateError) {
+      setError(rotateError instanceof Error ? rotateError.message : "Unable to rotate auth secret.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sourceLabel = status?.source === "env"
+    ? "Environment override"
+    : status?.source === "generated"
+      ? "Generated file"
+      : "Secret file";
+
+  return (
+    <div className="card auth-secret-panel">
+      <CardHeader icon={ShieldCheck} title="Auth Secret" action={<Badge tone={status?.rotation_required ? "amber" : "green"}>{status?.rotation_required ? "rotate" : "ready"}</Badge>} />
+      {loading ? (
+        <div className="compact-row"><Loader2 size={16} /> Loading security status...</div>
+      ) : status ? (
+        <div className="settings-list">
+          <SettingRow label="Source" value={sourceLabel} />
+          <SettingRow label="Environment" value={status.environment} />
+          <SettingRow label="File" value={status.file_path} />
+          <SettingRow label="UI rotation" value={status.ui_rotation_available ? "Available" : "Env managed"} />
+        </div>
+      ) : null}
+      {status?.ui_rotation_available ? (
+        <div className="auth-secret-rotate">
+          <label className="field">
+            <span>Custom secret</span>
+            <div className="field-control">
+              <Key size={17} />
+              <input
+                value={customSecret}
+                onChange={(event) => setCustomSecret(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.preventDefault();
+                }}
+                placeholder="Leave blank to generate a secure secret"
+                type="password"
+              />
+            </div>
+            <small className="field-hint">Use at least 32 characters. Blank rotation generates a new random value.</small>
+          </label>
+          <label className="maintenance-switch auth-secret-confirm">
+            <input checked={confirmed} disabled={saving} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
+            <span>Confirm rotation</span>
+          </label>
+          <button className="primary-button" disabled={!confirmed || saving} onClick={rotate} type="button">
+            {saving ? <Loader2 size={15} /> : <RefreshCw size={15} />}
+            {saving ? "Rotating..." : "Rotate Secret"}
+          </button>
+        </div>
+      ) : (
+        <p className="dependency-storage-note">{status?.detail || "Auth secret rotation is managed outside the UI."}</p>
+      )}
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note">{saved}</div> : null}
+    </div>
+  );
+}
+
 export function MaintenanceModeSettings({
+  currentUser,
   status,
   onStatusChanged
 }: {
+  currentUser?: UserAccount;
   status: MaintenanceStatus | null;
   onStatusChanged?: (status: MaintenanceStatus) => void;
 }) {
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState("");
   const active = status?.is_active === true;
+  const isAdmin = currentUser?.role === "admin";
   const toggle = async () => {
     if (saving) return;
+    if (!isAdmin) {
+      setError("Admin access is required to update Maintenance Mode.");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
       const path = active ? "/api/v1/maintenance/disable" : "/api/v1/maintenance/enable";
-      const next = await api.post<MaintenanceStatus>(path, {
+      const action = active ? "maintenance_mode.disable" : "maintenance_mode.enable";
+      const payload = {
         reason: active ? "Disabled from Settings General" : "Enabled from Settings General"
+      };
+      const confirmation = await createActionConfirmation(action, payload, {
+        target_entity: "MaintenanceMode",
+        target_label: "Maintenance Mode",
+        reason: payload.reason
+      });
+      const next = await api.post<MaintenanceStatus>(path, {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       onStatusChanged?.(next);
     } catch (toggleError) {
@@ -348,7 +487,7 @@ export function MaintenanceModeSettings({
         </div>
       </div>
       <label className={active ? "maintenance-switch active" : "maintenance-switch"}>
-        <input checked={active} disabled={saving || !status} onChange={toggle} type="checkbox" />
+        <input checked={active} disabled={saving || !status || !isAdmin} onChange={toggle} type="checkbox" />
         <span>{saving ? "Updating" : active ? "Enabled" : "Disabled"}</span>
       </label>
       {error ? <div className="auth-error inline-error maintenance-settings-error">{error}</div> : null}
@@ -452,15 +591,11 @@ export function UsersView({
         <div>
           <span className="eyebrow">Settings</span>
           <h1>Users</h1>
-          <p>{isAdmin ? "Manage dashboard access for family members." : "View system account roster."}</p>
+          <p>Manage dashboard access for family members.</p>
         </div>
-        {isAdmin ? (
-          <button className="primary-button" onClick={openCreate} type="button">
-            <UserPlus size={17} /> Add User
-          </button>
-        ) : (
-          <Badge tone="gray">View Only</Badge>
-        )}
+        <button className="primary-button" onClick={openCreate} type="button">
+          <UserPlus size={17} /> Add User
+        </button>
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}

@@ -6,6 +6,7 @@ import pytest
 
 from app.models import AccessEvent
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
+from app.modules.gate.base import GateCommandResult, GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
 from app.services import access_events as access_events_module
@@ -73,6 +74,94 @@ class FakeVisitorPassLookupSession:
 
     async def execute(self, _statement):
         return FakeVisitorPassLookupResult(self._row)
+
+
+class FakeNotificationService:
+    def __init__(self) -> None:
+        self.contexts = []
+
+    async def notify(self, context):
+        self.contexts.append(context)
+
+
+def hardware_audit_subjects():
+    occurred_at = datetime(2026, 5, 3, 9, 15, tzinfo=UTC)
+    person = SimpleNamespace(
+        id=uuid.uuid4(),
+        first_name="Jason",
+        last_name="Smith",
+        display_name="Jason Smith",
+        group=None,
+        garage_door_entity_ids=["cover.main_garage_door"],
+    )
+    vehicle = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="PE70DHX",
+        make="Tesla",
+        model="Model Y",
+        color="Blue",
+    )
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        person_id=person.id,
+        vehicle_id=vehicle.id,
+        vehicle=vehicle,
+        source="ubiquiti",
+        timing_classification=TimingClassification.NORMAL,
+        occurred_at=occurred_at,
+        raw_payload={"telemetry": {"trace_id": "trace-1"}},
+    )
+    return event, person, vehicle
+
+
+def capture_hardware_audits(monkeypatch):
+    audits = []
+    published = []
+    timestamp = datetime(2026, 5, 3, 9, 16, tzinfo=UTC)
+
+    class FakeAuditSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, _row):
+            return None
+
+    async def fake_write_audit_log(_session, **kwargs):
+        audits.append(kwargs)
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            timestamp=timestamp,
+            category=kwargs["category"],
+            action=kwargs["action"],
+            actor=kwargs["actor"],
+            actor_user_id=None,
+            target_entity=kwargs["target_entity"],
+            target_id=kwargs.get("target_id"),
+            target_label=kwargs.get("target_label"),
+            diff=None,
+            metadata_=kwargs["metadata"],
+            outcome=kwargs["outcome"],
+            level=kwargs["level"],
+            trace_id=None,
+            request_id=None,
+        )
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: FakeAuditSession())
+    monkeypatch.setattr(access_events_module, "write_audit_log", fake_write_audit_log)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    return audits, published
 
 
 def plate_read_with_gate_state(state: str) -> PlateRead:
@@ -1016,6 +1105,218 @@ async def test_ignored_gate_malfunction_unknown_read_emits_realtime_and_audit(mo
     assert audits[0]["target_entity"] == "PlateRead"
     assert audits[0]["target_label"] == "UNKNOWN1"
     assert published[1][0] == "audit.log.created"
+
+
+@pytest.mark.asyncio
+async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+
+    class FakeGateController:
+        async def open_gate(self, reason):
+            return GateCommandResult(True, GateState.OPENING, reason)
+
+    monkeypatch.setattr(access_events_module, "get_gate_controller", lambda _name: FakeGateController())
+
+    opened = await service._open_gate_for_event(event, person, open_garage_doors=False)
+
+    assert opened is True
+    gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
+    assert gate_audit["outcome"] == "accepted"
+    assert gate_audit["target_entity"] == "Gate"
+    assert gate_audit["metadata"]["source"] == "automatic_lpr_grant"
+    assert gate_audit["metadata"]["access_event_id"] == str(event.id)
+    assert gate_audit["metadata"]["registration_number"] == "PE70DHX"
+    assert gate_audit["metadata"]["person_id"] == str(person.id)
+    assert gate_audit["metadata"]["vehicle_id"] == str(vehicle.id)
+    assert gate_audit["metadata"]["controller"] == access_events_module.settings.gate_controller
+    assert gate_audit["metadata"]["accepted"] is True
+    assert any(event_type == "audit.log.created" for event_type, _payload in published)
+
+
+@pytest.mark.asyncio
+async def test_automatic_gate_skip_writes_skipped_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, _vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+
+    await service._publish_gate_open_skipped(
+        event,
+        {"gate_observation": {"state": "open", "observed_at": event.occurred_at.isoformat()}},
+        person,
+    )
+
+    gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
+    assert gate_audit["outcome"] == "skipped"
+    assert gate_audit["level"] == "warning"
+    assert gate_audit["metadata"]["state"] == "open"
+    assert gate_audit["metadata"]["garage_doors_skipped"] is True
+    assert any(event_type == "gate.open_skipped" for event_type, _payload in published)
+    assert any(event_type == "audit.log.created" for event_type, _payload in published)
+
+
+@pytest.mark.asyncio
+async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, _vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+    notifications = FakeNotificationService()
+
+    def unsupported_controller(_name):
+        raise access_events_module.UnsupportedModuleError("Unsupported gate controller: missing")
+
+    monkeypatch.setattr(access_events_module, "get_gate_controller", unsupported_controller)
+    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+
+    opened = await service._open_gate_for_event(event, person, open_garage_doors=False)
+
+    assert opened is False
+    gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
+    assert gate_audit["outcome"] == "failed"
+    assert gate_audit["level"] == "error"
+    assert gate_audit["metadata"]["detail"] == "Unsupported gate controller: missing"
+    assert any(event_type == "gate.open_failed" for event_type, _payload in published)
+    assert len(notifications.contexts) == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, _vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_garage_door_entities=[
+                {"entity_id": "cover.main_garage_door", "name": "Main Garage", "enabled": True}
+            ],
+            home_assistant_gate_open_service="cover.open_cover",
+            site_timezone="Europe/London",
+            schedule_default_policy="allow",
+        )
+
+    async def fake_schedule_evaluation(*_args, **_kwargs):
+        return access_events_module.ScheduleEvaluation(allowed=True, source="garage_door")
+
+    async def fake_command_cover(_client, entity, action, reason):
+        return SimpleNamespace(
+            entity_id=str(entity["entity_id"]),
+            name=str(entity["name"]),
+            action=action,
+            accepted=True,
+            state="opening",
+            detail=reason,
+        )
+
+    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
+    monkeypatch.setattr(access_events_module, "command_cover", fake_command_cover)
+
+    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+
+    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
+    assert garage_audit["outcome"] == "accepted"
+    assert garage_audit["target_id"] == "cover.main_garage_door"
+    assert garage_audit["target_label"] == "Main Garage"
+    assert garage_audit["metadata"]["accepted"] is True
+    assert garage_audit["metadata"]["state"] == "opening"
+    assert any(event_type == "garage_door.open_requested" for event_type, _payload in published)
+
+
+@pytest.mark.asyncio
+async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, _vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+    notifications = FakeNotificationService()
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_garage_door_entities=[
+                {
+                    "entity_id": "cover.main_garage_door",
+                    "name": "Main Garage",
+                    "enabled": True,
+                    "schedule_id": str(uuid.uuid4()),
+                }
+            ],
+            home_assistant_gate_open_service="cover.open_cover",
+            site_timezone="Europe/London",
+            schedule_default_policy="deny",
+        )
+
+    async def fake_schedule_evaluation(*_args, **_kwargs):
+        return access_events_module.ScheduleEvaluation(
+            allowed=False,
+            source="garage_door",
+            reason="Main Garage is outside schedule.",
+        )
+
+    async def fail_command_cover(*_args, **_kwargs):
+        raise AssertionError("Schedule-denied garage doors must not call Home Assistant.")
+
+    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
+    monkeypatch.setattr(access_events_module, "command_cover", fail_command_cover)
+    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+
+    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+
+    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
+    assert garage_audit["outcome"] == "rejected"
+    assert garage_audit["level"] == "warning"
+    assert garage_audit["metadata"]["state"] == "schedule_denied"
+    assert garage_audit["metadata"]["detail"] == "Main Garage is outside schedule."
+    assert garage_audit["metadata"]["schedule"]["allowed"] is False
+    assert any(event_type == "garage_door.open_failed" for event_type, _payload in published)
+    assert len(notifications.contexts) == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeypatch) -> None:
+    service = AccessEventService()
+    event, person, _vehicle = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+    notifications = FakeNotificationService()
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_garage_door_entities=[
+                {"entity_id": "cover.main_garage_door", "name": "Main Garage", "enabled": True}
+            ],
+            home_assistant_gate_open_service="cover.open_cover",
+            site_timezone="Europe/London",
+            schedule_default_policy="allow",
+        )
+
+    async def fake_schedule_evaluation(*_args, **_kwargs):
+        return access_events_module.ScheduleEvaluation(allowed=True, source="garage_door")
+
+    async def fake_command_cover(_client, entity, action, _reason):
+        return SimpleNamespace(
+            entity_id=str(entity["entity_id"]),
+            name=str(entity["name"]),
+            action=action,
+            accepted=False,
+            state="fault",
+            detail="Home Assistant rejected the command.",
+        )
+
+    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
+    monkeypatch.setattr(access_events_module, "command_cover", fake_command_cover)
+    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+
+    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+
+    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
+    assert garage_audit["outcome"] == "failed"
+    assert garage_audit["level"] == "error"
+    assert garage_audit["metadata"]["accepted"] is False
+    assert garage_audit["metadata"]["detail"] == "Home Assistant rejected the command."
+    assert any(event_type == "garage_door.open_failed" for event_type, _payload in published)
+    assert len(notifications.contexts) == 1
 
 
 @pytest.mark.asyncio

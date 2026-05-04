@@ -286,6 +286,30 @@ class MaintenanceModeState(Base, TimestampMixin):
     reason: Mapped[str | None] = mapped_column(Text)
 
 
+class ActionConfirmation(Base, TimestampMixin):
+    __tablename__ = "action_confirmations"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="ux_action_confirmations_token_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_entity: Mapped[str | None] = mapped_column(String(120), index=True)
+    target_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    target_label: Mapped[str | None] = mapped_column(String(240))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    outcome: Mapped[str | None] = mapped_column(String(80), index=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    actor_user: Mapped[User] = relationship(foreign_keys=[actor_user_id])
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -886,3 +910,98 @@ class ChatMessage(Base, TimestampMixin):
     tool_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
+class AlfredMemory(Base, TimestampMixin):
+    __tablename__ = "alfred_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    kind: Mapped[str] = mapped_column(String(80), nullable=False, default="preference")
+    title: Mapped[str] = mapped_column(String(180), nullable=False)
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    source_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    owner: Mapped[User | None] = relationship()
+
+
+Index("ix_alfred_memories_scope_owner_deleted", AlfredMemory.scope, AlfredMemory.owner_user_id, AlfredMemory.deleted_at)
+
+
+class AlfredLesson(Base, TimestampMixin):
+    __tablename__ = "alfred_lessons"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    title: Mapped[str] = mapped_column(String(180), nullable=False)
+    lesson: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    source_feedback_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    owner: Mapped[User | None] = relationship(foreign_keys=[owner_user_id])
+
+
+Index("ix_alfred_lessons_scope_status_deleted", AlfredLesson.scope, AlfredLesson.status, AlfredLesson.deleted_at)
+
+
+class AlfredFeedback(Base, TimestampMixin):
+    __tablename__ = "alfred_feedback"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    rating: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    source_channel: Mapped[str] = mapped_column(String(40), nullable=False, default="dashboard", index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
+    user_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True)
+    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    actor_role: Mapped[str] = mapped_column(String(40), nullable=False, default="standard", index=True)
+    provider: Mapped[str | None] = mapped_column(String(80), index=True)
+    model: Mapped[str | None] = mapped_column(String(160))
+    original_user_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    original_assistant_response: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    reason: Mapped[str | None] = mapped_column(Text)
+    ideal_answer: Mapped[str | None] = mapped_column(Text)
+    corrected_answer: Mapped[str | None] = mapped_column(Text)
+    turn_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="received", index=True)
+    lesson_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alfred_lessons.id", ondelete="SET NULL"), index=True)
+
+    actor_user: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
+    lesson: Mapped[AlfredLesson | None] = relationship()
+
+
+Index("ix_alfred_feedback_assistant_actor", AlfredFeedback.assistant_message_id, AlfredFeedback.actor_user_id)
+
+
+class AlfredEvalExample(Base, TimestampMixin):
+    __tablename__ = "alfred_eval_examples"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    feedback_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alfred_feedback.id", ondelete="SET NULL"), index=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    bad_answer: Mapped[str | None] = mapped_column(Text)
+    ideal_answer: Mapped[str | None] = mapped_column(Text)
+    corrected_answer: Mapped[str | None] = mapped_column(Text)
+    lesson: Mapped[str | None] = mapped_column(Text)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    feedback: Mapped[AlfredFeedback | None] = relationship()

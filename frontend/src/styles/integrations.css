@@ -269,6 +269,11 @@
   gap: 12px;
 }
 
+.dependency-storage-secret-controls {
+  display: flex;
+  align-items: flex-end;
+}
+
 .dependency-storage-meta {
   justify-content: flex-start;
   flex-wrap: wrap;
@@ -1459,6 +1464,16 @@
 
 .maintenance-settings-error {
   flex-basis: 100%;
+}
+
+.auth-secret-panel,
+.auth-secret-rotate {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-secret-confirm {
+  justify-self: start;
 }
 
 .ha-config-shell {

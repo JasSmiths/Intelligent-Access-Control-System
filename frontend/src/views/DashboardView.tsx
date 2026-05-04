@@ -88,6 +88,7 @@ import {
   api,
   Badge,
   BadgeTone,
+  createActionConfirmation,
   displayUserName,
   EmptyState,
   HomeAssistantManagedCover,
@@ -149,6 +150,7 @@ export function Dashboard({
   const [commandLoading, setCommandLoading] = React.useState(false);
   const [commandError, setCommandError] = React.useState("");
   const maintenanceActive = maintenanceStatus?.is_active === true;
+  const isAdmin = currentUser.role === "admin";
   const present = presence.filter((item) => item.state === "present").length;
   const exited = presence.filter((item) => item.state === "exited").length;
   const unknown = Math.max(presence.length - present - exited, 0);
@@ -198,12 +200,31 @@ export function Dashboard({
     setCommandError("");
     try {
       if (pendingCommand.kind === "gate") {
-        await api.post("/api/v1/integrations/gate/open", { reason: "Dashboard Top Gate status command" });
+        const payload = { reason: "Dashboard Top Gate status command" };
+        const confirmation = await createActionConfirmation("gate.open", payload, {
+          target_entity: "Gate",
+          target_label: pendingCommand.label,
+          reason: payload.reason
+        });
+        await api.post("/api/v1/integrations/gate/open", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post("/api/v1/integrations/cover/command", {
+        const payload = {
           entity_id: pendingCommand.entity_id,
           action: pendingCommand.action,
           reason: `Dashboard ${pendingCommand.label} ${pendingCommand.action} command`
+        };
+        const confirmation = await createActionConfirmation(`cover.${pendingCommand.action}`, payload, {
+          target_entity: "Cover",
+          target_id: pendingCommand.entity_id,
+          target_label: pendingCommand.label,
+          reason: payload.reason
+        });
+        await api.post("/api/v1/integrations/cover/command", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
         });
       }
       setPendingCommand(null);
@@ -221,8 +242,15 @@ export function Dashboard({
     setMaintenanceLoading(true);
     setMaintenanceError("");
     try {
+      const payload = { reason: "Disabled from Dashboard Site Status icon" };
+      const confirmation = await createActionConfirmation("maintenance_mode.disable", payload, {
+        target_entity: "MaintenanceMode",
+        target_label: "Maintenance Mode",
+        reason: payload.reason
+      });
       const status = await api.post<MaintenanceStatus>("/api/v1/maintenance/disable", {
-        reason: "Disabled from Dashboard Site Status icon"
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       onMaintenanceStatusChanged(status);
       setMaintenanceDisableOpen(false);
@@ -254,7 +282,9 @@ export function Dashboard({
             {maintenanceActive ? (
               <button
                 className="maintenance-status-icon"
+                disabled={!isAdmin}
                 onClick={() => {
+                  if (!isAdmin) return;
                   setMaintenanceError("");
                   setMaintenanceDisableOpen(true);
                 }}
@@ -288,14 +318,14 @@ export function Dashboard({
                 key={gate.entity_id}
                 label={gate.name || "Gate"}
                 state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : gate.state ?? topGateState}
-                onActionClick={maintenanceActive ? undefined : commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
               />
             )) : (
               <GateRow
                 icon={Car}
                 label="Top Gate"
                 state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : topGateState}
-                onActionClick={maintenanceActive ? undefined : commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
               />
             )}
             {garageDoorEntities.map((door) => (
@@ -303,7 +333,7 @@ export function Dashboard({
                 key={door.entity_id}
                 label={door.name || door.entity_id}
                 state={commandLoading && pendingCommand?.kind === "garage_door" && pendingCommand.entity_id === door.entity_id ? inProgressState(pendingCommand.action) : door.state ?? "unknown"}
-                onActionClick={maintenanceActive ? undefined : commandForGarageDoor(door, setPendingCommand, setCommandError)}
+                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGarageDoor(door, setPendingCommand, setCommandError)}
               />
             ))}
             <DoorRow label="Back Door" state={integrationStatus?.back_door_state ?? "unknown"} />

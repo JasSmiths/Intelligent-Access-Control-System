@@ -14,7 +14,7 @@ from fastapi import HTTPException, Request, Response, WebSocket, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.auth_secret import get_auth_secret
 from app.models import User
 from app.models.enums import UserRole
 from app.services.settings import get_runtime_config
@@ -233,7 +233,7 @@ def _encode_jwt(payload: dict[str, Any]) -> str:
     header_part = _b64encode_json(header)
     payload_part = _b64encode_json(payload)
     signing_input = f"{header_part}.{payload_part}".encode()
-    signature = hmac.new(settings.auth_secret_key.encode(), signing_input, hashlib.sha256).digest()
+    signature = hmac.new(get_auth_secret().encode(), signing_input, hashlib.sha256).digest()
     return f"{header_part}.{payload_part}.{_b64encode(signature)}"
 
 
@@ -242,7 +242,7 @@ def _decode_jwt(token: str) -> dict[str, Any] | None:
     if len(parts) != 3:
         return None
     signing_input = f"{parts[0]}.{parts[1]}".encode()
-    expected = hmac.new(settings.auth_secret_key.encode(), signing_input, hashlib.sha256).digest()
+    expected = hmac.new(get_auth_secret().encode(), signing_input, hashlib.sha256).digest()
     try:
         supplied = _b64decode(parts[2])
     except ValueError:

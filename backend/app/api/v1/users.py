@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import admin_user, current_user
+from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import Person, User
 from app.models.enums import UserRole
@@ -108,7 +108,7 @@ class ResetPasswordResponse(BaseModel):
 
 @router.get("", response_model=list[UserResponse])
 async def list_users(
-    _: User = Depends(current_user),
+    _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[UserResponse]:
     users = (await session.scalars(select(User).order_by(User.first_name, User.last_name))).all()

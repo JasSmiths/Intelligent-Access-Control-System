@@ -51,6 +51,7 @@ BACKUP_CONTAINER_ROOT = Path("/app/update-backups")
 GENERATED_COMPOSE = "docker-compose.update-backups.generated.yml"
 JOB_LOG_DIR = settings.log_dir / "dependency-updates"
 JOB_STREAM_LIMIT = 500
+_MOUNT_OPTIONS_UNSET = object()
 
 
 class DependencyUpdateError(RuntimeError):
@@ -534,10 +535,13 @@ class DependencyUpdateService:
     async def storage_status(self) -> dict[str, Any]:
         runtime = await get_runtime_config()
         root = _backup_root()
+        mount_options_configured = bool(runtime.dependency_update_backup_mount_options.strip())
         status = {
             "mode": runtime.dependency_update_backup_storage_mode,
             "mount_source": runtime.dependency_update_backup_mount_source,
-            "mount_options": runtime.dependency_update_backup_mount_options,
+            "mount_options": "",
+            "mount_options_configured": mount_options_configured,
+            "mount_options_redacted": mount_options_configured,
             "config_status": runtime.dependency_update_backup_config_status,
             "backup_root": str(root),
             "exists": root.exists(),
@@ -588,28 +592,43 @@ class DependencyUpdateService:
         return status
 
     async def save_storage_config(self, payload: dict[str, Any], *, user: User) -> dict[str, Any]:
+        runtime = await get_runtime_config()
         mode = str(payload.get("mode") or "local").strip().lower()
         if mode not in {"local", "nfs", "samba"}:
             raise DependencyUpdateError("Storage mode must be local, nfs, or samba.")
         source = str(payload.get("mount_source") or "").strip()
-        options = str(payload.get("mount_options") or "").strip()
+        raw_options = payload.get("mount_options", _MOUNT_OPTIONS_UNSET)
+        options_changed = raw_options is not _MOUNT_OPTIONS_UNSET and raw_options is not None
+        options = (
+            str(raw_options or "").strip()
+            if options_changed
+            else runtime.dependency_update_backup_mount_options
+        )
         retention = str(payload.get("retention_days") or "").strip()
         min_free = int(payload.get("min_free_bytes") or 1073741824)
+        if mode == "local":
+            source = ""
+            options = ""
+            options_changed = True
         if mode in {"nfs", "samba"} and not source:
             raise DependencyUpdateError("NAS storage requires a mount source.")
         await asyncio.to_thread(self._write_generated_compose_override, mode, source, options)
+        updates = {
+            "dependency_update_backup_storage_mode": mode,
+            "dependency_update_backup_mount_source": source,
+            "dependency_update_backup_retention_days": retention,
+            "dependency_update_backup_min_free_bytes": min_free,
+            "dependency_update_backup_config_status": "pending_reboot",
+        }
+        if options_changed:
+            updates["dependency_update_backup_mount_options"] = options
         await update_settings(
-            {
-                "dependency_update_backup_storage_mode": mode,
-                "dependency_update_backup_mount_source": source,
-                "dependency_update_backup_mount_options": options,
-                "dependency_update_backup_retention_days": retention,
-                "dependency_update_backup_min_free_bytes": min_free,
-                "dependency_update_backup_config_status": "pending_reboot",
-            }
+            updates
         )
         result = await self.storage_status()
         result["config_status"] = "pending_reboot"
+        result["mount_options_configured"] = bool(options)
+        result["mount_options_redacted"] = bool(options)
         emit_audit_log(
             category=TELEMETRY_CATEGORY_DEPENDENCY_UPDATES,
             action="dependency_updates.storage.configure",
@@ -618,7 +637,14 @@ class DependencyUpdateService:
             target_entity="DependencyUpdateStorage",
             target_id=mode,
             target_label="Update backup storage",
-            metadata={"mode": mode, "mount_source": source, "mount_options": options, "pending_reboot": True},
+            metadata={
+                "mode": mode,
+                "mount_source": source,
+                "mount_options_configured": bool(options),
+                "mount_options_changed": options_changed,
+                "mount_options_cleared": options_changed and not bool(options),
+                "pending_reboot": True,
+            },
         )
         await event_bus.publish("dependency_updates.storage.configured", result)
         return result
@@ -1535,7 +1561,6 @@ class DependencyUpdateService:
             "backend/Dockerfile",
             "frontend/Dockerfile",
             "docker-compose.yml",
-            GENERATED_COMPOSE,
         ]:
             source = root / relative
             if not source.exists():
@@ -1631,7 +1656,18 @@ class DependencyUpdateService:
                 f"  host_path: {host_path}\n"
                 f"  mount_options: {options}\n"
             )
-        path.write_text(body)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(body)
+            os.replace(temp_path, path)
+            path.chmod(0o600)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
 
     async def _get_dependency(self, dependency_id: uuid.UUID | None) -> ExternalDependency:
         if not dependency_id:

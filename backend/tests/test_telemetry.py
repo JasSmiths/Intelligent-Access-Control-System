@@ -69,6 +69,8 @@ def test_redaction_and_audit_diff_hide_secrets_and_media() -> None:
         {
             "authorization": "Bearer secret",
             "home_assistant_token": "secret",
+            "mount_options": "username=iacs,password=secret,vers=3.0,rw",
+            "assistant_text": "Snapshot at /api/v1/ai/chat/files/abcDEF_123",
             "profile_photo_data_url": "data:image/png;base64,abcdef",
             "nested": {"api_key": "123", "safe": "ok"},
         }
@@ -76,6 +78,8 @@ def test_redaction_and_audit_diff_hide_secrets_and_media() -> None:
 
     assert payload["authorization"] == "[redacted]"
     assert payload["home_assistant_token"] == "[redacted]"
+    assert payload["mount_options"] == "[redacted]"
+    assert payload["assistant_text"] == "Snapshot at /api/v1/ai/chat/files/[redacted]"
     assert str(payload["profile_photo_data_url"]).startswith("[media redacted")
     assert payload["nested"]["api_key"] == "[redacted]"
 

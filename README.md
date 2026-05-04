@@ -15,6 +15,12 @@ mkdir -p data/backend data/postgres data/redis logs/backend logs/frontend
 docker compose up --build
 ```
 
+On first development start, the backend creates `data/backend/auth-secret.key`
+with a random root secret. This key signs sessions and encrypts dynamic
+secrets. Keep it backed up, do not commit it, and use Settings -> Auth to rotate
+it. Production/non-development environments must provide either that file or a
+non-default `IACS_AUTH_SECRET_KEY` before startup.
+
 Backend health endpoints:
 
 - `GET http://localhost:8088/`

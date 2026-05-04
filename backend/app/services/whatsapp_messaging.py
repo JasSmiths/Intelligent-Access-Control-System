@@ -135,6 +135,20 @@ VISITOR_CONCIERGE_TOOLS: tuple[dict[str, Any], ...] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "request_visitor_timeframe_change",
+        "description": "Request a change to the currently bound Visitor Pass timeframe only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pass_id": {"type": "string"},
+                "valid_from": {"type": "string"},
+                "valid_until": {"type": "string"},
+            },
+            "required": ["pass_id", "valid_from", "valid_until"],
+            "additionalProperties": False,
+        },
+    },
 )
 
 
@@ -1480,79 +1494,74 @@ class WhatsAppMessagingService:
     ) -> dict[str, str]:
         pass_details = await self.get_pass_details(sender)
         runtime = await get_runtime_config()
-        if is_visitor_concierge_unsupported_request(text):
-            return {"action": "unsupported", "message": VISITOR_CONCIERGE_RESTRICTED_REPLY}
-        if runtime.llm_provider != "local":
-            try:
-                provider = get_llm_provider(runtime.llm_provider)
-                result = await provider.complete(
-                    [
-                        ChatMessageInput("system", VISITOR_CONCIERGE_PROMPT),
-                        ChatMessageInput(
-                            "user",
-                            json.dumps(
-                                {
-                                    "message": text,
-                                    "pass": pass_details,
-                                    "site_timezone": runtime.site_timezone,
-                                    "current_window": visitor_pass_timeframe_llm_context(visitor_pass, runtime.site_timezone),
-                                    "conversation_context": visitor_pass_whatsapp_llm_context(visitor_pass),
-                                    "alfred_mentioned": alfred_mentioned,
-                                    "allowed_tools": [tool["name"] for tool in VISITOR_CONCIERGE_TOOLS],
-                                },
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                        ),
-                    ]
-                )
-                payload = first_json_object(result.text)
-                if isinstance(payload, dict):
-                    action = str(payload.get("action") or "")
-                    if action == "plate_detected":
-                        plate = normalize_registration_number(payload.get("registration_number"))
-                        if plate:
-                            if visitor_plate_appears_in_message(text, plate) and visitor_plate_detection_allowed(visitor_pass, text):
-                                return {"action": "plate_detected", "registration_number": plate}
-                            logger.info(
-                                "visitor_concierge_ignored_context_plate",
-                                extra={"pass_id": str(visitor_pass.id), "plate": masked_plate_value(plate)},
-                            )
-                            return {
-                                "action": "reply",
-                                "message": visitor_concierge_non_action_reply(visitor_pass, text),
-                            }
-                    if action == "timeframe_change":
-                        timeframe_payload = normalize_llm_timeframe_change_payload(payload, runtime.site_timezone)
-                        if timeframe_payload:
-                            return timeframe_payload
-                        return {
-                            "action": "reply",
-                            "message": "Please send the exact new start and end time you need for your visitor pass.",
-                        }
-                    if action == "unsupported":
-                        return {"action": "unsupported", "message": VISITOR_CONCIERGE_RESTRICTED_REPLY}
-                    if action == "reply":
-                        message = str(payload.get("message") or "")[:1024]
-                        if not alfred_mentioned:
-                            message = strip_visitor_alfred_name_sentences(message)
-                        if visitor_pass.number_plate and visitor_reply_requests_registration(message):
-                            message = visitor_concierge_non_action_reply(visitor_pass, text)
-                        return {"action": "reply", "message": message}
-            except (ProviderNotConfiguredError, Exception) as exc:
-                logger.info("visitor_concierge_llm_fallback", extra={"error": str(exc)[:180]})
-
-        if has_timeframe_intent(text):
+        if runtime.llm_provider == "local":
             return {
                 "action": "reply",
-                "message": "Sorry, I can't safely process time changes right now. Please contact your host.",
+                "message": "Sorry, I can't safely process visitor chat right now. Please contact your host.",
             }
-        plate = extract_registration_from_text(text)
-        if plate and visitor_plate_detection_allowed(visitor_pass, text):
-            return {"action": "plate_detected", "registration_number": plate}
-        if visitor_pass.number_plate:
-            return {"action": "reply", "message": visitor_concierge_non_action_reply(visitor_pass, text)}
-        return {"action": "reply", "message": "Please reply with your vehicle registration."}
+        try:
+            provider = get_llm_provider(runtime.llm_provider)
+            result = await provider.complete(
+                [
+                    ChatMessageInput("system", VISITOR_CONCIERGE_PROMPT),
+                    ChatMessageInput(
+                        "user",
+                        json.dumps(
+                            {
+                                "message": text,
+                                "pass": pass_details,
+                                "site_timezone": runtime.site_timezone,
+                                "current_window": visitor_pass_timeframe_llm_context(visitor_pass, runtime.site_timezone),
+                                "conversation_context": visitor_pass_whatsapp_llm_context(visitor_pass),
+                                "alfred_mentioned": alfred_mentioned,
+                                "allowed_tools": [tool["name"] for tool in VISITOR_CONCIERGE_TOOLS],
+                            },
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                    ),
+                ]
+            )
+            payload = first_json_object(result.text)
+            if isinstance(payload, dict):
+                action = str(payload.get("action") or "")
+                if action == "plate_detected":
+                    plate = normalize_registration_number(payload.get("registration_number"))
+                    if plate:
+                        if visitor_plate_appears_in_message(text, plate) and visitor_plate_detection_allowed(visitor_pass, text):
+                            return {"action": "plate_detected", "registration_number": plate}
+                        logger.info(
+                            "visitor_concierge_ignored_context_plate",
+                            extra={"pass_id": str(visitor_pass.id), "plate": masked_plate_value(plate)},
+                        )
+                        return {
+                            "action": "reply",
+                            "message": visitor_concierge_non_action_reply(visitor_pass, text),
+                        }
+                if action == "timeframe_change":
+                    timeframe_payload = normalize_llm_timeframe_change_payload(payload, runtime.site_timezone)
+                    if timeframe_payload:
+                        return timeframe_payload
+                    return {
+                        "action": "reply",
+                        "message": "Please send the exact new start and end time you need for your visitor pass.",
+                    }
+                if action == "unsupported":
+                    return {"action": "unsupported", "message": VISITOR_CONCIERGE_RESTRICTED_REPLY}
+                if action == "reply":
+                    message = str(payload.get("message") or "")[:1024]
+                    if not alfred_mentioned:
+                        message = strip_visitor_alfred_name_sentences(message)
+                    if visitor_pass.number_plate and visitor_reply_requests_registration(message):
+                        message = visitor_concierge_non_action_reply(visitor_pass, text)
+                    return {"action": "reply", "message": message}
+        except (ProviderNotConfiguredError, Exception) as exc:
+            logger.info("visitor_concierge_llm_failed_closed", extra={"error": str(exc)[:180]})
+
+        return {
+            "action": "reply",
+            "message": "Sorry, I can't safely process visitor chat right now. Please contact your host.",
+        }
 
     async def _visitor_alfred_name_nod(self, visitor_pass: VisitorPass, text: str) -> str:
         runtime = await get_runtime_config()

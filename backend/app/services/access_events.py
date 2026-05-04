@@ -1482,7 +1482,7 @@ class AccessEventService:
                 )
         if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
             if not self._automatic_open_allowed(direction_resolution):
-                await self._publish_gate_open_skipped(event, direction_resolution)
+                await self._publish_gate_open_skipped(event, direction_resolution, person)
                 gate_opened = False
             else:
                 gate_opened = await self._open_gate_for_event(
@@ -2070,6 +2070,21 @@ class AccessEventService:
                     "detail": str(exc),
                 },
             )
+            await self._audit_automatic_hardware_command(
+                action="gate.open.automatic",
+                event=event,
+                person=person,
+                target_entity="Gate",
+                target_label="Automatic Gate",
+                outcome="failed",
+                level="error",
+                metadata={
+                    "controller": settings.gate_controller,
+                    "reason": reason,
+                    "detail": str(exc),
+                    "state": GateState.UNKNOWN.value,
+                },
+            )
             await get_notification_service().notify(
                 NotificationContext(
                     event_type="gate_open_failed",
@@ -2096,6 +2111,22 @@ class AccessEventService:
                     error=None if result.accepted else result.detail,
                 )
             event_type = "gate.open_requested" if result.accepted else "gate.open_failed"
+            await self._audit_automatic_hardware_command(
+                action="gate.open.automatic",
+                event=event,
+                person=person,
+                target_entity="Gate",
+                target_label="Automatic Gate",
+                outcome="accepted" if result.accepted else "rejected",
+                level="info" if result.accepted else "warning",
+                metadata={
+                    "controller": settings.gate_controller,
+                    "reason": reason,
+                    "accepted": result.accepted,
+                    "state": result.state.value,
+                    "detail": result.detail,
+                },
+            )
             await event_bus.publish(
                 event_type,
                 {
@@ -2152,19 +2183,38 @@ class AccessEventService:
         return gate_opened
 
     async def _publish_gate_open_skipped(
-        self, event: AccessEvent, direction_resolution: dict[str, Any]
+        self, event: AccessEvent, direction_resolution: dict[str, Any], person: Person | None = None
     ) -> None:
         gate_observation = direction_resolution.get("gate_observation") or {}
+        detail = (
+            "Automatic gate and garage-door commands require the top gate "
+            "to be closed at plate-read time."
+        )
+        await self._audit_automatic_hardware_command(
+            action="gate.open.automatic",
+            event=event,
+            person=person,
+            target_entity="Gate",
+            target_label="Automatic Gate",
+            outcome="skipped",
+            level="warning",
+            metadata={
+                "controller": settings.gate_controller,
+                "reason": "gate_state_not_closed_at_plate_read_time",
+                "state": gate_observation.get("state") or GateState.UNKNOWN.value,
+                "gate_observation": gate_observation,
+                "direction_resolution": direction_resolution,
+                "detail": detail,
+                "garage_doors_skipped": True,
+            },
+        )
         await event_bus.publish(
             "gate.open_skipped",
             {
                 "event_id": str(event.id),
                 "registration_number": event.registration_number,
                 "state": gate_observation.get("state") or GateState.UNKNOWN.value,
-                "detail": (
-                    "Automatic gate and garage-door commands require the top gate "
-                    "to be closed at plate-read time."
-                ),
+                "detail": detail,
             },
         )
 
@@ -2242,6 +2292,24 @@ class AccessEventService:
                         "detail": detail,
                     },
                 )
+                await self._audit_automatic_hardware_command(
+                    action="garage_door.open.automatic",
+                    event=event,
+                    person=person,
+                    target_entity="GarageDoor",
+                    target_id=str(entity["entity_id"]),
+                    target_label=str(entity.get("name") or entity["entity_id"]),
+                    outcome="rejected",
+                    level="warning",
+                    metadata={
+                        "controller": "home_assistant",
+                        "reason": reason,
+                        "accepted": False,
+                        "state": "schedule_denied",
+                        "detail": detail,
+                        "schedule": self._schedule_evaluation_payload(schedule_evaluation),
+                    },
+                )
                 await get_notification_service().notify(
                     NotificationContext(
                         event_type="garage_door_open_failed",
@@ -2282,6 +2350,23 @@ class AccessEventService:
                     error=None if outcome.accepted else outcome.detail,
                 )
             event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
+            await self._audit_automatic_hardware_command(
+                action="garage_door.open.automatic",
+                event=event,
+                person=person,
+                target_entity="GarageDoor",
+                target_id=outcome.entity_id,
+                target_label=outcome.name,
+                outcome="accepted" if outcome.accepted else "failed",
+                level="info" if outcome.accepted else "error",
+                metadata={
+                    "controller": "home_assistant",
+                    "reason": reason,
+                    "accepted": outcome.accepted,
+                    "state": outcome.state,
+                    "detail": outcome.detail,
+                },
+            )
             await event_bus.publish(
                 event_type,
                 {
@@ -2335,6 +2420,53 @@ class AccessEventService:
                     ),
                 )
             )
+
+    async def _audit_automatic_hardware_command(
+        self,
+        *,
+        action: str,
+        event: AccessEvent,
+        person: Person | None,
+        target_entity: str,
+        outcome: str,
+        level: str,
+        target_id: str | None = None,
+        target_label: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        vehicle = getattr(event, "vehicle", None)
+        vehicle_id = getattr(event, "vehicle_id", None) or getattr(vehicle, "id", None)
+        person_id = getattr(person, "id", None) or getattr(event, "person_id", None)
+        command_metadata = {
+            "source": "automatic_lpr_grant",
+            "access_event_id": str(event.id),
+            "registration_number": event.registration_number,
+            "direction": event.direction.value if hasattr(event.direction, "value") else str(event.direction),
+            "decision": event.decision.value if hasattr(event.decision, "value") else str(event.decision),
+            "person_id": str(person_id) if person_id else None,
+            "person": person.display_name if person else None,
+            "vehicle_id": str(vehicle_id) if vehicle_id else None,
+            "vehicle_registration_number": getattr(vehicle, "registration_number", None),
+            "event_source": getattr(event, "source", None),
+            "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+            **(metadata or {}),
+        }
+        async with AsyncSessionLocal() as session:
+            row = await write_audit_log(
+                session,
+                category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                action=action,
+                actor="Access Event Automation",
+                target_entity=target_entity,
+                target_id=target_id,
+                target_label=target_label,
+                outcome=outcome,
+                level=level,
+                metadata=command_metadata,
+            )
+            await session.commit()
+            await session.refresh(row)
+        await event_bus.publish("audit.log.created", audit_log_event_payload(row))
 
     async def _vehicle_visual_detection_for_read(
         self,

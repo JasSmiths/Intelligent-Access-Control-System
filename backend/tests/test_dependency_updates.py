@@ -1,12 +1,17 @@
 import json
 import shutil
+import stat
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
+import app.services.dependency_updates as dependency_updates_module
+from app.models import DependencyUpdateBackup, ExternalDependency, SystemSetting, User
 from app.services.dependency_updates import (
     DependencyUpdateError,
     DependencyUpdateService,
+    GENERATED_COMPOSE,
     _create_zstd_archive,
     _docker_images_from_text,
     _extract_archive,
@@ -19,7 +24,20 @@ from app.services.dependency_updates import (
     _update_python_requirement,
     _workspace_root,
 )
-from app.models import DependencyUpdateBackup, ExternalDependency
+from app.services.settings import SECRET_KEYS, _migrate_secret_record, decrypted_value
+
+
+def _storage_runtime(**overrides):
+    values = {
+        "dependency_update_backup_storage_mode": "samba",
+        "dependency_update_backup_mount_source": "//nas/iacs",
+        "dependency_update_backup_mount_options": "username=iacs,password=secret,vers=3.0,rw",
+        "dependency_update_backup_config_status": "active",
+        "dependency_update_backup_min_free_bytes": 1,
+        "dependency_update_backup_retention_days": "",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_dependency_manifest_discovery_enrolls_backend_frontend_and_images(tmp_path, monkeypatch) -> None:
@@ -95,23 +113,149 @@ dependencies = [
     assert discord_row.dependant_area == "Discord Messaging"
 
 
+def test_dependency_backup_mount_options_are_secret_and_legacy_plaintext_is_migrated() -> None:
+    secret = "username=iacs,password=secret,vers=3.0,rw"
+    record = SystemSetting(
+        key="dependency_update_backup_mount_options",
+        category="updates",
+        value={"plain": secret},
+        is_secret=False,
+        description="Docker local volume mount options.",
+    )
+
+    assert "dependency_update_backup_mount_options" in SECRET_KEYS
+    assert _migrate_secret_record(record) is True
+    assert record.is_secret is True
+    assert "encrypted" in record.value
+    assert "plain" not in record.value
+    assert secret not in json.dumps(record.value)
+    assert decrypted_value(record) == secret
+
+
+@pytest.mark.asyncio
+async def test_dependency_storage_status_redacts_saved_mount_options(tmp_path, monkeypatch) -> None:
+    secret = "username=iacs,password=secret,vers=3.0,rw"
+
+    async def fake_runtime():
+        return _storage_runtime(dependency_update_backup_mount_options=secret)
+
+    monkeypatch.setattr(dependency_updates_module, "get_runtime_config", fake_runtime)
+    monkeypatch.setattr(dependency_updates_module, "_backup_root", lambda: tmp_path / "backups")
+
+    status = await DependencyUpdateService().storage_status()
+
+    assert status["mount_options"] == ""
+    assert status["mount_options_configured"] is True
+    assert status["mount_options_redacted"] is True
+    assert "password=secret" not in json.dumps(status)
+
+
+@pytest.mark.asyncio
+async def test_dependency_storage_config_preserves_omitted_secret_and_redacts_outputs(tmp_path, monkeypatch) -> None:
+    secret = "username=iacs,password=secret,vers=3.0,rw"
+    updates: list[dict[str, object]] = []
+    audits: list[dict[str, object]] = []
+    events: list[dict[str, object]] = []
+
+    async def fake_runtime():
+        return _storage_runtime(dependency_update_backup_mount_options=secret)
+
+    async def fake_update_settings(payload):
+        updates.append(payload)
+        return []
+
+    class FakeEventBus:
+        async def publish(self, topic, payload):
+            events.append({"topic": topic, "payload": payload})
+
+    monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr(dependency_updates_module, "get_runtime_config", fake_runtime)
+    monkeypatch.setattr(dependency_updates_module, "update_settings", fake_update_settings)
+    monkeypatch.setattr(dependency_updates_module, "emit_audit_log", lambda **kwargs: audits.append(kwargs))
+    monkeypatch.setattr(dependency_updates_module, "event_bus", FakeEventBus())
+    monkeypatch.setattr(dependency_updates_module, "_backup_root", lambda: tmp_path / "backups")
+
+    result = await DependencyUpdateService().save_storage_config(
+        {"mode": "samba", "mount_source": "//nas/iacs-2"},
+        user=User(id=uuid.uuid4(), username="admin", full_name="Admin"),
+    )
+
+    generated = (tmp_path / GENERATED_COMPOSE).read_text()
+    assert "password=secret" in generated
+    assert "dependency_update_backup_mount_options" not in updates[0]
+    assert result["mount_options"] == ""
+    assert result["mount_options_configured"] is True
+    assert result["mount_options_redacted"] is True
+    assert "password=secret" not in json.dumps(result)
+    assert "password=secret" not in json.dumps(audits, default=str)
+    assert "password=secret" not in json.dumps(events, default=str)
+    assert audits[0]["metadata"]["mount_options_changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_dependency_storage_config_explicit_empty_clears_secret(tmp_path, monkeypatch) -> None:
+    updates: list[dict[str, object]] = []
+
+    async def fake_runtime():
+        return _storage_runtime()
+
+    async def fake_update_settings(payload):
+        updates.append(payload)
+        return []
+
+    class FakeEventBus:
+        async def publish(self, topic, payload):
+            return None
+
+    monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr(dependency_updates_module, "get_runtime_config", fake_runtime)
+    monkeypatch.setattr(dependency_updates_module, "update_settings", fake_update_settings)
+    monkeypatch.setattr(dependency_updates_module, "emit_audit_log", lambda **kwargs: None)
+    monkeypatch.setattr(dependency_updates_module, "event_bus", FakeEventBus())
+    monkeypatch.setattr(dependency_updates_module, "_backup_root", lambda: tmp_path / "backups")
+
+    result = await DependencyUpdateService().save_storage_config(
+        {"mode": "samba", "mount_source": "//nas/iacs", "mount_options": ""},
+        user=User(id=uuid.uuid4(), username="admin", full_name="Admin"),
+    )
+
+    assert updates[0]["dependency_update_backup_mount_options"] == ""
+    assert "password=secret" not in (tmp_path / GENERATED_COMPOSE).read_text()
+    assert result["mount_options_configured"] is False
+    assert result["mount_options_redacted"] is False
+
+
 def test_generated_compose_override_records_host_mounted_remote_storage(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
     service = DependencyUpdateService()
 
     service._write_generated_compose_override("nfs", "nas.local:/volume/iacs", "addr=nas.local,rw")
-    nfs = (tmp_path / "docker-compose.update-backups.generated.yml").read_text()
+    generated_path = tmp_path / GENERATED_COMPOSE
+    nfs = generated_path.read_text()
     assert "mode: nfs" in nfs
     assert "host_path: nas.local:/volume/iacs" in nfs
     assert "addr=nas.local,rw" in nfs
     assert "volumes:" not in nfs
+    assert stat.S_IMODE(generated_path.stat().st_mode) == 0o600
 
     service._write_generated_compose_override("samba", "//nas/iacs", "username=iacs,vers=3.0,rw")
-    samba = (tmp_path / "docker-compose.update-backups.generated.yml").read_text()
+    samba = generated_path.read_text()
     assert "mode: samba" in samba
     assert "host_path: //nas/iacs" in samba
     assert "username=iacs,vers=3.0,rw" in samba
     assert "volumes:" not in samba
+    assert stat.S_IMODE(generated_path.stat().st_mode) == 0o600
+
+
+def test_manifest_snapshot_excludes_generated_compose_override(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    (tmp_path / GENERATED_COMPOSE).write_text("mount_options: username=iacs,password=secret\n")
+
+    snapshot = DependencyUpdateService()._write_manifest_snapshot(tmp_path / "staging")
+
+    assert GENERATED_COMPOSE not in {row["path"] for row in snapshot["files"]}
+    assert not (tmp_path / "staging" / "manifests" / GENERATED_COMPOSE).exists()
 
 
 def test_docker_image_parser_handles_from_and_compose_images() -> None:
