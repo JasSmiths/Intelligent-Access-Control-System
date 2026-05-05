@@ -166,13 +166,14 @@ export type LeaderboardResponse = {
 
 export const TOP_CHARTS_PAGE_SIZE = 5;
 
-export function TopChartsView({ query, realtime }: { query: string; realtime: RealtimeMessage[] }) {
+export function TopChartsView({ query, realtime, refreshToken }: { query: string; realtime: RealtimeMessage[]; refreshToken: number }) {
   const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
   const [knownPage, setKnownPage] = React.useState(0);
   const [unknownPage, setUnknownPage] = React.useState(0);
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const load = React.useCallback(async () => {
     setRefreshing(true);
@@ -190,6 +191,12 @@ export function TopChartsView({ query, realtime }: { query: string; realtime: Re
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    load().catch(() => undefined);
+  }, [load, refreshToken]);
 
   const latestRealtime = realtime[0];
   React.useEffect(() => {

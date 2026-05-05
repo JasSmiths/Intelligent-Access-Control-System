@@ -46,7 +46,6 @@ import {
   Moon,
   Monitor,
   MoreHorizontal,
-  Play,
   PlugZap,
   Plus,
   Paperclip,
@@ -60,7 +59,6 @@ import {
   Settings,
   Shield,
   ShieldCheck,
-  SlidersHorizontal,
   Save,
   Split,
   Sparkles,
@@ -142,7 +140,6 @@ export function Dashboard({
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
   const [now, setNow] = React.useState(() => new Date());
-  const [simulatorPlate, setSimulatorPlate] = React.useState("");
   const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
   const [maintenanceDisableOpen, setMaintenanceDisableOpen] = React.useState(false);
   const [maintenanceLoading, setMaintenanceLoading] = React.useState(false);
@@ -154,7 +151,6 @@ export function Dashboard({
   const present = presence.filter((item) => item.state === "present").length;
   const exited = presence.filter((item) => item.state === "exited").length;
   const unknown = Math.max(presence.length - present - exited, 0);
-  const latestEvent = events[0];
   const actionableAlerts = anomalies.filter(isActionableAlert);
   const critical = actionableAlerts.filter((item) => item.severity === "critical").length;
   const warning = actionableAlerts.filter((item) => item.severity === "warning").length;
@@ -177,22 +173,11 @@ export function Dashboard({
       : "No actionable alerts";
   const greeting = greetingForDate(now);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
-  const selectedPlate = simulatorPlate || vehicles[0]?.registration_number || "";
 
   React.useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-
-  React.useEffect(() => {
-    if (!simulatorPlate && vehicles[0]) {
-      setSimulatorPlate(vehicles[0].registration_number);
-      return;
-    }
-    if (simulatorPlate && !vehicles.some((vehicle) => vehicle.registration_number === simulatorPlate)) {
-      setSimulatorPlate(vehicles[0]?.registration_number ?? "");
-    }
-  }, [simulatorPlate, vehicles]);
 
   const runDashboardCommand = async () => {
     if (!pendingCommand || commandLoading) return;
@@ -421,46 +406,6 @@ export function Dashboard({
         <div className="card chart-card">
           <PanelHeader title="Daily Entries vs Exits" action="7 Days" actionKind="select" />
           <DailyEntriesChart events={events} />
-        </div>
-
-        <div className="card access-simulator-card span-2">
-          <PanelHeader title="Access Simulator" />
-          <div className="simulator-form">
-            <label>
-              <span>Select Credential</span>
-              <select value={selectedPlate} onChange={(event) => setSimulatorPlate(event.target.value)} disabled={!vehicles.length}>
-                {vehicles.length ? vehicles.map((vehicle) => (
-                  <option value={vehicle.registration_number} key={vehicle.id}>Plate - {vehicle.registration_number}</option>
-                )) : <option value="">No vehicles available</option>}
-              </select>
-            </label>
-            <label>
-              <span>Select Gate</span>
-              <select defaultValue="main">
-                <option value="main">Main Gate</option>
-                <option value="service">Service Gate</option>
-              </select>
-            </label>
-            <label>
-              <span>Select Date & Time</span>
-              <div className="date-input">
-                <CalendarDays size={18} />
-                <span>{formatSimulatorDate(new Date())}</span>
-              </div>
-            </label>
-            <button className="primary-button simulate-primary" onClick={() => simulate(`/api/v1/simulation/arrival/${selectedPlate}`, refresh)} type="button" disabled={!selectedPlate}>
-              <Play size={17} /> Simulate Access
-            </button>
-          </div>
-          <div className="simulator-footer-line">
-            <p className="muted-line">
-              {vehicles.length ? "Run a synthetic access event for a registered plate." : "Add a vehicle before running synthetic access events."}
-              {latestEvent ? ` Latest: ${latestEvent.registration_number} ${latestEvent.decision}.` : ""}
-            </p>
-            <button className="misread-link" onClick={() => simulate(`/api/v1/simulation/misread-sequence/${selectedPlate}`, refresh)} type="button" disabled={!selectedPlate}>
-              <SlidersHorizontal size={14} /> Simulate misread sequence
-            </button>
-          </div>
         </div>
       </div>
 
@@ -842,11 +787,6 @@ export function lastSevenDayBuckets(events: AccessEvent[]) {
   });
 }
 
-export async function simulate(path: string, refresh: () => Promise<void>) {
-  await api.post(path);
-  window.setTimeout(() => refresh().catch(() => undefined), 3200);
-}
-
 export function formatTime(value: string) {
   return new Intl.DateTimeFormat("en-US", {
     hour: "2-digit",
@@ -884,18 +824,4 @@ export function isToday(value: string, now = new Date()) {
     date.getMonth() === now.getMonth() &&
     date.getDate() === now.getDate()
   );
-}
-
-export function formatSimulatorDate(value: Date) {
-  const date = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "2-digit",
-    year: "numeric"
-  }).format(value);
-  const time = new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true
-  }).format(value);
-  return `${date}  ${time}`;
 }

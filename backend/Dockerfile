@@ -13,7 +13,8 @@ RUN apt-get update \
 COPY pyproject.toml README.md ./
 COPY app ./app
 RUN pip install --upgrade pip \
-    && pip install ".[dev]"
+    && pip install ".[dev]" \
+    && python -m playwright install --with-deps chromium
 
 RUN mkdir -p /app/data /app/logs
 

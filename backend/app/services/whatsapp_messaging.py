@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, ToolCall, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, MessagingIdentity, User, Vehicle, VisitorPass
@@ -69,6 +69,12 @@ class WhatsAppConfirmation:
 
 
 @dataclass(frozen=True)
+class WhatsAppReaction:
+    emoji: str
+    message_id: str
+
+
+@dataclass(frozen=True)
 class VisitorPassButtonReply:
     decision: str
     pass_id: str
@@ -109,6 +115,13 @@ VISITOR_ABUSE_WINDOW_SECONDS = 10 * 60
 VISITOR_ABUSE_MUTE_SECONDS = 30 * 60
 VISITOR_POST_COMPLETE_REPLY_LIMIT = 4
 VISITOR_PLATE_CHANGE_LIMIT = 3
+ADMIN_VISITOR_PASS_STATE_KEY = "whatsapp_admin_visitor_pass_create"
+ADMIN_ALFRED_FEEDBACK_STATE_KEY = "whatsapp_admin_alfred_feedback"
+ADMIN_VISITOR_PASS_TOOL_NAMES = ("query_visitor_passes", "create_visitor_pass")
+ADMIN_ALFRED_FEEDBACK_PROMPT = (
+    "What was wrong with that answer? Send me a quick note, and if you know what I should have said, "
+    "add “ideal: …”."
+)
 
 
 VISITOR_CONCIERGE_TOOLS: tuple[dict[str, Any], ...] = (
@@ -191,6 +204,43 @@ Return only compact JSON in one of these shapes:
 {"action":"timeframe_change","valid_from":"2026-05-03T09:00:00+01:00","valid_until":"2026-05-03T21:30:00+01:00","summary":"Visitor agreed to the dashboard user's proposal to move the pass to tomorrow.","direct_apply":true,"source":"dashboard_custom_proposal"}
 {"action":"unsupported","message":"Sorry, I can only discuss details about your visitor pass and vehicle registration."}
 {"action":"reply","message":"Please reply with your vehicle registration."}
+"""
+
+
+ADMIN_VISITOR_PASS_PROMPT = """You are Alfred helping an authorized IACS user create a Visitor Pass over WhatsApp.
+
+User-visible style:
+- Sound completely natural, conversational, friendly, and non-technical, like a capable person texting back.
+- Do not list requirements like a form or robot. Ask for missing details in context, in one short message.
+- Never expose JSON, schemas, tool names, IDs, or internal workflow details in the user-facing reply.
+- Optional details are genuinely optional. If the user does not know a phone number or vehicle registration, accept that gracefully and do not ask again.
+
+Workflow:
+- Detect whether the user is trying to create or arrange a Visitor Pass for an expected visitor.
+- Extract the visitor name as free text; do not resolve it to an IACS Person.
+- Convert relative dates and natural times into absolute ISO-8601 datetimes in the supplied site_timezone.
+- Required before creating: visitor_name, arrival date and time, and duration or end time.
+- Optional: visitor_phone and number_plate. Use null when missing or explicitly unknown.
+- If only a date is known, keep it as arrival_date and ask naturally for the arrival time and duration.
+- If the user gives an arrival time plus a duration, calculate valid_until from the duration.
+- If the user gives "until <time>", use that as valid_until on the arrival date.
+- If duplicate_confirmation is pending, interpret whether the user means the existing pass is the same visit.
+
+Return only compact JSON for the backend. The `reply` field is the only user-facing text:
+{
+  "intent":"visitor_pass_create|other|cancel",
+  "visitor_name":"Betty|null",
+  "arrival_date":"2026-05-08|null",
+  "arrival_datetime":"2026-05-08T14:00:00+01:00|null",
+  "duration_minutes":180,
+  "valid_until":"2026-05-08T17:00:00+01:00|null",
+  "visitor_phone":"447123456789|null",
+  "number_plate":"AB12CDE|null",
+  "unknown_optional":["visitor_phone","number_plate"],
+  "missing_required":["arrival_time","duration"],
+  "duplicate_answer":"same|different|unclear|null",
+  "reply":"Natural WhatsApp reply, never JSON."
+}
 """
 
 
@@ -868,6 +918,28 @@ class WhatsAppMessagingService:
 
         display_name = contact_display_name(contacts) or admin.full_name or admin.username
         await self._ensure_admin_identity(admin, sender, display_name, phone_number_id, signature_verified)
+        reaction = parse_reaction_message(message)
+        if reaction:
+            rating = feedback_rating_for_reaction(reaction)
+            await acknowledge(show_typing=rating is not None)
+            if rating == "down":
+                await self._start_admin_feedback_followup(
+                    reaction,
+                    admin=admin,
+                    display_name=display_name,
+                    sender=sender,
+                    phone_number_id=phone_number_id,
+                )
+            elif rating == "up":
+                await self._submit_admin_reaction_feedback(
+                    reaction,
+                    admin=admin,
+                    display_name=display_name,
+                    sender=sender,
+                    phone_number_id=phone_number_id,
+                    rating=rating,
+                )
+            return
         timeframe_decision = parse_visitor_pass_timeframe_decision_message(message)
         if timeframe_decision:
             await acknowledge(show_typing=True)
@@ -909,6 +981,21 @@ class WhatsAppMessagingService:
             received_at=parse_whatsapp_timestamp(message.get("timestamp")),
             author_is_provider_admin=True,
         )
+        if await self._handle_admin_feedback_followup(
+            incoming,
+            admin=admin,
+            sender=sender,
+        ):
+            return
+        if await self._handle_admin_visitor_pass_workflow(
+            incoming,
+            admin=admin,
+            display_name=display_name,
+            sender=sender,
+            phone_number_id=phone_number_id,
+        ):
+            return
+
         from app.services.messaging_bridge import messaging_bridge_service
 
         result = await messaging_bridge_service.handle_message(incoming, is_admin_hint=True)
@@ -916,6 +1003,251 @@ class WhatsAppMessagingService:
             await self.send_text_message(sender, result.response_text)
         if result.pending_action:
             await self.send_confirmation_message(sender, result.pending_action)
+
+    async def _handle_admin_visitor_pass_workflow(
+        self,
+        incoming: IncomingChatMessage,
+        *,
+        admin: User,
+        display_name: str,
+        sender: str,
+        phone_number_id: str,
+    ) -> bool:
+        from app.ai.tools import set_chat_tool_context
+        from app.services.chat import chat_service
+        from app.services.chat_contracts import IntentRoute
+        from app.services.messaging_bridge import deterministic_session_id
+
+        session_id = deterministic_session_id(incoming)
+        session_uuid = await chat_service._ensure_session(session_id)
+        memory = await chat_service._load_memory(session_uuid)
+        state = memory.get(ADMIN_VISITOR_PASS_STATE_KEY)
+        state = dict(state) if isinstance(state, dict) else None
+        if not state and not admin_visitor_pass_message_likely(incoming.text):
+            return False
+
+        runtime = await get_runtime_config()
+        if runtime.llm_provider == "local":
+            return False
+        payload = await self._admin_visitor_pass_llm_payload(
+            incoming.text,
+            state=state,
+            runtime=runtime,
+            display_name=display_name,
+        )
+        intent = str(payload.get("intent") or "").strip().lower()
+        if not state and intent != "visitor_pass_create":
+            return False
+
+        await chat_service._append_message(
+            session_uuid,
+            "user",
+            incoming.text,
+            tool_payload={
+                "source": "whatsapp",
+                "workflow": "admin_visitor_pass_create",
+                "provider_message_id": incoming.provider_message_id,
+                "user_id": str(admin.id),
+            },
+        )
+
+        if intent == "cancel":
+            memory.pop(ADMIN_VISITOR_PASS_STATE_KEY, None)
+            await chat_service._save_memory(session_uuid, memory)
+            result = await chat_service._direct_response(
+                session_uuid,
+                admin_visitor_pass_reply(payload, "No problem, I've cancelled that visitor pass setup."),
+                provider="whatsapp_visitor_pass",
+            )
+            await self.send_text_message(sender, result.text)
+            return True
+
+        state = merge_admin_visitor_pass_state(state, payload)
+        tool_results: list[dict[str, Any]] = []
+        actor_context = {
+            "user": {
+                "id": str(admin.id),
+                "role": admin.role.value,
+                "username": admin.username,
+                "display_name": display_name,
+            },
+            "source": "whatsapp",
+        }
+        context_token = set_chat_tool_context(
+            {
+                "user_id": str(admin.id),
+                "user_role": admin.role.value,
+                "actor_context": actor_context,
+                "session_id": str(session_uuid),
+                "provider": runtime.llm_provider,
+                "model": getattr(runtime, f"{runtime.llm_provider}_model", None),
+                "trigger": "whatsapp_admin_visitor_pass_workflow",
+            }
+        )
+        try:
+            duplicate_answer = str(payload.get("duplicate_answer") or "").strip().lower()
+            if state.get("stage") == "duplicate_confirmation":
+                if duplicate_answer == "same":
+                    memory.pop(ADMIN_VISITOR_PASS_STATE_KEY, None)
+                    await chat_service._save_memory(session_uuid, memory)
+                    result = await chat_service._direct_response(
+                        session_uuid,
+                        admin_visitor_pass_reply(
+                            payload,
+                            "Got it, I'll leave the existing pass alone. One less duplicate for the paperwork pile.",
+                        ),
+                        provider="whatsapp_visitor_pass",
+                    )
+                    await self.send_text_message(sender, result.text)
+                    return True
+                if duplicate_answer == "different":
+                    state["stage"] = "collecting_details"
+                    state["duplicate_checked"] = True
+                else:
+                    memory[ADMIN_VISITOR_PASS_STATE_KEY] = state
+                    await chat_service._save_memory(session_uuid, memory)
+                    result = await chat_service._direct_response(
+                        session_uuid,
+                        admin_visitor_pass_duplicate_reply(state),
+                        provider="whatsapp_visitor_pass",
+                    )
+                    await self.send_text_message(sender, result.text)
+                    return True
+
+            draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+            visitor_name = str(draft.get("visitor_name") or "").strip()
+            if visitor_name and not state.get("duplicate_checked"):
+                duplicate_call = ToolCall(
+                    "whatsapp-visitor-pass-duplicates",
+                    "query_visitor_passes",
+                    {
+                        "statuses": ["active", "scheduled"],
+                        "search": visitor_name,
+                        "fuzzy_name": True,
+                        "limit": 5,
+                    },
+                )
+                duplicate_result = await chat_service._execute_tool_call(session_uuid, duplicate_call)
+                tool_results.append(duplicate_result)
+                matches = admin_visitor_pass_duplicate_matches(duplicate_result, visitor_name)
+                state["duplicate_checked"] = True
+                state["duplicate_checked_name"] = visitor_name
+                if matches:
+                    state["stage"] = "duplicate_confirmation"
+                    state["duplicate_matches"] = matches
+                    memory[ADMIN_VISITOR_PASS_STATE_KEY] = state
+                    await chat_service._save_memory(session_uuid, memory)
+                    result = await chat_service._direct_response(
+                        session_uuid,
+                        admin_visitor_pass_duplicate_reply(state),
+                        tool_results=tool_results,
+                        provider="whatsapp_visitor_pass",
+                    )
+                    await self.send_text_message(sender, result.text)
+                    return True
+
+            missing = admin_visitor_pass_missing_required(state)
+            if missing:
+                state["stage"] = "collecting_details"
+                memory[ADMIN_VISITOR_PASS_STATE_KEY] = state
+                await chat_service._save_memory(session_uuid, memory)
+                result = await chat_service._direct_response(
+                    session_uuid,
+                    admin_visitor_pass_reply(payload, admin_visitor_pass_missing_reply(state, missing)),
+                    tool_results=tool_results,
+                    provider="whatsapp_visitor_pass",
+                )
+                await self.send_text_message(sender, result.text)
+                return True
+
+            create_args = admin_visitor_pass_create_arguments(state, runtime.site_timezone)
+            create_call = ToolCall("whatsapp-create-visitor-pass", "create_visitor_pass", create_args)
+            create_result = await chat_service._execute_tool_call(session_uuid, create_call)
+            tool_results.append(create_result)
+            output = create_result.get("output") if isinstance(create_result.get("output"), dict) else {}
+            memory.pop(ADMIN_VISITOR_PASS_STATE_KEY, None)
+            await chat_service._save_memory(session_uuid, memory)
+
+            if output.get("requires_confirmation"):
+                route = IntentRoute(("Visitor_Passes",), 0.98, False, "WhatsApp visitor pass creation")
+                selected_tools = [
+                    chat_service._tools[name]
+                    for name in ADMIN_VISITOR_PASS_TOOL_NAMES
+                    if name in chat_service._tools
+                ]
+                pending_action = await chat_service._store_pending_agent_action(
+                    session_uuid,
+                    create_result,
+                    tool_results,
+                    route,
+                    selected_tools,
+                    provider_name="whatsapp_visitor_pass",
+                    user_message=incoming.text,
+                    user_id=str(admin.id),
+                    actor_context=actor_context,
+                    iteration=0,
+                )
+                result = await chat_service._direct_response(
+                    session_uuid,
+                    admin_visitor_pass_reply(
+                        payload,
+                        admin_visitor_pass_ready_reply(create_args),
+                    ),
+                    tool_results=tool_results,
+                    provider="whatsapp_visitor_pass",
+                    pending_action=pending_action,
+                )
+                await self.send_text_message(sender, result.text)
+                await self.send_confirmation_message(sender, pending_action)
+                return True
+
+            result = await chat_service._direct_response(
+                session_uuid,
+                str(output.get("detail") or output.get("error") or "I couldn't prepare that Visitor Pass."),
+                tool_results=tool_results,
+                provider="whatsapp_visitor_pass",
+            )
+            await self.send_text_message(sender, result.text)
+            return True
+        finally:
+            set_chat_tool_context({}, token=context_token)
+
+    async def _admin_visitor_pass_llm_payload(
+        self,
+        text: str,
+        *,
+        state: dict[str, Any] | None,
+        runtime: Any,
+        display_name: str,
+    ) -> dict[str, Any]:
+        try:
+            provider = get_llm_provider(runtime.llm_provider)
+            now = datetime.now(tz=safe_zoneinfo(runtime.site_timezone))
+            result = await provider.complete(
+                [
+                    ChatMessageInput("system", ADMIN_VISITOR_PASS_PROMPT),
+                    ChatMessageInput(
+                        "user",
+                        json.dumps(
+                            {
+                                "message": text,
+                                "conversation_state": state or {},
+                                "site_timezone": runtime.site_timezone,
+                                "now": now.isoformat(),
+                                "today": now.date().isoformat(),
+                                "sender_display_name": display_name,
+                            },
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                    ),
+                ]
+            )
+            payload = first_json_object(result.text)
+            return payload if isinstance(payload, dict) else {}
+        except (ProviderNotConfiguredError, Exception) as exc:
+            logger.info("whatsapp_admin_visitor_pass_llm_failed", extra={"error": str(exc)[:180]})
+            return {}
 
     async def _handle_visitor_message(
         self,
@@ -2719,6 +3051,156 @@ class WhatsAppMessagingService:
         response_text = naturalize_messaging_response(result.text, result.tool_results, "confirmation")
         await self.send_text_message(sender, response_text)
 
+    async def _start_admin_feedback_followup(
+        self,
+        reaction: WhatsAppReaction,
+        *,
+        admin: User,
+        display_name: str,
+        sender: str,
+        phone_number_id: str,
+    ) -> None:
+        from app.services.chat import chat_service
+        from app.services.messaging_bridge import deterministic_session_id
+
+        incoming = self._admin_feedback_incoming(
+            sender=sender,
+            display_name=display_name,
+            phone_number_id=phone_number_id,
+            text="",
+            provider_message_id=reaction.message_id,
+        )
+        session_id = deterministic_session_id(incoming)
+        session_uuid = await chat_service._ensure_session(session_id)
+        memory = await chat_service._load_memory(session_uuid)
+        memory[ADMIN_ALFRED_FEEDBACK_STATE_KEY] = {
+            "rating": "down",
+            "reacted_message_id": reaction.message_id,
+            "requested_at": datetime.now(tz=UTC).isoformat(),
+            "actor_user_id": str(admin.id),
+            "actor_role": admin.role.value,
+        }
+        await chat_service._save_memory(session_uuid, memory)
+        await self.send_text_message(sender, ADMIN_ALFRED_FEEDBACK_PROMPT)
+
+    async def _submit_admin_reaction_feedback(
+        self,
+        reaction: WhatsAppReaction,
+        *,
+        admin: User,
+        display_name: str,
+        sender: str,
+        phone_number_id: str,
+        rating: str,
+    ) -> None:
+        from app.services.alfred.feedback import AlfredFeedbackError, alfred_feedback_service
+        from app.services.messaging_bridge import deterministic_session_id
+
+        incoming = self._admin_feedback_incoming(
+            sender=sender,
+            display_name=display_name,
+            phone_number_id=phone_number_id,
+            text="",
+            provider_message_id=reaction.message_id,
+        )
+        try:
+            await alfred_feedback_service.submit_feedback_for_last_response(
+                session_id=deterministic_session_id(incoming),
+                rating=rating,
+                reason="",
+                ideal_answer="",
+                source_channel="whatsapp",
+                actor_user_id=str(admin.id),
+                actor_role=admin.role.value,
+            )
+        except AlfredFeedbackError as exc:
+            await self.send_text_message(sender, f"I could not attach that feedback: {exc}")
+            return
+        await self.send_text_message(sender, "Thanks, I logged that Alfred feedback.")
+
+    async def _handle_admin_feedback_followup(
+        self,
+        incoming: IncomingChatMessage,
+        *,
+        admin: User,
+        sender: str,
+    ) -> bool:
+        from app.services.alfred.feedback import AlfredFeedbackError, alfred_feedback_service, parse_feedback_command
+        from app.services.chat import chat_service
+        from app.services.messaging_bridge import deterministic_session_id
+
+        session_id = deterministic_session_id(incoming)
+        session_uuid = await chat_service._ensure_session(session_id)
+        memory = await chat_service._load_memory(session_uuid)
+        state = memory.get(ADMIN_ALFRED_FEEDBACK_STATE_KEY)
+        if not isinstance(state, dict):
+            return False
+
+        text = incoming.text.strip()
+        if text.lower() in {"cancel", "never mind", "nevermind", "ignore it", "leave it"}:
+            memory.pop(ADMIN_ALFRED_FEEDBACK_STATE_KEY, None)
+            await chat_service._save_memory(session_uuid, memory)
+            await self.send_text_message(sender, "No problem, I won't log feedback for that one.")
+            return True
+
+        feedback_command = parse_feedback_command(f"thumbs down {text}") or {
+            "rating": "down",
+            "reason": text,
+            "ideal_answer": "",
+        }
+        reason = (feedback_command.get("reason") or "").strip()
+        ideal_answer = (feedback_command.get("ideal_answer") or "").strip()
+        if not reason:
+            reason = "The previous answer needed correction."
+
+        try:
+            feedback = await alfred_feedback_service.submit_feedback_for_last_response(
+                session_id=session_id,
+                rating=str(state.get("rating") or "down"),
+                reason=reason,
+                ideal_answer=ideal_answer,
+                source_channel="whatsapp",
+                actor_user_id=str(admin.id),
+                actor_role=admin.role.value,
+            )
+        except AlfredFeedbackError as exc:
+            memory.pop(ADMIN_ALFRED_FEEDBACK_STATE_KEY, None)
+            await chat_service._save_memory(session_uuid, memory)
+            await self.send_text_message(sender, f"I could not attach that feedback: {exc}")
+            return True
+
+        memory.pop(ADMIN_ALFRED_FEEDBACK_STATE_KEY, None)
+        await chat_service._save_memory(session_uuid, memory)
+        corrected = str(feedback.get("corrected_answer") or "").strip()
+        response_text = "Thanks, I logged that Alfred feedback."
+        if corrected:
+            response_text = f"{response_text}\n\nCorrected answer:\n{corrected}"
+        await self.send_text_message(sender, response_text)
+        return True
+
+    def _admin_feedback_incoming(
+        self,
+        *,
+        sender: str,
+        display_name: str,
+        phone_number_id: str,
+        text: str,
+        provider_message_id: str,
+    ) -> IncomingChatMessage:
+        return IncomingChatMessage(
+            provider="whatsapp",
+            provider_message_id=provider_message_id or f"whatsapp-{uuid.uuid4().hex}",
+            provider_channel_id=phone_number_id,
+            author_provider_id=sender,
+            author_display_name=display_name,
+            text=text,
+            is_direct_message=True,
+            mentioned_bot=True,
+            raw_payload={"type": "reaction_feedback"},
+            received_at=datetime.now(tz=UTC),
+            author_is_provider_admin=True,
+        )
+
     async def _ensure_admin_identity(
         self,
         admin: User,
@@ -3003,6 +3485,26 @@ def visitor_pass_timeframe_confirmation_button_id(decision: str, pass_id: str, r
     return f"iacs:vp_time_user:{decision}:{pass_id}:{request_id}"
 
 
+def parse_reaction_message(message: dict[str, Any]) -> WhatsAppReaction | None:
+    if str(message.get("type") or "").strip().lower() != "reaction":
+        return None
+    reaction = message.get("reaction") if isinstance(message.get("reaction"), dict) else {}
+    emoji = str(reaction.get("emoji") or "").strip()
+    message_id = str(reaction.get("message_id") or "").strip()
+    if not emoji or not message_id:
+        return None
+    return WhatsAppReaction(emoji=emoji, message_id=message_id)
+
+
+def feedback_rating_for_reaction(reaction: WhatsAppReaction) -> str | None:
+    emoji = reaction.emoji.replace("\ufe0f", "")
+    if "👎" in emoji:
+        return "down"
+    if "👍" in emoji:
+        return "up"
+    return None
+
+
 def parse_confirmation_button_id(value: str) -> WhatsAppConfirmation | None:
     parts = str(value or "").split(":", 3)
     if len(parts) != 4 or parts[0] != "iacs" or parts[1] not in {"confirm", "cancel"}:
@@ -3089,6 +3591,199 @@ def parse_visitor_pass_timeframe_reply_message(message: dict[str, Any]) -> Visit
     if button.get("payload"):
         return parse_visitor_pass_timeframe_confirmation_button_id(str(button.get("payload")))
     return None
+
+
+def admin_visitor_pass_message_likely(text: str) -> bool:
+    lower = str(text or "").strip().lower()
+    if not lower:
+        return False
+    phrases = (
+        "visitor pass",
+        "guest pass",
+        "coming",
+        "visiting",
+        "visitor",
+        "guest",
+        "arriving",
+        "staying",
+        "plate",
+        "number is",
+        "phone is",
+        "reg is",
+    )
+    return any(phrase in lower for phrase in phrases)
+
+
+def merge_admin_visitor_pass_state(
+    state: dict[str, Any] | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    next_state = dict(state or {})
+    draft = dict(next_state.get("draft") if isinstance(next_state.get("draft"), dict) else {})
+    for key in ("visitor_name", "arrival_date", "arrival_datetime", "valid_until", "visitor_phone"):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        text = str(value or "").strip()
+        if text and text.lower() != "null":
+            draft[key] = text
+    if "duration_minutes" in payload:
+        try:
+            duration = int(payload.get("duration_minutes") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration > 0:
+            draft["duration_minutes"] = duration
+    if "number_plate" in payload:
+        plate = normalize_registration_number(payload.get("number_plate"))
+        if plate:
+            draft["number_plate"] = plate
+
+    unknown_optional = set(
+        str(item)
+        for item in draft.get("unknown_optional", [])
+        if str(item) in {"visitor_phone", "number_plate"}
+    )
+    raw_unknown = payload.get("unknown_optional")
+    if isinstance(raw_unknown, list):
+        unknown_optional.update(
+            str(item) for item in raw_unknown if str(item) in {"visitor_phone", "number_plate"}
+        )
+    for key in unknown_optional:
+        draft[key] = None
+    draft["unknown_optional"] = sorted(unknown_optional)
+    next_state["draft"] = draft
+    next_state.setdefault("stage", "collecting_details")
+    if draft.get("visitor_name") and next_state.get("duplicate_checked_name") != draft.get("visitor_name"):
+        next_state.pop("duplicate_checked", None)
+        next_state.pop("duplicate_matches", None)
+    return next_state
+
+
+def admin_visitor_pass_reply(payload: dict[str, Any], fallback: str) -> str:
+    reply = str(payload.get("reply") or "").strip()
+    if reply and not reply.lstrip().startswith(("{", "[")):
+        return reply[:1024]
+    return fallback
+
+
+def admin_visitor_pass_duplicate_matches(
+    tool_result: dict[str, Any],
+    visitor_name: str,
+) -> list[dict[str, Any]]:
+    output = tool_result.get("output") if isinstance(tool_result.get("output"), dict) else {}
+    records = output.get("visitor_passes") if isinstance(output.get("visitor_passes"), list) else []
+    needle = re.sub(r"[^a-z0-9]+", "", visitor_name.lower())
+    matches: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("visitor_name") or "").strip()
+        candidate = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if not needle or not candidate:
+            continue
+        score = 1.0 if needle in candidate or candidate in needle else 0.0
+        if not score:
+            from difflib import SequenceMatcher
+
+            score = SequenceMatcher(None, needle, candidate).ratio()
+        if score >= 0.72:
+            matches.append(record)
+    return matches[:5]
+
+
+def admin_visitor_pass_duplicate_reply(state: dict[str, Any]) -> str:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    visitor_name = str(draft.get("visitor_name") or "that visitor").strip()
+    matches = state.get("duplicate_matches") if isinstance(state.get("duplicate_matches"), list) else []
+    first = matches[0] if matches and isinstance(matches[0], dict) else {}
+    matched_name = str(first.get("visitor_name") or visitor_name).strip()
+    status = str(first.get("status") or "").replace("_", " ").strip()
+    status_text = f"{status} " if status else ""
+    return f"I found a {status_text}Visitor Pass for {matched_name} already. Is this the same {visitor_name}, or a different visit?"
+
+
+def admin_visitor_pass_missing_required(state: dict[str, Any]) -> list[str]:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    missing: list[str] = []
+    if not str(draft.get("visitor_name") or "").strip():
+        missing.append("visitor_name")
+    if not _admin_visitor_pass_datetime(draft.get("arrival_datetime"), None):
+        missing.append("arrival_time" if draft.get("arrival_date") else "arrival_date_time")
+    if not draft.get("duration_minutes") and not _admin_visitor_pass_datetime(draft.get("valid_until"), None):
+        missing.append("duration")
+    return missing
+
+
+def admin_visitor_pass_missing_reply(state: dict[str, Any], missing: list[str]) -> str:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    name = str(draft.get("visitor_name") or "").strip()
+    if "visitor_name" in missing:
+        return "Who's visiting?"
+    if "arrival_date_time" in missing and "duration" in missing:
+        return f"When is {name} arriving, and roughly how long is the visit?"
+    if "arrival_date_time" in missing:
+        return f"When is {name} arriving?"
+    if "arrival_time" in missing and "duration" in missing:
+        return f"What time is {name} arriving, and roughly how long is the visit? Plate or phone is handy if you have it, but no worries if not."
+    if "arrival_time" in missing:
+        return f"What time is {name} arriving?"
+    return f"How long should I make {name}'s pass valid for?"
+
+
+def admin_visitor_pass_create_arguments(state: dict[str, Any], timezone_name: str) -> dict[str, Any]:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    valid_from = _admin_visitor_pass_datetime(draft.get("arrival_datetime"), timezone_name)
+    if not valid_from:
+        raise ValueError("Visitor Pass arrival datetime is missing.")
+    valid_until = _admin_visitor_pass_datetime(draft.get("valid_until"), timezone_name)
+    if not valid_until:
+        duration = int(draft.get("duration_minutes") or 0)
+        if duration <= 0:
+            raise ValueError("Visitor Pass duration is missing.")
+        valid_until = valid_from + timedelta(minutes=duration)
+    if valid_until <= valid_from:
+        raise ValueError("Visitor Pass end time must be after arrival.")
+    unknown = set(draft.get("unknown_optional") if isinstance(draft.get("unknown_optional"), list) else [])
+    return {
+        "visitor_name": str(draft.get("visitor_name") or "").strip(),
+        "pass_type": "duration",
+        "visitor_phone": None if "visitor_phone" in unknown else str(draft.get("visitor_phone") or "").strip() or None,
+        "number_plate": None if "number_plate" in unknown else normalize_registration_number(draft.get("number_plate")) or None,
+        "expected_time": valid_from.isoformat(),
+        "valid_from": valid_from.isoformat(),
+        "valid_until": valid_until.isoformat(),
+        "confirm": False,
+    }
+
+
+def admin_visitor_pass_ready_reply(arguments: dict[str, Any]) -> str:
+    name = str(arguments.get("visitor_name") or "the visitor").strip()
+    start = _admin_visitor_pass_datetime(arguments.get("valid_from"), None)
+    end = _admin_visitor_pass_datetime(arguments.get("valid_until"), None)
+    if start and end:
+        return (
+            f"I've got {name} from {start.strftime('%d %b at %H:%M')} to "
+            f"{end.strftime('%H:%M')}. Tap Create pass and I'll make it official."
+        )
+    return f"I've got enough for {name}. Tap Create pass and I'll make it official."
+
+
+def _admin_visitor_pass_datetime(value: Any, timezone_name: str | None) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text or text.lower() == "null":
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    timezone = safe_zoneinfo(timezone_name)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone)
+    return parsed.astimezone(timezone)
 
 
 def extract_message_text(message: dict[str, Any]) -> str:

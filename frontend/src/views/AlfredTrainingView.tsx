@@ -51,7 +51,7 @@ type LessonDraft = {
 
 type LessonTab = "pending" | "learnt";
 
-export function AlfredTrainingView() {
+export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
   const settings = useSettings("llm");
   const [feedback, setFeedback] = React.useState<AlfredFeedbackRecord[]>([]);
   const [lessons, setLessons] = React.useState<AlfredLessonRecord[]>([]);
@@ -61,6 +61,7 @@ export function AlfredTrainingView() {
   const [lessonDraft, setLessonDraft] = React.useState<LessonDraft | null>(null);
   const [lessonTab, setLessonTab] = React.useState<LessonTab>("pending");
   const [modeSaving, setModeSaving] = React.useState(false);
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const load = React.useCallback(async () => {
     setError("");
@@ -84,6 +85,13 @@ export function AlfredTrainingView() {
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    load().catch(() => undefined);
+    settings.reload().catch(() => undefined);
+  }, [load, refreshToken, settings.reload]);
 
   const learningMode = String(settings.values.alfred_learning_mode || "review_then_learn");
   const pendingLessons = lessons.filter((lesson) => lesson.status === "pending");

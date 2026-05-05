@@ -1496,12 +1496,27 @@ async def query_visitor_passes(arguments: dict[str, Any]) -> dict[str, Any]:
     limit = _bounded_int(arguments.get("limit"), default=20, minimum=1, maximum=100)
     statuses = _visitor_pass_statuses_from_arguments(arguments)
     search = str(arguments.get("search") or arguments.get("visitor_name") or "").strip() or None
+    fuzzy_name = bool(arguments.get("fuzzy_name"))
     service = get_visitor_pass_service()
     async with AsyncSessionLocal() as session:
         changed = await service.refresh_statuses(session=session, publish=False)
         if changed:
             await session.commit()
         passes = await service.list_passes(session, statuses=statuses, search=search, limit=limit)
+        if fuzzy_name and search:
+            broad_limit = max(limit, 100)
+            candidates = await service.list_passes(session, statuses=statuses, search=None, limit=broad_limit)
+            merged: list[VisitorPass] = []
+            seen: set[str] = set()
+            for pass_ in [*passes, *_fuzzy_visitor_pass_name_matches(search, candidates)]:
+                key = str(pass_.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(pass_)
+                if len(merged) >= limit:
+                    break
+            passes = merged
         records = [_visitor_pass_agent_payload(pass_, config.site_timezone) for pass_ in passes]
     return {
         "visitor_passes": records,
@@ -1510,8 +1525,31 @@ async def query_visitor_passes(arguments: dict[str, Any]) -> dict[str, Any]:
         "filters": {
             "statuses": [status.value for status in statuses] if statuses else None,
             "search": search,
+            "fuzzy_name": fuzzy_name or None,
         },
     }
+
+
+def _fuzzy_visitor_pass_name_matches(search: str, candidates: list[VisitorPass]) -> list[VisitorPass]:
+    needle = _normalize_name_for_similarity(search)
+    if not needle:
+        return []
+    scored: list[tuple[float, VisitorPass]] = []
+    for pass_ in candidates:
+        candidate = _normalize_name_for_similarity(pass_.visitor_name)
+        if not candidate:
+            continue
+        score = SequenceMatcher(None, needle, candidate).ratio()
+        if needle in candidate or candidate in needle:
+            score = max(score, 0.9)
+        if score >= 0.72:
+            scored.append((score, pass_))
+    scored.sort(key=lambda item: (item[0], item[1].expected_time), reverse=True)
+    return [pass_ for _score, pass_ in scored]
+
+
+def _normalize_name_for_similarity(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
 async def get_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1532,14 +1570,13 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     expected_value = arguments.get("expected_time")
     pass_type = _visitor_pass_type_from_arguments(arguments.get("pass_type"))
     visitor_phone = str(arguments.get("visitor_phone") or "").strip()
+    number_plate = normalize_registration_number(arguments.get("number_plate")) or None
     valid_from_value = arguments.get("valid_from")
     valid_until_value = arguments.get("valid_until")
     missing = []
     if not visitor_name:
         missing.append("visitor_name")
     if pass_type == VisitorPassType.DURATION:
-        if not visitor_phone:
-            missing.append("visitor_phone")
         if not valid_from_value:
             missing.append("valid_from")
         if not valid_until_value:
@@ -1552,7 +1589,7 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             "requires_details": True,
             "missing": missing,
             "detail": (
-                "I need the visitor name, phone number, and start/end times before I can prepare a duration Visitor Pass."
+                "I need the visitor name and start/end times before I can prepare a duration Visitor Pass."
                 if pass_type == VisitorPassType.DURATION
                 else "I need the visitor name and expected time before I can prepare a Visitor Pass."
             ),
@@ -1594,6 +1631,7 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             "visitor_name": visitor_name,
             "pass_type": pass_type.value,
             "visitor_phone": visitor_phone or None,
+            "number_plate": number_plate,
             "expected_time": _agent_datetime_iso(expected_time, config.site_timezone),
             "expected_time_display": _agent_datetime_display(expected_time, config.site_timezone),
             "window_minutes": window_minutes,
@@ -1621,6 +1659,7 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 window_minutes=window_minutes,
                 pass_type=pass_type,
                 visitor_phone=visitor_phone or None,
+                number_plate=number_plate,
                 valid_from=valid_from,
                 valid_until=valid_until,
                 source="alfred",

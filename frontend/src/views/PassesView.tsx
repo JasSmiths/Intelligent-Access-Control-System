@@ -169,7 +169,7 @@ export const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "
 
 export const visitorPassWindowOptions = [30, 60, 90, 120, 180];
 
-export function PassesView({ query, realtime }: { query: string; realtime: RealtimeMessage[] }) {
+export function PassesView({ query, realtime, refreshToken }: { query: string; realtime: RealtimeMessage[]; refreshToken: number }) {
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
   const [filters, setFilters] = React.useState<Set<VisitorPassStatus>>(() => new Set(defaultVisitorPassFilters));
   const [modalPass, setModalPass] = React.useState<VisitorPass | null>(null);
@@ -177,6 +177,7 @@ export function PassesView({ query, realtime }: { query: string; realtime: Realt
   const [detailPass, setDetailPass] = React.useState<VisitorPass | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const loadPasses = React.useCallback(async (options?: { showLoading?: boolean }) => {
     const showLoading = options?.showLoading !== false;
@@ -200,6 +201,12 @@ export function PassesView({ query, realtime }: { query: string; realtime: Realt
   React.useEffect(() => {
     loadPasses().catch(() => undefined);
   }, [loadPasses]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    loadPasses({ showLoading: false }).catch(() => undefined);
+  }, [loadPasses, refreshToken]);
 
   React.useEffect(() => {
     const latest = realtime[0];

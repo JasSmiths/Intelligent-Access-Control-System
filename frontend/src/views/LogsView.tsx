@@ -290,7 +290,7 @@ export function realtimeLogKey(log: RealtimeMessage) {
   ].join("|");
 }
 
-export function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; onClearRealtime: () => void }) {
+export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: RealtimeMessage[]; onClearRealtime: () => void; refreshToken: number }) {
   const [tab, setTab] = React.useState<LogsTabKey>("lpr");
   const [query, setQuery] = React.useState("");
   const [level, setLevel] = React.useState("all");
@@ -312,6 +312,7 @@ export function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; o
   const [countdownNow, setCountdownNow] = React.useState(() => Date.now());
   const reloadTimerRef = React.useRef<number | null>(null);
   const processedRealtimeKeysRef = React.useRef<Set<string>>(new Set());
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const isTraceTab = Boolean(traceCategories[tab]);
   const isAuditTab = Boolean(auditCategories[tab] || auditActionPrefixes[tab]);
@@ -385,6 +386,12 @@ export function LogsView({ logs, onClearRealtime }: { logs: RealtimeMessage[]; o
     loadTelemetry("reset").catch(() => undefined);
     loadTelemetryStorage().catch(() => undefined);
   }
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    refreshLogs();
+  }, [refreshToken]);
 
   async function clearLogs() {
     if (!window.confirm("Clear all telemetry, audit, and live log records?")) return;

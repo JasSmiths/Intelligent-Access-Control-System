@@ -32,6 +32,7 @@ from app.models.core import (
     NotificationRule,
     Person,
     Presence,
+    ReportExport,
     Schedule,
     ScheduleOverride,
     SystemSetting,
@@ -39,6 +40,7 @@ from app.models.core import (
     TelemetryTrace,
     User,
     Vehicle,
+    VehiclePersonAssignment,
     VisitorPass,
 )
 
@@ -74,6 +76,7 @@ __all__ = [
     "NotificationRule",
     "Person",
     "Presence",
+    "ReportExport",
     "Schedule",
     "ScheduleOverride",
     "SystemSetting",
@@ -81,5 +84,6 @@ __all__ = [
     "TelemetryTrace",
     "User",
     "Vehicle",
+    "VehiclePersonAssignment",
     "VisitorPass",
 ]

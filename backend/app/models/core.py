@@ -51,6 +51,7 @@ class Person(Base, TimestampMixin):
     first_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
     last_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    pronouns: Mapped[str | None] = mapped_column(String(24))
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -64,6 +65,10 @@ class Person(Base, TimestampMixin):
     group: Mapped[Group | None] = relationship(back_populates="people")
     schedule: Mapped["Schedule | None"] = relationship(back_populates="people")
     vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="owner")
+    vehicle_assignments: Mapped[list["VehiclePersonAssignment"]] = relationship(
+        back_populates="person",
+        cascade="all, delete-orphan",
+    )
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
 
 
@@ -80,6 +85,7 @@ class Vehicle(Base, TimestampMixin):
     make: Mapped[str | None] = mapped_column(String(80))
     model: Mapped[str | None] = mapped_column(String(120))
     color: Mapped[str | None] = mapped_column(String(80))
+    fuel_type: Mapped[str | None] = mapped_column(String(80))
     mot_status: Mapped[str | None] = mapped_column(String(80))
     tax_status: Mapped[str | None] = mapped_column(String(80))
     mot_expiry: Mapped[date | None] = mapped_column(Date)
@@ -91,6 +97,26 @@ class Vehicle(Base, TimestampMixin):
     owner: Mapped[Person | None] = relationship(back_populates="vehicles")
     schedule: Mapped["Schedule | None"] = relationship(back_populates="vehicles")
     events: Mapped[list["AccessEvent"]] = relationship(back_populates="vehicle")
+    person_assignments: Mapped[list["VehiclePersonAssignment"]] = relationship(
+        back_populates="vehicle",
+        cascade="all, delete-orphan",
+    )
+
+
+class VehiclePersonAssignment(Base, TimestampMixin):
+    __tablename__ = "vehicle_person_assignments"
+
+    vehicle_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    vehicle: Mapped[Vehicle] = relationship(back_populates="person_assignments")
+    person: Mapped[Person] = relationship(back_populates="vehicle_assignments")
 
 
 class User(Base, TimestampMixin):
@@ -717,6 +743,35 @@ Index(
     AccessEvent.created_at,
     postgresql_where=AccessEvent.snapshot_path.is_not(None),
 )
+
+
+class ReportExport(Base, TimestampMixin):
+    __tablename__ = "report_exports"
+    __table_args__ = (
+        UniqueConstraint("report_number", name="ux_report_exports_report_number"),
+        Index("ix_report_exports_person_created", "person_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    report_number: Mapped[str] = mapped_column(String(12), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(80), default="person_movements", nullable=False, index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"),
+        index=True,
+    )
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    options: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    pdf_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    pdf_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+
+    person: Mapped[Person | None] = relationship()
+    created_by: Mapped[User | None] = relationship()
 
 
 class VisitorPass(Base, TimestampMixin):

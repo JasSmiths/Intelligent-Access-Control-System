@@ -242,7 +242,8 @@ export function DynamicSettingsView({
   icon: Icon,
   currentUser,
   maintenanceStatus,
-  onMaintenanceStatusChanged
+  onMaintenanceStatusChanged,
+  refreshToken
 }: {
   category: "general" | "auth" | "lpr";
   title: string;
@@ -250,12 +251,14 @@ export function DynamicSettingsView({
   currentUser?: UserAccount;
   maintenanceStatus?: MaintenanceStatus | null;
   onMaintenanceStatusChanged?: (status: MaintenanceStatus) => void;
+  refreshToken: number;
 }) {
-  const { values, loading, error, save } = useSettings(category);
+  const { values, loading, error, save, reload } = useSettings(category);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
   const fields = settingsFields(category);
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   React.useEffect(() => {
     const next: Record<string, string> = {};
@@ -264,6 +267,12 @@ export function DynamicSettingsView({
     }
     setForm(next);
   }, [values, category]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    reload().catch(() => undefined);
+  }, [refreshToken, reload]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -315,7 +324,7 @@ export function DynamicSettingsView({
             <button className="primary-button" type="submit">Save Settings</button>
           </div>
         </div>
-        {category === "auth" ? <AuthSecretSecurityPanel /> : null}
+        {category === "auth" ? <AuthSecretSecurityPanel refreshToken={refreshToken} /> : null}
         <div className="card">
           <CardHeader icon={Database} title="Source" />
           <div className="settings-list">
@@ -329,7 +338,7 @@ export function DynamicSettingsView({
   );
 }
 
-export function AuthSecretSecurityPanel() {
+export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number }) {
   const [status, setStatus] = React.useState<AuthSecretStatus | null>(null);
   const [customSecret, setCustomSecret] = React.useState("");
   const [confirmed, setConfirmed] = React.useState(false);
@@ -337,6 +346,7 @@ export function AuthSecretSecurityPanel() {
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -353,6 +363,12 @@ export function AuthSecretSecurityPanel() {
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    load().catch(() => undefined);
+  }, [load, refreshToken]);
 
   const rotate = async () => {
     if (!confirmed || saving) return;
@@ -497,10 +513,12 @@ export function MaintenanceModeSettings({
 
 export function UsersView({
   currentUser,
-  onCurrentUserUpdated
+  onCurrentUserUpdated,
+  refreshToken
 }: {
   currentUser: UserAccount;
   onCurrentUserUpdated: (user: UserAccount) => void;
+  refreshToken: number;
 }) {
   const [users, setUsers] = React.useState<UserAccount[]>([]);
   const [people, setPeople] = React.useState<Person[]>([]);
@@ -510,6 +528,7 @@ export function UsersView({
   const [selectedUser, setSelectedUser] = React.useState<UserAccount | null>(null);
   const [temporaryPassword, setTemporaryPassword] = React.useState<string | null>(null);
   const isAdmin = currentUser.role === "admin";
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const loadUsers = React.useCallback(async () => {
     setError("");
@@ -530,6 +549,12 @@ export function UsersView({
   React.useEffect(() => {
     loadUsers().catch(() => undefined);
   }, [loadUsers]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    loadUsers().catch(() => undefined);
+  }, [loadUsers, refreshToken]);
 
   const openCreate = () => {
     setTemporaryPassword(null);

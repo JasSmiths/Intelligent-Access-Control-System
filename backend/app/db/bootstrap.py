@@ -23,6 +23,7 @@ async def init_database() -> None:
             await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS pronouns VARCHAR(24)"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS schedule_id UUID"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_people_schedule_id ON people (schedule_id)"))
@@ -63,6 +64,7 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS schedule_id UUID"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mot_status VARCHAR(80)"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tax_status VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS fuel_type VARCHAR(80)"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mot_expiry DATE"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tax_expiry DATE"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_dvla_lookup_date DATE"))
@@ -78,6 +80,54 @@ async def init_database() -> None:
                     EXCEPTION
                         WHEN duplicate_object THEN NULL;
                     END $$;
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS vehicle_person_assignments (
+                        vehicle_id UUID NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+                        person_id UUID NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                        PRIMARY KEY (vehicle_id, person_id)
+                    )
+                    """
+                )
+            )
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicle_person_assignments_person_id ON vehicle_person_assignments (person_id)"))
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO vehicle_person_assignments (vehicle_id, person_id)
+                    SELECT id, person_id
+                    FROM vehicles
+                    WHERE person_id IS NOT NULL
+                    ON CONFLICT DO NOTHING
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    WITH derived_vehicle_people AS (
+                        SELECT
+                            vehicles.id AS vehicle_id,
+                            CASE
+                                WHEN count(vehicle_person_assignments.person_id) = 1
+                                    THEN min(vehicle_person_assignments.person_id::text)::uuid
+                                ELSE NULL
+                            END AS derived_person_id
+                        FROM vehicles
+                        LEFT JOIN vehicle_person_assignments
+                            ON vehicle_person_assignments.vehicle_id = vehicles.id
+                        GROUP BY vehicles.id
+                    )
+                    UPDATE vehicles
+                    SET person_id = derived_vehicle_people.derived_person_id
+                    FROM derived_vehicle_people
+                    WHERE vehicles.id = derived_vehicle_people.vehicle_id
                     """
                 )
             )
@@ -193,6 +243,11 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_report_exports_report_number ON report_exports (report_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_report_type ON report_exports (report_type)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_person_id ON report_exports (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_created_by_user_id ON report_exports (created_by_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_person_created ON report_exports (person_id, created_at)"))
             await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claim_token VARCHAR(64)"))
             await conn.execute(text("ALTER TABLE gate_malfunction_states ADD COLUMN IF NOT EXISTS attempt_claimed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_states_attempt_claim_token ON gate_malfunction_states (attempt_claim_token)"))

@@ -137,6 +137,7 @@ app = FastAPI(
         {"name": "Schedules", "description": "Reusable weekly access windows and dependency checks."},
         {"name": "Visitor Passes", "description": "Anticipated one-shot visitor access windows and telemetry."},
         {"name": "Realtime", "description": "Dashboard realtime WebSocket channel."},
+        {"name": "Reports", "description": "Generated access and presence reports with PDF export."},
         {"name": "Settings", "description": "Dynamic runtime settings and integration test actions."},
         {"name": "Telemetry", "description": "Trace, audit, category, artifact, and purge endpoints."},
         {"name": "Users", "description": "Admin-managed local dashboard users."},

@@ -102,7 +102,39 @@ import {
   Vehicle
 } from "../shared";
 
+type PersonPronouns = NonNullable<Person["pronouns"]>;
+type PersonPronounFormValue = PersonPronouns | "";
 
+const SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME: Record<string, PersonPronouns> = {
+  jason: "he/him",
+  john: "he/him",
+  james: "he/him",
+  david: "he/him",
+  michael: "he/him",
+  paul: "he/him",
+  mark: "he/him",
+  peter: "he/him",
+  stephen: "he/him",
+  steven: "he/him",
+  sarah: "she/her",
+  steph: "she/her",
+  stephanie: "she/her",
+  sylvia: "she/her",
+  emma: "she/her",
+  olivia: "she/her",
+  amelia: "she/her",
+  ava: "she/her",
+  charlotte: "she/her",
+  grace: "she/her"
+};
+
+function normalizePersonPronounFormValue(value: string): PersonPronounFormValue {
+  return value === "he/him" || value === "she/her" ? value : "";
+}
+
+function suggestedPersonPronouns(firstName: string): PersonPronounFormValue {
+  return SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME[firstName.trim().toLowerCase()] ?? "";
+}
 
 export type HomeAssistantPersonSuggestion = {
   mobile?: {
@@ -119,18 +151,21 @@ export type DvlaLookupResponse = {
     model?: string | null;
     colour?: string | null;
     color?: string | null;
+    fuelType?: string | null;
   } & Record<string, unknown>;
   display_vehicle?: {
     make?: string | null;
     model?: string | null;
     colour?: string | null;
     color?: string | null;
+    fuelType?: string | null;
   } & Record<string, unknown>;
   normalized_vehicle?: {
     registration_number?: string | null;
     make?: string | null;
     colour?: string | null;
     color?: string | null;
+    fuel_type?: string | null;
     mot_status?: string | null;
     mot_expiry?: string | null;
     tax_status?: string | null;
@@ -407,8 +442,12 @@ export const unassignedDirectoryGroup: DirectoryGroupMeta = {
   category: null
 };
 
+export function isResidentsDirectoryGroup(section: DirectoryGroupMeta) {
+  return section.category?.trim().toLowerCase() === "family" && section.name.trim().toLowerCase() === "residents";
+}
+
 export function directoryGroupDefaultOpen(section: DirectoryGroupMeta) {
-  return section.category?.trim().toLowerCase() === "family" || section.name.trim().toLowerCase() === "family";
+  return isResidentsDirectoryGroup(section);
 }
 
 export function buildDirectoryGroupIndex(groups: Group[]) {
@@ -452,6 +491,7 @@ export function directoryGroupMetaForPerson(person: Person, groupById: Map<strin
 }
 
 export function directoryGroupOrder(meta: DirectoryGroupMeta, groupOrder: Map<string, number>, groupCount: number) {
+  if (isResidentsDirectoryGroup(meta)) return -1;
   const knownOrder = groupOrder.get(meta.id);
   if (knownOrder !== undefined) return knownOrder;
   if (meta.id === unassignedDirectoryGroup.id) return groupCount + 1000;
@@ -520,6 +560,11 @@ export function ownerPeopleForVehicle(
 ) {
   const ownersById = new Map<string, Person>();
 
+  for (const personId of vehicle.person_ids ?? []) {
+    const person = peopleById.get(personId);
+    if (person) ownersById.set(person.id, person);
+  }
+
   for (const person of peopleByVehicleId.get(vehicle.id) ?? []) {
     ownersById.set(person.id, person);
   }
@@ -539,6 +584,7 @@ export function vehicleOwnerLabel(
 ) {
   const owners = ownerPeopleForVehicle(vehicle, peopleByVehicleId, peopleById);
   if (owners.length) return owners.map((person) => person.display_name).join(", ");
+  if (vehicle.owners?.length) return vehicle.owners.join(", ");
   return vehicle.owner ?? "Unassigned";
 }
 
@@ -815,6 +861,7 @@ export function PersonModal({
   const [form, setForm] = React.useState({
     first_name: person?.first_name ?? "",
     last_name: person?.last_name ?? "",
+    pronouns: (person?.pronouns ?? "") as PersonPronounFormValue,
     profile_photo_data_url: person?.profile_photo_data_url ?? "",
     group_id: person?.group_id ?? groups[0]?.id ?? "",
     schedule_id: person?.schedule_id ?? "",
@@ -829,6 +876,7 @@ export function PersonModal({
   const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
   const [haDiscoveryLoading, setHaDiscoveryLoading] = React.useState(false);
   const [haMobileSelectionTouched, setHaMobileSelectionTouched] = React.useState(Boolean(person?.home_assistant_mobile_app_notify_service));
+  const [pronounSelectionTouched, setPronounSelectionTouched] = React.useState(Boolean(person?.pronouns));
   const [haSuggestion, setHaSuggestion] = React.useState<HomeAssistantPersonSuggestion>({});
   const [haTestFeedback, setHaTestFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [sendingHaTest, setSendingHaTest] = React.useState(false);
@@ -873,6 +921,11 @@ export function PersonModal({
     setHaMobileSelectionTouched(true);
     setHaTestFeedback(null);
     update("home_assistant_mobile_app_notify_service", serviceId);
+  };
+
+  const updatePronouns = (pronouns: string) => {
+    setPronounSelectionTouched(true);
+    update("pronouns", normalizePersonPronounFormValue(pronouns));
   };
 
   const sendHomeAssistantMobileTest = async () => {
@@ -921,6 +974,14 @@ export function PersonModal({
   }, []);
 
   React.useEffect(() => {
+    if (pronounSelectionTouched) return;
+    const suggestedPronouns = suggestedPersonPronouns(form.first_name);
+    setForm((current) => (
+      current.pronouns === suggestedPronouns ? current : { ...current, pronouns: suggestedPronouns }
+    ));
+  }, [form.first_name, pronounSelectionTouched]);
+
+  React.useEffect(() => {
     if (!haDiscovery) return;
     const firstName = form.first_name.trim();
     const lastName = form.last_name.trim();
@@ -952,6 +1013,7 @@ export function PersonModal({
     const payload = {
       first_name: form.first_name,
       last_name: form.last_name,
+      pronouns: form.pronouns || null,
       profile_photo_data_url: form.profile_photo_data_url || null,
       group_id: form.group_id || null,
       schedule_id: form.schedule_id || null,
@@ -982,6 +1044,7 @@ export function PersonModal({
     first_name: form.first_name,
     last_name: form.last_name,
     display_name: `${form.first_name} ${form.last_name}`.trim() || "New person",
+    pronouns: form.pronouns || null,
     profile_photo_data_url: form.profile_photo_data_url || null,
     group_id: form.group_id || null,
     group: groups.find((group) => group.id === form.group_id)?.name ?? null,
@@ -1063,6 +1126,14 @@ export function PersonModal({
             <select value={form.is_active ? "active" : "inactive"} onChange={(event) => update("is_active", event.target.value === "active")}>
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Pronouns</span>
+            <select value={form.pronouns} onChange={(event) => updatePronouns(event.target.value)}>
+              <option value="">Unspecified</option>
+              <option value="he/him">He / him</option>
+              <option value="she/her">She / her</option>
             </select>
           </label>
         </div>
@@ -1301,6 +1372,7 @@ export function VehiclesView({
       {modalOpen ? (
         <VehicleModal
           defaultPolicyOptionLabel={defaultPolicyOptionLabel}
+          groups={groups}
           mode={selectedVehicle ? "edit" : "create"}
             onClose={closeModal}
             onSaved={async () => {
@@ -1318,8 +1390,105 @@ export function VehiclesView({
   );
 }
 
+export function VehiclePeoplePicker({
+  groups,
+  onToggle,
+  people,
+  selectedPersonIds
+}: {
+  groups: Group[];
+  onToggle: (personId: string) => void;
+  people: Person[];
+  selectedPersonIds: string[];
+}) {
+  const selectedPersonIdSet = React.useMemo(() => new Set(selectedPersonIds), [selectedPersonIds]);
+  const selectedPeople = React.useMemo(
+    () => people
+      .filter((person) => selectedPersonIdSet.has(person.id))
+      .sort((left, right) => left.display_name.localeCompare(right.display_name)),
+    [people, selectedPersonIdSet]
+  );
+  const groupSections = React.useMemo(() => {
+    const allPeople = [...people].sort((left, right) => left.display_name.localeCompare(right.display_name));
+    return [
+      {
+        id: "all",
+        title: "All People",
+        description: "Every directory person",
+        items: allPeople
+      },
+      ...groupPeopleByDirectoryGroup(people, groups).map((section) => ({
+        id: section.id,
+        title: section.name,
+        description: section.category ? titleCase(section.category) : "No group",
+        items: section.items
+      }))
+    ];
+  }, [groups, people]);
+  const [activeGroupId, setActiveGroupId] = React.useState("all");
+  const activeGroup = groupSections.find((section) => section.id === activeGroupId) ?? groupSections[0];
+
+  React.useEffect(() => {
+    if (!groupSections.some((section) => section.id === activeGroupId)) {
+      setActiveGroupId("all");
+    }
+  }, [activeGroupId, groupSections]);
+
+  return (
+    <div className="field vehicle-person-field">
+      <span>Assigned people</span>
+      <div className="vehicle-person-picker">
+        <div className="vehicle-person-selected">
+          {selectedPeople.length ? selectedPeople.map((person) => (
+            <button className="vehicle-person-chip" key={person.id} onClick={() => onToggle(person.id)} type="button">
+              <PersonAvatar person={person} />
+              <span>{person.display_name}</span>
+              <X size={13} />
+            </button>
+          )) : <span className="vehicle-person-empty">No people assigned</span>}
+        </div>
+        <div className="vehicle-person-browser">
+          <div className="vehicle-person-groups" role="tablist" aria-label="Person groups">
+            {groupSections.map((section) => (
+              <button
+                aria-selected={activeGroup.id === section.id}
+                className={activeGroup.id === section.id ? "vehicle-person-group active" : "vehicle-person-group"}
+                key={section.id}
+                onClick={() => setActiveGroupId(section.id)}
+                type="button"
+              >
+                <span>
+                  <strong>{section.title}</strong>
+                  <small>{section.description}</small>
+                </span>
+                <Badge tone="gray">{section.items.length}</Badge>
+              </button>
+            ))}
+          </div>
+          <div className="vehicle-person-list">
+            {activeGroup.items.length ? activeGroup.items.map((person) => {
+              const selected = selectedPersonIdSet.has(person.id);
+              return (
+                <label className={selected ? "vehicle-person-row selected" : "vehicle-person-row"} key={person.id}>
+                  <input checked={selected} onChange={() => onToggle(person.id)} type="checkbox" />
+                  <PersonAvatar person={person} />
+                  <span>
+                    <strong>{person.display_name}</strong>
+                    <small>{person.group ? `${person.group} - ${titleCase(person.category ?? "")}` : titleCase(person.category ?? "No group")}</small>
+                  </span>
+                </label>
+              );
+            }) : <div className="empty-state compact">No people in this group</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function VehicleModal({
   defaultPolicyOptionLabel,
+  groups,
   mode,
   onClose,
   onSaved,
@@ -1330,6 +1499,7 @@ export function VehicleModal({
   vehicle
 }: {
   defaultPolicyOptionLabel: string;
+  groups: Group[];
   mode: "create" | "edit";
   onClose: () => void;
   onSaved: () => Promise<void>;
@@ -1345,13 +1515,14 @@ export function VehicleModal({
     make: vehicle?.make ?? "",
     model: vehicle?.model ?? "",
     color: vehicle?.color ?? "",
+    fuel_type: vehicle?.fuel_type ?? "",
     mot_status: vehicle?.mot_status ?? "",
     tax_status: vehicle?.tax_status ?? "",
     mot_expiry: vehicle?.mot_expiry ?? "",
     tax_expiry: vehicle?.tax_expiry ?? "",
     last_dvla_lookup_date: vehicle?.last_dvla_lookup_date ?? "",
     description: vehicle?.description ?? "",
-    person_id: vehicle?.person_id ?? "",
+    person_ids: vehicle?.person_ids ?? (vehicle?.person_id ? [vehicle.person_id] : []),
     schedule_id: vehicle?.schedule_id ?? "",
     is_active: vehicle?.is_active ?? true
   });
@@ -1367,6 +1538,15 @@ export function VehicleModal({
   const initialRegistrationRef = React.useRef(vehicle?.registration_number ?? "");
 
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
+
+  const toggleAssignedPerson = (personId: string) => {
+    update(
+      "person_ids",
+      form.person_ids.includes(personId)
+        ? form.person_ids.filter((id) => id !== personId)
+        : [...form.person_ids, personId]
+    );
+  };
 
   React.useEffect(() => {
     const registrationNumber = normalizePlateInput(form.registration_number);
@@ -1394,12 +1574,14 @@ export function VehicleModal({
           const model = typeof displayVehicle.model === "string" ? displayVehicle.model : "";
           const normalizedColor = normalizedVehicle?.colour ?? normalizedVehicle?.color;
           const color = normalizedColor || (typeof (displayVehicle.colour ?? displayVehicle.color) === "string" ? String(displayVehicle.colour ?? displayVehicle.color) : "");
+          const fuelType = normalizedVehicle?.fuel_type || (typeof displayVehicle.fuelType === "string" ? displayVehicle.fuelType : "");
           setForm((current) => ({
             ...current,
             registration_number: result.registration_number || current.registration_number,
             make: make || current.make,
             model: model || current.model,
             color: color || current.color,
+            fuel_type: fuelType || current.fuel_type,
             mot_status: normalizedVehicle?.mot_status ?? current.mot_status,
             tax_status: normalizedVehicle?.tax_status ?? current.tax_status,
             mot_expiry: normalizedVehicle?.mot_expiry ?? current.mot_expiry,
@@ -1448,6 +1630,7 @@ export function VehicleModal({
           ...current,
           make: refreshed.make ?? current.make,
           color: refreshed.color ?? current.color,
+          fuel_type: refreshed.fuel_type ?? current.fuel_type,
           mot_status: refreshed.mot_status ?? "",
           tax_status: refreshed.tax_status ?? "",
           mot_expiry: refreshed.mot_expiry ?? "",
@@ -1475,14 +1658,15 @@ export function VehicleModal({
         make: form.make || null,
         model: form.model || null,
         color: form.color || null,
+        fuel_type: form.fuel_type || null,
         mot_status: form.mot_status || null,
         tax_status: form.tax_status || null,
         mot_expiry: form.mot_expiry || null,
         tax_expiry: form.tax_expiry || null,
         last_dvla_lookup_date: form.last_dvla_lookup_date || null,
         description: form.description || null,
-        person_id: form.person_id || null,
-      schedule_id: form.schedule_id || null,
+        person_ids: form.person_ids,
+        schedule_id: form.schedule_id || null,
       is_active: form.is_active
     };
     try {
@@ -1514,8 +1698,12 @@ export function VehicleModal({
       mot_expiry: form.mot_expiry || null,
       tax_expiry: form.tax_expiry || null,
       last_dvla_lookup_date: form.last_dvla_lookup_date || null,
-    person_id: form.person_id || null,
-    owner: people.find((person) => person.id === form.person_id)?.display_name ?? null,
+    person_id: form.person_ids.length === 1 ? form.person_ids[0] : null,
+    owner: form.person_ids.length === 1
+      ? people.find((person) => person.id === form.person_ids[0])?.display_name ?? null
+      : null,
+    person_ids: form.person_ids,
+    owners: people.filter((person) => form.person_ids.includes(person.id)).map((person) => person.display_name),
     schedule_id: form.schedule_id || null,
     schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
     is_active: form.is_active
@@ -1529,7 +1717,7 @@ export function VehicleModal({
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Vehicle" : "Add Vehicle"}</h2>
-            <p>{mode === "edit" ? "Update vehicle details and assignment." : "Register a vehicle and assign it to a person."}</p>
+            <p>{mode === "edit" ? "Update vehicle details and assignments." : "Register a vehicle and assign it to people."}</p>
           </div>
           <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
             <X size={16} />
@@ -1601,15 +1789,12 @@ export function VehicleModal({
             <input value={form.description} onChange={(event) => update("description", event.target.value)} />
           </div>
         </label>
-        <label className="field">
-          <span>Assigned person</span>
-          <select value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
-            <option value="">Unassigned</option>
-            {people.map((person) => (
-              <option key={person.id} value={person.id}>{person.display_name}</option>
-            ))}
-          </select>
-        </label>
+        <VehiclePeoplePicker
+          groups={groups}
+          onToggle={toggleAssignedPerson}
+          people={people}
+          selectedPersonIds={form.person_ids}
+        />
         <label className="field">
           <span>Access Schedule</span>
           <select value={form.schedule_id} onChange={(event) => update("schedule_id", event.target.value)}>

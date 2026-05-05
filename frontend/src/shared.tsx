@@ -165,6 +165,7 @@ export type Person = {
   first_name: string;
   last_name: string;
   display_name: string;
+  pronouns: "he/him" | "she/her" | null;
   profile_photo_data_url: string | null;
   group_id: string | null;
   group: string | null;
@@ -186,6 +187,7 @@ export type Vehicle = {
   make: string | null;
   model: string | null;
   color?: string | null;
+  fuel_type?: string | null;
   mot_status?: string | null;
   tax_status?: string | null;
   mot_expiry?: string | null;
@@ -193,6 +195,8 @@ export type Vehicle = {
   last_dvla_lookup_date?: string | null;
   person_id?: string | null;
   owner?: string | null;
+  person_ids?: string[];
+  owners?: string[];
   schedule_id?: string | null;
   schedule?: string | null;
   is_active?: boolean;

@@ -1831,6 +1831,7 @@ async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
         color="White",
         mot_status="Valid",
         tax_status="Taxed",
+        fuel_type="Electric",
         mot_expiry=date(2026, 10, 14),
         tax_expiry=date(2027, 1, 1),
         last_dvla_lookup_date=date(2026, 4, 27),
@@ -1854,6 +1855,7 @@ async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
         "registration_number": "PE70DHX",
         "make": "Peugeot",
         "colour": "White",
+        "fuel_type": "Electric",
         "mot_status": "Valid",
         "tax_status": "Taxed",
         "mot_expiry": "2026-10-14",
@@ -2035,3 +2037,71 @@ def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -
     assert facts["vehicle_colour"] == "Grey"
     assert facts["vehicle_type"] == "Car"
     assert facts["detected_vehicle_colour"] == "Grey"
+
+
+@pytest.mark.parametrize(
+    ("pronouns", "object_pronoun", "possessive_determiner"),
+    [
+        ("he/him", "him", "his"),
+        ("she/her", "her", "her"),
+        (None, "them", "their"),
+    ],
+)
+def test_notification_facts_use_person_pronouns(
+    pronouns: str | None,
+    object_pronoun: str,
+    possessive_determiner: str,
+) -> None:
+    service = AccessEventService()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        raw_payload={"telemetry": {"trace_id": "trace-1"}},
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        source="ubiquiti",
+        timing_classification=TimingClassification.NORMAL,
+        occurred_at=datetime(2026, 5, 5, 10, 0, tzinfo=UTC),
+    )
+    person = SimpleNamespace(
+        first_name="Jason",
+        last_name="Smith",
+        display_name="Jason Smith",
+        pronouns=pronouns,
+        group=SimpleNamespace(name="Family"),
+    )
+
+    facts = service._notification_facts(event, person=person, vehicle=None, message="Granted")
+
+    assert facts["object_pronoun"] == object_pronoun
+    assert facts["possessive_determiner"] == possessive_determiner
+
+
+@pytest.mark.parametrize(
+    ("pronouns", "expected"),
+    [
+        (
+            "he/him",
+            "Jason's Tesla Model Y has been detected at the gate. I've let him in.",
+        ),
+        (
+            "she/her",
+            "Jason's Tesla Model Y has been detected at the gate. I've let her in.",
+        ),
+        (
+            None,
+            "Jason's Tesla Model Y has been detected at the gate. I've let them in.",
+        ),
+    ],
+)
+def test_authorized_entry_message_uses_person_pronouns(pronouns: str | None, expected: str) -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(first_name="Jason", display_name="Jason Smith", pronouns=pronouns)
+    vehicle = SimpleNamespace(
+        make="Tesla",
+        model="Model Y",
+        description=None,
+        registration_number="PE70DHX",
+    )
+
+    assert service._authorized_entry_message(person, vehicle) == expected

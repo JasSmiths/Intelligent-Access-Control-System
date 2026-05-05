@@ -632,3 +632,28 @@ async def test_alfred_create_visitor_pass_requires_confirmation(monkeypatch) -> 
     assert result["visitor_name"] == "Sarah"
     assert "Europe/London" not in result["detail"]
     assert result["expected_time_display"] == "29 Apr 2027, 15:00"
+
+
+@pytest.mark.asyncio
+async def test_alfred_create_duration_visitor_pass_allows_missing_optional_contact(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(site_timezone="Europe/London")
+
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+
+    result = await ai_tools.create_visitor_pass(
+        {
+            "visitor_name": "Dave",
+            "pass_type": "duration",
+            "visitor_phone": None,
+            "number_plate": "ab12 cde",
+            "valid_from": "2027-04-29T14:00:00+01:00",
+            "valid_until": "2027-04-29T17:00:00+01:00",
+            "confirm": False,
+        }
+    )
+
+    assert result["requires_confirmation"] is True
+    assert result["visitor_phone"] is None
+    assert result["number_plate"] == "AB12CDE"
+    assert "phone number" not in result["detail"].lower()

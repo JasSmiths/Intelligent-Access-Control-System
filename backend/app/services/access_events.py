@@ -83,6 +83,10 @@ DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
 MAX_SUPPRESSED_SESSION_READS = 20
 CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.85
+PERSON_NOTIFICATION_PRONOUNS = {
+    "he/him": ("him", "his"),
+    "she/her": ("her", "her"),
+}
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
@@ -1927,6 +1931,7 @@ class AccessEventService:
             "registration_number": vehicle.registration_number,
             "make": vehicle.make,
             "colour": vehicle.color,
+            "fuel_type": getattr(vehicle, "fuel_type", None),
             "mot_status": vehicle.mot_status,
             "tax_status": vehicle.tax_status,
             "mot_expiry": vehicle.mot_expiry.isoformat() if vehicle.mot_expiry else None,
@@ -1943,6 +1948,7 @@ class AccessEventService:
             vehicle.make = normalized.make
         if normalized.colour:
             vehicle.color = normalized.colour
+        vehicle.fuel_type = normalized.fuel_type
         vehicle.mot_status = normalized.mot_status
         vehicle.tax_status = normalized.tax_status
         vehicle.mot_expiry = normalized.mot_expiry
@@ -2545,6 +2551,7 @@ class AccessEventService:
             if vehicle
             else (detected_vehicle_colour or dvla_colour)
         )
+        object_pronoun, possessive_determiner = self._person_notification_pronouns(person)
         facts = {
             "message": message,
             "access_event_id": str(event.id),
@@ -2568,8 +2575,8 @@ class AccessEventService:
             "mot_expiry": self._fact_text(dvla.get("mot_expiry")),
             "tax_status": self._fact_text(dvla.get("tax_status")),
             "tax_expiry": self._fact_text(dvla.get("tax_expiry")),
-            "object_pronoun": "them",
-            "possessive_determiner": "their",
+            "object_pronoun": object_pronoun,
+            "possessive_determiner": possessive_determiner,
             "direction": event.direction.value,
             "decision": event.decision.value,
             "source": event.source,
@@ -2590,13 +2597,21 @@ class AccessEventService:
             return value.isoformat()
         return str(value)
 
+    def _person_notification_pronouns(self, person: Person | None) -> tuple[str, str]:
+        pronouns = getattr(person, "pronouns", None)
+        return PERSON_NOTIFICATION_PRONOUNS.get(pronouns or "", ("them", "their"))
+
     def _authorized_entry_message(self, person: Person, vehicle: Vehicle | None) -> str:
         first_name = person.first_name or person.display_name.split(" ", 1)[0]
         possessive = f"{first_name}'" if first_name.lower().endswith("s") else f"{first_name}'s"
+        object_pronoun, _possessive_determiner = self._person_notification_pronouns(person)
         vehicle_label = self._vehicle_display_name(vehicle, "")
         if vehicle_label:
-            return f"{possessive} {vehicle_label} has been detected at the gate. I've let them in."
-        return f"{person.display_name} has been detected at the gate. I've let them in."
+            return (
+                f"{possessive} {vehicle_label} has been detected at the gate. "
+                f"I've let {object_pronoun} in."
+            )
+        return f"{person.display_name} has been detected at the gate. I've let {object_pronoun} in."
 
     def _vehicle_display_name(self, vehicle: Vehicle | None, fallback: str) -> str:
         if not vehicle:

@@ -32,6 +32,10 @@ def build_tools() -> list[AgentTool]:
                             "search": {"type": "string", "description": "Visitor name, plate, make, or colour text."},
                             "visitor_name": {"type": "string"},
                             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                            "fuzzy_name": {
+                                "type": "boolean",
+                                "description": "When true, include close visitor-name matches for duplicate checks.",
+                            },
                         },
                         "additionalProperties": False,
                     },
@@ -55,7 +59,7 @@ def build_tools() -> list[AgentTool]:
                     description=(
                         "Create a one-shot Visitor Pass for an expected unknown vehicle. "
                         "For one-time passes, do not call until visitor_name and expected_time are known. "
-                        "For duration passes, visitor_phone, valid_from, and valid_until are required. "
+                        "For duration passes, valid_from and valid_until are required; visitor_phone is optional. "
                         "Use local site time silently and default to a +/- 30 minute window when window_minutes is omitted. "
                         "Do not resolve visitor_name as a Person record. Requires confirm=true."
                     ),
@@ -64,7 +68,14 @@ def build_tools() -> list[AgentTool]:
                         "properties": {
                             "visitor_name": {"type": "string"},
                             "pass_type": {"type": "string", "enum": ["one-time", "duration"]},
-                            "visitor_phone": {"type": "string", "description": "Required for duration Visitor Passes. Use full international format when known."},
+                            "visitor_phone": {
+                                "type": ["string", "null"],
+                                "description": "Optional visitor WhatsApp/mobile number. Use full international format when known.",
+                            },
+                            "number_plate": {
+                                "type": ["string", "null"],
+                                "description": "Optional visitor vehicle registration when the host already knows it.",
+                            },
                             "expected_time": {"type": "string", "description": "Expected local or ISO datetime for the visitor."},
                             "window_minutes": {
                                 "type": "integer",

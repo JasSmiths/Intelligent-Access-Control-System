@@ -635,7 +635,7 @@
 }
 
 .vehicle-modal {
-  width: min(680px, 100%);
+  width: min(760px, 100%);
 }
 
 .vehicle-compliance-card {
@@ -815,6 +815,155 @@
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vehicle-person-field {
+  gap: 8px;
+}
+
+.vehicle-person-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.vehicle-person-selected {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.vehicle-person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 8px 5px 5px;
+  border: 1px solid color-mix(in srgb, var(--blue) 34%, var(--line));
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.vehicle-person-chip .profile-photo {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.vehicle-person-empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.vehicle-person-browser {
+  min-height: 260px;
+  display: grid;
+  grid-template-columns: minmax(170px, 0.42fr) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.vehicle-person-groups,
+.vehicle-person-list {
+  max-height: 300px;
+  overflow: auto;
+}
+
+.vehicle-person-groups {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 8px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.vehicle-person-group {
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.vehicle-person-group:hover,
+.vehicle-person-group.active {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.vehicle-person-group strong,
+.vehicle-person-group small,
+.vehicle-person-row strong,
+.vehicle-person-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-person-group strong,
+.vehicle-person-row strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.vehicle-person-group small,
+.vehicle-person-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vehicle-person-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 8px;
+}
+
+.vehicle-person-row {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.vehicle-person-row.selected {
+  border-color: color-mix(in srgb, var(--blue) 38%, var(--line));
+  background: var(--blue-soft);
+}
+
+.vehicle-person-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.vehicle-person-row .profile-photo {
+  width: 30px;
+  height: 30px;
+  font-size: 11px;
 }
 
 .empty-state.compact {

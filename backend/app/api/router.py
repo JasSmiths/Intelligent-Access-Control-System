@@ -19,6 +19,7 @@ from app.api.v1 import (
     notification_snapshots,
     notifications,
     realtime,
+    reports,
     schedules,
     settings,
     telemetry,
@@ -52,6 +53,7 @@ api_router.include_router(notifications.router, prefix="/notifications", tags=["
 api_router.include_router(schedules.router, prefix="/schedules", tags=["Schedules"])
 api_router.include_router(unifi_protect.router, prefix="/integrations/unifi-protect", tags=["UniFi Protect"])
 api_router.include_router(realtime.router, prefix="/realtime", tags=["Realtime"])
+api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(settings.router, prefix="/settings", tags=["Settings"])
 api_router.include_router(telemetry.router, prefix="/telemetry", tags=["Telemetry"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])

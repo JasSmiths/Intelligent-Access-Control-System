@@ -23,8 +23,19 @@ from app.services.auth import (
     set_session_cookie,
     verify_password,
 )
+from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
 
 router = APIRouter()
+
+
+def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
+    try:
+        return normalize_profile_photo_data_url(profile_photo_data_url)
+    except ProfilePhotoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Profile photo could not be processed.",
+        ) from exc
 
 
 class LoginRequest(BaseModel):
@@ -103,7 +114,7 @@ async def first_run_setup(
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=request.profile_photo_data_url,
+            profile_photo_data_url=normalize_profile_photo_or_400(request.profile_photo_data_url),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=request.password,

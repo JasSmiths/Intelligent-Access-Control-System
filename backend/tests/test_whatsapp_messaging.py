@@ -22,10 +22,12 @@ from app.services import whatsapp_messaging
 from app.services.visitor_passes import visitor_pass_whatsapp_history
 from app.services.whatsapp_messaging import (
     WhatsAppIntegrationConfig,
+    feedback_rating_for_reaction,
     get_whatsapp_messaging_service,
     normalize_graph_api_version,
     normalize_whatsapp_phone_number,
     parse_confirmation_button_id,
+    parse_reaction_message,
     parse_visitor_pass_button_id,
     parse_visitor_pass_timeframe_button_id,
     parse_visitor_pass_timeframe_confirmation_button_id,
@@ -140,6 +142,25 @@ def test_phone_and_graph_version_normalization() -> None:
     assert normalize_whatsapp_phone_number("+44 (7700) 900-123") == "447700900123"
     assert normalize_graph_api_version("25.0") == "v25.0"
     assert normalize_graph_api_version("") == "v25.0"
+
+
+def test_whatsapp_reaction_feedback_rating() -> None:
+    reaction = parse_reaction_message(
+        {
+            "id": "wamid.react",
+            "from": "447700900123",
+            "type": "reaction",
+            "reaction": {"message_id": "wamid.bad", "emoji": "👎🏽"},
+        }
+    )
+    assert reaction is not None
+    assert reaction.message_id == "wamid.bad"
+    assert feedback_rating_for_reaction(reaction) == "down"
+
+    up_reaction = parse_reaction_message({"type": "reaction", "reaction": {"message_id": "wamid.good", "emoji": "👍"}})
+    assert up_reaction is not None
+    assert feedback_rating_for_reaction(up_reaction) == "up"
+    assert parse_reaction_message({"type": "text", "text": {"body": "👎"}}) is None
 
 
 def test_visitor_emoji_only_messages_are_preference_not_content() -> None:
@@ -444,6 +465,397 @@ async def test_admin_sender_routes_text_to_messaging_bridge(monkeypatch) -> None
     assert captured["incoming"].author_provider_id == "447700900123"
     assert captured["is_admin_hint"] is True
     assert sent == [("447700900123", "Gate is closed.")]
+
+
+class FakeWhatsAppVisitorPassChat:
+    def __init__(self, *, duplicate_matches: list[dict] | None = None) -> None:
+        self.memory: dict = {}
+        self.calls = []
+        self.saved_assistant = []
+        self.pending_actions = []
+        self.duplicate_matches = duplicate_matches or []
+        self._tools = {
+            "query_visitor_passes": SimpleNamespace(name="query_visitor_passes"),
+            "create_visitor_pass": SimpleNamespace(name="create_visitor_pass"),
+        }
+
+    async def _ensure_session(self, session_id):
+        return uuid.UUID(str(session_id))
+
+    async def _load_memory(self, _session_id):
+        return dict(self.memory)
+
+    async def _save_memory(self, _session_id, memory):
+        self.memory = dict(memory)
+
+    async def _append_message(self, *_args, **_kwargs):
+        return uuid.uuid4()
+
+    async def _direct_response(self, _session_id, text, **kwargs):
+        self.saved_assistant.append(text)
+        return SimpleNamespace(
+            text=text,
+            tool_results=kwargs.get("tool_results") or [],
+            pending_action=kwargs.get("pending_action"),
+        )
+
+    async def _execute_tool_call(self, _session_id, call, **_kwargs):
+        self.calls.append(call)
+        if call.name == "query_visitor_passes":
+            return {
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "output": {
+                    "visitor_passes": self.duplicate_matches,
+                    "count": len(self.duplicate_matches),
+                    "timezone": "Europe/London",
+                },
+            }
+        if call.name == "create_visitor_pass":
+            return {
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "output": {
+                    "created": False,
+                    "requires_confirmation": True,
+                    "confirmation_field": "confirm",
+                    "target": call.arguments.get("visitor_name"),
+                    "visitor_name": call.arguments.get("visitor_name"),
+                    "detail": f"Create a Visitor Pass for {call.arguments.get('visitor_name')}?",
+                },
+            }
+        raise AssertionError(f"Unexpected tool call {call.name}")
+
+    async def _store_pending_agent_action(self, session_id, pending_result, *_args, **_kwargs):
+        pending = {
+            "session_id": str(session_id),
+            "confirmation_id": "confirm-test",
+            "tool_name": pending_result["name"],
+            "title": f"Create Visitor Pass for {pending_result['arguments'].get('visitor_name')}?",
+            "description": "Create the pass?",
+            "confirm_label": "Create pass",
+            "cancel_label": "Cancel",
+        }
+        self.pending_actions.append(pending)
+        return pending
+
+
+def whatsapp_admin_user(name: str = "Mum"):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        person_id=uuid.uuid4(),
+        username=name.lower(),
+        full_name=name,
+        role=UserRole.ADMIN,
+    )
+
+
+async def run_admin_whatsapp_message(monkeypatch, *, text: str, provider, fake_chat):
+    service = get_whatsapp_messaging_service()
+    admin = whatsapp_admin_user()
+    sent = []
+    confirmations = []
+
+    async def admin_for_phone(sender):
+        assert sender == "447700900123"
+        return admin
+
+    async def ensure_identity(*_args, **_kwargs):
+        return None
+
+    async def send_text(to, body, **_kwargs):
+        sent.append((to, body))
+
+    async def send_confirmation(to, pending_action):
+        confirmations.append((to, pending_action))
+
+    async def runtime():
+        return SimpleNamespace(llm_provider="openai", site_timezone="Europe/London", openai_model="test-model")
+
+    import app.services.chat as chat_module
+
+    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service, "send_confirmation_message", send_confirmation)
+    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
+    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: provider)
+    monkeypatch.setattr(chat_module, "chat_service", fake_chat)
+
+    await service._handle_incoming_message(
+        {"id": f"wamid.{uuid.uuid4().hex}", "from": "447700900123", "type": "text", "text": {"body": text}},
+        contacts=[{"wa_id": "447700900123", "profile": {"name": "Mum"}}],
+        phone_number_id="123456789",
+        config=enabled_config(),
+        signature_verified=True,
+    )
+    return sent, confirmations
+
+
+class FakeWhatsAppFeedbackMemory:
+    def __init__(self, memory: dict | None = None):
+        self.memory = dict(memory or {})
+        self.saved = []
+
+    async def _ensure_session(self, session_id):
+        self.session_id = session_id
+        return uuid.UUID(session_id)
+
+    async def _load_memory(self, _session_uuid):
+        return dict(self.memory)
+
+    async def _save_memory(self, _session_uuid, memory):
+        self.memory = dict(memory)
+        self.saved.append(dict(memory))
+
+
+async def configure_admin_reaction_feedback_test(monkeypatch, *, memory: dict | None = None):
+    service = get_whatsapp_messaging_service()
+    admin = whatsapp_admin_user()
+    sent = []
+    fake_chat = FakeWhatsAppFeedbackMemory(memory)
+
+    async def admin_for_phone(sender):
+        assert sender == "447700900123"
+        return admin
+
+    async def ensure_identity(*_args, **_kwargs):
+        return None
+
+    async def send_text(to, body, **_kwargs):
+        sent.append((to, body))
+
+    import app.services.chat as chat_module
+
+    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(chat_module, "chat_service", fake_chat)
+    return service, admin, sent, fake_chat
+
+
+@pytest.mark.asyncio
+async def test_admin_whatsapp_thumbs_down_reaction_asks_for_feedback_detail(monkeypatch) -> None:
+    service, _admin, sent, fake_chat = await configure_admin_reaction_feedback_test(monkeypatch)
+
+    await service._handle_incoming_message(
+        {
+            "id": "wamid.react",
+            "from": "447700900123",
+            "type": "reaction",
+            "reaction": {"message_id": "wamid.bad-response", "emoji": "👎"},
+        },
+        contacts=[{"wa_id": "447700900123", "profile": {"name": "Mum"}}],
+        phone_number_id="123456789",
+        config=enabled_config(),
+        signature_verified=True,
+    )
+
+    assert sent == [("447700900123", whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_PROMPT)]
+    state = fake_chat.memory[whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY]
+    assert state["rating"] == "down"
+    assert state["reacted_message_id"] == "wamid.bad-response"
+
+
+@pytest.mark.asyncio
+async def test_admin_whatsapp_feedback_followup_submits_reason_and_ideal(monkeypatch) -> None:
+    memory = {
+        whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY: {
+            "rating": "down",
+            "reacted_message_id": "wamid.bad-response",
+        }
+    }
+    service, admin, sent, fake_chat = await configure_admin_reaction_feedback_test(monkeypatch, memory=memory)
+    captured = {}
+
+    class FeedbackService:
+        async def submit_feedback_for_last_response(self, **kwargs):
+            captured.update(kwargs)
+            return {"corrected_answer": "Ask naturally and do not keep requesting optional details."}
+
+    import app.services.alfred.feedback as feedback_module
+
+    monkeypatch.setattr(feedback_module, "alfred_feedback_service", FeedbackService())
+
+    await service._handle_incoming_message(
+        {
+            "id": "wamid.explain",
+            "from": "447700900123",
+            "type": "text",
+            "text": {
+                "body": "It kept asking for a plate after I said I don't know it. ideal: Accept that optional details can be unknown."
+            },
+        },
+        contacts=[{"wa_id": "447700900123", "profile": {"name": "Mum"}}],
+        phone_number_id="123456789",
+        config=enabled_config(),
+        signature_verified=True,
+    )
+
+    assert captured["rating"] == "down"
+    assert captured["source_channel"] == "whatsapp"
+    assert captured["actor_user_id"] == str(admin.id)
+    assert captured["actor_role"] == UserRole.ADMIN.value
+    assert captured["reason"] == "It kept asking for a plate after I said I don't know it."
+    assert captured["ideal_answer"] == "Accept that optional details can be unknown."
+    assert whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY not in fake_chat.memory
+    assert sent == [
+        (
+            "447700900123",
+            "Thanks, I logged that Alfred feedback.\n\nCorrected answer:\nAsk naturally and do not keep requesting optional details.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_whatsapp_visitor_pass_duplicate_check(monkeypatch) -> None:
+    class Provider:
+        async def complete(self, _messages, **_kwargs):
+            return LlmResult(
+                json.dumps(
+                    {
+                        "intent": "visitor_pass_create",
+                        "visitor_name": "Betty",
+                        "missing_required": ["arrival_date_time", "duration"],
+                        "reply": "I'll check Betty before we make anything new.",
+                    }
+                )
+            )
+
+    fake_chat = FakeWhatsAppVisitorPassChat(
+        duplicate_matches=[
+            {
+                "id": "pass-betty",
+                "visitor_name": "Betty",
+                "status": "scheduled",
+                "expected_time_display": "08 May 2026, 14:00",
+            }
+        ]
+    )
+
+    sent, confirmations = await run_admin_whatsapp_message(
+        monkeypatch,
+        text="Betty is coming",
+        provider=Provider(),
+        fake_chat=fake_chat,
+    )
+
+    assert [(call.name, call.arguments["search"]) for call in fake_chat.calls] == [
+        ("query_visitor_passes", "Betty")
+    ]
+    assert fake_chat.calls[0].arguments["statuses"] == ["active", "scheduled"]
+    assert fake_chat.calls[0].arguments["fuzzy_name"] is True
+    assert "same Betty" in sent[-1][1]
+    assert confirmations == []
+
+
+@pytest.mark.asyncio
+async def test_admin_whatsapp_visitor_pass_missing_info_loop(monkeypatch) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, _messages, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return LlmResult(
+                    json.dumps(
+                        {
+                            "intent": "visitor_pass_create",
+                            "visitor_name": "Dave",
+                            "arrival_date": "2026-05-08",
+                            "missing_required": ["arrival_time", "duration"],
+                            "reply": "What time is Dave arriving, and roughly how long is he staying?",
+                        }
+                    )
+                )
+            return LlmResult(
+                json.dumps(
+                    {
+                        "intent": "visitor_pass_create",
+                        "arrival_datetime": "2026-05-08T14:00:00+01:00",
+                        "duration_minutes": 180,
+                        "number_plate": None,
+                        "unknown_optional": ["number_plate"],
+                        "reply": "Perfect, I'll set Dave up for Friday afternoon.",
+                    }
+                )
+            )
+
+    provider = Provider()
+    fake_chat = FakeWhatsAppVisitorPassChat()
+
+    first_sent, first_confirmations = await run_admin_whatsapp_message(
+        monkeypatch,
+        text="Dave is coming on Friday",
+        provider=provider,
+        fake_chat=fake_chat,
+    )
+    assert "What time is Dave arriving" in first_sent[-1][1]
+    assert first_confirmations == []
+
+    second_sent, second_confirmations = await run_admin_whatsapp_message(
+        monkeypatch,
+        text="Around 2pm, staying for 3 hours. Don't know his plate",
+        provider=provider,
+        fake_chat=fake_chat,
+    )
+
+    create_call = next(call for call in fake_chat.calls if call.name == "create_visitor_pass")
+    assert create_call.arguments == {
+        "visitor_name": "Dave",
+        "pass_type": "duration",
+        "visitor_phone": None,
+        "number_plate": None,
+        "expected_time": "2026-05-08T14:00:00+01:00",
+        "valid_from": "2026-05-08T14:00:00+01:00",
+        "valid_until": "2026-05-08T17:00:00+01:00",
+        "confirm": False,
+    }
+    assert "Perfect" in second_sent[-1][1]
+    assert second_confirmations[0][1]["tool_name"] == "create_visitor_pass"
+
+
+@pytest.mark.asyncio
+async def test_admin_whatsapp_visitor_pass_one_shot_create(monkeypatch) -> None:
+    class Provider:
+        async def complete(self, _messages, **_kwargs):
+            return LlmResult(
+                json.dumps(
+                    {
+                        "intent": "visitor_pass_create",
+                        "visitor_name": "John Doe",
+                        "arrival_datetime": "2026-05-05T09:00:00+01:00",
+                        "valid_until": "2026-05-05T17:00:00+01:00",
+                        "visitor_phone": "07123456789",
+                        "number_plate": "AB12CDE",
+                        "missing_required": [],
+                        "reply": "I've got John Doe for tomorrow, 9 to 5.",
+                    }
+                )
+            )
+
+    fake_chat = FakeWhatsAppVisitorPassChat()
+
+    sent, confirmations = await run_admin_whatsapp_message(
+        monkeypatch,
+        text="John Doe is coming tomorrow at 9am until 5pm, his number is 07123456789 and plate is AB12CDE",
+        provider=Provider(),
+        fake_chat=fake_chat,
+    )
+
+    assert [call.name for call in fake_chat.calls] == ["query_visitor_passes", "create_visitor_pass"]
+    create_call = fake_chat.calls[-1]
+    assert create_call.arguments["visitor_name"] == "John Doe"
+    assert create_call.arguments["visitor_phone"] == "07123456789"
+    assert create_call.arguments["number_plate"] == "AB12CDE"
+    assert create_call.arguments["valid_from"] == "2026-05-05T09:00:00+01:00"
+    assert create_call.arguments["valid_until"] == "2026-05-05T17:00:00+01:00"
+    assert create_call.arguments["confirm"] is False
+    assert "?" not in sent[-1][1]
+    assert confirmations[0][1]["tool_name"] == "create_visitor_pass"
 
 
 @pytest.mark.asyncio

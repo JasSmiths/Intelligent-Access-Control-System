@@ -13,6 +13,7 @@ def test_normalize_vehicle_enquiry_response_maps_compliance_fields() -> None:
             "registrationNumber": "pe70dhx",
             "make": "PEUGEOT",
             "colour": "SILVER",
+            "fuelType": "PETROL",
             "motStatus": "VALID",
             "motExpiryDate": "2026-10-14",
             "taxStatus": "TAXED",
@@ -24,6 +25,7 @@ def test_normalize_vehicle_enquiry_response_maps_compliance_fields() -> None:
     assert normalized.registration_number == "PE70DHX"
     assert normalized.make == "Peugeot"
     assert normalized.colour == "Silver"
+    assert normalized.fuel_type == "Petrol"
     assert normalized.mot_status == "Valid"
     assert normalized.tax_status == "Taxed"
     assert normalized.mot_expiry == date(2026, 10, 14)
@@ -97,6 +99,7 @@ async def test_manual_dvla_lookup_preserves_response_shape_and_adds_normalized_v
         "registration_number": "PE70DHX",
         "make": "Peugeot",
         "colour": "Silver",
+        "fuel_type": None,
         "mot_status": "Valid",
         "tax_status": "SORN",
         "mot_expiry": "2026-10-14",

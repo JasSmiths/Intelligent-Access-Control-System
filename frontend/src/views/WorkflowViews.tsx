@@ -440,7 +440,9 @@ export const fallbackNotificationVariables: NotificationVariableGroup[] = [
     items: [
       { name: "FirstName", token: "@FirstName", label: "First name" },
       { name: "LastName", token: "@LastName", label: "Last name" },
-      { name: "GroupName", token: "@GroupName", label: "Group name" }
+      { name: "GroupName", token: "@GroupName", label: "Group name" },
+      { name: "ObjectPronoun", token: "@ObjectPronoun", label: "Object pronoun" },
+      { name: "PossessiveDeterminer", token: "@PossessiveDeterminer", label: "Possessive determiner" }
     ]
   },
   {
@@ -509,6 +511,8 @@ export const mockNotificationContext: Record<string, string> = {
   LastName: "Smith",
   DisplayName: "Steph Smith",
   GroupName: "Family",
+  ObjectPronoun: "her",
+  PossessiveDeterminer: "her",
   Registration: "STEPH26",
   VehicleRegistrationNumber: "STEPH26",
   VehicleName: "2026 Tesla Model Y Dual Motor Long Range",
@@ -590,7 +594,7 @@ export const vehicleTtsPhoneticPattern = new RegExp(
   `\\b(${Object.keys(vehicleTtsPhonetics).sort((left, right) => right.length - left.length).join("|")})\\b`
 );
 
-export function AutomationsView({ people, vehicles }: { people: Person[]; vehicles: Vehicle[] }) {
+export function AutomationsView({ people, refreshToken, vehicles }: { people: Person[]; refreshToken: number; vehicles: Vehicle[] }) {
   const [catalog, setCatalog] = React.useState<AutomationCatalogResponse | null>(null);
   const [rules, setRules] = React.useState<AutomationRule[]>([]);
   const [users, setUsers] = React.useState<UserAccount[]>([]);
@@ -605,6 +609,7 @@ export function AutomationsView({ people, vehicles }: { people: Person[]; vehicl
   const [dryRun, setDryRun] = React.useState<Record<string, unknown> | null>(null);
   const [error, setError] = React.useState("");
   const prefersReducedMotion = useReducedMotion();
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const triggerByType = React.useMemo(() => new Map((catalog?.triggers ?? []).flatMap((group) => (group.triggers ?? []).map((item) => [item.type, item]))), [catalog]);
   const conditionByType = React.useMemo(() => new Map((catalog?.conditions ?? []).flatMap((group) => (group.conditions ?? []).map((item) => [item.type, item]))), [catalog]);
@@ -652,6 +657,12 @@ export function AutomationsView({ people, vehicles }: { people: Person[]; vehicl
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    load().catch(() => undefined);
+  }, [load, refreshToken]);
 
   React.useEffect(() => {
     if (!ruleStatusFeedback) return undefined;
@@ -1854,7 +1865,7 @@ export function toggleStringList(value: unknown, item: string) {
   return current.includes(item) ? current.filter((entry) => entry !== item) : [...current, item];
 }
 
-export function NotificationsView({ currentUser, people, schedules }: { currentUser: UserAccount; people: Person[]; schedules: Schedule[] }) {
+export function NotificationsView({ currentUser, people, refreshToken, schedules }: { currentUser: UserAccount; people: Person[]; refreshToken: number; schedules: Schedule[] }) {
   const [catalog, setCatalog] = React.useState<NotificationCatalogResponse | null>(null);
   const [rules, setRules] = React.useState<NotificationRule[]>([]);
   const [cameras, setCameras] = React.useState<UnifiProtectCamera[]>([]);
@@ -1870,6 +1881,7 @@ export function NotificationsView({ currentUser, people, schedules }: { currentU
   const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [error, setError] = React.useState("");
   const prefersReducedMotion = useReducedMotion();
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const triggerGroups = notificationTriggerGroupsForDisplay(
     catalog?.triggers.length ? catalog.triggers : fallbackNotificationTriggers
@@ -1927,6 +1939,12 @@ export function NotificationsView({ currentUser, people, schedules }: { currentU
   React.useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    load().catch(() => undefined);
+  }, [load, refreshToken]);
 
   React.useEffect(() => {
     if (!ruleStatusFeedback) return undefined;

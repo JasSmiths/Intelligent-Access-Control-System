@@ -21,6 +21,7 @@ from app.services.auth import (
     normalize_mobile_phone_number,
     serialize_user,
 )
+from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
@@ -29,6 +30,16 @@ from app.services.telemetry import (
 )
 
 router = APIRouter()
+
+
+def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
+    try:
+        return normalize_profile_photo_data_url(profile_photo_data_url)
+    except ProfilePhotoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Profile photo could not be processed.",
+        ) from exc
 
 
 def user_audit_snapshot(user: User) -> dict[str, Any]:
@@ -135,7 +146,7 @@ async def add_user(
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=request.profile_photo_data_url,
+            profile_photo_data_url=normalize_profile_photo_or_400(request.profile_photo_data_url),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=temporary_password,
@@ -202,7 +213,7 @@ async def update_user(
     if request.first_name is not None or request.last_name is not None:
         user.full_name = compose_full_name(user.first_name, user.last_name)
     if "profile_photo_data_url" in request.model_fields_set:
-        user.profile_photo_data_url = request.profile_photo_data_url
+        user.profile_photo_data_url = normalize_profile_photo_or_400(request.profile_photo_data_url)
     if "email" in request.model_fields_set:
         user.email = request.email.strip().lower() if request.email else None
     if "mobile_phone_number" in request.model_fields_set:

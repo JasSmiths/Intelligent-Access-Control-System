@@ -114,7 +114,7 @@ export type AlertActionTarget = {
   action: "resolve" | "reopen";
 };
 
-export function AlertsView({ refreshDashboard }: { refreshDashboard: () => Promise<void> }) {
+export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboard: () => Promise<void>; refreshToken: number }) {
   const [alerts, setAlerts] = React.useState<Anomaly[]>([]);
   const [statusFilter, setStatusFilter] = React.useState<"open" | "resolved" | "all">("open");
   const [severityFilter, setSeverityFilter] = React.useState<"all" | AlertSeverity>("all");
@@ -126,6 +126,7 @@ export function AlertsView({ refreshDashboard }: { refreshDashboard: () => Promi
   const [actionTarget, setActionTarget] = React.useState<AlertActionTarget | null>(null);
   const [resolutionNote, setResolutionNote] = React.useState("");
   const [actionLoading, setActionLoading] = React.useState(false);
+  const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const loadAlerts = React.useCallback(async () => {
     setLoading(true);
@@ -146,6 +147,12 @@ export function AlertsView({ refreshDashboard }: { refreshDashboard: () => Promi
   React.useEffect(() => {
     loadAlerts().catch(() => undefined);
   }, [loadAlerts]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    loadAlerts().catch(() => undefined);
+  }, [loadAlerts, refreshToken]);
 
   React.useEffect(() => {
     const updateFocusedAlert = () => setFocusedAlertId(alertIdFromLocation());

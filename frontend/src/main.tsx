@@ -144,6 +144,9 @@ const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
 
 const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "access_event.finalize_failed",
+  "automation.run.failed",
+  "automation.run.skipped",
+  "automation.run.succeeded",
   "alerts.updated",
   "visitor_pass.created",
   "visitor_pass.updated",
@@ -153,6 +156,19 @@ const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "visitor_pass.used",
   "visitor_pass.departure_recorded"
 ]);
+
+const REALTIME_AUDIT_REFRESH_ACTION_PREFIXES = [
+  "automation_rule.",
+  "dependency_updates.",
+  "group.",
+  "notification_rule.",
+  "person.",
+  "schedule.",
+  "settings.",
+  "user.",
+  "vehicle.",
+  "visitor_pass."
+];
 
 type NotificationToast = {
   id: string;
@@ -384,7 +400,13 @@ function notificationToastActions(value: unknown): NotificationToastAction[] {
 }
 
 function shouldRefreshDataForRealtimeEvent(event: RealtimeMessage) {
-  return REALTIME_DATA_REFRESH_EVENTS.has(event.type);
+  if (REALTIME_DATA_REFRESH_EVENTS.has(event.type) || event.type.startsWith("automation.run.")) {
+    return true;
+  }
+  if (event.type !== "audit.log.created") return false;
+  const payload = isRecord(event.payload.log) ? event.payload.log : event.payload;
+  const action = stringPayload(payload.action);
+  return REALTIME_AUDIT_REFRESH_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix));
 }
 
 function isNotificationSeverity(value: string): value is NotificationToast["severity"] {
@@ -788,6 +810,7 @@ function App() {
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [maintenanceStatus, setMaintenanceStatus] = React.useState<MaintenanceStatus | null>(null);
   const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
+  const [dataRefreshToken, setDataRefreshToken] = React.useState(0);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
@@ -863,6 +886,7 @@ function App() {
     setSchedules(nextSchedules);
     setIntegrationStatus(nextStatus);
     setMaintenanceStatus(nextMaintenanceStatus);
+    setDataRefreshToken((current) => current + 1);
     setLoading(false);
   }, []);
 
@@ -928,7 +952,7 @@ function App() {
       if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) {
         return;
       }
-      if (parsed.type.startsWith("telemetry.") || parsed.type.startsWith("audit.")) {
+      if (parsed.type.startsWith("telemetry.")) {
         return;
       }
       const finalizedEvent = accessEventFromRealtime(parsed);
@@ -1320,6 +1344,7 @@ function App() {
             integrationStatus={integrationStatus}
             maintenanceStatus={maintenanceStatus}
             realtime={realtime}
+            dataRefreshToken={dataRefreshToken}
             onClearRealtime={() => setRealtime([])}
             refresh={refresh}
             currentUser={currentUser}
@@ -1356,6 +1381,7 @@ function View(props: {
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
   realtime: RealtimeMessage[];
+  dataRefreshToken: number;
   onClearRealtime: () => void;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
@@ -1375,55 +1401,55 @@ function View(props: {
       content = <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
       break;
     case "passes":
-      content = <PassesView query={props.search} realtime={props.realtime} />;
+      content = <PassesView query={props.search} realtime={props.realtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "vehicles":
       content = <VehiclesView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "top_charts":
-      content = <TopChartsView query={props.search} realtime={props.realtime} />;
+      content = <TopChartsView query={props.search} realtime={props.realtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "events":
       content = <EventsView events={props.events} query={props.search} />;
       break;
     case "alerts":
-      content = <AlertsView refreshDashboard={props.refresh} />;
+      content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} />;
       break;
     case "reports":
-      content = <ReportsView events={props.events} presence={props.presence} />;
+      content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
       break;
     case "integrations":
-      content = <IntegrationsView people={props.people} realtime={props.realtime} schedules={props.schedules} status={props.integrationStatus} />;
+      content = <IntegrationsView people={props.people} realtime={props.realtime} refreshToken={props.dataRefreshToken} schedules={props.schedules} status={props.integrationStatus} />;
       break;
     case "logs":
-      content = <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} />;
+      content = <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_general":
-      content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} />;
+      content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
       break;
 	    case "settings_auth":
-	      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} />;
+	      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
 	      break;
 	    case "alfred_training":
 	      content = props.currentUser.role === "admin"
-	        ? <AlfredTrainingView />
+	        ? <AlfredTrainingView refreshToken={props.dataRefreshToken} />
 	        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
 	      break;
 	    case "settings_automations":
-      content = <AutomationsView people={props.people} vehicles={props.vehicles} />;
+      content = <AutomationsView people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
       break;
     case "settings_notifications":
-      content = <NotificationsView currentUser={props.currentUser} people={props.people} schedules={props.schedules} />;
+      content = <NotificationsView currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
     case "settings_lpr":
-      content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} />;
+      content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings":
       content = <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "users":
       content = props.currentUser.role === "admin"
-        ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />
+        ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} refreshToken={props.dataRefreshToken} />
         : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     default:

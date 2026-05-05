@@ -1,3 +1,39 @@
+.badge,
+.vehicle-chip,
+.schedule-dependency-pill,
+.visitor-pass-status-pill,
+.variable-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.badge {
+  gap: 5px;
+}
+
+.badge .badge-label,
+.visitor-pass-status-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1;
+  transform: none;
+}
+
+.badge svg,
+.vehicle-chip svg,
+.schedule-dependency-pill svg,
+.visitor-pass-status-pill svg,
+.variable-pill svg {
+  flex: 0 0 auto;
+  display: block;
+}
+
 .chat-widget {
   position: fixed;
   right: 30px;
@@ -1278,6 +1314,27 @@
     padding: 12px 14px;
   }
 
+  .toolbar,
+  .card-header,
+  .panel-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .toolbar .card-title,
+  .card-header .card-title,
+  .panel-header .card-title {
+    min-width: 0;
+  }
+
+  .toolbar .card-title h2,
+  .card-header .card-title h2,
+  .panel-header .card-title h2 {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .modal-backdrop {
     padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
   }
@@ -1866,6 +1923,16 @@
     grid-template-columns: 1fr;
   }
 
+  .vehicle-person-browser {
+    grid-template-columns: 1fr;
+  }
+
+  .vehicle-person-groups {
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
   .users-hero,
   .temporary-password-card,
   .modal-actions {
@@ -2240,6 +2307,66 @@
     position: absolute;
     right: 8px;
     bottom: 10px;
+  }
+}
+
+@media (max-width: 430px) {
+  .topbar {
+    gap: 6px;
+    padding: 7px 9px;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .topbar-menu {
+    width: 38px;
+  }
+
+  .topbar .icon-button {
+    width: 34px;
+    min-height: 34px;
+  }
+
+  .search {
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 88px;
+    padding-inline: 9px;
+  }
+
+  .dashboard-page,
+  .view-stack,
+  .reports-grid,
+  .integrations-grid,
+  .settings-grid {
+    padding-inline: 10px;
+  }
+
+  .toolbar {
+    min-height: 52px;
+    padding: 8px 10px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .badge,
+  .vehicle-chip,
+  .schedule-dependency-pill,
+  .visitor-pass-status-pill {
+    max-width: 100%;
+  }
+
+  .badge .badge-label,
+  .vehicle-chip,
+  .schedule-dependency-pill,
+  .visitor-pass-status-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 

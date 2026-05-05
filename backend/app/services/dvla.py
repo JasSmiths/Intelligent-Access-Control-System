@@ -20,12 +20,14 @@ class NormalizedDvlaVehicle:
     tax_status: str | None
     mot_expiry: date | None
     tax_expiry: date | None
+    fuel_type: str | None = None
 
     def as_payload(self) -> dict[str, str | None]:
         return {
             "registration_number": self.registration_number,
             "make": self.make,
             "colour": self.colour,
+            "fuel_type": self.fuel_type,
             "mot_status": self.mot_status,
             "tax_status": self.tax_status,
             "mot_expiry": self.mot_expiry.isoformat() if self.mot_expiry else None,
@@ -73,6 +75,7 @@ def normalize_vehicle_enquiry_response(
         registration_number=str(display.get("registrationNumber") or registration_number or "").strip().upper(),
         make=_optional_text(display.get("make")),
         colour=_optional_text(display.get("colour") or display.get("color")),
+        fuel_type=_optional_text(display.get("fuelType")),
         mot_status=mot_status,
         tax_status=_optional_text(display.get("taxStatus")),
         mot_expiry=mot_expiry,

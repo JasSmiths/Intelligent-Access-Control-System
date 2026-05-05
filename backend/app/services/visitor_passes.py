@@ -172,6 +172,7 @@ class VisitorPassService:
         window_minutes: int = DEFAULT_WINDOW_MINUTES,
         pass_type: VisitorPassType | str = VisitorPassType.ONE_TIME,
         visitor_phone: str | None = None,
+        number_plate: str | None = None,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
         source: str = "ui",
@@ -183,11 +184,10 @@ class VisitorPassService:
         name = _clean_visitor_name(visitor_name)
         normalized_pass_type = _visitor_pass_type(pass_type)
         normalized_phone = _normalize_phone_number(visitor_phone)
+        normalized_plate = normalize_registration_number(number_plate) or None
         window = _bounded_window_minutes(window_minutes)
         explicit_valid_from, explicit_valid_until = _valid_window(valid_from, valid_until)
         if normalized_pass_type == VisitorPassType.DURATION:
-            if not normalized_phone:
-                raise VisitorPassError("Visitor phone is required for duration Visitor Passes.")
             if explicit_valid_from is None or explicit_valid_until is None:
                 raise VisitorPassError("Duration Visitor Passes require valid_from and valid_until.")
             expected = _ensure_aware(expected_time) if expected_time else explicit_valid_from
@@ -221,6 +221,7 @@ class VisitorPassService:
             source_reference=_optional_text(source_reference),
             source_metadata=metadata or None,
             created_by_user_id=_coerce_uuid(created_by_user_id),
+            number_plate=normalized_plate,
         )
         session.add(visitor_pass)
         await session.flush()
@@ -280,8 +281,6 @@ class VisitorPassService:
             require_pair=next_pass_type == VisitorPassType.DURATION,
         )
         if next_pass_type == VisitorPassType.DURATION:
-            if not next_phone:
-                raise VisitorPassError("Visitor phone is required for duration Visitor Passes.")
             if next_valid_from is None or next_valid_until is None:
                 raise VisitorPassError("Duration Visitor Passes require valid_from and valid_until.")
         visitor_pass.pass_type = next_pass_type

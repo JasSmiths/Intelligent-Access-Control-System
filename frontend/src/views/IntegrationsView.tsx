@@ -466,7 +466,7 @@ export type DependencyConfirmAction =
   | { kind: "apply" }
   | { kind: "restore"; backup: DependencyBackup };
 
-export function IntegrationsView({ people, realtime, schedules, status }: { people: Person[]; realtime: RealtimeMessage[]; schedules: Schedule[]; status: IntegrationStatus | null }) {
+export function IntegrationsView({ people, realtime, refreshToken, schedules, status }: { people: Person[]; realtime: RealtimeMessage[]; refreshToken: number; schedules: Schedule[]; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
   const [pageTab, setPageTab] = React.useState<IntegrationsPageTab>("integrations");
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
@@ -495,6 +495,7 @@ export function IntegrationsView({ people, realtime, schedules, status }: { peop
   const [dependencyLoading, setDependencyLoading] = React.useState(false);
   const [dependencyError, setDependencyError] = React.useState("");
   const processedIcloudRealtimeRef = React.useRef(new Set<string>());
+  const lastRefreshTokenRef = React.useRef(refreshToken);
   const loadProtect = React.useCallback(async (forceRefresh = false) => {
     setProtectLoading(true);
     setProtectError("");
@@ -615,6 +616,12 @@ export function IntegrationsView({ people, realtime, schedules, status }: { peop
     loadWhatsApp().catch(() => undefined);
     loadDependencyUpdates().catch(() => undefined);
   }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    reloadSettingsAndProtect().catch(() => undefined);
+  }, [refreshToken, reloadSettingsAndProtect]);
 
   const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
   const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
