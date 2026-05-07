@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.ai.tools import (
     AgentTool,
+    analyze_alert_snapshot,
     backfill_access_event_from_protect,
     calculate_visit_duration,
     diagnose_access_event,
@@ -25,16 +26,29 @@ def build_tools() -> list[AgentTool]:
     return [
         AgentTool(
                     name="query_access_events",
-                    description="Return recent access events, optionally filtered by person, group/category, plate, or day.",
+                    description=(
+                        "LPR/access log lookup for arrivals, exits, denials, and who came or went. "
+                        "Use this when the user semantically asks when or whether someone arrived, left, headed out, bolted, "
+                        "went, came in, got back, or changed site presence. Resolve fuzzy people/vehicles first when needed."
+                    ),
                     parameters={
                         "type": "object",
                         "properties": {
-                            "person": {"type": "string"},
-                            "person_id": {"type": "string"},
-                            "vehicle_id": {"type": "string"},
+                            "person": {"type": "string", "description": "Person name only when an exact person_id is not available."},
+                            "person_id": {"type": "string", "description": "Exact Person UUID from resolve_human_entity or actor context."},
+                            "vehicle_id": {"type": "string", "description": "Exact Vehicle UUID from resolve_human_entity or actor context."},
                             "group": {"type": "string"},
                             "registration_number": {"type": "string"},
                             "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
+                            "direction": {
+                                "type": "string",
+                                "enum": ["entry", "exit", "denied"],
+                                "description": (
+                                    "Use exit for departure meaning such as left, gone, headed out, bolted, or outta here; "
+                                    "entry for arrival meaning such as arrived, came in, returned, or got back; denied for rejected access."
+                                ),
+                            },
+                            "decision": {"type": "string", "enum": ["granted", "denied"]},
                             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                             "summarize_payload": {"type": "boolean", "description": "Default true. Return compact schedule/gate payload summaries instead of raw payloads."},
                         },
@@ -259,16 +273,54 @@ def build_tools() -> list[AgentTool]:
                 ),
         AgentTool(
                     name="query_anomalies",
-                    description="Return recent anomaly records and unresolved alerts.",
+                    description=(
+                        "Return active/open and resolved alert records, including resolution notes, snapshot metadata, "
+                        "linked access-event details, and stored vehicle visual evidence. Use status=all and "
+                        "suspected_delivery=true for supplier or delivery questions such as oil deliveries, Dove Fuels, "
+                        "or truck/lorry/tanker evidence in alert snapshots."
+                    ),
                     parameters={
                         "type": "object",
                         "properties": {
                             "severity": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["open", "active", "resolved", "all"],
+                                "description": "Alert status to inspect. active is accepted as an alias for open.",
+                            },
+                            "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
+                            "search": {
+                                "type": "string",
+                                "description": "Optional text to search across alert message, registration, resolution note, context, and linked event payload.",
+                            },
+                            "suspected_delivery": {
+                                "type": "boolean",
+                                "description": "Set true when looking for likely supplier/delivery visits, including oil deliveries.",
+                            },
                             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                         },
                         "additionalProperties": False,
                     },
                     handler=query_anomalies,
+                ),
+        AgentTool(
+                    name="analyze_alert_snapshot",
+                    description=(
+                        "Analyze a retained active or resolved alert snapshot with the active vision-capable provider. "
+                        "Use after query_anomalies returns an alert_id and snapshot when visual confirmation is needed, "
+                        "for example checking whether a snapshot shows a truck, lorry, tanker, or Dove Fuels branding."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "alert_id": {"type": "string", "description": "Alert/anomaly ID returned by query_anomalies."},
+                            "prompt": {"type": "string", "description": "What to inspect in the retained snapshot."},
+                            "provider": {"type": "string"},
+                        },
+                        "required": ["alert_id"],
+                        "additionalProperties": False,
+                    },
+                    handler=analyze_alert_snapshot,
                 ),
         AgentTool(
                     name="summarize_access_rhythm",

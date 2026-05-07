@@ -17,6 +17,7 @@ from app.models import AccessEvent, Anomaly, Presence, User
 from app.models.enums import AnomalySeverity, AnomalyType
 from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.event_bus import event_bus
+from app.services.expected_presence import expected_presence_today
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
@@ -119,6 +120,15 @@ async def list_presence() -> list[dict]:
         }
         for row in rows
     ]
+
+
+@router.get("/presence/expected-today")
+async def expected_presence_for_today(
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    config = await get_runtime_config()
+    return await expected_presence_today(session, timezone_name=config.site_timezone)
 
 
 @router.get("/alerts")

@@ -14,10 +14,12 @@ from app.services.alfred.feedback import (
     AlfredFeedbackError,
     AlfredFeedbackService,
     DEFAULT_SEEDED_LESSONS,
+    _rank_lessons_for_prompt,
     _safe_corrected_answer,
     parse_feedback_command,
 )
 from app.services.alfred import memory as alfred_memory_module
+from app.services.alfred.planner import PLANNER_PROMPT
 from app.services.alfred.permissions import filter_tools_for_actor
 from app.services.alfred.runtime import provider_agent_capability
 from app.services.chat import ChatService, IntentRoute, IntentRouterError, SYSTEM_PROMPT
@@ -57,6 +59,33 @@ class JsonFinalProvider:
         return LlmResult(text='{"final":"Done."}')
 
 
+class RawJsonAfterToolProvider:
+    name = "raw-json-after-tool-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LlmResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        "hello-fresh-alerts",
+                        "query_anomalies",
+                        {"status": "all", "search": "hellofresh", "suspected_delivery": True},
+                    )
+                ],
+            )
+        return LlmResult(
+            text=(
+                '[{"alerts":[],"anomalies":[],"count":0,"status":"all",'
+                '"day":"recent","search":"hellofresh","suspected_delivery":true,"timezone":"Europe/London"}]'
+            )
+        )
+
+
 class UnknownToolProvider:
     name = "unknown-tool-test"
 
@@ -81,11 +110,70 @@ class CountingToolProvider:
 
 
 def test_system_prompt_sets_warm_wit_persona_and_preserves_safety_rules() -> None:
-    assert "quick-witted, good-natured, lightly cheeky" in SYSTEM_PROMPT
-    assert "warm operations butler" in SYSTEM_PROMPT
+    assert "humorous, sharp, and highly intelligent concierge" in SYSTEM_PROMPT
+    assert "dry British wit" in SYSTEM_PROMPT
+    assert "find a gate event in a haystack and still make one tidy joke" in SYSTEM_PROMPT
+    assert "All intent parsing and tool selection is semantic and LLM-owned" in SYSTEM_PROMPT
+    assert "Departure intent means the user is asking about exit evidence" in SYSTEM_PROMPT
+    assert "Delivery or supplier arrival intent" in SYSTEM_PROMPT
+    assert "Dove Fuels" in SYSTEM_PROMPT
     assert "Never invent people, vehicles, schedules" in SYSTEM_PROMPT
     assert "Do not claim an action has happened until a confirmed tool result says it happened" in SYSTEM_PROMPT
     assert "jokes must never soften risk or hide uncertainty" in SYSTEM_PROMPT
+    assert "treat them as approved behavioral guidance, not scripts or replacement answers" in SYSTEM_PROMPT
+    assert "Do not use keyword rules, regex routing, or hardcoded intent blocks" in PLANNER_PROMPT
+    assert "oil delivery" in PLANNER_PROMPT
+    assert "query_anomalies" in PLANNER_PROMPT
+    assert "never as keyword rules or canned text" in PLANNER_PROMPT
+
+
+def test_training_lesson_recall_selects_relevant_guidance_without_prompt_stuffing() -> None:
+    now = datetime.now(tz=UTC)
+    lessons = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            scope="site",
+            title="Don't confuse get back with exit",
+            lesson="When asked 'get back,' treat it as the arrival or return event and query entry evidence.",
+            tags=["access-events", "arrival"],
+            source_feedback_ids=[],
+            confidence=0.94,
+            status="active",
+            active_at=now,
+            created_at=now,
+            updated_at=now,
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            scope="site",
+            title="Answer departure-time queries with resolved record and exact time",
+            lesson="Resolve the person before answering when someone left.",
+            tags=["access-events", "departure"],
+            source_feedback_ids=[],
+            confidence=0.96,
+            status="active",
+            active_at=now,
+            created_at=now,
+            updated_at=now,
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            scope="site",
+            title="Keep simple device status answers focused",
+            lesson="For simple gate or garage state questions, answer the current device state directly.",
+            tags=["device-status", "concise-response"],
+            source_feedback_ids=[],
+            confidence=0.99,
+            status="active",
+            active_at=now,
+            created_at=now,
+            updated_at=now,
+        ),
+    ]
+
+    selected = _rank_lessons_for_prompt("What time did Steph get back this morning?", lessons, limit=2)
+
+    assert [lesson.title for lesson in selected] == ["Don't confuse get back with exit"]
 
 
 @pytest.mark.asyncio
@@ -235,6 +323,7 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
     provider = V3PlannerProvider()
     session_id = uuid.uuid4()
     saved_assistant: list[str] = []
+    lesson_recall_kwargs: dict[str, str | None] = {}
 
     class Memory:
         async def recall(self, **_kwargs):
@@ -244,7 +333,8 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
             return 0
 
     class Feedback:
-        async def recall_active_lessons(self, **_kwargs):
+        async def recall_active_lessons(self, **kwargs):
+            lesson_recall_kwargs.update(kwargs)
             return [{"title": "Short answers", "lesson": "Keep routine answers concise."}]
 
     async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
@@ -299,6 +389,7 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
     assert planner_payload["actor_context"]["vehicles"][0]["registration_number"] == "VIP123"
     assert planner_payload["actor_context"]["alfred_lessons"][0]["title"] == "Short answers"
     assert planner_payload["memory"][0]["title"] == "Call me Jas"
+    assert lesson_recall_kwargs["message"] == "Check my presence"
     assert result.text == "You are present."
     assert saved_assistant == ["You are present."]
 
@@ -326,6 +417,240 @@ async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
     assert result.provider == "provider_error"
     assert "requires a configured hosted LLM provider" in result.text
     assert "I did not run any system action" in result.text
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_persona_answers_chit_chat_with_new_concierge_voice(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["General"],'
+            '"selected_tool_names":[],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.91,'
+            '"reason":"chit-chat, no tools needed"}'
+        ),
+        agent_steps=[
+            '{"final":"Awake, calibrated, and regrettably still overqualified for small talk. What needs finding?"}'
+        ],
+    )
+
+    result, executed, selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="Are you awake Alfred?",
+        tool_outputs={},
+    )
+
+    assert executed == []
+    assert selected_tool_history[0] == []
+    assert provider.agent_tool_catalogs == [[]]
+    assert "overqualified for small talk" in result.text
+    assert "What needs finding?" in result.text
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_semantically_maps_steph_leave_to_lpr_exit_logs(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["Access_Logs"],'
+            '"selected_tool_names":["resolve_human_entity","query_access_events"],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.96,'
+            '"reason":"semantic departure question requires entity resolution and access-event exit lookup"}'
+        ),
+        agent_steps=[
+            ToolCall("resolve-steph", "resolve_human_entity", {"query": "Steph", "entity_types": ["person", "vehicle"]}),
+            ToolCall(
+                "query-steph-exit",
+                "query_access_events",
+                {"person_id": "person-steph", "vehicle_id": "vehicle-steph", "day": "today", "direction": "exit", "limit": 1},
+            ),
+            '{"final":"Steph left at 07:42. The Tesla made its escape with unusual punctuality."}',
+        ],
+    )
+
+    result, executed, selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="When did Steph leave this morning?",
+        tool_outputs={
+            "resolve_human_entity": {
+                "status": "unique",
+                "match": {
+                    "type": "person",
+                    "id": "person-steph",
+                    "display_name": "Steph",
+                    "vehicles": [{"id": "vehicle-steph", "registration_number": "PE70DHX"}],
+                },
+            },
+            "query_access_events": {
+                "events": [
+                    {
+                        "person": "Steph",
+                        "person_id": "person-steph",
+                        "vehicle_id": "vehicle-steph",
+                        "direction": "exit",
+                        "decision": "granted",
+                        "occurred_at_display": "07:42",
+                    }
+                ],
+                "count": 1,
+            },
+        },
+    )
+
+    assert selected_tool_history[0] == ["resolve_human_entity", "query_access_events"]
+    assert [call.name for call in executed] == ["resolve_human_entity", "query_access_events"]
+    assert executed[0].arguments == {"query": "Steph", "entity_types": ["person", "vehicle"]}
+    assert executed[1].arguments["vehicle_id"] == "vehicle-steph"
+    assert executed[1].arguments["direction"] == "exit"
+    assert provider.planner_requests[0]["message"] == "When did Steph leave this morning?"
+    assert "left at 07:42" in result.text
+    assert "unusual punctuality" in result.text
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_semantically_routes_missus_bolted_without_keyword_router(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["Access_Logs"],'
+            '"selected_tool_names":["resolve_human_entity","query_access_events"],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.94,'
+            '"reason":"relationship reference plus idiomatic departure maps to resolved person and exit logs"}'
+        ),
+        agent_steps=[
+            ToolCall("resolve-missus", "resolve_human_entity", {"query": "the missus", "entity_types": ["person", "vehicle"]}),
+            ToolCall(
+                "query-missus-exit",
+                "query_access_events",
+                {"person_id": "person-steph", "vehicle_id": "vehicle-steph", "day": "today", "direction": "exit", "limit": 1},
+            ),
+            '{"final":"Yes. Steph bolted at 07:42, in the strictly LPR-approved sense of the word."}',
+        ],
+    )
+
+    result, executed, _selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="Has the missus bolted yet?",
+        tool_outputs={
+            "resolve_human_entity": {
+                "status": "unique",
+                "match": {
+                    "type": "person",
+                    "id": "person-steph",
+                    "display_name": "Steph",
+                    "vehicles": [{"id": "vehicle-steph", "registration_number": "PE70DHX"}],
+                },
+            },
+            "query_access_events": {
+                "events": [
+                    {
+                        "person": "Steph",
+                        "person_id": "person-steph",
+                        "vehicle_id": "vehicle-steph",
+                        "direction": "exit",
+                        "decision": "granted",
+                        "occurred_at_display": "07:42",
+                    }
+                ],
+                "count": 1,
+            },
+        },
+        actor_context={
+            "user": {"id": "user-1", "role": "admin", "username": "jas"},
+            "person": {"id": "person-jas", "display_name": "Jas"},
+        },
+    )
+
+    assert [call.name for call in executed] == ["resolve_human_entity", "query_access_events"]
+    assert executed[0].arguments["query"] == "the missus"
+    assert executed[1].arguments == {
+        "person_id": "person-steph",
+        "vehicle_id": "vehicle-steph",
+        "day": "today",
+        "direction": "exit",
+        "limit": 1,
+    }
+    assert provider.planner_requests[0]["message"] == "Has the missus bolted yet?"
+    assert "Steph bolted at 07:42" in result.text
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_semantically_routes_oil_delivery_to_active_and_resolved_alerts(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["Access_Diagnostics"],'
+            '"selected_tool_names":["query_anomalies","analyze_alert_snapshot"],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.93,'
+            '"reason":"unknown supplier arrival should inspect open/resolved alerts and retained snapshot evidence"}'
+        ),
+        agent_steps=[
+            ToolCall(
+                "query-oil-alerts",
+                "query_anomalies",
+                {
+                    "status": "all",
+                    "day": "recent",
+                    "search": "oil delivery Dove Fuels truck lorry tanker",
+                    "suspected_delivery": True,
+                    "limit": 25,
+                },
+            ),
+            ToolCall(
+                "inspect-alert-snapshot",
+                "analyze_alert_snapshot",
+                {
+                    "alert_id": "alert-oil-1",
+                    "prompt": "Does this retained alert snapshot show an oil/fuel delivery vehicle, truck, lorry, tanker, or Dove Fuels branding?",
+                },
+            ),
+            '{"final":"The oil delivery likely arrived at 09:18. The resolved alert note says Dove Fuels, and the snapshot analysis saw a fuel lorry. Tiny mystery, neatly filed."}',
+        ],
+    )
+
+    result, executed, selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="When did the oil delivery arrive?",
+        tool_outputs={
+            "query_anomalies": {
+                "alerts": [
+                    {
+                        "id": "alert-oil-1",
+                        "status": "resolved",
+                        "created_at_display": "07 May 2026, 09:18",
+                        "resolution_note": "Oil delivery from Dove Fuels.",
+                        "delivery_indicators": [
+                            "Text evidence mentions Dove Fuels.",
+                            "Stored visual evidence reports vehicle type: Truck.",
+                        ],
+                        "snapshot": {"url": "/api/v1/alerts/alert-oil-1/snapshot"},
+                    }
+                ],
+                "count": 1,
+            },
+            "analyze_alert_snapshot": {
+                "alert_id": "alert-oil-1",
+                "analysis": "The image shows a fuel lorry with Dove Fuels branding.",
+            },
+        },
+    )
+
+    assert selected_tool_history[0] == ["query_anomalies", "analyze_alert_snapshot"]
+    assert [call.name for call in executed] == ["query_anomalies", "analyze_alert_snapshot"]
+    assert executed[0].arguments["status"] == "all"
+    assert executed[0].arguments["suspected_delivery"] is True
+    assert executed[1].arguments["alert_id"] == "alert-oil-1"
+    assert provider.planner_requests[0]["message"] == "When did the oil delivery arrive?"
+    assert "likely arrived at 09:18" in result.text
+    assert "Dove Fuels" in result.text
 
 
 def test_standard_users_do_not_see_mutation_or_admin_tools() -> None:
@@ -403,6 +728,29 @@ class V3PlannerProvider:
         return LlmResult(text='{"final":"You are present."}')
 
 
+class V3SimulatedSemanticProvider:
+    name = "openai"
+
+    def __init__(self, *, planner_json: str, agent_steps: list[ToolCall | str]) -> None:
+        self.planner_json = planner_json
+        self.agent_steps = list(agent_steps)
+        self.planner_requests: list[dict[str, object]] = []
+        self.agent_tool_catalogs: list[list[str]] = []
+
+    async def complete(self, messages, tools=None, tool_results=None):
+        if tools is None and messages and messages[0].content.startswith("You are Alfred's v3 planning brain"):
+            self.planner_requests.append(json.loads(messages[1].content))
+            return LlmResult(text=self.planner_json)
+
+        self.agent_tool_catalogs.append([tool["name"] for tool in tools or []])
+        if not self.agent_steps:
+            raise AssertionError("Simulated provider received more agent calls than expected.")
+        step = self.agent_steps.pop(0)
+        if isinstance(step, ToolCall):
+            return LlmResult(text="", tool_calls=[step])
+        return LlmResult(text=step)
+
+
 class DualActionPreviewProvider:
     name = "action-preview-test"
 
@@ -415,6 +763,90 @@ class DualActionPreviewProvider:
                 ']}'
             )
         )
+
+
+async def _run_simulated_v3_turn(
+    monkeypatch,
+    *,
+    provider: V3SimulatedSemanticProvider,
+    message: str,
+    tool_outputs: dict[str, dict[str, object]],
+    actor_context: dict[str, object] | None = None,
+) -> tuple[ChatTurnResult, list[ToolCall], list[list[str]]]:
+    service = ChatService()
+    executed: list[ToolCall] = []
+    selected_tool_history: list[list[str]] = []
+
+    def forbidden_deterministic_routing(*_args, **_kwargs):
+        raise AssertionError("Deterministic keyword routing was invoked in a v3 semantic-routing test.")
+
+    async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
+        executed.append(call)
+        return {
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+            "output": tool_outputs[call.name],
+        }
+
+    async def fake_build_messages(_session_id, tool_results, selected_tools, route=None, actor_context=None):
+        selected_tool_history.append([tool.name for tool in selected_tools])
+        return [
+            ChatMessageInput("system", SYSTEM_PROMPT),
+            ChatMessageInput(
+                "user",
+                json.dumps(
+                    {
+                        "message": message,
+                        "route": route.intents if route else [],
+                        "tool_results": tool_results,
+                        "actor_context": actor_context or {},
+                    },
+                    default=str,
+                ),
+            ),
+        ]
+
+    async def fake_append_message(_session_id, _role, _content, **_kwargs):
+        return uuid.uuid4()
+
+    async def no_schedule_conflict(_session_id, _memory, _tool_results):
+        return None
+
+    class Memory:
+        async def recall(self, **_kwargs):
+            return []
+
+        async def remember_from_turn(self, *_args, **_kwargs):
+            return 0
+
+    class Feedback:
+        async def recall_active_lessons(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(service, "_deterministic_react_calls", forbidden_deterministic_routing)
+    monkeypatch.setattr(service, "_select_tools_for_route", forbidden_deterministic_routing)
+    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_build_agent_messages", fake_build_messages)
+    monkeypatch.setattr(service, "_append_message", fake_append_message)
+    monkeypatch.setattr(service, "_update_memory", lambda *_args, **_kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(service, "_pending_action_for_response", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+    monkeypatch.setattr("app.services.chat.alfred_memory_service", Memory())
+    monkeypatch.setattr("app.services.chat.alfred_feedback_service", Feedback())
+    monkeypatch.setattr("app.services.chat.event_bus.publish", lambda *_args, **_kwargs: asyncio.sleep(0))
+
+    result = await service._handle_message_v3(
+        provider,
+        SimpleNamespace(llm_provider="openai", openai_api_key="key", openai_model="semantic-test"),
+        uuid.uuid4(),
+        message,
+        {},
+        [],
+        actor_context or {"user": {"id": "user-1", "role": "admin"}},
+        status_callback=None,
+    )
+    return result, executed, selected_tool_history
 
 
 class ActionToolProvider:
@@ -521,6 +953,56 @@ async def test_react_loop_accepts_json_final() -> None:
     )
 
     assert result.text == "Done."
+
+
+@pytest.mark.asyncio
+async def test_react_loop_does_not_expose_raw_tool_json_after_empty_alert_search(monkeypatch) -> None:
+    service = ChatService()
+
+    async def fake_execute_tool_batch(_session_id, calls, _selected_tools, **_kwargs):
+        call = calls[0]
+        return [
+            {
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "output": {
+                    "alerts": [],
+                    "anomalies": [],
+                    "count": 0,
+                    "status": "all",
+                    "day": "recent",
+                    "search": "hellofresh",
+                    "suspected_delivery": True,
+                    "timezone": "Europe/London",
+                },
+            }
+        ]
+
+    async def fake_build_agent_messages(_session_id, _tool_results, _selected_tools, route=None, actor_context=None):
+        return [ChatMessageInput("system", "test")]
+
+    async def no_schedule_conflict(_session_id, _memory, _tool_results):
+        return None
+
+    monkeypatch.setattr(service, "_execute_tool_batch", fake_execute_tool_batch)
+    monkeypatch.setattr(service, "_build_agent_messages", fake_build_agent_messages)
+    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
+
+    result = await service._run_provider_agent_loop(
+        RawJsonAfterToolProvider(),
+        uuid.uuid4(),
+        [ChatMessageInput("system", "test")],
+        [],
+        [service._tools["query_anomalies"]],
+        {},
+        route=IntentRoute(("Access_Diagnostics",), 0.9, False, "delivery alert search"),
+        user_message="When did the hello fresh delivery arrive?",
+        status_callback=None,
+    )
+
+    assert not result.text.strip().startswith("[")
+    assert "couldn't find any matching active or resolved alerts for hellofresh" in result.text
 
 
 @pytest.mark.asyncio
@@ -946,6 +1428,7 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
     tools = ai_tools.build_agent_tools()
 
     expected_tool_names = {
+        "analyze_alert_snapshot",
         "analyze_camera_snapshot",
         "analyze_dependency_update",
         "apply_dependency_update",
@@ -1643,6 +2126,148 @@ def test_lpr_timing_observation_reports_capture_delay() -> None:
 
     assert observation["captured_to_received_ms"] == 714.0
     assert observation["received_at"] == "2026-04-28T17:46:28.800000+01:00"
+
+
+@pytest.mark.asyncio
+async def test_query_anomalies_can_search_resolved_delivery_alert_notes_and_visual_evidence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    alert_id = uuid.uuid4()
+    event_id = uuid.uuid4()
+    observed_at = datetime.now(tz=UTC)
+    snapshot_path = tmp_path / "alert-snapshots" / f"{alert_id}.jpg"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_bytes(b"jpeg")
+    event = SimpleNamespace(
+        id=event_id,
+        registration_number="DOVE123",
+        direction=SimpleNamespace(value="entry"),
+        decision=SimpleNamespace(value="denied"),
+        source="uiprotect",
+        occurred_at=observed_at,
+        raw_payload={
+            "vehicle_visual_detection": {
+                "observed_vehicle_type": "Truck",
+                "observed_vehicle_color": "White",
+                "vehicle_type_confidence": 88,
+            },
+            "best": {"supplier": "Dove Fuels"},
+        },
+    )
+    alert = SimpleNamespace(
+        id=alert_id,
+        event_id=event_id,
+        event=event,
+        anomaly_type=SimpleNamespace(value="unauthorized_plate"),
+        severity=SimpleNamespace(value="warning"),
+        message="Unauthorised Plate, Access Denied",
+        context={
+            "registration_number": "DOVE123",
+            "snapshot": {
+                "url": f"/api/v1/alerts/{alert_id}/snapshot",
+                "captured_at": observed_at.isoformat(),
+                "content_type": "image/jpeg",
+                "bytes": 4,
+            },
+        },
+        created_at=observed_at,
+        resolved_at=observed_at,
+        resolution_note="Resolved as oil delivery from Dove Fuels.",
+        resolved_by=None,
+    )
+
+    class ScalarResult:
+        def all(self):
+            return [alert]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def scalars(self, _query):
+            return ScalarResult()
+
+    async def fake_runtime_config():
+        return SimpleNamespace(site_timezone="Europe/London")
+
+    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+
+    result = await ai_tools.query_anomalies(
+        {
+            "status": "all",
+            "search": "oil delivery",
+            "suspected_delivery": True,
+            "limit": 10,
+        }
+    )
+
+    assert result["count"] == 1
+    record = result["alerts"][0]
+    assert record["status"] == "resolved"
+    assert record["resolution_note"] == "Resolved as oil delivery from Dove Fuels."
+    assert record["snapshot"]["url"] == f"/api/v1/alerts/{alert_id}/snapshot"
+    assert record["event"]["vehicle_visual_detection"]["observed_vehicle_type"] == "Truck"
+    assert record["possible_delivery"] is True
+    assert "Text evidence mentions Dove Fuels." in record["delivery_indicators"]
+    assert "Stored visual evidence reports vehicle type: Truck." in record["delivery_indicators"]
+
+
+@pytest.mark.asyncio
+async def test_query_anomalies_matches_compacted_hello_fresh_supplier_search(monkeypatch) -> None:
+    observed_at = datetime.now(tz=UTC)
+    alert = SimpleNamespace(
+        id=uuid.uuid4(),
+        event_id=None,
+        event=None,
+        anomaly_type=SimpleNamespace(value="unauthorized_plate"),
+        severity=SimpleNamespace(value="warning"),
+        message="Unauthorised Plate, Access Denied",
+        context={"registration_number": "HFRESH1"},
+        created_at=observed_at,
+        resolved_at=observed_at,
+        resolution_note="Resolved as Hello Fresh delivery.",
+        resolved_by=None,
+    )
+
+    class ScalarResult:
+        def all(self):
+            return [alert]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def scalars(self, _query):
+            return ScalarResult()
+
+    async def fake_runtime_config():
+        return SimpleNamespace(site_timezone="Europe/London")
+
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+
+    result = await ai_tools.query_anomalies(
+        {
+            "status": "all",
+            "search": "hellofresh",
+            "suspected_delivery": True,
+            "limit": 10,
+        }
+    )
+
+    assert result["count"] == 1
+    assert result["alerts"][0]["resolution_note"] == "Resolved as Hello Fresh delivery."
+    assert "Text evidence mentions HelloFresh." in result["alerts"][0]["delivery_indicators"]
+    assert "Text evidence mentions a delivery." in result["alerts"][0]["delivery_indicators"]
 
 
 @pytest.mark.asyncio

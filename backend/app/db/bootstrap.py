@@ -237,6 +237,14 @@ async def init_database() -> None:
             await conn.execute(
                 text(
                     """
+                    CREATE INDEX IF NOT EXISTS ix_access_events_decision_occurred_person_vehicle
+                    ON access_events (decision, occurred_at DESC, person_id, vehicle_id)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
                     CREATE INDEX IF NOT EXISTS ix_access_events_snapshot_created_at
                     ON access_events (created_at)
                     WHERE snapshot_path IS NOT NULL

@@ -199,17 +199,44 @@ def _extract_plate(payload: dict[str, Any]) -> str | None:
     if isinstance(alarm, dict):
         triggers = alarm.get("triggers")
         if isinstance(triggers, list):
+            candidates: list[Any] = []
             for trigger in triggers:
                 if not isinstance(trigger, dict):
                     continue
                 trigger_text = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name"))
                 if _looks_like_lpr_trigger(trigger_text):
-                    value = trigger.get("value") or trigger.get("plate") or trigger.get("registrationNumber")
-                    if value:
-                        return str(value)
+                    candidates.extend(_trigger_plate_candidates(trigger))
+            best = _best_plate_candidate(candidates)
+            if best:
+                return best
 
     nested = _find_nested_value(payload, PLATE_KEYS)
     return str(nested) if nested else None
+
+
+def _trigger_plate_candidates(trigger: dict[str, Any]) -> list[Any]:
+    candidates = [
+        trigger.get("value"),
+        trigger.get("plate"),
+        trigger.get("registrationNumber"),
+        trigger.get("registration_number"),
+    ]
+    group = trigger.get("group")
+    if isinstance(group, dict):
+        candidates.extend([group.get("name"), group.get("matchedName"), group.get("matched_name")])
+    return candidates
+
+
+def _best_plate_candidate(candidates: list[Any]) -> str | None:
+    ranked: list[tuple[int, int, str]] = []
+    for index, candidate in enumerate(candidates):
+        plate = _normalize_plate(candidate)
+        if not plate:
+            continue
+        ranked.append((len(plate), -index, plate))
+    if not ranked:
+        return None
+    return max(ranked)[2]
 
 
 def _collect_smart_zone_names(value: Any, zones: list[str]) -> None:
@@ -317,20 +344,7 @@ def _trigger_registration_number(trigger: dict[str, Any]) -> str:
     descriptor = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name", "label"))
     if not _looks_like_lpr_trigger(descriptor):
         return ""
-    group = trigger.get("group")
-    candidates = [
-        trigger.get("value"),
-        trigger.get("plate"),
-        trigger.get("registrationNumber"),
-        trigger.get("registration_number"),
-    ]
-    if isinstance(group, dict):
-        candidates.extend([group.get("name"), group.get("matchedName"), group.get("matched_name")])
-    for candidate in candidates:
-        plate = _normalize_plate(candidate)
-        if plate:
-            return plate
-    return ""
+    return _best_plate_candidate(_trigger_plate_candidates(trigger)) or ""
 
 
 def _plate_zone_evidence_from_mapping(

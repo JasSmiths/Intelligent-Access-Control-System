@@ -1,5 +1,4 @@
 import React from "react";
-import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { diff as jsonDiff } from "jsondiffpatch";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -89,6 +88,8 @@ import {
   createActionConfirmation,
   displayUserName,
   EmptyState,
+  ExpectedPresencePerson,
+  ExpectedPresenceSummary,
   HomeAssistantManagedCover,
   IntegrationStatus,
   isActionableAlert,
@@ -116,6 +117,7 @@ export type DashboardCommand = {
 
 export function Dashboard({
   presence,
+  expectedPresence,
   events,
   anomalies,
   integrationStatus,
@@ -128,6 +130,7 @@ export function Dashboard({
   onMaintenanceStatusChanged
 }: {
   presence: Presence[];
+  expectedPresence: ExpectedPresenceSummary | null;
   events: AccessEvent[];
   anomalies: Anomaly[];
   integrationStatus: IntegrationStatus | null;
@@ -156,7 +159,18 @@ export function Dashboard({
   const warning = actionableAlerts.filter((item) => item.severity === "warning").length;
   const displayEvents = getDashboardEvents(events, vehicles, people);
   const displayAnomalies = getDashboardAnomalies(actionableAlerts);
-  const expected = Math.max(people.length, presence.length);
+  const expected = expectedPresence?.count ?? 0;
+  const peopleById = React.useMemo(
+    () => new Map(people.map((person) => [person.id, person])),
+    [people]
+  );
+  const expectedTooltipPeople = React.useMemo(
+    () => (expectedPresence?.people ?? []).map((person) => ({
+      ...person,
+      profilePhotoDataUrl: peopleById.get(person.person_id)?.profile_photo_data_url ?? null
+    })),
+    [expectedPresence?.people, peopleById]
+  );
   const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
   const exitedToday = todayEvents.filter((event) => event.direction === "exit").length;
   const deniedToday = todayEvents.filter((event) => event.decision === "denied").length;
@@ -335,7 +349,21 @@ export function Dashboard({
           <PanelHeader title="Presence Summary" action="View all" />
           <div className="presence-stats">
             <PresenceStat label="Inside Now" value={String(present)} trend="current" tone="green" />
-            <PresenceStat label="Expected" value={String(expected)} trend="profiles" tone="blue" />
+            <PresenceStat
+              badge={expectedPresence?.learning ? "Learning" : undefined}
+              label="Expected"
+              tooltip={(
+                <ExpectedPresenceTooltip
+                  count={expected}
+                  learning={expectedPresence?.learning === true}
+                  people={expectedTooltipPeople}
+                />
+              )}
+              tooltipLabel="Expected arrivals today"
+              value={String(expected)}
+              trend="today"
+              tone="blue"
+            />
             <PresenceStat label="Exited Today" value={String(exitedToday)} trend="events" tone="gray" />
           </div>
           <div className="presence-bar" aria-label="Presence mix">
@@ -627,14 +655,122 @@ export function normalizeGateState(state: string) {
   return "unknown";
 }
 
-export function PresenceStat({ label, value, trend, tone }: { label: string; value: string; trend: string; tone: "green" | "blue" | "gray" }) {
+export function PresenceStat({
+  badge,
+  label,
+  tooltip,
+  tooltipLabel,
+  value,
+  trend,
+  tone
+}: {
+  badge?: string;
+  label: string;
+  tooltip?: React.ReactNode;
+  tooltipLabel?: string;
+  value: string;
+  trend: string;
+  tone: "green" | "blue" | "gray";
+}) {
+  const tooltipId = React.useId();
+  const [tooltipOpen, setTooltipOpen] = React.useState(false);
+
   return (
-    <div className="presence-stat">
+    <div
+      aria-describedby={tooltip ? tooltipId : undefined}
+      aria-label={tooltip ? tooltipLabel : undefined}
+      className={`presence-stat${tooltip ? " has-tooltip" : ""}${tooltipOpen ? " tooltip-open" : ""}`}
+      onBlur={tooltip ? () => setTooltipOpen(false) : undefined}
+      onClick={tooltip ? () => setTooltipOpen(true) : undefined}
+      onKeyDown={tooltip ? (event) => {
+        if (event.key === "Escape") setTooltipOpen(false);
+      } : undefined}
+      onMouseLeave={tooltip ? () => setTooltipOpen(false) : undefined}
+      tabIndex={tooltip ? 0 : undefined}
+    >
+      {badge ? <em className="presence-stat-pill">{badge}</em> : null}
       <span>{label}</span>
       <strong className={tone}>{value}</strong>
       <small>{trend}</small>
+      {tooltip ? (
+        <div
+          className="iacs-tooltip expected-presence-tooltip bottom"
+          id={tooltipId}
+          role="tooltip"
+        >
+          {tooltip}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+type ExpectedPresenceTooltipPerson = ExpectedPresencePerson & {
+  profilePhotoDataUrl: string | null;
+};
+
+export function ExpectedPresenceTooltip({
+  count,
+  learning,
+  people
+}: {
+  count: number;
+  learning: boolean;
+  people: ExpectedPresenceTooltipPerson[];
+}) {
+  return (
+    <>
+      <div className="expected-tooltip-head">
+        <div>
+          <strong>Expected Today</strong>
+          <span>{count} {count === 1 ? "person" : "people"}</span>
+        </div>
+        {learning ? <em>Learning</em> : null}
+      </div>
+      {people.length ? (
+        <div className="expected-tooltip-list">
+          {people.slice(0, 6).map((person) => (
+            <div className="expected-tooltip-person" key={person.person_id}>
+              <ExpectedPresenceAvatar name={person.display_name} src={person.profilePhotoDataUrl} />
+              <div>
+                <strong>{person.display_name}</strong>
+                <span>{expectedPresenceTimingLabel(person)}</span>
+              </div>
+            </div>
+          ))}
+          {people.length > 6 ? <span className="expected-tooltip-more">+{people.length - 6} more expected</span> : null}
+        </div>
+      ) : (
+        <span className="expected-tooltip-empty">No expected arrivals learned for today yet.</span>
+      )}
+    </>
+  );
+}
+
+export function ExpectedPresenceAvatar({ name, src }: { name: string; src: string | null }) {
+  if (src) {
+    return <img alt="" className="expected-tooltip-avatar" loading="lazy" src={src} />;
+  }
+  return <span className="expected-tooltip-avatar fallback">{initialsForName(name)}</span>;
+}
+
+export function expectedPresenceTimingLabel(person: ExpectedPresenceTooltipPerson) {
+  if (person.evidence_days === 0) {
+    return person.typical_arrival ? `Seen today at ${person.typical_arrival}` : "Seen today";
+  }
+  if (person.typical_arrival && person.typical_departure) {
+    return `Usually ${person.typical_arrival}-${person.typical_departure}`;
+  }
+  if (person.typical_arrival) {
+    return `Usually arrives ${person.typical_arrival}`;
+  }
+  return `${person.evidence_days} routine ${person.evidence_days === 1 ? "day" : "days"}`;
+}
+
+export function initialsForName(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("");
 }
 
 export function presenceSegmentWidth(value: number, total: number) {

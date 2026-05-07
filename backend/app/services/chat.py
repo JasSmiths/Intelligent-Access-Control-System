@@ -25,7 +25,7 @@ from app.services.alfred.feedback import alfred_feedback_service
 from app.services.alfred.memory import alfred_memory_service
 from app.services.alfred.permissions import filter_tools_for_actor, validate_tool_call
 from app.services.alfred.planner import PlannerSelection, plan_with_llm, tools_for_selection
-from app.services.alfred.runtime import agent_mode, agent_status_payload, provider_agent_capability
+from app.services.alfred.runtime import agent_status_payload, provider_agent_capability
 from app.services.alfred.streaming import emit_agent_state
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.chat_routing import ChatRoutingMixin
@@ -116,110 +116,19 @@ class ChatService(ChatRoutingMixin):
             }
         )
         try:
-            if agent_mode(runtime) == "v3":
-                return await self._handle_message_v3(
-                    provider,
-                    runtime,
-                    session_uuid,
-                    message,
-                    memory,
-                    attachment_refs,
-                    actor_context,
-                    user_message_id=user_message_id,
-                    status_callback=status_callback,
-                )
-
-            tool_results: list[dict[str, Any]] = []
-            try:
-                route = await self._classify_intent(provider, message, memory, attachment_refs, actor_context=actor_context)
-            except IntentRouterError as exc:
-                logger.warning(
-                    "intent_router_failed_closed",
-                    extra={"provider": provider.name, "error": str(exc)[:240]},
-                )
-                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
-            selected_tools = self._select_tools_for_route(route, attachment_refs)
-            messages = await self._build_agent_messages(
+            return await self._handle_message_v3(
+                provider,
+                runtime,
                 session_uuid,
-                tool_results,
-                selected_tools,
-                route,
-                actor_context=actor_context,
+                message,
+                memory,
+                attachment_refs,
+                actor_context,
+                user_message_id=user_message_id,
+                status_callback=status_callback,
             )
-
-            try:
-                result = await self._run_provider_agent_loop(
-                    provider,
-                    session_uuid,
-                    messages,
-                    tool_results,
-                    selected_tools,
-                    memory,
-                    route=route,
-                    user_message=message,
-                    attachments=attachment_refs,
-                    actor_context=actor_context,
-                    status_callback=status_callback,
-                )
-                if isinstance(result, ChatTurnResult):
-                    return result
-            except ProviderNotConfiguredError as exc:
-                logger.info(
-                    "llm_provider_not_configured",
-                    extra={"provider": provider.name, "error": str(exc)},
-                )
-                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
-            except Exception as exc:
-                logger.warning(
-                    "llm_provider_failed",
-                    extra={"provider": provider.name, "error": str(exc)},
-                )
-                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
         finally:
             set_chat_tool_context({}, token=context_token)
-
-        response_attachments = self._attachments_from_tool_results(tool_results)
-        raw_text = result.text or self._fallback_text(tool_results)
-        if self._should_replace_with_diagnostic_answer(message, raw_text, tool_results):
-            raw_text = self._access_diagnostic_direct_text(self._diagnostic_output(tool_results) or {})
-        text = self._clean_assistant_text(raw_text, response_attachments)
-        assistant_message_id = await self._append_message(
-            session_uuid,
-            "assistant",
-            text,
-            tool_payload=self._assistant_turn_payload(
-                session_uuid=session_uuid,
-                user_message_id=user_message_id,
-                user_message=message,
-                assistant_text=text,
-                provider=provider.name,
-                model=self._model_for_provider(runtime, provider.name),
-                tool_results=tool_results,
-                attachments=response_attachments,
-                actor_context=actor_context,
-                route=route,
-            ),
-        )
-        await self._update_memory(session_uuid, message, tool_results)
-        await event_bus.publish(
-            "chat.message",
-            {
-                "session_id": str(session_uuid),
-                "provider": provider.name,
-                "text": text,
-                "attachments": response_attachments,
-            },
-        )
-        return ChatTurnResult(
-            str(session_uuid),
-            provider.name,
-            text,
-            tool_results,
-            response_attachments,
-            await self._pending_action_for_response(session_uuid, user_id=user_id),
-            str(user_message_id),
-            str(assistant_message_id),
-        )
 
     async def handle_tool_confirmation(
         self,
@@ -346,7 +255,7 @@ class ChatService(ChatRoutingMixin):
                     self._tools[name]
                     for name in pending.get("selected_tools", [])
                     if isinstance(name, str) and name in self._tools
-                ] or self._select_tools_for_route(route, [])
+                ]
                 memory = await self._load_memory(session_uuid)
                 messages = await self._build_agent_messages(
                     session_uuid,
@@ -595,6 +504,7 @@ class ChatService(ChatRoutingMixin):
         active_lessons = await alfred_feedback_service.recall_active_lessons(
             user_id=str(user.get("id") or "") or None,
             user_role=str(user.get("role") or "") or None,
+            message=message,
         )
         planning_context = {**actor_context, "alfred_lessons": active_lessons}
         visible_tools = filter_tools_for_actor(self._tools.values(), actor_context)
@@ -868,29 +778,18 @@ class ChatService(ChatRoutingMixin):
         executed: set[str] = set()
         result = LlmResult(text="")
         route = route or IntentRoute(("General",), 0.5, True, "default route")
+        if provider.name == "local":
+            raise IntentRouterError("Alfred 3.0 ReAct tool routing requires a hosted LLM provider.")
 
         for iteration in range(MAX_AGENT_TOOL_ITERATIONS):
-            if provider.name == "local":
-                calls = self._deterministic_react_calls(
-                    user_message,
-                    route,
-                    memory,
-                    attachments or [],
-                    tool_results,
-                    selected_tools,
-                    iteration=iteration,
-                    actor_context=actor_context,
-                )
-                if not calls:
-                    result = await provider.complete(messages, tools=tool_schemas, tool_results=tool_results)
-                    return LlmResult(text=self._clean_agent_text(result.text), raw=result.raw)
-            else:
-                result = await provider.complete(messages, tools=tool_schemas)
-                final_text = self._react_final_from_result(result)
-                if final_text:
-                    return LlmResult(text=final_text, raw=result.raw)
-                calls = self._tool_calls_from_result(result, iteration=iteration)
+            result = await provider.complete(messages, tools=tool_schemas)
+            final_text = self._react_final_from_result(result)
+            if final_text:
+                return LlmResult(text=final_text, raw=result.raw)
+            calls = self._tool_calls_from_result(result, iteration=iteration)
             if not calls:
+                if tool_results and self._extract_tool_call_payload(result.text) is not None:
+                    return LlmResult(text=self._fallback_text(tool_results), raw=result.raw)
                 return LlmResult(text=self._clean_agent_text(result.text), raw=result.raw)
 
             fresh_calls: list[ToolCall] = []
@@ -2693,6 +2592,27 @@ class ChatService(ChatRoutingMixin):
             verb = "left" if event.get("direction") == "exit" else "arrived"
             occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
             return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
+        if tool_name == "query_anomalies":
+            alerts = output.get("alerts") if isinstance(output.get("alerts"), list) else []
+            if not alerts and isinstance(output.get("anomalies"), list):
+                alerts = output["anomalies"]
+            search = str(output.get("search") or "that request").strip()
+            if not alerts:
+                if output.get("suspected_delivery"):
+                    return (
+                        f"I couldn't find any matching active or resolved alerts for {search}. "
+                        "No delivery breadcrumb in the alert ledger, which is irritatingly tidy."
+                    )
+                return "I couldn't find any matching active or resolved alerts. The alert ledger is politely blank."
+            alert = alerts[0] if isinstance(alerts[0], dict) else {}
+            when = str(alert.get("created_at_display") or alert.get("resolved_at_display") or "the recorded alert time")
+            note = str(alert.get("resolution_note") or "").strip()
+            indicators = alert.get("delivery_indicators") if isinstance(alert.get("delivery_indicators"), list) else []
+            if output.get("suspected_delivery") or alert.get("possible_delivery"):
+                evidence = note or "; ".join(str(item) for item in indicators[:2] if item)
+                suffix = f" Evidence: {evidence}" if evidence else ""
+                return f"The most likely matching delivery alert was recorded at {when}.{suffix}"
+            return f"The latest matching alert was recorded at {when}: {alert.get('message') or alert.get('type') or 'alert'}."
         if tool_name == "diagnose_access_event":
             if not output.get("found"):
                 return str(output.get("error") or "I could not find a matching access event to diagnose. I checked the usual cupboards; next stop is incident investigation.")

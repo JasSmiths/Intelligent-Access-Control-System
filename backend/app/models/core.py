@@ -739,6 +739,13 @@ class AccessEvent(Base, TimestampMixin):
 
 Index("ix_access_events_created_at", AccessEvent.created_at)
 Index(
+    "ix_access_events_decision_occurred_person_vehicle",
+    AccessEvent.decision,
+    AccessEvent.occurred_at.desc(),
+    AccessEvent.person_id,
+    AccessEvent.vehicle_id,
+)
+Index(
     "ix_access_events_snapshot_created_at",
     AccessEvent.created_at,
     postgresql_where=AccessEvent.snapshot_path.is_not(None),

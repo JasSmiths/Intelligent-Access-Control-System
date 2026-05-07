@@ -1172,7 +1172,8 @@
     width: 100%;
     gap: 2px;
     padding-top: 14px;
-    overflow: visible;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .nav-group {
@@ -1876,7 +1877,7 @@
   }
 
   .dashboard-event-snapshot-preview {
-    width: min(210px, calc(100% - 18px));
+    display: none;
   }
 
   .feed-line {

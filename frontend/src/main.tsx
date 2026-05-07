@@ -91,6 +91,7 @@ import {
   Badge,
   displayUserName,
   EmptyState,
+  ExpectedPresenceSummary,
   formatDate,
   Group,
   HomeAssistantManagedCover,
@@ -801,6 +802,7 @@ function App() {
   const currentUser = authStatus?.user ?? null;
   const [profilePreferences, setProfilePreferences] = useProfilePreferences(currentUser);
   const [presence, setPresence] = React.useState<Presence[]>([]);
+  const [expectedPresence, setExpectedPresence] = React.useState<ExpectedPresenceSummary | null>(null);
   const [events, setEvents] = React.useState<AccessEvent[]>([]);
   const [anomalies, setAnomalies] = React.useState<Anomaly[]>([]);
   const [people, setPeople] = React.useState<Person[]>([]);
@@ -865,9 +867,21 @@ function App() {
   }, [refreshAuth]);
 
   const refresh = React.useCallback(async () => {
-    const [nextPresence, nextEvents, nextAnomalies, nextPeople, nextVehicles, nextGroups, nextSchedules, nextStatus, nextMaintenanceStatus] =
+    const [
+      nextPresence,
+      nextExpectedPresence,
+      nextEvents,
+      nextAnomalies,
+      nextPeople,
+      nextVehicles,
+      nextGroups,
+      nextSchedules,
+      nextStatus,
+      nextMaintenanceStatus
+    ] =
       await Promise.all([
         api.get<Presence[]>("/api/v1/presence"),
+        api.get<ExpectedPresenceSummary>("/api/v1/presence/expected-today"),
         api.get<AccessEvent[]>("/api/v1/events?limit=40"),
         api.get<Anomaly[]>("/api/v1/alerts?status=open&limit=100"),
         api.get<Person[]>("/api/v1/people"),
@@ -878,6 +892,7 @@ function App() {
         api.get<MaintenanceStatus>("/api/v1/maintenance/status")
       ]);
     setPresence(nextPresence);
+    setExpectedPresence(nextExpectedPresence);
     setEvents(nextEvents);
     setAnomalies(nextAnomalies);
     setPeople(nextPeople);
@@ -1075,6 +1090,7 @@ function App() {
       await api.post<{ status: string }>("/api/v1/auth/logout");
       setAuthStatus({ setup_required: false, authenticated: false, user: null });
       setPresence([]);
+      setExpectedPresence(null);
       setEvents([]);
       setAnomalies([]);
       setPeople([]);
@@ -1335,6 +1351,7 @@ function App() {
             view={view}
             search={search}
             presence={presence}
+            expectedPresence={expectedPresence}
             events={events}
             anomalies={anomalies}
             people={people}
@@ -1372,6 +1389,7 @@ function View(props: {
   view: ViewKey;
   search: string;
   presence: Presence[];
+  expectedPresence: ExpectedPresenceSummary | null;
   events: AccessEvent[];
   anomalies: Anomaly[];
   people: Person[];

@@ -1,4 +1,30 @@
-from app.modules.lpr.ubiquiti import extract_plate_smart_zone_evidence, extract_smart_zone_names
+from app.modules.lpr.ubiquiti import UbiquitiLprPayload, extract_plate_smart_zone_evidence, extract_smart_zone_names
+
+
+def test_alarm_manager_payload_prefers_complete_plate_when_triggers_include_partial_read() -> None:
+    payload = UbiquitiLprPayload.model_validate(
+        {
+            "alarm": {
+                "triggers": [
+                    {
+                        "key": "license_plate_unknown",
+                        "value": "LG73",
+                        "group": {"name": "LG73"},
+                        "eventId": "event-1",
+                    },
+                    {
+                        "key": "license_plate_unknown",
+                        "value": "LG73DNR",
+                        "group": {"name": "LG73DNR"},
+                        "eventId": "event-1",
+                    },
+                ]
+            },
+            "timestamp": 1778084953100,
+        }
+    )
+
+    assert payload.registration_number == "LG73DNR"
 
 
 def test_extracts_smart_zone_from_direct_lpr_payload() -> None:

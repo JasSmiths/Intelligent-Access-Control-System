@@ -43,6 +43,7 @@ from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.auth_secret_management import AuthSecretRotationError, auth_secret_security_status, rotate_auth_secret
+from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.automations import (
     AutomationError,
     get_automation_service,
@@ -82,6 +83,7 @@ from app.services.schedules import (
     schedule_allows_at,
 )
 from app.services.settings import get_runtime_config, list_settings, update_settings
+from app.services.snapshots import get_snapshot_manager
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_ACCESS, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry, write_audit_log
 from app.services.visitor_passes import (
@@ -322,6 +324,7 @@ def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
         "query_vehicle_detection_history": ("Access_Logs", "Access_Diagnostics", "Compliance_DVLA"),
         "get_telemetry_trace": ("Access_Diagnostics", "Users_Settings"),
         "query_anomalies": ("Access_Logs", "Access_Diagnostics", "General"),
+        "analyze_alert_snapshot": ("Access_Diagnostics", "Cameras"),
         "summarize_access_rhythm": ("Access_Logs", "General"),
         "calculate_visit_duration": ("Access_Logs",),
         "trigger_anomaly_alert": ("Access_Logs", "Notifications"),
@@ -1879,6 +1882,12 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
         vehicle_id_filter = _uuid_from_value(arguments.get("vehicle_id"))
         if vehicle_id_filter:
             query = query.where(AccessEvent.vehicle_id == vehicle_id_filter)
+        direction_filter = _access_direction_from_argument(arguments.get("direction"))
+        if direction_filter:
+            query = query.where(AccessEvent.direction == direction_filter)
+        decision_filter = _access_decision_from_argument(arguments.get("decision"))
+        if decision_filter:
+            query = query.where(AccessEvent.decision == decision_filter)
         events = (await session.scalars(query)).all()
 
         person_filter = _normalize(arguments.get("person"))
@@ -2552,29 +2561,326 @@ async def query_leaderboard(arguments: dict[str, Any]) -> dict[str, Any]:
 async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
     limit = _bounded_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
     severity = _normalize(arguments.get("severity"))
+    status_filter = _alert_status_from_argument(arguments.get("status"))
+    search = _normalize(arguments.get("search"))
+    suspected_delivery = bool(arguments.get("suspected_delivery") or arguments.get("possible_delivery"))
     config = await get_runtime_config()
+    start, end = _period_bounds(arguments.get("day") or "recent", config.site_timezone)
+    query_limit = 250 if search or suspected_delivery or status_filter == "all" else limit
     async with AsyncSessionLocal() as session:
         query = (
             select(Anomaly)
-            .where(Anomaly.resolved_at.is_(None))
+            .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+            .where(Anomaly.created_at >= start, Anomaly.created_at <= end)
             .order_by(Anomaly.created_at.desc())
-            .limit(limit)
+            .limit(query_limit)
         )
+        if status_filter == "open":
+            query = query.where(Anomaly.resolved_at.is_(None))
+        elif status_filter == "resolved":
+            query = query.where(Anomaly.resolved_at.is_not(None))
         anomalies = (await session.scalars(query)).all()
 
-    records = [
-        {
-            "type": anomaly.anomaly_type.value,
-            "severity": anomaly.severity.value,
-            "message": anomaly.message,
-            "status": "open",
-            "created_at": _agent_datetime_iso(anomaly.created_at, config.site_timezone),
-            "created_at_display": _agent_datetime_display(anomaly.created_at, config.site_timezone),
-        }
-        for anomaly in anomalies
-        if not severity or severity == anomaly.severity.value
+    records: list[dict[str, Any]] = []
+    for anomaly in anomalies:
+        if severity and severity != _enum_text(anomaly.severity):
+            continue
+        record = _anomaly_agent_payload(anomaly, timezone_name=config.site_timezone)
+        if not _anomaly_matches_search(record, anomaly, search=search, suspected_delivery=suspected_delivery):
+            continue
+        records.append(record)
+        if len(records) >= limit:
+            break
+    return {
+        "alerts": records,
+        "anomalies": records,
+        "count": len(records),
+        "status": status_filter,
+        "day": arguments.get("day") or "recent",
+        "search": search or None,
+        "suspected_delivery": suspected_delivery,
+        "timezone": config.site_timezone,
+    }
+
+
+async def analyze_alert_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
+    alert_id = _uuid_from_value(arguments.get("alert_id"))
+    if not alert_id:
+        return {"error": "alert_id is required."}
+    prompt = str(
+        arguments.get("prompt")
+        or "Inspect this retained alert snapshot. Describe visible vehicles, supplier branding, and whether it looks like a delivery."
+    ).strip()
+    runtime = await get_runtime_config()
+    provider = str(arguments.get("provider") or runtime.llm_provider)
+
+    async with AsyncSessionLocal() as session:
+        row = await session.scalar(
+            select(Anomaly)
+            .options(selectinload(Anomaly.event))
+            .where(Anomaly.id == alert_id)
+        )
+    if not row:
+        return {"alert_id": str(alert_id), "error": "Alert was not found."}
+
+    media = _alert_snapshot_file(row)
+    if not media:
+        return {"alert_id": str(alert_id), "error": "No retained snapshot is available for this alert."}
+    path, content_type, snapshot = media
+    try:
+        result = await analyze_image_with_provider(
+            provider,
+            prompt=prompt,
+            image_bytes=path.read_bytes(),
+            mime_type=content_type,
+        )
+    except (ImageAnalysisUnsupportedError, Exception) as exc:
+        return {"alert_id": str(alert_id), "provider": provider, "error": str(exc)}
+
+    return {
+        "alert_id": str(alert_id),
+        "provider": provider,
+        "analysis": result.text,
+        "snapshot": _compact_alert_snapshot(snapshot),
+        "snapshot_retained": True,
+    }
+
+
+def _alert_status_from_argument(value: Any) -> str:
+    status = _normalize(value or "open")
+    if status in {"active", "unresolved"}:
+        return "open"
+    if status in {"resolved", "all", "open"}:
+        return status
+    return "open"
+
+
+def _anomaly_agent_payload(anomaly: Anomaly, *, timezone_name: str) -> dict[str, Any]:
+    event = getattr(anomaly, "event", None)
+    snapshot = _alert_snapshot_for_agent(anomaly)
+    visual_detection = _event_vehicle_visual_detection(event)
+    status = "resolved" if getattr(anomaly, "resolved_at", None) else "open"
+    record: dict[str, Any] = {
+        "id": str(getattr(anomaly, "id", "")),
+        "alert_ids": [str(getattr(anomaly, "id", ""))],
+        "event_id": str(getattr(anomaly, "event_id", None) or getattr(event, "id", "") or "") or None,
+        "type": _enum_text(getattr(anomaly, "anomaly_type", "")),
+        "severity": _enum_text(getattr(anomaly, "severity", "")),
+        "status": status,
+        "message": str(getattr(anomaly, "message", "") or ""),
+        "registration_number": _anomaly_registration_number(anomaly),
+        "created_at": _agent_datetime_iso(anomaly.created_at, timezone_name),
+        "created_at_display": _agent_datetime_display(anomaly.created_at, timezone_name),
+        "resolved_at": (
+            _agent_datetime_iso(anomaly.resolved_at, timezone_name)
+            if getattr(anomaly, "resolved_at", None)
+            else None
+        ),
+        "resolved_at_display": (
+            _agent_datetime_display(anomaly.resolved_at, timezone_name)
+            if getattr(anomaly, "resolved_at", None)
+            else None
+        ),
+        "resolution_note": getattr(anomaly, "resolution_note", None),
+        "snapshot": snapshot,
+        "event": _alert_event_payload(event, timezone_name=timezone_name, visual_detection=visual_detection),
+    }
+    delivery_indicators = _delivery_indicators_for_alert(anomaly, record, visual_detection)
+    record["possible_delivery"] = bool(delivery_indicators)
+    record["delivery_indicators"] = delivery_indicators
+    return record
+
+
+def _alert_event_payload(
+    event: AccessEvent | None,
+    *,
+    timezone_name: str,
+    visual_detection: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not event:
+        return None
+    return {
+        "id": str(getattr(event, "id", "")),
+        "registration_number": getattr(event, "registration_number", None),
+        "direction": _enum_text(getattr(event, "direction", "")),
+        "decision": _enum_text(getattr(event, "decision", "")),
+        "source": getattr(event, "source", None),
+        "occurred_at": _agent_datetime_iso(event.occurred_at, timezone_name),
+        "occurred_at_display": _agent_datetime_display(event.occurred_at, timezone_name),
+        "vehicle_visual_detection": visual_detection or None,
+    }
+
+
+def _alert_snapshot_for_agent(anomaly: Anomaly) -> dict[str, Any] | None:
+    snapshot = None
+    try:
+        snapshot = alert_snapshot_metadata(anomaly)
+    except Exception:
+        snapshot = None
+    if not snapshot and isinstance(getattr(anomaly, "context", None), dict):
+        raw_snapshot = anomaly.context.get("snapshot")
+        snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else None
+    return _compact_alert_snapshot(snapshot)
+
+
+def _compact_alert_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    value = {
+        "url": snapshot.get("url") or snapshot.get("snapshot_url"),
+        "captured_at": snapshot.get("captured_at") or snapshot.get("snapshot_captured_at"),
+        "content_type": snapshot.get("content_type") or snapshot.get("snapshot_content_type"),
+        "bytes": snapshot.get("bytes") or snapshot.get("snapshot_bytes"),
+        "width": snapshot.get("width") or snapshot.get("snapshot_width"),
+        "height": snapshot.get("height") or snapshot.get("snapshot_height"),
+        "camera": snapshot.get("camera") or snapshot.get("snapshot_camera"),
+    }
+    return {key: item for key, item in value.items() if item not in (None, "")}
+
+
+def _alert_snapshot_file(anomaly: Anomaly) -> tuple[Any, str, dict[str, Any]] | None:
+    snapshot = None
+    try:
+        snapshot = alert_snapshot_metadata(anomaly)
+    except Exception:
+        snapshot = None
+    if not isinstance(snapshot, dict):
+        return None
+    url = str(snapshot.get("url") or "")
+    path = None
+    if url.startswith("/api/v1/alerts/") and getattr(anomaly, "id", None):
+        path = alert_snapshot_path(anomaly.id)
+    elif getattr(anomaly, "event", None) and getattr(anomaly.event, "snapshot_path", None):
+        try:
+            path = get_snapshot_manager().resolve_path(anomaly.event.snapshot_path)
+        except Exception:
+            path = None
+    if not path or not path.exists():
+        return None
+    content_type = str(
+        snapshot.get("content_type")
+        or snapshot.get("snapshot_content_type")
+        or getattr(getattr(anomaly, "event", None), "snapshot_content_type", None)
+        or "image/jpeg"
+    )
+    return path, content_type, snapshot
+
+
+def _event_vehicle_visual_detection(event: AccessEvent | None) -> dict[str, Any]:
+    payload = getattr(event, "raw_payload", None)
+    if not isinstance(payload, dict):
+        return {}
+    visual = payload.get("vehicle_visual_detection")
+    if not isinstance(visual, dict):
+        return {}
+    allowed = {
+        "observed_vehicle_type",
+        "observed_vehicle_color",
+        "observed_vehicle_colour",
+        "vehicle_type",
+        "vehicle_color",
+        "vehicle_colour",
+        "detected_vehicle_type",
+        "detected_vehicle_color",
+        "detected_vehicle_colour",
+        "vehicle_type_confidence",
+        "vehicle_color_confidence",
+        "source",
+        "observed_at",
+    }
+    return {key: value for key, value in visual.items() if key in allowed and value not in (None, "")}
+
+
+def _delivery_indicators_for_alert(
+    anomaly: Anomaly,
+    record: dict[str, Any],
+    visual_detection: dict[str, Any],
+) -> list[str]:
+    blob = _alert_search_blob(anomaly, record)
+    lowered = blob.lower()
+    compacted = re.sub(r"[^a-z0-9]+", "", lowered)
+    indicators: list[str] = []
+    if "dove fuels" in lowered or "dove fuel" in lowered:
+        indicators.append("Text evidence mentions Dove Fuels.")
+    if "hello fresh" in lowered or "hellofresh" in compacted:
+        indicators.append("Text evidence mentions HelloFresh.")
+    if "oil delivery" in lowered or "heating oil" in lowered or "fuel delivery" in lowered:
+        indicators.append("Text evidence mentions an oil/fuel delivery.")
+    elif "delivery" in lowered:
+        indicators.append("Text evidence mentions a delivery.")
+    vehicle_type = _normalize(
+        visual_detection.get("observed_vehicle_type")
+        or visual_detection.get("vehicle_type")
+        or visual_detection.get("detected_vehicle_type")
+    )
+    if vehicle_type in {"truck", "lorry", "tanker", "hgv", "van"}:
+        indicators.append(f"Stored visual evidence reports vehicle type: {vehicle_type.title()}.")
+    elif any(term in lowered for term in ("lorry", "truck", "tanker", "hgv")):
+        indicators.append("Text evidence mentions a truck/lorry/tanker.")
+    return indicators
+
+
+def _anomaly_matches_search(
+    record: dict[str, Any],
+    anomaly: Anomaly,
+    *,
+    search: str,
+    suspected_delivery: bool,
+) -> bool:
+    if suspected_delivery and record.get("delivery_indicators"):
+        return True
+    if not search:
+        return True
+    terms = [term for term in re.findall(r"[a-z0-9]+", search.lower()) if len(term) >= 2]
+    if not terms:
+        return True
+    blob = _alert_search_blob(anomaly, record).lower()
+    compact_blob = re.sub(r"[^a-z0-9]+", "", blob)
+    compact_search = re.sub(r"[^a-z0-9]+", "", search.lower())
+    if compact_search and compact_search in compact_blob:
+        return True
+    return any(term in blob or term in compact_blob for term in terms)
+
+
+def _alert_search_blob(anomaly: Anomaly, record: dict[str, Any]) -> str:
+    parts = [
+        str(record.get("message") or ""),
+        str(record.get("registration_number") or ""),
+        str(record.get("resolution_note") or ""),
+        _searchable_text(getattr(anomaly, "context", None)),
+        _searchable_text(getattr(getattr(anomaly, "event", None), "raw_payload", None)),
     ]
-    return {"anomalies": records, "count": len(records), "timezone": config.site_timezone}
+    return " ".join(part for part in parts if part)
+
+
+def _searchable_text(value: Any, *, depth: int = 0) -> str:
+    if value is None or depth > 5:
+        return ""
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            parts.append(str(key))
+            parts.append(_searchable_text(item, depth=depth + 1))
+        return " ".join(part for part in parts if part)
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_searchable_text(item, depth=depth + 1) for item in value)
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    return ""
+
+
+def _anomaly_registration_number(anomaly: Anomaly) -> str:
+    context = getattr(anomaly, "context", None)
+    if isinstance(context, dict):
+        value = context.get("registration_number")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    event = getattr(anomaly, "event", None)
+    return str(getattr(event, "registration_number", "") or "")
+
+
+def _enum_text(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
 
 
 async def summarize_access_rhythm(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -6198,6 +6504,26 @@ def _uuid_from_value(value: Any) -> UUID | None:
     try:
         return UUID(str(value))
     except (TypeError, ValueError):
+        return None
+
+
+def _access_direction_from_argument(value: Any) -> AccessDirection | None:
+    text = _normalize(value)
+    if not text:
+        return None
+    try:
+        return AccessDirection(text)
+    except ValueError:
+        return None
+
+
+def _access_decision_from_argument(value: Any) -> AccessDecision | None:
+    text = _normalize(value)
+    if not text:
+        return None
+    try:
+        return AccessDecision(text)
+    except ValueError:
         return None
 
 

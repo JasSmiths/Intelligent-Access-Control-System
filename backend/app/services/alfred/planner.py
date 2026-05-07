@@ -15,10 +15,14 @@ from app.services.chat_contracts import SUPPORTED_INTENTS
 PLANNER_PROMPT = """You are Alfred's v3 planning brain for IACS.
 
 You receive exact actor context, compact memory, and compact domain cards.
-Select only the domains and tool names needed for the next agent loop.
-Do not answer the user here. Do not execute tools. Do not use keyword rules.
+Select only the explicit tool names needed for the next agent loop.
+Do not answer the user here. Do not execute tools. Do not use keyword rules, regex routing, or hardcoded intent blocks.
+The acting ReAct model will only see the tools you select, so include every tool it may need.
 Prefer enough tools to answer correctly; for complex questions, select independent read tools together so the acting model can call them in parallel.
-Arrival/departure questions about a name may refer to a directory Person or a Visitor Pass visitor; include Visitor Pass lookup tools when the person may be a visitor or entity resolution is uncertain.
+Interpret casual wording semantically. Departure-like meaning ("left this morning", "headed out", "gone", "bolted", "outta here") maps to LPR/access events with direction exit; arrival-like meaning maps to direction entry; current-here questions map to presence.
+Arrival/departure questions about a fuzzy person or relationship name require resolve_human_entity plus query_access_events. They may refer to a directory Person or a Visitor Pass visitor; include Visitor Pass lookup tools when the person may be a visitor or entity resolution is uncertain.
+Delivery or supplier-arrival questions without a known person/vehicle, such as "When did the oil delivery arrive?", should inspect active/open and resolved Alerts with query_anomalies; include analyze_alert_snapshot when snapshot evidence may be needed to identify a truck, lorry, tanker, or supplier branding.
+Active Alfred training lessons in actor context are approved behavioral guidance. Use them to inform tool choice and answer strategy by analogy, never as keyword rules or canned text.
 For simple open/closed device-state questions, select query_device_states only. Do not select malfunction tools unless the user asks about faults, failures, stuck devices, missed opens, or diagnostics.
 If the user asks for a real-world action or mutation, include the relevant mutation tool but set safety_posture to confirmation_required.
 If the request is ambiguous, ask one concise clarification question.
@@ -58,7 +62,7 @@ def domain_cards(tools: Iterable[AgentTool]) -> list[dict[str, Any]]:
                     "name": tool.name,
                     "read_only": tool.read_only,
                     "requires_confirmation": tool.requires_confirmation,
-                    "description": tool.description[:180],
+                    "description": tool.description[:360],
                 }
             )
             if tool.read_only:
@@ -135,13 +139,7 @@ def tools_for_selection(selection: PlannerSelection, tools: list[AgentTool]) -> 
     if selection.selected_tool_names:
         selected = [tool for tool in tools if tool.name in set(selection.selected_tool_names)]
     else:
-        domains = set(selection.selected_domains)
-        selected = [tool for tool in tools if domains.intersection(tool.categories)]
-    if not selected:
-        selected = [tool for tool in tools if "General" in tool.categories]
-    names = {tool.name for tool in selected}
-    if "resolve_human_entity" in {tool.name for tool in tools} and not names.intersection({"create_visitor_pass"}):
-        selected.insert(0, next(tool for tool in tools if tool.name == "resolve_human_entity"))
+        selected = []
     deduped: list[AgentTool] = []
     seen: set[str] = set()
     for tool in selected:

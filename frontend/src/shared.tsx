@@ -105,6 +105,31 @@ export type Presence = {
   last_changed_at: string | null;
 };
 
+export type ExpectedPresencePerson = {
+  person_id: string;
+  display_name: string;
+  confidence: number;
+  evidence_days: number;
+  observed_weekdays: number;
+  typical_arrival: string | null;
+  typical_departure: string | null;
+};
+
+export type ExpectedPresenceSummary = {
+  date: string;
+  timezone: string;
+  generated_at: string;
+  count: number;
+  learning: boolean;
+  coverage: {
+    regular_candidates: number;
+    learned_candidates: number;
+    learning_population: number;
+    ratio: number;
+  };
+  people: ExpectedPresencePerson[];
+};
+
 export type AccessEvent = {
   id: string;
   registration_number: string;

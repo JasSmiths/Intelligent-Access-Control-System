@@ -275,6 +275,7 @@
 }
 
 .presence-stat {
+  position: relative;
   min-height: 112px;
   display: grid;
   align-content: center;
@@ -283,6 +284,15 @@
   padding: 0 12px;
   border-right: 1px solid var(--line);
   text-align: center;
+}
+
+.presence-stat.has-tooltip {
+  cursor: help;
+}
+
+.presence-stat.has-tooltip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 52%, transparent);
+  outline-offset: -4px;
 }
 
 .presence-stat:last-child {
@@ -324,8 +334,158 @@
   color: var(--green);
 }
 
+.presence-stat .presence-stat-pill {
+  position: absolute;
+  top: -24px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--blue) 34%, transparent);
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 620;
+  line-height: 1;
+  transform: translateX(-50%);
+}
+
 .presence-stat strong.blue + small {
   color: var(--blue);
+}
+
+.presence-stat .expected-presence-tooltip {
+  position: absolute;
+  top: calc(100% + 12px);
+  left: 50%;
+  z-index: 95;
+  width: min(340px, calc(100vw - 24px));
+  gap: 10px;
+  padding: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-4px);
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+  visibility: hidden;
+}
+
+.presence-stat.has-tooltip:hover .expected-presence-tooltip,
+.presence-stat.has-tooltip.tooltip-open .expected-presence-tooltip,
+.presence-stat.has-tooltip:focus .expected-presence-tooltip,
+.presence-stat.has-tooltip:focus-within .expected-presence-tooltip,
+.presence-stat.has-tooltip:focus-visible .expected-presence-tooltip {
+  opacity: 1;
+  transform: translateX(-50%);
+  visibility: visible;
+}
+
+.expected-tooltip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.expected-tooltip-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.expected-tooltip-head strong {
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.expected-tooltip-head span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.expected-tooltip-head em {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--blue) 34%, transparent);
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 680;
+  line-height: 1;
+}
+
+.expected-tooltip-list {
+  display: grid;
+  gap: 8px;
+}
+
+.expected-tooltip-person {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+}
+
+.expected-tooltip-avatar {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--blue) 18%, var(--line));
+  border-radius: 50%;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 760;
+  object-fit: cover;
+}
+
+.expected-tooltip-person > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.expected-tooltip-person strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.expected-tooltip-person span,
+.expected-tooltip-empty,
+.expected-tooltip-more {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 540;
+  line-height: 1.35;
+}
+
+.expected-tooltip-empty,
+.expected-tooltip-more {
+  display: block;
+  padding: 2px 0;
+  text-align: center;
 }
 
 .presence-bar {
@@ -499,7 +659,7 @@
   width: clamp(176px, 46vw, 248px);
   aspect-ratio: 16 / 9;
   position: absolute;
-  right: 0;
+  left: calc(100% + 12px);
   top: 50%;
   z-index: 40;
   padding: 4px;

@@ -5,14 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 
-ROLLBACK_MODE = "v2"
 DEFAULT_MODE = "v3"
 NON_AGENT_PROVIDERS = {"local"}
 
 
 def agent_mode(runtime: Any) -> str:
-    mode = str(getattr(runtime, "alfred_agent_mode", DEFAULT_MODE) or DEFAULT_MODE).strip().lower()
-    return ROLLBACK_MODE if mode == ROLLBACK_MODE else DEFAULT_MODE
+    return DEFAULT_MODE
 
 
 def provider_agent_capability(runtime: Any, provider_name: str) -> dict[str, Any]:
@@ -34,7 +32,7 @@ def agent_status_payload(runtime: Any, *, memory_status: dict[str, Any] | None =
     capability = provider_agent_capability(runtime, active_provider)
     return {
         "active_mode": mode,
-        "rollback_available": True,
+        "rollback_available": False,
         "provider": active_provider,
         "provider_capability": capability,
         "v3_ready": mode == DEFAULT_MODE and capability["agent_capable"],
@@ -69,4 +67,3 @@ def _capability_reason(provider: str, configured: bool, local_limited: bool) -> 
     if not provider:
         return "provider_missing"
     return "ready"
-

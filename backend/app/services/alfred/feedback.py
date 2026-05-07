@@ -87,7 +87,8 @@ class AlfredFeedbackService:
         *,
         user_id: str | None,
         user_role: str | None,
-        limit: int = 8,
+        message: str | None = None,
+        limit: int = 6,
     ) -> list[dict[str, Any]]:
         user_uuid = _coerce_uuid(user_id)
         scope_filter = [AlfredLesson.scope == "site"]
@@ -101,9 +102,10 @@ class AlfredFeedbackService:
                     .where(AlfredLesson.deleted_at.is_(None))
                     .where(or_(*scope_filter))
                     .order_by(AlfredLesson.confidence.desc(), AlfredLesson.updated_at.desc())
-                    .limit(limit)
+                    .limit(80)
                 )
             ).all()
+        rows = _rank_lessons_for_prompt(message or "", rows, limit=max(1, min(limit, 12)))
         include_owner = str(user_role or "").lower() == "admin"
         return [self._public_lesson(row, include_owner=include_owner) for row in rows]
 
@@ -734,6 +736,191 @@ def _needs_live_facts(value: str) -> bool:
 def _turn_has_tool_results(turn_snapshot: dict[str, Any]) -> bool:
     results = turn_snapshot.get("tool_results") if isinstance(turn_snapshot, dict) else None
     return bool(isinstance(results, list) and results)
+
+
+TRAINING_RELEVANCE_STOPWORDS = {
+    "a",
+    "about",
+    "after",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "but",
+    "by",
+    "can",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "she",
+    "so",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "this",
+    "to",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+}
+
+TRAINING_TERM_ALIASES = {
+    "arrive": "arrival",
+    "arrived": "arrival",
+    "arrives": "arrival",
+    "arrival": "arrival",
+    "back": "arrival",
+    "came": "arrival",
+    "entered": "arrival",
+    "entry": "arrival",
+    "return": "arrival",
+    "returned": "arrival",
+    "showed": "arrival",
+    "depart": "departure",
+    "departed": "departure",
+    "departure": "departure",
+    "exit": "departure",
+    "exited": "departure",
+    "gone": "departure",
+    "leave": "departure",
+    "leaves": "departure",
+    "leaving": "departure",
+    "left": "departure",
+    "pass": "visitor_pass",
+    "passes": "visitor_pass",
+    "visitor": "visitor_pass",
+    "visitors": "visitor_pass",
+    "garage": "device_state",
+    "gate": "device_state",
+    "state": "device_state",
+    "status": "device_state",
+    "minimal": "concise",
+    "concise": "concise",
+    "direct": "concise",
+    "focused": "concise",
+    "simple": "concise",
+    "exact": "time_query",
+    "morning": "time_query",
+    "time": "time_query",
+    "today": "time_query",
+    "tonight": "time_query",
+}
+
+
+def _rank_lessons_for_prompt(message: str, rows: list[AlfredLesson], *, limit: int) -> list[AlfredLesson]:
+    bounded_limit = max(1, min(limit, 12))
+    if not str(message or "").strip():
+        return list(rows)[:bounded_limit]
+    scored: list[tuple[float, float, int, AlfredLesson]] = []
+    for index, row in enumerate(rows):
+        score = _lesson_relevance_score(message, row)
+        if score <= 0:
+            continue
+        try:
+            confidence = float(getattr(row, "confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        scored.append((score, confidence, -index, row))
+    scored.sort(reverse=True, key=lambda item: (item[0], item[1], item[2]))
+    return [row for _score, _confidence, _index, row in scored[:bounded_limit]]
+
+
+def _lesson_relevance_score(message: str, row: AlfredLesson) -> float:
+    message_terms = _training_terms(message)
+    if not message_terms:
+        return 0.0
+    title_terms = _training_terms(str(getattr(row, "title", "") or ""))
+    lesson_terms = _training_terms(str(getattr(row, "lesson", "") or ""))
+    tag_terms: set[str] = set()
+    tags = getattr(row, "tags", None)
+    if isinstance(tags, list):
+        for tag in tags:
+            tag_terms.update(_training_terms(str(tag).replace("-", " ")))
+    title_overlap = message_terms & title_terms
+    tag_overlap = message_terms & tag_terms
+    lesson_overlap = message_terms & lesson_terms
+    if not (title_overlap or tag_overlap or lesson_overlap):
+        return 0.0
+    meaningful_overlap = (title_overlap | tag_overlap | lesson_overlap) - {
+        "concise",
+        "exact",
+        "morning",
+        "time",
+        "time_query",
+        "today",
+        "tonight",
+    }
+    if not meaningful_overlap:
+        return 0.0
+    score = (len(title_overlap) * 3.0) + (len(tag_overlap) * 2.0) + len(lesson_overlap)
+    if {"arrival", "departure"} & message_terms and {"arrival", "departure"} & (title_terms | tag_terms):
+        score += 1.5
+    if "time_query" in message_terms and "time_query" in (title_terms | tag_terms | lesson_terms):
+        score += 1.0
+    try:
+        score += max(0.0, min(float(getattr(row, "confidence", 0.0) or 0.0), 1.0)) * 0.2
+    except (TypeError, ValueError):
+        pass
+    return score
+
+
+def _training_terms(value: str) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    terms: set[str] = set()
+    for token in tokens:
+        if token in TRAINING_RELEVANCE_STOPWORDS:
+            continue
+        if len(token) < 3:
+            continue
+        terms.add(token)
+        expanded = _expand_training_term(token)
+        if expanded:
+            terms.add(expanded)
+    if "get" in tokens and "back" in tokens:
+        terms.add("arrival")
+    return terms
+
+
+def _expand_training_term(token: str) -> str:
+    return TRAINING_TERM_ALIASES.get(token, "")
 
 
 def _coerce_uuid(value: Any) -> uuid.UUID | None:
