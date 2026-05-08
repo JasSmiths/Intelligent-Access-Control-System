@@ -1564,6 +1564,125 @@ async def test_vehicle_session_suppresses_post_exit_closed_gate_linger(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_vehicle_session_allows_return_entry_after_exit_idle_expired(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=30.0,
+    )
+    tracker = VehiclePresenceTracker()
+    finalized = []
+
+    async def fake_active_vehicle_registrations():
+        return ["AGS7X"]
+
+    async def fake_finalize_window(window):
+        finalized.append(window.best_read.registration_number)
+        return FinalizedPlateEvent(
+            event_id=str(uuid.uuid4()),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+            occurred_at=window.best_read.captured_at,
+        )
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
+
+    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context(
+            "AGS7X",
+            first_seen,
+            state="open",
+            event_id="exit-event",
+            device_id="942A6FD09D64",
+        ),
+        direction=AccessDirection.EXIT,
+        decision=AccessDecision.GRANTED,
+    )
+
+    return_read = plate_read_with_context(
+        "AGS7X",
+        first_seen + timedelta(minutes=52),
+        state="closed",
+        event_id="return-event",
+        device_id="942A6FD09D64",
+    )
+    await tracker.record_unifi_payload(
+        return_read.raw_payload,
+        registration_number=return_read.registration_number,
+        received_at=return_read.captured_at,
+    )
+
+    await service._handle_queued_read(return_read)
+
+    assert finalized == ["AGS7X"]
+    assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_ignores_current_lpr_webhook_presence_evidence_after_idle(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=30.0,
+    )
+    tracker = VehiclePresenceTracker()
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MJ17MDZ", first_seen, event_id="previous-event"),
+    )
+
+    read = plate_read_with_context(
+        "MJ17MDZ",
+        first_seen + timedelta(seconds=31),
+        event_id="current-event",
+    )
+    await tracker.record_unifi_payload(
+        read.raw_payload,
+        registration_number=read.registration_number,
+        received_at=read.captured_at,
+    )
+    published.clear()
+
+    await service._handle_queued_read(read)
+
+    assert [event_type for event_type, _payload in published] == []
+    assert len(service._pending) == 1
+
+
+@pytest.mark.asyncio
 async def test_vehicle_session_allows_departure_state_after_entry(monkeypatch) -> None:
     service = AccessEventService()
     service._runtime = SimpleNamespace(

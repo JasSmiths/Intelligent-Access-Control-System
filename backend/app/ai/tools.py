@@ -100,6 +100,11 @@ logger = get_logger(__name__)
 DEFAULT_AGENT_TIMEZONE = "Europe/London"
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
+VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
+SUPPRESSED_READ_ROOT_CAUSES = {
+    "iacs_read_suppressed_as_active_vehicle_session",
+    "iacs_read_suppressed_before_access_event",
+}
 
 SCHEDULE_TIME_BLOCKS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2039,6 +2044,16 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
             default_policy=config.schedule_default_policy,
         )
         notification_summary = await _incident_notification_summary(session, incident_type=incident_type)
+        suppressed_reads = await _incident_suppressed_reads(
+            session,
+            subject=subject,
+            plates=plates,
+            start=start,
+            end=end,
+            direction=direction_filter,
+            timezone_name=config.site_timezone,
+            idle_seconds=_runtime_vehicle_session_idle_seconds(config),
+        )
 
     diagnostic = None
     if iacs_events:
@@ -2064,11 +2079,13 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
         found_iacs=bool(iacs_events),
         protect=protect,
         traces=traces,
+        suppressed_reads=suppressed_reads,
         incident_type=incident_type,
     )
     backfill_args = _backfill_args_from_incident(
         subject=subject,
         protect=protect,
+        suppressed_reads=suppressed_reads,
         arguments=arguments,
         root_cause=str(root.get("root_cause") or ""),
     )
@@ -2084,14 +2101,26 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
         gate_observations=gate_observations,
         audit_logs=audit_logs,
         anomalies=anomalies,
+        suppressed_reads=suppressed_reads,
         timezone_name=config.site_timezone,
+    )
+    diagnostic_chain = _incident_diagnostic_chain(
+        iacs_events=iacs_events,
+        suppressed_reads=suppressed_reads,
+        protect=protect,
+        traces=traces,
+        audit_logs=audit_logs,
+        root=root,
+        diagnostic=diagnostic,
     )
     result = {
         "found_iacs_event": bool(iacs_events),
+        "found_iacs_suppressed_read": bool(suppressed_reads),
         "found_protect_event": bool(protect.get("matched_event") or protect.get("events")),
         "root_cause": root.get("root_cause"),
         "confidence": root.get("confidence"),
         "timeline": timeline,
+        "diagnostic_chain": diagnostic_chain,
         "subject": subject.get("summary"),
         "window": {
             "start": _agent_datetime_iso(start, config.site_timezone),
@@ -2102,6 +2131,8 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
         "iacs": {
             "events": iacs_events,
             "event_count": len(iacs_events),
+            "suppressed_reads": suppressed_reads,
+            "suppressed_read_count": len(suppressed_reads),
             "telemetry_traces": traces,
             "gate_observations": gate_observations,
             "anomalies": anomalies,
@@ -2111,7 +2142,7 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
             "diagnostic": diagnostic,
         },
         "protect": protect,
-        "iacs_vs_protect": _iacs_vs_protect_summary(bool(iacs_events), protect, traces),
+        "iacs_vs_protect": _iacs_vs_protect_summary(bool(iacs_events), protect, traces, suppressed_reads=suppressed_reads),
         "recommended_action": _incident_recommended_action(root, bool(backfill_args), protect),
         "requires_confirmation": bool(backfill_args),
         "confirmation_field": "confirm" if backfill_args else None,
@@ -2119,10 +2150,16 @@ async def investigate_access_incident(arguments: dict[str, Any]) -> dict[str, An
     }
     if backfill_args:
         result["target"] = subject.get("summary", {}).get("label") or backfill_args.get("registration_number") or "missing access event"
-        result["detail"] = (
-            "I found durable UniFi Protect LPR evidence without a matching IACS access event. "
-            "Confirm to backfill the access event and update presence only; no gate, garage, or normal arrival notifications will be fired."
-        )
+        if backfill_args.get("evidence_kind") == "suppressed_read":
+            result["detail"] = (
+                "I found durable IACS suppressed-read evidence without a finalized access event. "
+                "Confirm to backfill the access event and update presence only; no gate, garage, automation, or normal arrival notifications will be fired."
+            )
+        else:
+            result["detail"] = (
+                "I found durable UniFi Protect LPR evidence without a matching IACS access event. "
+                "Confirm to backfill the access event and update presence only; no gate, garage, automation, or normal arrival notifications will be fired."
+            )
     return _compact_observation(result)
 
 
@@ -2164,7 +2201,7 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
 
     config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
-        candidate = await _backfill_candidate(session, arguments, config.site_timezone)
+        candidate = await _backfill_candidate(session, arguments, config)
         if isinstance(candidate, dict) and candidate.get("error"):
             return {"backfilled": False, **candidate}
         if not bool(arguments.get("confirm")):
@@ -2177,7 +2214,7 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
                     f"Backfill {candidate.get('direction')} {candidate.get('decision')} event for "
                     f"{candidate.get('label') or candidate.get('registration_number')} at "
                     f"{_agent_datetime_display(candidate['captured_at'], config.site_timezone)}? "
-                    "This updates IACS event history and presence only."
+                    "This updates IACS event history and presence only. It will not replay gate, garage, automation, or notification actions."
                 ),
                 "candidate": _backfill_candidate_payload(candidate, config.site_timezone),
             }
@@ -2208,16 +2245,24 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
             registration_number=candidate["registration_number"],
             context={
                 "protect_event_id": candidate.get("protect_event_id"),
+                "evidence_kind": candidate.get("evidence_kind"),
+                "source_access_event_id": candidate.get("source_access_event_id"),
+                "suppression_reason": candidate.get("suppression_reason"),
                 "reason": candidate.get("reason"),
                 "direction": candidate["direction"],
                 "decision": candidate["decision"],
             },
         )
         trace.record_span(
-            "Protect evidence selected",
+            "Backfill evidence selected",
             started_at=datetime.now(tz=UTC),
             category=TELEMETRY_CATEGORY_ALFRED,
-            attributes={"source": candidate.get("source"), "protect_event_id": candidate.get("protect_event_id")},
+            attributes={
+                "source": candidate.get("source"),
+                "evidence_kind": candidate.get("evidence_kind"),
+                "protect_event_id": candidate.get("protect_event_id"),
+                "source_access_event_id": candidate.get("source_access_event_id"),
+            },
             output_payload=_backfill_candidate_payload(candidate, config.site_timezone),
         )
         event = AccessEvent(
@@ -2233,9 +2278,13 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
             raw_payload={
                 "backfill": {
                     "source": candidate.get("source"),
+                    "evidence_kind": candidate.get("evidence_kind"),
                     "reason": candidate.get("reason"),
+                    "source_access_event_id": candidate.get("source_access_event_id"),
+                    "suppression_reason": candidate.get("suppression_reason"),
                     "created_by": "Alfred_AI",
                     "created_by_user_id": str(context.get("user_id") or "") or None,
+                    "actions_replayed": False,
                 },
                 "protect_evidence": {
                     "event_id": candidate.get("protect_event_id"),
@@ -2245,10 +2294,12 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
                     "confidence": candidate["confidence"],
                     "track_candidate": candidate.get("track_candidate"),
                 },
+                "suppressed_read_evidence": candidate.get("suppressed_read_evidence"),
                 "direction_resolution": {
                     "source": "alfred_backfill",
                     "gate_observation": candidate.get("gate_observation"),
                 },
+                "schedule": candidate.get("schedule_evaluation"),
                 "telemetry": {"trace_id": trace.trace_id},
             },
         )
@@ -2277,6 +2328,9 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
             target_label=event.registration_number,
             metadata={
                 "protect_event_id": candidate.get("protect_event_id"),
+                "evidence_kind": candidate.get("evidence_kind"),
+                "source_access_event_id": candidate.get("source_access_event_id"),
+                "suppression_reason": candidate.get("suppression_reason"),
                 "camera_name": candidate.get("camera_name"),
                 "direction": event.direction.value,
                 "decision": event.decision.value,
@@ -2312,6 +2366,8 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
             "timing_classification": event.timing_classification.value,
             "anomaly_count": 0,
             "backfilled": True,
+            "skip_automation_actions": True,
+            "skip_notification_actions": True,
         },
     )
     return {
@@ -2324,6 +2380,8 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
         "occurred_at_display": _agent_datetime_display(event.occurred_at, config.site_timezone),
         "presence_updated": presence_updated,
         "telemetry_trace_id": trace.trace_id,
+        "evidence_kind": candidate.get("evidence_kind"),
+        "source_access_event_id": str(candidate.get("source_access_event_id")) if candidate.get("source_access_event_id") else None,
     }
 
 
@@ -4980,11 +5038,202 @@ def _event_looks_like_lpr(event: dict[str, Any]) -> bool:
     return "license" in types or "plate" in types or "lpr" in camera or "license" in camera
 
 
+def _runtime_vehicle_session_idle_seconds(config: Any) -> float:
+    try:
+        value = float(getattr(config, "lpr_vehicle_session_idle_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return max(10.0, value or 180.0)
+
+
+async def _incident_suppressed_reads(
+    session,
+    *,
+    subject: dict[str, Any],
+    plates: list[str],
+    start: datetime,
+    end: datetime,
+    direction: str,
+    timezone_name: str,
+    idle_seconds: float,
+) -> list[dict[str, Any]]:
+    search_start = start - timedelta(seconds=max(idle_seconds * 3, 3600.0))
+    events = (
+        await session.scalars(
+            select(AccessEvent)
+            .options(*_access_event_load_options())
+            .where(AccessEvent.occurred_at >= search_start, AccessEvent.occurred_at <= end)
+            .order_by(AccessEvent.occurred_at.desc())
+            .limit(250)
+        )
+    ).all()
+    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    records: list[dict[str, Any]] = []
+    for event in events:
+        records.extend(
+            _incident_suppressed_read_payloads_from_event(
+                event,
+                subject_summary=summary,
+                plates=plates,
+                start=start,
+                end=end,
+                direction=direction,
+                timezone_name=timezone_name,
+            )
+        )
+
+    def sort_key(item: dict[str, Any]) -> datetime:
+        return _datetime_from_agent_value(item.get("captured_at")) or datetime.min.replace(tzinfo=UTC)
+
+    return sorted(records, key=sort_key, reverse=True)[:50]
+
+
+def _incident_suppressed_read_payloads_from_event(
+    event: Any,
+    *,
+    subject_summary: dict[str, Any],
+    plates: list[str],
+    start: datetime,
+    end: datetime,
+    direction: str,
+    timezone_name: str,
+) -> list[dict[str, Any]]:
+    raw_payload = getattr(event, "raw_payload", None) if isinstance(getattr(event, "raw_payload", None), dict) else {}
+    vehicle_session = raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY) if isinstance(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY), dict) else {}
+    suppressed_reads = vehicle_session.get("suppressed_reads") if isinstance(vehicle_session.get("suppressed_reads"), list) else []
+    if not suppressed_reads:
+        return []
+
+    source_person_id = str(getattr(event, "person_id", "") or "")
+    source_vehicle_id = str(getattr(event, "vehicle_id", "") or "")
+    source_registration = normalize_registration_number(str(getattr(event, "registration_number", "") or ""))
+    source_direction = _enum_value(getattr(event, "direction", ""))
+    source_decision = _enum_value(getattr(event, "decision", ""))
+    source_event_id = str(getattr(event, "id", "") or vehicle_session.get("id") or "")
+    source_occurred_at = _datetime_from_agent_value(getattr(event, "occurred_at", None))
+    person = None
+    vehicle = getattr(event, "vehicle", None)
+    if vehicle is not None:
+        person = getattr(vehicle, "owner", None)
+    person_name = getattr(person, "display_name", None)
+    records: list[dict[str, Any]] = []
+    for read in suppressed_reads:
+        if not isinstance(read, dict):
+            continue
+        captured_at = _datetime_from_agent_value(read.get("captured_at"))
+        if not captured_at or captured_at < start or captured_at > end:
+            continue
+        if not _suppressed_read_matches_subject(
+            event_person_id=source_person_id,
+            event_vehicle_id=source_vehicle_id,
+            event_registration=source_registration,
+            read=read,
+            subject_summary=subject_summary,
+            plates=plates,
+        ):
+            continue
+        inferred_direction = _direction_from_suppressed_read(read)
+        if direction and inferred_direction and inferred_direction != direction:
+            continue
+        registration_number = _registration_from_suppressed_read(read) or source_registration
+        detected_registration_number = normalize_registration_number(str(read.get("detected_registration_number") or ""))
+        records.append(
+            _compact_observation(
+                {
+                    "source_access_event_id": source_event_id,
+                    "source_event_occurred_at": _agent_datetime_iso(source_occurred_at, timezone_name) if source_occurred_at else None,
+                    "source_event_direction": source_direction,
+                    "source_event_decision": source_decision,
+                    "source_event_registration_number": source_registration,
+                    "person_id": source_person_id or subject_summary.get("person_id"),
+                    "vehicle_id": source_vehicle_id or subject_summary.get("vehicle_id"),
+                    "person": person_name or subject_summary.get("person"),
+                    "registration_number": registration_number,
+                    "detected_registration_number": detected_registration_number,
+                    "captured_at": _agent_datetime_iso(captured_at, timezone_name),
+                    "captured_at_display": _agent_datetime_display(captured_at, timezone_name),
+                    "confidence": read.get("confidence"),
+                    "source": read.get("source"),
+                    "gate_state": read.get("gate_state"),
+                    "inferred_direction": inferred_direction,
+                    "reason": read.get("reason") or vehicle_session.get("last_suppressed_reason"),
+                    "matched_by": read.get("matched_by") or vehicle_session.get("last_matched_by"),
+                    "protect_event_ids": read.get("protect_event_ids") if isinstance(read.get("protect_event_ids"), list) else [],
+                    "presence_evidence": _payload_summary(read.get("presence_evidence")),
+                    "source_event": {
+                        "id": source_event_id,
+                        "occurred_at": _agent_datetime_iso(source_occurred_at, timezone_name) if source_occurred_at else None,
+                        "direction": source_direction,
+                        "decision": source_decision,
+                        "registration_number": source_registration,
+                    },
+                    "backfill_repairable": bool(
+                        registration_number
+                        and captured_at
+                        and (subject_summary.get("person_id") or subject_summary.get("vehicle_id") or source_person_id or source_vehicle_id)
+                    ),
+                }
+            )
+        )
+    return records
+
+
+def _suppressed_read_matches_subject(
+    *,
+    event_person_id: str,
+    event_vehicle_id: str,
+    event_registration: str,
+    read: dict[str, Any],
+    subject_summary: dict[str, Any],
+    plates: list[str],
+) -> bool:
+    subject_person_id = str(subject_summary.get("person_id") or "")
+    subject_vehicle_id = str(subject_summary.get("vehicle_id") or "")
+    if subject_vehicle_id and event_vehicle_id == subject_vehicle_id:
+        return True
+    if subject_person_id and event_person_id == subject_person_id:
+        return True
+
+    read_registration = _registration_from_suppressed_read(read)
+    detected_registration = normalize_registration_number(str(read.get("detected_registration_number") or ""))
+    candidates = [value for value in [read_registration, detected_registration, event_registration] if value]
+    if plates:
+        return any(
+            _plate_match_score(candidate, expected) >= 0.78
+            for candidate in candidates
+            for expected in plates
+        )
+    return not (subject_person_id or subject_vehicle_id)
+
+
+def _registration_from_suppressed_read(read: dict[str, Any]) -> str:
+    return normalize_registration_number(
+        str(read.get("registration_number") or read.get("detected_registration_number") or read.get("raw_value") or "")
+    )
+
+
+def _direction_from_suppressed_read(read: dict[str, Any]) -> str | None:
+    state = str(read.get("gate_state") or "").strip().lower()
+    if state == "closed":
+        return "entry"
+    if state in {"open", "opening", "closing"}:
+        return "exit"
+    return None
+
+
+def _enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = getattr(value, "value", value)
+    return str(raw) if str(raw) else None
+
+
 def _incident_root_cause(
     *,
     found_iacs: bool,
     protect: dict[str, Any],
     traces: list[dict[str, Any]],
+    suppressed_reads: list[dict[str, Any]],
     incident_type: str,
 ) -> dict[str, str]:
     if found_iacs:
@@ -4995,6 +5244,11 @@ def _incident_root_cause(
         if incident_type == "schedule_denial":
             return {"root_cause": "iacs_event_found_check_schedule_diagnostics", "confidence": "high"}
         return {"root_cause": "iacs_event_found", "confidence": "high"}
+    if suppressed_reads:
+        reason = str(suppressed_reads[0].get("reason") or "")
+        if reason == "vehicle_session_already_active":
+            return {"root_cause": "iacs_read_suppressed_as_active_vehicle_session", "confidence": "high"}
+        return {"root_cause": "iacs_read_suppressed_before_access_event", "confidence": "high"}
     if not protect.get("available"):
         return {"root_cause": "protect_unavailable_partial_diagnosis", "confidence": "low"}
     if protect.get("matched_event"):
@@ -5019,9 +5273,17 @@ def _backfill_args_from_incident(
     *,
     subject: dict[str, Any],
     protect: dict[str, Any],
+    suppressed_reads: list[dict[str, Any]],
     arguments: dict[str, Any],
     root_cause: str,
 ) -> dict[str, Any] | None:
+    if root_cause in SUPPRESSED_READ_ROOT_CAUSES:
+        return _backfill_args_from_suppressed_read(
+            subject=subject,
+            suppressed_reads=suppressed_reads,
+            arguments=arguments,
+            root_cause=root_cause,
+        )
     if root_cause not in {
         "protect_lpr_detected_but_iacs_webhook_missing",
         "iacs_webhook_received_error",
@@ -5045,6 +5307,7 @@ def _backfill_args_from_incident(
     decision = "denied" if direction == "denied" or not (summary.get("person_id") or summary.get("vehicle_id")) else "granted"
     return _compact_observation(
         {
+            "evidence_kind": "protect",
             "protect_event_id": event.get("id"),
             "person_id": summary.get("person_id"),
             "vehicle_id": summary.get("vehicle_id"),
@@ -5058,14 +5321,65 @@ def _backfill_args_from_incident(
     )
 
 
-def _iacs_vs_protect_summary(found_iacs: bool, protect: dict[str, Any], traces: list[dict[str, Any]]) -> dict[str, Any]:
+def _backfill_args_from_suppressed_read(
+    *,
+    subject: dict[str, Any],
+    suppressed_reads: list[dict[str, Any]],
+    arguments: dict[str, Any],
+    root_cause: str,
+) -> dict[str, Any] | None:
+    if not suppressed_reads:
+        return None
+    read = next((item for item in suppressed_reads if item.get("backfill_repairable")), suppressed_reads[0])
+    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    registration_number = normalize_registration_number(
+        str(read.get("registration_number") or (summary.get("plates") or [None])[0] or arguments.get("registration_number") or "")
+    )
+    captured_at = read.get("captured_at") or arguments.get("expected_time")
+    source_access_event_id = read.get("source_access_event_id")
+    if not registration_number or not captured_at or not source_access_event_id:
+        return None
+    direction = _normalize(arguments.get("direction"))
+    if direction not in {"entry", "exit", "denied"}:
+        direction = str(read.get("inferred_direction") or "entry")
+    decision = "denied" if direction == "denied" or not (summary.get("person_id") or summary.get("vehicle_id") or read.get("person_id") or read.get("vehicle_id")) else "granted"
+    return _compact_observation(
+        {
+            "evidence_kind": "suppressed_read",
+            "source_access_event_id": source_access_event_id,
+            "suppressed_read_captured_at": captured_at,
+            "suppression_reason": read.get("reason"),
+            "person_id": summary.get("person_id") or read.get("person_id"),
+            "vehicle_id": summary.get("vehicle_id") or read.get("vehicle_id"),
+            "registration_number": registration_number,
+            "captured_at": captured_at,
+            "direction": direction,
+            "decision": decision,
+            "confidence": read.get("confidence"),
+            "reason": f"Alfred incident remediation: {root_cause}",
+        }
+    )
+
+
+def _iacs_vs_protect_summary(
+    found_iacs: bool,
+    protect: dict[str, Any],
+    traces: list[dict[str, Any]],
+    *,
+    suppressed_reads: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     webhook_traces = [trace for trace in traces if _trace_is_lpr_webhook(trace)]
+    found_suppressed = bool(suppressed_reads)
     return _compact_observation(
         {
             "iacs_access_event": "found" if found_iacs else "missing",
+            "iacs_suppressed_read": "found" if found_suppressed else "not_found",
             "protect_event": "found" if protect.get("matched_event") else "not_found",
             "iacs_webhook_trace_count": len(webhook_traces),
             "comparison": (
+                "IACS received a matching LPR read but suppressed it before finalizing an access event."
+                if found_suppressed and not found_iacs
+                else
                 "Protect saw a matching LPR candidate but IACS has no access event."
                 if protect.get("matched_event") and not found_iacs
                 else "IACS has a matching access event."
@@ -5080,6 +5394,11 @@ def _incident_recommended_action(root: dict[str, Any], backfill_available: bool,
     root_cause = str(root.get("root_cause") or "")
     if backfill_available:
         return {"type": "confirmed_backfill_available", "summary": "Confirm the prepared backfill to repair IACS history and presence."}
+    if root_cause in SUPPRESSED_READ_ROOT_CAUSES:
+        return {
+            "type": "suppressed_read_review",
+            "summary": "Review the suppressed-read evidence and only backfill if the resolved person, vehicle, and schedule allow it.",
+        }
     if root_cause == "protect_lpr_detected_but_iacs_webhook_missing":
         return {
             "type": "external_alarm_manager_fix",
@@ -5098,6 +5417,116 @@ def _incident_recommended_action(root: dict[str, Any], backfill_available: bool,
     return {"type": "diagnostic_follow_up", "summary": "Use the linked event diagnostics or external repair steps above."}
 
 
+def _incident_diagnostic_chain(
+    *,
+    iacs_events: list[dict[str, Any]],
+    suppressed_reads: list[dict[str, Any]],
+    protect: dict[str, Any],
+    traces: list[dict[str, Any]],
+    audit_logs: list[dict[str, Any]],
+    root: dict[str, Any],
+    diagnostic: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    webhook_traces = [trace for trace in traces if _trace_is_lpr_webhook(trace)]
+    matched_protect = protect.get("matched_event") if isinstance(protect.get("matched_event"), dict) else None
+    first_suppressed = suppressed_reads[0] if suppressed_reads else {}
+    access_detail = "A finalized IACS access event exists." if iacs_events else "No finalized IACS access event exists in the requested window."
+    if first_suppressed:
+        access_detail = (
+            f"IACS received the read at {first_suppressed.get('captured_at_display') or first_suppressed.get('captured_at')} "
+            f"but suppressed it as {first_suppressed.get('reason') or 'a vehicle-session duplicate'}."
+        )
+    gate_detail = _incident_gate_chain_detail(iacs_events, diagnostic, audit_logs)
+    notification_detail = _incident_notification_chain_detail(iacs_events, diagnostic, first_suppressed)
+    return [
+        _compact_observation(
+            {
+                "stage": "camera_webhook",
+                "status": "found" if first_suppressed or webhook_traces or matched_protect else "not_found",
+                "detail": (
+                    "IACS suppressed-read history contains the matching LPR read."
+                    if first_suppressed
+                    else "IACS webhook telemetry contains matching LPR traffic."
+                    if webhook_traces
+                    else "UniFi Protect has matching LPR evidence."
+                    if matched_protect
+                    else "No matching camera/webhook evidence was found."
+                ),
+            }
+        ),
+        _compact_observation(
+            {
+                "stage": "access_event",
+                "status": "finalized" if iacs_events else "suppressed" if first_suppressed else "missing",
+                "detail": access_detail,
+            }
+        ),
+        _compact_observation(
+            {
+                "stage": "gate_command",
+                "status": "not_attempted" if not iacs_events else gate_detail.get("status"),
+                "detail": "No gate command ran because no access event was finalized." if not iacs_events else gate_detail.get("detail"),
+            }
+        ),
+        _compact_observation(
+            {
+                "stage": "notification",
+                "status": "not_triggered" if not iacs_events else notification_detail.get("status"),
+                "detail": (
+                    "Notifications never ran because notification workflows are evaluated after finalized access events or explicit notification triggers."
+                    if not iacs_events
+                    else notification_detail.get("detail")
+                ),
+            }
+        ),
+        _compact_observation(
+            {
+                "stage": "root_cause",
+                "status": root.get("confidence"),
+                "detail": root.get("root_cause"),
+            }
+        ),
+    ]
+
+
+def _incident_gate_chain_detail(
+    iacs_events: list[dict[str, Any]],
+    diagnostic: dict[str, Any] | None,
+    audit_logs: list[dict[str, Any]],
+) -> dict[str, str]:
+    gate = diagnostic.get("gate") if isinstance(diagnostic, dict) and isinstance(diagnostic.get("gate"), dict) else {}
+    if gate:
+        command = gate.get("gate_command")
+        if isinstance(command, dict):
+            return {"status": str(command.get("status") or "recorded"), "detail": str(gate.get("outcome_reason") or "Gate command diagnostics were recorded.")}
+        return {"status": "not_attempted", "detail": str(gate.get("outcome_reason") or "No gate command span was recorded.")}
+    gate_audits = [row for row in audit_logs if "gate" in str(row.get("action") or "").lower()]
+    if gate_audits:
+        return {"status": str(gate_audits[0].get("outcome") or "recorded"), "detail": str(gate_audits[0].get("action") or "Gate audit record found.")}
+    if iacs_events:
+        return {"status": "not_found", "detail": "No gate command evidence was found for the finalized event."}
+    return {"status": "not_attempted", "detail": "No access event was finalized."}
+
+
+def _incident_notification_chain_detail(
+    iacs_events: list[dict[str, Any]],
+    diagnostic: dict[str, Any] | None,
+    first_suppressed: dict[str, Any],
+) -> dict[str, str]:
+    notifications = diagnostic.get("notifications") if isinstance(diagnostic, dict) and isinstance(diagnostic.get("notifications"), dict) else {}
+    summary = str(notifications.get("summary") or "").strip()
+    deliveries = notifications.get("delivery_records") if isinstance(notifications.get("delivery_records"), list) else []
+    if deliveries:
+        return {"status": "recorded", "detail": summary or "Notification delivery records were found."}
+    if summary:
+        return {"status": "not_recorded", "detail": summary}
+    if iacs_events:
+        return {"status": "unknown", "detail": "No notification diagnostic summary was available."}
+    if first_suppressed:
+        return {"status": "not_triggered", "detail": "The read stopped at vehicle-session suppression, before notification context creation."}
+    return {"status": "not_triggered", "detail": "No matching event reached notification evaluation."}
+
+
 def _incident_timeline(
     *,
     iacs_events: list[dict[str, Any]],
@@ -5106,11 +5535,21 @@ def _incident_timeline(
     gate_observations: list[dict[str, Any]],
     audit_logs: list[dict[str, Any]],
     anomalies: list[dict[str, Any]],
+    suppressed_reads: list[dict[str, Any]],
     timezone_name: str,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for event in iacs_events:
         items.append({"time": event.get("occurred_at"), "source": "iacs_access_event", "summary": f"{event.get('direction')} {event.get('decision')} {event.get('registration_number')}"})
+    for read in suppressed_reads:
+        items.append(
+            {
+                "time": read.get("captured_at"),
+                "source": "iacs_suppressed_read",
+                "summary": f"suppressed {read.get('registration_number')} as {read.get('reason') or 'suppressed_read'}",
+                "source_access_event_id": read.get("source_access_event_id"),
+            }
+        )
     for event in protect.get("events") or []:
         items.append({"time": event.get("start"), "source": "unifi_protect", "summary": f"{event.get('camera_name')} {event.get('smart_detect_types')}"})
     for trace in traces:
@@ -5137,14 +5576,36 @@ def _incident_timeline(
     ]
 
 
-async def _backfill_candidate(session, arguments: dict[str, Any], timezone_name: str) -> dict[str, Any]:
+async def _backfill_candidate(session, arguments: dict[str, Any], config: Any) -> dict[str, Any]:
+    timezone_name = config.site_timezone
     subject = await _resolve_incident_subject(session, arguments)
     summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
     plates = _incident_candidate_plates(subject, arguments)
+    evidence_kind = _normalize(arguments.get("evidence_kind") or "protect")
+    if evidence_kind not in {"protect", "suppressed_read"}:
+        return {"error": "evidence_kind must be protect or suppressed_read."}
     protect_event_id = str(arguments.get("protect_event_id") or "").strip()
     track_candidate: dict[str, Any] | None = None
     protect_event: dict[str, Any] | None = None
-    if protect_event_id:
+    source_event: AccessEvent | None = None
+    suppressed_read: dict[str, Any] | None = None
+    if evidence_kind == "suppressed_read":
+        source_event_id = _uuid_from_value(arguments.get("source_access_event_id"))
+        if not source_event_id:
+            return {"error": "source_access_event_id is required for suppressed-read backfill evidence."}
+        source_event = await session.scalar(
+            select(AccessEvent)
+            .options(*_access_event_load_options())
+            .where(AccessEvent.id == source_event_id)
+        )
+        if not source_event:
+            return {"error": "Source access event containing suppressed-read evidence was not found."}
+        suppressed_read = _suppressed_read_from_source_event(source_event, arguments, timezone_name)
+        if not suppressed_read:
+            return {"error": "No matching suppressed read was found on the source access event."}
+        if source_event.vehicle and str(source_event.vehicle_id) != str(summary.get("vehicle_id") or ""):
+            plates = list(dict.fromkeys([*plates, source_event.vehicle.registration_number]))
+    elif protect_event_id:
         try:
             track = await get_unifi_protect_service().event_lpr_track(protect_event_id)
             protect_event = _protect_event_payload(track.get("event") or {"id": protect_event_id}, timezone_name)
@@ -5158,13 +5619,21 @@ async def _backfill_candidate(session, arguments: dict[str, Any], timezone_name:
             return {"error": str(exc)}
 
     registration_number = normalize_registration_number(
-        str(arguments.get("registration_number") or (track_candidate or {}).get("registration_number") or (plates[0] if plates else ""))
+        str(
+            arguments.get("registration_number")
+            or (suppressed_read or {}).get("registration_number")
+            or (suppressed_read or {}).get("detected_registration_number")
+            or (track_candidate or {}).get("registration_number")
+            or (plates[0] if plates else "")
+        )
     )
     if not registration_number:
         return {"error": "registration_number is required for an access event backfill."}
 
     captured_at = (
         _parse_incident_datetime(arguments.get("captured_at") or arguments.get("expected_time"), timezone_name, str(arguments.get("day") or "today"))
+        or _datetime_from_agent_value(arguments.get("suppressed_read_captured_at"))
+        or _datetime_from_agent_value((suppressed_read or {}).get("captured_at"))
         or _datetime_from_agent_value((track_candidate or {}).get("captured_at"))
         or _datetime_from_agent_value((protect_event or {}).get("start"))
     )
@@ -5172,30 +5641,79 @@ async def _backfill_candidate(session, arguments: dict[str, Any], timezone_name:
         return {"error": "captured_at or durable Protect track time is required for an access event backfill."}
     captured_at = captured_at.astimezone(UTC)
     gate_observation = await _nearest_gate_observation(session, captured_at, timezone_name)
+    if evidence_kind == "suppressed_read" and not gate_observation and suppressed_read:
+        gate_state = str(suppressed_read.get("gate_state") or "").strip()
+        if gate_state:
+            gate_observation = {"state": gate_state, "source": "suppressed_read", "observed_at": _agent_datetime_iso(captured_at, timezone_name)}
     direction = _normalize(arguments.get("direction"))
     if direction not in {"entry", "exit", "denied"}:
-        direction = _direction_from_gate_observation(gate_observation) or "entry"
+        direction = _direction_from_suppressed_read(suppressed_read or {}) or _direction_from_gate_observation(gate_observation) or "entry"
+    source_vehicle = source_event.vehicle if source_event and source_event.vehicle else None
+    source_person = source_vehicle.owner if source_vehicle and source_vehicle.owner else None
+    vehicle_obj = subject.get("vehicle") if isinstance(subject.get("vehicle"), Vehicle) else source_vehicle
+    person_obj = subject.get("person") if isinstance(subject.get("person"), Person) else source_person
+    person_id = _uuid_from_value(summary.get("person_id")) or (person_obj.id if person_obj else None)
+    vehicle_id = _uuid_from_value(summary.get("vehicle_id")) or (vehicle_obj.id if vehicle_obj else None)
     decision = _normalize(arguments.get("decision"))
     if decision not in {"granted", "denied"}:
-        decision = "denied" if direction == "denied" or not (summary.get("person_id") or summary.get("vehicle_id")) else "granted"
+        decision = "denied" if direction == "denied" or not (person_id or vehicle_id) else "granted"
     if decision == "granted" and not (summary.get("person_id") or summary.get("vehicle_id")):
-        return {"error": "A granted backfill requires a resolved person or vehicle."}
+        if not (person_id or vehicle_id):
+            return {"error": "A granted backfill requires a resolved active person or vehicle."}
+    schedule_evaluation = None
+    downgraded_reason = None
+    if decision == "granted":
+        if person_obj is not None and not person_obj.is_active:
+            decision = "denied"
+            downgraded_reason = f"{person_obj.display_name} is inactive, so the repair was prepared as denied."
+        elif vehicle_obj is not None and not vehicle_obj.is_active:
+            decision = "denied"
+            downgraded_reason = f"{vehicle_obj.registration_number} is inactive, so the repair was prepared as denied."
+        elif vehicle_obj is not None:
+            evaluation = await evaluate_vehicle_schedule(
+                session,
+                vehicle_obj,
+                captured_at,
+                timezone_name=timezone_name,
+                default_policy=getattr(config, "schedule_default_policy", "deny"),
+            )
+            schedule_evaluation = _schedule_evaluation_payload(evaluation, f"vehicle {vehicle_obj.registration_number}", timezone_name)
+            if not evaluation.allowed:
+                decision = "denied"
+                downgraded_reason = evaluation.reason or "The resolved vehicle was outside schedule, so the repair was prepared as denied."
+        elif person_obj is not None:
+            evaluation = await evaluate_person_schedule(
+                session,
+                person_obj,
+                captured_at,
+                timezone_name=timezone_name,
+                default_policy=getattr(config, "schedule_default_policy", "deny"),
+            )
+            schedule_evaluation = _schedule_evaluation_payload(evaluation, person_obj.display_name, timezone_name)
+            if not evaluation.allowed:
+                decision = "denied"
+                downgraded_reason = evaluation.reason or "The resolved person was outside schedule, so the repair was prepared as denied."
     return {
         "label": summary.get("label") or registration_number,
-        "person_id": _uuid_from_value(summary.get("person_id")),
-        "vehicle_id": _uuid_from_value(summary.get("vehicle_id")),
+        "person_id": person_id,
+        "vehicle_id": vehicle_id,
         "registration_number": registration_number,
         "captured_at": captured_at,
         "direction": direction,
         "decision": decision,
-        "confidence": _confidence_ratio(arguments.get("confidence") or (track_candidate or {}).get("confidence") or 0.99),
-        "source": "unifi_protect_backfill" if protect_event_id else "alfred_backfill",
+        "confidence": _confidence_ratio(arguments.get("confidence") or (suppressed_read or {}).get("confidence") or (track_candidate or {}).get("confidence") or 0.99),
+        "source": "iacs_suppressed_read_backfill" if evidence_kind == "suppressed_read" else "unifi_protect_backfill" if protect_event_id else "alfred_backfill",
+        "evidence_kind": evidence_kind,
         "protect_event_id": protect_event_id or None,
+        "source_access_event_id": source_event.id if source_event else None,
+        "suppression_reason": (suppressed_read or {}).get("reason") or arguments.get("suppression_reason"),
         "camera_id": (protect_event or {}).get("camera_id") or (track_candidate or {}).get("camera_id"),
         "camera_name": (protect_event or {}).get("camera_name") or (track_candidate or {}).get("camera_name"),
         "track_candidate": track_candidate,
+        "suppressed_read_evidence": _compact_observation(suppressed_read) if suppressed_read else None,
+        "schedule_evaluation": schedule_evaluation,
         "gate_observation": gate_observation,
-        "reason": str(arguments.get("reason") or "Backfilled by Alfred from incident investigation").strip(),
+        "reason": str(downgraded_reason or arguments.get("reason") or "Backfilled by Alfred from incident investigation").strip(),
     }
 
 
@@ -5218,6 +5736,45 @@ async def _nearest_gate_observation(session, captured_at: datetime, timezone_nam
         key=lambda observation: abs((observation.observed_at.astimezone(UTC) - captured_at).total_seconds()),
     )
     return _gate_observation_payload(nearest, timezone_name)
+
+
+def _suppressed_read_from_source_event(event: AccessEvent, arguments: dict[str, Any], timezone_name: str) -> dict[str, Any] | None:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    vehicle_session = raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY) if isinstance(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY), dict) else {}
+    suppressed_reads = vehicle_session.get("suppressed_reads") if isinstance(vehicle_session.get("suppressed_reads"), list) else []
+    if not suppressed_reads:
+        return None
+    target_time = (
+        _parse_incident_datetime(
+            arguments.get("suppressed_read_captured_at") or arguments.get("captured_at") or arguments.get("expected_time"),
+            timezone_name,
+            str(arguments.get("day") or "today"),
+        )
+        or _datetime_from_agent_value(arguments.get("suppressed_read_captured_at"))
+        or _datetime_from_agent_value(arguments.get("captured_at"))
+    )
+    registration_number = normalize_registration_number(str(arguments.get("registration_number") or ""))
+    suppression_reason = str(arguments.get("suppression_reason") or "").strip()
+    best: tuple[float, dict[str, Any]] | None = None
+    for read in suppressed_reads:
+        if not isinstance(read, dict):
+            continue
+        read_at = _datetime_from_agent_value(read.get("captured_at"))
+        if target_time and read_at and abs((read_at - target_time).total_seconds()) > 5:
+            continue
+        if suppression_reason and str(read.get("reason") or "") != suppression_reason:
+            continue
+        read_registration = _registration_from_suppressed_read(read)
+        if registration_number and _plate_match_score(read_registration, registration_number) < 0.78:
+            continue
+        time_score = 1.0
+        if target_time and read_at:
+            time_score = max(0.0, 1.0 - abs((read_at - target_time).total_seconds()) / 5)
+        plate_score = _plate_match_score(read_registration, registration_number) if registration_number else 1.0
+        score = (plate_score * 0.7) + (time_score * 0.3)
+        if best is None or score > best[0]:
+            best = (score, read)
+    return dict(best[1]) if best else None
 
 
 def _direction_from_gate_observation(observation: dict[str, Any] | None) -> str | None:
@@ -5254,8 +5811,13 @@ def _backfill_candidate_payload(candidate: dict[str, Any], timezone_name: str) -
             "decision": candidate.get("decision"),
             "confidence": candidate.get("confidence"),
             "source": candidate.get("source"),
+            "evidence_kind": candidate.get("evidence_kind"),
             "protect_event_id": candidate.get("protect_event_id"),
+            "source_access_event_id": str(candidate.get("source_access_event_id")) if candidate.get("source_access_event_id") else None,
+            "suppression_reason": candidate.get("suppression_reason"),
             "camera_name": candidate.get("camera_name"),
+            "suppressed_read_evidence": candidate.get("suppressed_read_evidence"),
+            "schedule_evaluation": candidate.get("schedule_evaluation"),
             "gate_observation": candidate.get("gate_observation"),
             "reason": candidate.get("reason"),
         }

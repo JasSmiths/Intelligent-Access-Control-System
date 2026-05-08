@@ -2736,6 +2736,42 @@ class ChatService(ChatRoutingMixin):
             return self._confirmation_result_text("backfill_access_event_from_protect", output)
         if output.get("error"):
             return str(output.get("detail") or output.get("error"))
+        chain = output.get("diagnostic_chain") if isinstance(output.get("diagnostic_chain"), list) else []
+        if chain:
+            stage_map = {str(item.get("stage") or ""): item for item in chain if isinstance(item, dict)}
+            lines = ["I traced the full access chain."]
+            labels = [
+                ("camera_webhook", "Camera/webhook"),
+                ("access_event", "Access event"),
+                ("gate_command", "Gate command"),
+                ("notification", "Notification"),
+                ("root_cause", "Root cause"),
+            ]
+            for key, label in labels:
+                item = stage_map.get(key)
+                if not item:
+                    continue
+                detail = str(item.get("detail") or item.get("status") or "").strip()
+                if detail:
+                    lines.append(f"{label}: {detail}")
+            iacs = output.get("iacs") if isinstance(output.get("iacs"), dict) else {}
+            suppressed_reads = iacs.get("suppressed_reads") if isinstance(iacs.get("suppressed_reads"), list) else []
+            if output.get("found_iacs_suppressed_read") and suppressed_reads:
+                read = suppressed_reads[0] if isinstance(suppressed_reads[0], dict) else {}
+                reason = read.get("reason") or "vehicle_session_already_active"
+                source_id = read.get("source_access_event_id")
+                suffix = f" against earlier event {source_id}" if source_id else " against an earlier event"
+                lines.append(
+                    "IACS received the plate read, but suppressed it as "
+                    f"`{reason}`{suffix}, so no access event was finalized and notifications never ran."
+                )
+            action = output.get("recommended_action") if isinstance(output.get("recommended_action"), dict) else {}
+            detail = str(output.get("detail") or action.get("summary") or "").strip()
+            if detail:
+                lines.append(f"Repair: {detail}")
+            elif output.get("requires_confirmation"):
+                lines.append("Repair: a confirmation-required backfill is available.")
+            return " ".join(lines)
         root = str(output.get("root_cause") or "unknown").replace("_", " ")
         confidence = output.get("confidence") or "unknown"
         iacs = "found an IACS access event" if output.get("found_iacs_event") else "found no matching IACS access event"

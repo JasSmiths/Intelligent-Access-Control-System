@@ -511,6 +511,7 @@ async def init_database() -> None:
 
     await seed_dynamic_settings()
     await alfred_feedback_service.seed_default_lessons()
+    await alfred_feedback_service.seed_default_eval_examples()
 
     if settings.seed_demo_data:
         logger.warning("seed_demo_data_ignored")

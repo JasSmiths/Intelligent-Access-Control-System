@@ -13,11 +13,13 @@ from app.api.v1 import ai as ai_api
 from app.services.alfred.feedback import (
     AlfredFeedbackError,
     AlfredFeedbackService,
+    DEFAULT_SEEDED_EVAL_EXAMPLES,
     DEFAULT_SEEDED_LESSONS,
     _rank_lessons_for_prompt,
     _safe_corrected_answer,
     parse_feedback_command,
 )
+from app.services.alfred import feedback as feedback_module
 from app.services.alfred import memory as alfred_memory_module
 from app.services.alfred.planner import PLANNER_PROMPT
 from app.services.alfred.permissions import filter_tools_for_actor
@@ -1292,6 +1294,38 @@ def test_noop_malfunction_guidance_is_a_lesson_not_keyword_filter() -> None:
 
     assert not hasattr(service, "_should_suppress_tool_result_for_prompt")
     assert "Do not mention inactive malfunctions" in seeded_text
+    assert any(item["title"] == "Investigate missing access as a full chain" for item in DEFAULT_SEEDED_LESSONS)
+
+
+@pytest.mark.asyncio
+async def test_default_eval_example_seed_is_idempotent(monkeypatch) -> None:
+    rows = []
+
+    class FakeSeedSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _query):
+            return rows[0] if rows else None
+
+        def add(self, row):
+            rows.append(row)
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(feedback_module, "AsyncSessionLocal", lambda: FakeSeedSession())
+
+    await AlfredFeedbackService().seed_default_eval_examples()
+    await AlfredFeedbackService().seed_default_eval_examples()
+
+    assert len(rows) == 1
+    assert rows[0].prompt == DEFAULT_SEEDED_EVAL_EXAMPLES[0]["prompt"]
+    assert rows[0].scope == "site"
+    assert rows[0].metadata_["seed"] == "ash_1818_suppressed_read_incident"
 
 
 def test_messaging_feedback_commands_parse_without_keyword_routing() -> None:
@@ -1980,6 +2014,21 @@ def test_missing_access_incident_routes_to_investigator() -> None:
     assert planned[0].arguments["incident_type"] == "missing_event"
 
 
+def test_ash_style_access_incident_routes_to_suppressed_read_investigation() -> None:
+    service = ChatService()
+    message = "Ash came back at 18:18 but he wasnt let in and no notification fired"
+
+    route = service._deterministic_intent_route(message, {}, [])
+    planned = service._plan_tool_calls(message, {}, [])
+
+    assert "Access_Diagnostics" in route.intents
+    assert planned[0].name == "investigate_access_incident"
+    assert planned[0].arguments["person"] == "ash"
+    assert planned[0].arguments["direction"] == "entry"
+    assert planned[0].arguments["expected_time"] == "18:18"
+    assert planned[0].arguments["incident_type"] == "notification_failure"
+
+
 def test_diagnostic_no_match_falls_through_to_incident_in_react_loop() -> None:
     service = ChatService()
     route = IntentRoute(("Access_Diagnostics",), 0.9, False, "test")
@@ -2020,6 +2069,127 @@ def test_access_incident_direct_text_reports_comparison_and_action() -> None:
     assert "Protect has matching evidence" in text
     assert "protect lpr detected but iacs webhook missing" in text
     assert "Fix UniFi Protect Alarm Manager delivery" in text
+
+
+def test_suppressed_read_extraction_and_root_cause_chain() -> None:
+    person_id = uuid.uuid4()
+    vehicle_id = uuid.uuid4()
+    source_event_id = uuid.uuid4()
+    source_event = SimpleNamespace(
+        id=source_event_id,
+        person_id=person_id,
+        vehicle_id=vehicle_id,
+        registration_number="AGS7X",
+        direction=ai_tools.AccessDirection.EXIT,
+        decision=ai_tools.AccessDecision.GRANTED,
+        occurred_at=datetime(2026, 5, 8, 18, 5, tzinfo=UTC),
+        vehicle=SimpleNamespace(
+            registration_number="AGS7X",
+            owner=SimpleNamespace(display_name="Ash"),
+        ),
+        raw_payload={
+            "vehicle_session": {
+                "suppressed_reads": [
+                    {
+                        "registration_number": "AGS7X",
+                        "detected_registration_number": "AGS7X",
+                        "captured_at": "2026-05-08T18:18:00+00:00",
+                        "confidence": 0.99,
+                        "source": "ubiquiti_lpr",
+                        "gate_state": "closed",
+                        "reason": "vehicle_session_already_active",
+                        "matched_by": "registration_number",
+                    }
+                ]
+            }
+        },
+    )
+
+    suppressed = ai_tools._incident_suppressed_read_payloads_from_event(
+        source_event,
+        subject_summary={"person_id": str(person_id), "vehicle_id": str(vehicle_id), "plates": ["AGS7X"], "person": "Ash"},
+        plates=["AGS7X"],
+        start=datetime(2026, 5, 8, 18, 0, tzinfo=UTC),
+        end=datetime(2026, 5, 8, 18, 30, tzinfo=UTC),
+        direction="entry",
+        timezone_name="Europe/London",
+    )
+    root = ai_tools._incident_root_cause(
+        found_iacs=False,
+        protect={"available": True, "events": []},
+        traces=[],
+        suppressed_reads=suppressed,
+        incident_type="notification_failure",
+    )
+
+    assert len(suppressed) == 1
+    assert suppressed[0]["source_access_event_id"] == str(source_event_id)
+    assert suppressed[0]["reason"] == "vehicle_session_already_active"
+    assert suppressed[0]["inferred_direction"] == "entry"
+    assert root["root_cause"] == "iacs_read_suppressed_as_active_vehicle_session"
+
+
+def test_suppressed_read_incident_builds_backfill_candidate_args() -> None:
+    person_id = str(uuid.uuid4())
+    vehicle_id = str(uuid.uuid4())
+    source_event_id = str(uuid.uuid4())
+
+    args = ai_tools._backfill_args_from_incident(
+        subject={"summary": {"person_id": person_id, "vehicle_id": vehicle_id, "plates": ["AGS7X"]}},
+        protect={},
+        suppressed_reads=[
+            {
+                "source_access_event_id": source_event_id,
+                "registration_number": "AGS7X",
+                "captured_at": "2026-05-08T18:18:00+01:00",
+                "inferred_direction": "entry",
+                "reason": "vehicle_session_already_active",
+                "confidence": 0.99,
+                "backfill_repairable": True,
+            }
+        ],
+        arguments={},
+        root_cause="iacs_read_suppressed_as_active_vehicle_session",
+    )
+
+    assert args is not None
+    assert args["evidence_kind"] == "suppressed_read"
+    assert args["source_access_event_id"] == source_event_id
+    assert args["suppression_reason"] == "vehicle_session_already_active"
+    assert args["decision"] == "granted"
+
+
+def test_access_incident_direct_text_reports_suppressed_read_chain() -> None:
+    service = ChatService()
+
+    text = service._access_incident_direct_text(
+        {
+            "found_iacs_event": False,
+            "found_iacs_suppressed_read": True,
+            "root_cause": "iacs_read_suppressed_as_active_vehicle_session",
+            "diagnostic_chain": [
+                {"stage": "camera_webhook", "detail": "IACS suppressed-read history contains the matching LPR read."},
+                {"stage": "access_event", "detail": "IACS received the read at 18:18 but suppressed it as vehicle_session_already_active."},
+                {"stage": "gate_command", "detail": "No gate command ran because no access event was finalized."},
+                {"stage": "notification", "detail": "Notifications never ran because notification workflows are evaluated after finalized access events."},
+                {"stage": "root_cause", "detail": "iacs_read_suppressed_as_active_vehicle_session"},
+            ],
+            "iacs": {
+                "suppressed_reads": [
+                    {
+                        "reason": "vehicle_session_already_active",
+                        "source_access_event_id": "event-1",
+                    }
+                ]
+            },
+            "detail": "Confirm to backfill the access event and update presence only.",
+        }
+    )
+
+    assert "Camera/webhook" in text
+    assert "IACS received the plate read, but suppressed it as `vehicle_session_already_active`" in text
+    assert "no access event was finalized and notifications never ran" in text
+    assert "Repair: Confirm to backfill" in text
 
 
 def test_hosted_provider_prefetches_deep_access_diagnostics() -> None:

@@ -1084,6 +1084,8 @@ class AutomationService:
                 )
             ]
         if event.type == "access_event.finalized":
+            if payload.get("backfilled") or payload.get("skip_automation_actions"):
+                return []
             return self._access_event_to_vehicle_trigger(event, payload)
         if event.type == "visitor_pass.created":
             return [("visitor_pass.created", {**payload, "occurred_at": event.created_at})]

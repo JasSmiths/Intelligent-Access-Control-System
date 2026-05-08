@@ -957,6 +957,11 @@ class ChatRoutingMixin:
     def _registration_from_message(self, message: str) -> str | None:
             for match in re.finditer(r"\b[A-Z0-9][A-Z0-9 -]{1,10}[A-Z0-9]\b", message.upper()):
                 candidate = re.sub(r"[^A-Z0-9]", "", match.group(0))
+                raw = match.group(0).lower()
+                if re.search(r"\b(?:back|came|come|return|returned|arrive|arrived)\s+at\s+\d", raw):
+                    continue
+                if " " in raw and re.search(r"\b(?:but|he|she|they|them|wasnt|wasn't|not|notification|fired)\b", raw):
+                    continue
                 if re.fullmatch(r"\d+(?:MS|S|SEC|SECS|SECOND|SECONDS|MILLISECOND|MILLISECONDS)", candidate):
                     continue
                 if re.fullmatch(r"AT\d{1,4}", candidate):
@@ -1572,13 +1577,18 @@ class ChatRoutingMixin:
                 "wasnt recorded",
                 "no notification",
                 "not notified",
+                "wasn't let in",
+                "wasnt let in",
+                "not let in",
+                "didn't get in",
+                "didnt get in",
                 "why wasn't",
                 "why wasnt",
             ]
             if any(phrase in lower for phrase in phrases):
                 return any(
                     term in lower
-                    for term in ["left", "leave", "exit", "arrived", "arrival", "entry", "gate", "lpr", "plate", "car", "vehicle", "notification", "logged", "recorded"]
+                    for term in ["left", "leave", "exit", "arrived", "arrival", "came", "return", "returned", "back", "entry", "gate", "lpr", "plate", "car", "vehicle", "notification", "logged", "recorded"]
                 )
             return False
 
@@ -1665,7 +1675,7 @@ class ChatRoutingMixin:
                 args["decision"] = "denied"
             if any(word in lower for word in ["exit", "exited", "leave", "left", "leaving"]):
                 args["direction"] = "exit"
-            elif any(word in lower for word in ["entry", "entries", "enter", "arrival", "arrivals", "arrive", "arrived", "arriving"]):
+            elif any(word in lower for word in ["entry", "entries", "enter", "arrival", "arrivals", "arrive", "arrived", "arriving", "came", "come", "returned", "return", "back"]):
                 args["direction"] = "entry"
             return args
 

@@ -793,6 +793,8 @@ class AccessEventService:
                 continue
             if self._read_is_departure_after_entry_session(read, session):
                 continue
+            if self._read_is_entry_after_exit_idle_expired(read, session, idle_seconds):
+                continue
             evidence = await self._vehicle_session_presence_evidence(session, context, read, idle_seconds)
             if read.captured_at <= session.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
                 return VehicleSessionSuppression(
@@ -857,13 +859,41 @@ class AccessEventService:
         read: PlateRead,
         idle_seconds: float,
     ) -> dict[str, Any] | None:
-        return await get_vehicle_presence_tracker().recent_evidence(
+        evidence = await get_vehicle_presence_tracker().recent_evidence(
             registration_number=context.registration_number,
             event_ids=context.protect_event_ids | session.protect_event_ids,
             camera_id=context.camera_id or session.camera_id,
             device_id=context.device_id or session.device_id,
             observed_at=read.captured_at,
             max_age_seconds=idle_seconds,
+        )
+        if evidence and self._presence_evidence_is_current_lpr_read(evidence, context, read):
+            return None
+        return evidence
+
+    def _presence_evidence_is_current_lpr_read(
+        self,
+        evidence: dict[str, Any],
+        context: VehicleSessionContext,
+        read: PlateRead,
+    ) -> bool:
+        if evidence.get("source") != "webhook" or evidence.get("source_detail") != "ubiquiti_lpr_webhook":
+            return False
+        observed_at = self._datetime_from_payload(evidence.get("observed_at"))
+        if not observed_at:
+            return False
+        age_seconds = abs((read.captured_at.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds())
+        if age_seconds > 1.0:
+            return False
+
+        evidence_event_id = str(evidence.get("event_id") or "").strip()
+        if evidence_event_id and evidence_event_id in context.protect_event_ids:
+            return True
+
+        evidence_registration = self._normalize_registration_number(str(evidence.get("registration_number") or ""))
+        return bool(
+            evidence_registration
+            and evidence_registration == context.normalized_registration_number
         )
 
     async def _vehicle_session_db_fallback(
@@ -896,6 +926,8 @@ class AccessEventService:
                 continue
             if self._read_is_departure_after_entry_session(read, candidate):
                 continue
+            if self._read_is_entry_after_exit_idle_expired(read, candidate, idle_seconds):
+                continue
             evidence = await self._vehicle_session_presence_evidence(candidate, context, read, idle_seconds)
             if read.captured_at <= candidate.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
                 self._upsert_active_vehicle_session(candidate)
@@ -913,6 +945,18 @@ class AccessEventService:
         session: ActiveVehicleSession,
     ) -> bool:
         return session.direction == AccessDirection.ENTRY and self._read_direction_hint(read) == AccessDirection.EXIT
+
+    def _read_is_entry_after_exit_idle_expired(
+        self,
+        read: PlateRead,
+        session: ActiveVehicleSession,
+        idle_seconds: float,
+    ) -> bool:
+        return (
+            session.direction == AccessDirection.EXIT
+            and self._read_direction_hint(read) == AccessDirection.ENTRY
+            and read.captured_at > session.last_seen_at + timedelta(seconds=idle_seconds)
+        )
 
     async def _annotate_suppressed_session_read(
         self,

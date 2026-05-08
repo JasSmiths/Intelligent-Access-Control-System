@@ -255,10 +255,18 @@ def test_event_bridge_uses_direct_access_event_domain_events() -> None:
             created_at,
         )
     )
+    backfilled = service._event_to_triggers(
+        RealtimeEvent(
+            "access_event.finalized",
+            {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at, "backfilled": True},
+            created_at,
+        )
+    )
 
     assert known[0][0] == "vehicle.known_plate"
     assert outside_schedule[0][0] == "vehicle.outside_schedule"
     assert unknown[0][0] == "vehicle.unknown_plate"
+    assert backfilled == []
 
 
 def test_event_bridge_ignores_notification_and_automation_status_events() -> None:

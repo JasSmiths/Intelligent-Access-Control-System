@@ -93,8 +93,9 @@ def build_tools() -> list[AgentTool]:
                         "Run a full Alfred access incident investigation. Use this for missing access events, "
                         "nothing logged, no notification, gate/garage failures, schedule denials, and any case "
                         "where diagnose_access_event finds no matching IACS event. It compares IACS records, "
-                        "telemetry, Home Assistant gate observations, maintenance mode, schedules, notifications, "
-                        "and durable UniFi Protect event/track history before recommending a fix."
+                        "IACS suppressed vehicle-session reads, telemetry, Home Assistant gate observations, "
+                        "maintenance mode, schedules, notifications, and durable UniFi Protect event/track "
+                        "history before recommending a fix."
                     ),
                     parameters={
                         "type": "object",
@@ -143,14 +144,19 @@ def build_tools() -> list[AgentTool]:
         AgentTool(
                     name="backfill_access_event_from_protect",
                     description=(
-                        "Create a missing IACS access event from durable UniFi Protect LPR evidence or explicit "
-                        "admin-provided details. Requires Admin and confirm=true. Never opens gates, garage doors, "
-                        "or sends normal arrival/departure notifications."
+                        "Create a missing IACS access event from durable UniFi Protect LPR evidence, durable "
+                        "IACS suppressed-read evidence, or explicit admin-provided details. Requires Admin and "
+                        "confirm=true. Never opens gates, garage doors, runs automations, or sends normal "
+                        "arrival/departure notifications."
                     ),
                     parameters={
                         "type": "object",
                         "properties": {
                             "protect_event_id": {"type": "string"},
+                            "evidence_kind": {"type": "string", "enum": ["protect", "suppressed_read"]},
+                            "source_access_event_id": {"type": "string", "description": "Access event UUID containing raw_payload.vehicle_session.suppressed_reads evidence."},
+                            "suppressed_read_captured_at": {"type": "string", "description": "Captured time of the suppressed read to repair."},
+                            "suppression_reason": {"type": "string", "description": "Suppression reason, for example vehicle_session_already_active."},
                             "person": {"type": "string"},
                             "person_id": {"type": "string"},
                             "vehicle_id": {"type": "string"},

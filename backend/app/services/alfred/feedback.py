@@ -39,6 +39,38 @@ DEFAULT_SEEDED_LESSONS = (
         "tags": ["device-status", "concise-response"],
         "confidence": 0.95,
     },
+    {
+        "title": "Investigate missing access as a full chain",
+        "lesson": (
+            "For missing access, gate, or notification incidents, do not stop at no matching access event. "
+            "Run the incident investigation path, check suppressed reads, and explain the LPR to access event "
+            "to gate to notification chain from tool evidence."
+        ),
+        "tags": ["access-incidents", "suppressed-reads", "diagnostic-chain"],
+        "confidence": 0.98,
+    },
+)
+
+DEFAULT_SEEDED_EVAL_EXAMPLES = (
+    {
+        "prompt": "Ash came back at 18:18 but he wasnt let in and no notification fired, fully investigate what happened",
+        "ideal_answer": (
+            "Trace the chain from evidence: camera/webhook, access-event outcome, gate-command outcome, "
+            "notification outcome, root cause, and repair availability. If the incident tool finds an "
+            "IACS suppressed read, say that IACS received the plate read but suppressed it as "
+            "`vehicle_session_already_active` against an earlier event, so no access event was finalized "
+            "and notifications never ran. Offer only the confirmation-required history/presence backfill; "
+            "do not imply gate, garage, automation, or notification actions will be replayed."
+        ),
+        "lesson": (
+            "Missing access plus no notification questions require the full incident investigation path, "
+            "including suppressed-read evidence and the LPR to access event to gate to notification chain."
+        ),
+        "metadata": {
+            "seed": "ash_1818_suppressed_read_incident",
+            "tags": ["access-incidents", "suppressed-reads", "notifications"],
+        },
+    },
 )
 
 FEEDBACK_COMMAND_RE = re.compile(
@@ -78,6 +110,30 @@ class AlfredFeedbackService:
                         confidence=item["confidence"],
                         status="active",
                         active_at=datetime.now(tz=UTC),
+                    )
+                )
+            await session.commit()
+
+    async def seed_default_eval_examples(self) -> None:
+        async with AsyncSessionLocal() as session:
+            for item in DEFAULT_SEEDED_EVAL_EXAMPLES:
+                existing = await session.scalar(
+                    select(AlfredEvalExample)
+                    .where(AlfredEvalExample.scope == "site")
+                    .where(AlfredEvalExample.prompt == item["prompt"])
+                )
+                if existing:
+                    continue
+                session.add(
+                    AlfredEvalExample(
+                        feedback_id=None,
+                        scope="site",
+                        prompt=item["prompt"],
+                        bad_answer=None,
+                        ideal_answer=item["ideal_answer"],
+                        corrected_answer=None,
+                        lesson=item["lesson"],
+                        metadata_=sanitize_payload(item.get("metadata") or {}),
                     )
                 )
             await session.commit()
