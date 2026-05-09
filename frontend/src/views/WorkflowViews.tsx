@@ -84,6 +84,7 @@ import {
   api,
   Badge,
   BadgeTone,
+  createActionConfirmation,
   displayUserName,
   formatDate,
   fromDateTimeLocal,
@@ -2085,8 +2086,16 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     setTesting(true);
     setFeedback({ tone: "info", text: "Sending workflow test through the configured providers." });
     try {
+      const payload = { rule: workflowRulePayload(activeDraft) };
+      const confirmation = await createActionConfirmation("notification_rule.test", payload, {
+        target_entity: "NotificationRule",
+        target_id: activeDraft.id.startsWith("draft-") ? undefined : activeDraft.id,
+        target_label: activeDraft.name || "Draft notification workflow",
+        reason: "Send notification workflow test"
+      });
       await api.post("/api/v1/notifications/rules/test", {
-        rule: workflowRulePayload(activeDraft)
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       setFeedback({ tone: "success", text: "Workflow test accepted by the configured providers." });
     } catch (testError) {

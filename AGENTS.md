@@ -1,48 +1,92 @@
 # IACS Agent Guide
 
 golden_rules:
-  ask_dont_assume: unclear/underspecified => ask before writing; no silent assumptions about intent, architecture, requirements
-  simplest_solution_first: implement simplest thing that works; no abstractions/layers/flexibility unless explicitly requested
-  dont_touch_unrelated_code: modify only files/functions directly required by current task; no opportunistic cleanup
-  flag_uncertainty: low confidence in approach/library/detail => say so before proceeding; admit gaps over false certainty
+  ask: unclear intent/requirements/architecture => ask before writing.
+  scope: touch only files/functions required by the task; no opportunistic cleanup.
+  simple: prefer the smallest working change; add abstractions only for real complexity.
+  honest: flag uncertainty early; do not fake library/system knowledge.
 
-meta:
-  product: Intelligent Access Control + Presence System
-  purpose: LPR ingest -> noisy-read resolution -> presence -> anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops
+system:
+  name: Intelligent Access Control + Presence System
+  purpose: LPR ingest -> plate resolution -> presence/anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
   deploy: docker compose
-  host_ports:
+  ports:
+    host: {frontend: 8089, backend: 8088, postgres: 5432, redis: 6379}
+    container: {frontend: 80, backend: 8000, postgres: 5432, redis: 6379}
+  proxy:
     frontend: http://localhost:8089
     backend: http://localhost:8088
-    postgres: localhost:5432
-    redis: localhost:6379
-  container_ports:
-    frontend: 80
-    backend: 8000
-    postgres: 5432
-    redis: 6379
-  proxy:
-    target: http://<docker-host-ip>:8089
+    frontend_nginx: proxies /api/*, /health, /docs, /openapi.json, WS -> backend:8000
     websockets: required
-    root_path: IACS_ROOT_PATH blank unless URL subpath deployment
-    frontend_nginx: proxies /api/* /health /docs /openapi.json WS -> backend:8000
-  cache:
-    spa_shell: no-store for / and /index.html
-    assets: immutable for hashed /assets/*
-
-stack:
-  backend: Python 3.12 + FastAPI + SQLAlchemy async
-  database: PostgreSQL
-  cache_bus: Redis
-  frontend: React 19 + TypeScript + Vite + Nginx
-  frontend_libs: lucide-react, Tiptap, motion, TanStack Virtual, Monaco, jsondiffpatch
-  integrations: Home Assistant, Apprise, WhatsApp Cloud API, Discord, DVLA VES, UniFi Protect/uiprotect, iCloud Calendar
-  ai_providers: local, openai, gemini, claude/anthropic, ollama
-  telemetry: db traces/spans/audit/artifacts
+    root_path: IACS_ROOT_PATH blank unless deployed under URL subpath
+  stack:
+    backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis
+    frontend: React 19, TypeScript, Vite, Nginx
+    ui_libs: lucide-react, Tiptap, motion, TanStack Virtual, Monaco, jsondiffpatch
+    integrations: Home Assistant, Apprise, WhatsApp Cloud API, Discord, DVLA VES, UniFi Protect/uiprotect, iCloud Calendar
+    ai: local, OpenAI, Gemini, Claude/Anthropic, Ollama
 
 hard_rules:
-  api_prefix: /api/v1 only; non-versioned API aliases forbidden
-  storage: bind mounts only; Docker named volumes forbidden
-  persistence_roots:
+  api: versioned /api/v1 only; do not add non-versioned API aliases.
+  storage: bind mounts only; Docker named volumes forbidden.
+  generated_ignore: data/, logs/, frontend/node_modules/, frontend/dist/
+  cache: SPA shell no-store for / and /index.html; hashed /assets/* immutable.
+  bootstrap_env_only: ports, DB/Redis URLs, auth secret file/override, CORS/trusted hosts/public URL/root path, module selectors.
+  dynamic_config: system_settings via UI/API; encrypted secrets use Fernet derived from active auth root secret.
+  auth_secret:
+    default: data/backend/auth-secret.key
+    advanced_override: IACS_AUTH_SECRET_KEY
+    rotation: file mode only through UI/API
+  secret_keys:
+    - home_assistant_token
+    - apprise_urls
+    - discord_bot_token
+    - whatsapp_access_token
+    - whatsapp_webhook_verify_token
+    - whatsapp_app_secret
+    - dvla_api_key
+    - unifi_protect_username
+    - unifi_protect_password
+    - unifi_protect_api_key
+    - openai_api_key
+    - gemini_api_key
+    - anthropic_api_key
+    - dependency_update_backup_mount_options
+  safety:
+    require_admin_confirmation_audit:
+      - gate/door/cover commands and announcements
+      - maintenance changes/overrides
+      - schedule overrides
+      - notification sends/tests and workflow/rule edits
+      - integration connection tests
+      - telemetry purge
+      - UniFi Protect update apply, backup create/restore/delete
+    audit: durable state changes; realtime logs are not audit history.
+    sanitize: never log raw secrets, cookies, tokens, or media blobs.
+    error_policy: never return success unless adapter/provider accepted the operation.
+  modularity: core services consume normalized contracts; vendor I/O stays under backend/app/modules/*.
+
+repo:
+  backend:
+    entry: backend/app/main.py
+    api_router: backend/app/api/router.py
+    db_models: backend/app/models/core.py
+    settings: backend/app/services/settings.py
+    alfred_facade: backend/app/services/chat.py
+    alfred_v3: backend/app/services/alfred/*
+    alfred_contracts: backend/app/services/chat_contracts.py
+    alfred_tools_facade: backend/app/ai/tools.py
+    alfred_tool_groups: backend/app/ai/tool_groups/*
+  frontend:
+    shell: frontend/src/main.tsx
+    shared: frontend/src/shared.tsx
+    views: frontend/src/views/*
+    styles: frontend/src/styles.css imports frontend/src/styles/*
+
+runtime:
+  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_events, home_assistant, gate_malfunction, unifi_protect, restart_backfill, snapshot_recovery]
+  stop_order: reverse; close UniFi Protect WS/aiohttp/session resources.
+  persistence_mounts:
     - ./data/backend:/app/data
     - ./data/chat_attachments:/app/data/chat_attachments
     - ./logs/backend:/app/logs
@@ -51,48 +95,6 @@ hard_rules:
     - ./data/postgres:/var/lib/postgresql/data
     - ./data/redis:/data
     - ./data/backend/dependency-update-backups:/app/update-backups
-  bootstrap_config: .env/Compose only for ports, DB/Redis URLs, auth secret file/advanced env override, CORS/trusted hosts/public URL/root path, module selectors
-  auth_secret: file-backed at data/backend/auth-secret.key by default; IACS_AUTH_SECRET_KEY is advanced override only; UI rotation file mode only
-  dynamic_config: system_settings via UI/API; encrypted secrets via Fernet derived from active auth root secret; alfred_learning_mode = review_then_learn|auto_learn
-  secret_keys: home_assistant_token, apprise_urls, discord_bot_token, whatsapp_access_token, whatsapp_webhook_verify_token, whatsapp_app_secret, dvla_api_key, unifi_protect_username, unifi_protect_password, unifi_protect_api_key, openai_api_key, gemini_api_key, anthropic_api_key, dependency_update_backup_mount_options
-  real_world_actions: gate/door commands, announcements, maintenance require Admin + server confirmation + audit; schedule overrides, notification sends/tests, workflow/rule edits require explicit confirmation + audit
-  modularity: core services consume normalized contracts; vendor I/O stays under backend/app/modules/*
-  telemetry: sanitize secrets/media/cookies/tokens; audit durable state changes; realtime logs are not audit history
-  error_policy: never return success unless adapter/provider accepted operation
-
-repo:
-  backend_entry: backend/app/main.py
-  api_router: backend/app/api/router.py
-  db_models: backend/app/models/core.py
-  settings: backend/app/services/settings.py
-  frontend_shell: frontend/src/main.tsx
-  frontend_shared: frontend/src/shared.tsx
-  frontend_views: frontend/src/views/*
-  frontend_styles: frontend/src/styles.css imports frontend/src/styles/*
-  alfred_service: backend/app/services/chat.py
-  alfred_v3: backend/app/services/alfred/*
-  alfred_contracts: backend/app/services/chat_contracts.py
-  alfred_routing_policy: backend/app/services/chat_routing.py v2 rollback-only
-  alfred_tool_facade: backend/app/ai/tools.py
-  alfred_tool_groups: backend/app/ai/tool_groups/*
-  generated_ignore: data/, logs/, frontend/node_modules/, frontend/dist/
-
-runtime_lifespan:
-  start_order:
-    - init_database
-    - event_bus
-    - dependency_update_service
-    - notification_service
-    - automation_service
-    - discord_messaging_service
-    - visitor_pass_service
-    - access_event_service
-    - home_assistant_service
-    - gate_malfunction_service
-    - unifi_protect_service
-    - restart_backfill heartbeat/check
-    - snapshot_recovery
-  stop_order: reverse; close UniFi Protect WS/aiohttp/session resources
 
 data:
   tables:
@@ -116,278 +118,157 @@ data:
     dependency_cache: data/backend/dependency-update-cache/
     dependency_backups: data/backend/dependency-update-backups/
     dependency_logs: logs/backend/dependency-updates/
-  schema_bootstrap: Base.metadata.create_all + idempotent transitional columns/indexes; add Alembic when schema stabilizes
-  seed: no demo seed; first Admin via UI/API setup
+  schema: Base.metadata.create_all + idempotent transitional columns/indexes; add Alembic when schema stabilizes.
+  seed: no demo seed; first Admin via setup UI/API.
 
-core_api:
+api:
   health: GET /, /health, /api/v1/health
   auth:
-    service: backend/app/services/auth.py
     routes: /api/v1/auth/*
-    behavior: first-run setup if users empty; Argon2; signed HTTP-only JWT cookie; bearer accepted
-    protected: dashboard APIs, docs/openapi, realtime WS, AI chat WS after setup
-    public: health, auth setup/login/status/logout, Ubiquiti webhook, WhatsApp webhook
-    invariant: last active Admin cannot be deleted/demoted/deactivated
-  users: /api/v1/users/* Admin CRUD; sidebar preference in users.preferences
+    behavior: first-run setup if users empty; Argon2; signed HTTP-only JWT cookie; bearer accepted.
+    protected: dashboard APIs, docs/openapi, realtime WS, AI chat WS after setup.
+    public: health, setup/login/status/logout, Ubiquiti webhook, WhatsApp webhook.
+    invariant: last active Admin cannot be deleted/demoted/deactivated.
+  users: /api/v1/users/* Admin CRUD; sidebar preference in users.preferences.
   directory:
     routes: /api/v1/people, /vehicles, /groups, /schedules
     schedule_precedence: vehicle.schedule_id > person.schedule_id > schedule_default_policy
     schedule_blocks: Monday-first 30-minute normalized intervals in schedules.time_blocks
-    deletions: vehicles yes; people/groups no hard-delete endpoint
+    deletes: vehicles yes; people/groups no hard-delete endpoint
   realtime:
-    system: WS /api/v1/realtime/ws via event_bus; cookie or bearer/query token
-    alfred: HTTP /api/v1/ai/chat, SSE /api/v1/ai/chat/stream, WS /api/v1/ai/chat/ws, status /api/v1/ai/agent/status, feedback /api/v1/ai/feedback, Admin training /api/v1/ai/training/*
+    system: WS /api/v1/realtime/ws via event_bus; cookie or bearer/query token.
+    alfred: /api/v1/ai/chat, /stream, /ws, /agent/status, /feedback, /training/*
     dependency_jobs: WS /api/v1/dependency-updates/jobs/{job_id}/ws
-  action_confirmations: POST /api/v1/action-confirmations; Admin-only short-lived one-use tokens bound to action+payload before dashboard real-world actions
+  confirmations: POST /api/v1/action-confirmations; Admin-only, short-lived, one-use tokens bound to action+payload.
 
 lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
-  adapter: backend/app/modules/lpr/ubiquiti.py
-  contract: PlateRead(registration_number, confidence, source, captured_at, raw_payload)
+  adapter: backend/app/modules/lpr/ubiquiti.py -> PlateRead(registration_number, confidence, source, captured_at, raw_payload)
   service: backend/app/services/access_events.py
-  maintenance_mode: active => accept/ignore webhook, clear queues, no access_event/presence/gate/garage
-  smart-zone:
-    current_state: diagnostic evidence only
-    numeric_zone_ids: may resolve through UniFi Protect camera smart_detect_zones
-    invariant: missing/empty/nonmatching smart zones never block or drop valid plate reads
-    setting: lpr_allowed_smart_zones diagnostic only
-  debounce:
-    settings: lpr_debounce_quiet_seconds, lpr_debounce_max_seconds, lpr_similarity_threshold, lpr_vehicle_session_idle_seconds
-    canonicalize: compare every read to active stored vehicles before grouping; preserve detected plate in raw payload
-    exact_match: active stored exact plate wins; finalize burst immediately; suppress trailing same-source reads in original max window
-    session_suppression: suppress duplicate reads in same physical visit; allow departure evidence through
-  direction:
-    primary: captured top-gate state at queue time
-    closed: entry
-    open/opening/closing: exit
-    unknown: payload direction then presence state
-    tie_breaker: known already-present entry => live UniFi Protect snapshot from camera.gate + OpenAI image analysis
-  event_creation:
-    authorization: vehicle/person/schedule/override
-    visitor_pass: unknown arrival claims active pass before anomaly; unknown exit links used/duration pass departure
-    dvla: arrival-like only; known vehicle same-day cache by site_timezone; unknown DVLA stays notification context only unless visitor_pass claimed
-    persist: one final access_events row with telemetry trace id in raw_payload.telemetry.trace_id
-    presence: update on granted events
-    anomalies: unauthorized_plate, outside_schedule, duplicate_entry, duplicate_exit; suppress unauthorized anomaly for matched visitor pass
-    gate: open only granted entry with captured gate state closed; durable audit for accepted/rejected/skipped/failed auto commands
-    garage: open assigned doors only after accepted gate open, entry, captured closed, per-door schedule allowed; durable audit for accepted/rejected/failed auto commands
-    realtime: publish finalized access/presence/anomaly/notification events
-  diagnostics: /api/v1/diagnostics/lpr-timing in-memory feed from webhooks + UniFi Protect probes
-  restart_backfill: backend/app/services/restart_backfill.py; missed UniFi Protect event repair; auditable; marked restart_backfill source/metadata
+  maintenance_mode: accept/ignore webhook; clear queues; no access_event/presence/gate/garage.
+  smart_zones: diagnostic only; missing/empty/nonmatching zones never drop valid plate reads.
+  debounce: compare every read to active vehicles; exact active plate wins; suppress trailing same-source reads within max window; duplicate session suppression allows departure evidence.
+  direction: captured gate state at queue time; closed=entry, open/opening/closing=exit, unknown => payload then presence; known-present entry tie-breaker may use UniFi snapshot + OpenAI vision.
+  creation: authorization + visitor pass + DVLA context + one final access_events row; granted events update presence; anomalies include unauthorized_plate/outside_schedule/duplicate_entry/duplicate_exit.
+  gate: open only granted entry with captured closed state; garage opens assigned doors only after accepted gate open and schedule allows.
+  diagnostics: /api/v1/diagnostics/lpr-timing; restart backfill in backend/app/services/restart_backfill.py.
 
 snapshots:
-  owner: SnapshotManager in backend/app/services/snapshots.py
+  owner: backend/app/services/snapshots.py SnapshotManager
   wrappers: alert_snapshots.py, notification_snapshots.py compatibility only
-  access_event_capture: SnapshotManager.capture_access_event_snapshot()
-  disk: compact JPEG under /app/data/snapshots/access-events/
-  db_fields: snapshot_path, snapshot_content_type, snapshot_bytes, snapshot_width, snapshot_height, snapshot_captured_at, snapshot_camera, created_at
-  stream_processing: live media via UniFi Protect service; no ad hoc Path.write_bytes/Pillow compression outside SnapshotManager
-  alert_media: unauthorized alert uses linked access_event snapshot metadata
-  notification_media: short-lived files under notification-snapshots; TTL cleanup via SnapshotManager
-  recovery: backend/app/services/snapshot_recovery.py startup pass; repair only
-  ttl_future: use access_events.created_at + snapshot_path index; do not invent file mtime purge
+  access: SnapshotManager.capture_access_event_snapshot(); compact JPEG under /app/data/snapshots/access-events/
+  db_fields: snapshot_path, content_type, bytes, width, height, captured_at, camera, created_at
+  rule: no ad hoc Path.write_bytes/Pillow compression outside SnapshotManager.
+  notification_media: short-lived notification-snapshots with SnapshotManager TTL cleanup.
+  recovery: backend/app/services/snapshot_recovery.py startup repair only.
 
-notifications_mobile_push:
+notifications:
   service: backend/app/services/notifications.py
   contract: NotificationContext(event_type, subject, severity, facts)
-  storage: notification_rules DB; not system_settings
-  registry:
-    triggers_conditions_actions_variables: backend/app/services/notifications.py catalogs
-    add_trigger: define metadata + structured facts + sample context + tests
-    templates: @Variable tokens; renderer accepts bracket tokens but new UI uses @Variable
+  storage: notification_rules DB, not system_settings.
+  templates: new UI uses @Variable; renderer also accepts bracket tokens.
   channels: mobile(Apprise/HA), in_app, WhatsApp, Discord, voice/TTS
-  ha_mobile_sender: backend/app/modules/notifications/home_assistant_mobile.py
-  ha_mobile_payload:
-    service: notify.mobile_app_*
-    body: {title, message, data}
-    data: {tag: iacs-{event_type}, group: iacs, image?, attachment?: {url, content-type}, actions?}
-  return_trip_webhook:
-    source: Home Assistant WS event mobile_app_notification_action
-    visitor_timeframe_actions: iacs:vp_time:<allow|deny>:<pass_id>:<request_id>
-    gate_actions: iacs:gate_open:<token>, iacs:gate_force_open:<token>
-  NotificationActionContext:
+  ha_mobile: backend/app/modules/notifications/home_assistant_mobile.py; notify.mobile_app_* body {title,message,data}
+  action_context:
     table: notification_action_contexts
-    token: HMAC(auth_secret_key, token); token_urlsafe(24)
     ttl: normal 10m; force 5m
-    binding: notify_service -> exactly one active Person; optional linked active User
-    consume: one-time; record consumed_at/outcome/outcome_detail
-  audit_required:
-    action_names: gate.open.actionable_notification, gate.open.actionable_notification.force
-    category: integrations
-    target_entity: Gate
-    metadata_keys: action, context_id, parent_context_id, registration_number, access_event_id, person_id, notify_service, force, state, detail, malfunction_id, malfunction_duration_seconds, home_assistant_event_device_id
-  event_bus_failures: notification.failed/skipped/sent published for UI/logs; Automation Engine must not cycle on notification.* status events
+    token: HMAC(auth_secret_key, token); one-time consume with outcome.
+  bus: publish notification.failed/skipped/sent for UI/logs; Automation Engine must not cycle on notification.* status events.
 
 automation:
   service: backend/app/services/automations.py
   routes: /api/v1/automations/*
   model: flat Trigger -> If -> Then
-  storage:
-    rules: automation_rules {triggers[], trigger_keys[], conditions[], actions[], next_run_at,last_fired_at,run_count,last_run_status,last_error}
-    runs: automation_runs {trigger_key,payload,context,condition_results,action_results,trace_id,status,error,actor,source}
-    webhook_senders: automation_webhook_senders tracks key+source_ip; emits webhook.new_sender
-  scheduler: lifespan; 15s; row locks; due active rules; recompute next_run_at; disable single-use/expired time-only rules
-  event_sources: scheduler, public webhook, event_bus, Alfred
-  event_bus_routes: access_event.finalized, visitor_pass.*, maintenance_mode.changed, ai.issue_detected, integration health/failure events to Notification System
+  storage: automation_rules, automation_runs, automation_webhook_senders
+  scheduler: lifespan every 15s; row locks; recompute next_run_at; disable single-use/expired time-only rules.
+  sources: scheduler, public webhook, event_bus, Alfred
   cycle_guard: ignore notification.trigger/sent/failed/skipped and automation.run.*
-  dry_run: context/conditions/render only; no sends, no hardware, no sync timestamps
-  integration_actions: backend/app/services/automation_integration_actions.py; catalog exposes enabled + disabled_reason
-  maintenance_mode: skips hardware + notification-toggle + WhatsApp sends; maintenance_mode.disable allowed
-  variable_policy: trigger scopes; unknown/empty/unavailable @Variable => context_missing skip
+  dry_run: render context/conditions only; no sends, hardware, or sync timestamps.
+  maintenance_mode: skips hardware, notification-toggle, WhatsApp sends; maintenance_mode.disable allowed.
+  variables: trigger scopes; unknown/empty/unavailable @Variable => context_missing skip.
 
 integrations:
   home_assistant:
     modules: modules/home_assistant/client.py, modules/gate/home_assistant.py, modules/announcements/home_assistant_tts.py, services/home_assistant.py
-    dynamic_settings: url, token, gate_entities, garage_door_entities, gate_open_service, tts_service, default_media_player
-    rules: gate/garage through modules/services only; no HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode
+    settings: url, token, gate_entities, garage_door_entities, gate_open_service, tts_service, default_media_player
+    rules: gate/garage via modules/services only; no HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
   whatsapp:
     service: backend/app/services/whatsapp_messaging.py
     webhooks: GET/POST /api/v1/webhooks/whatsapp
-    outbound: Graph /{version}/{phone_number_id}/messages; phone_number_id is sender ID
-    verification: hub token; X-Hub-Signature-256 if app_secret set; metadata phone_number_id must match config
-    routing:
-      Admin: exact normalized users.mobile_phone_number + active Admin -> upsert messaging_identities(provider=whatsapp) -> IncomingChatMessage -> MessagingBridgeService -> full Alfred ReAct
-      Visitor: active/scheduled duration visitor_pass exact visitor_phone -> Visitor Concierge sandbox
-      Other: denied/safe response/audit; never Admin Alfred
-    Visitor Concierge: restricted LLM; tools only get_pass_details(phone_number), update_visitor_plate(pass_id,new_plate); no admin/gate/settings/schedules/files/tools
-    visitor_time_changes: <=1h cumulative auto path with Confirm/Change; larger => visitor_pass_timeframe_change_requested notification; one open request max
+    verify: hub token; X-Hub-Signature-256 if app_secret set; metadata phone_number_id must match config.
+    routing: Admin exact normalized users.mobile_phone_number + active Admin -> Alfred; Visitor active/scheduled pass phone -> Visitor Concierge; others denied/audited.
+    visitor_sandbox: tools only get_pass_details(phone_number), update_visitor_plate(pass_id,new_plate).
   discord:
     service: backend/app/services/discord_messaging.py
-    module: backend/app/modules/messaging/discord_bot.py
     routes: /api/v1/integrations/discord/*
-    config: bot_token secret; guild/channel/user/role/admin_role allowlists; default channel; DM allowed; mention required
-    routing: normalized IncomingChatMessage -> MessagingBridgeService -> Alfred ReAct after allowlist/admin checks
-    identities: messaging_identities(provider=discord)
-    confirmations: iacs:<confirm|cancel>:<session_id>:<confirmation_id>
+    config: bot_token secret; guild/channel/user/role/admin_role allowlists; default channel; DM allowed; mention required.
   unifi_protect:
     service: backend/app/services/unifi_protect.py
     module: backend/app/modules/unifi_protect/client.py
-    capabilities: cameras, events, snapshots, thumbnails, videos, websocket updates, package overlays/backups
-    secrets: username/password/api_key encrypted
-    shutdown: close websocket + all aiohttp/session cleanup methods
+    capabilities: cameras, events, snapshots, thumbnails, videos, websocket updates, package overlays/backups.
+    shutdown: close websocket + aiohttp/session cleanup.
   dvla:
-    service: backend/app/services/dvla.py
-    module: backend/app/modules/dvla/vehicle_enquiry.py
-    request: POST JSON body VRN; never URL query; API key secret
-    persistence: known vehicle compliance fields only; unknown vehicle data not persisted except claimed visitor_pass details
+    request: POST JSON VRN; never URL query.
+    persist: known vehicle compliance fields only; unknown data stays notification context unless visitor pass claimed.
   icloud_calendar:
-    service: backend/app/services/icloud_calendar.py
-    module: backend/app/modules/icloud_calendar/client.py
-    auth: pyicloud trusted session bundle encrypted; Apple password never persisted
-    sync: active accounts; today + 14d; notes/description marker "Open Gate"; creates/updates/cancels visitor_passes with source_reference icloud:<account>:<calendar>:<event>
+    sync: today + 14d; notes marker "Open Gate"; creates/updates/cancels visitor_passes with source_reference icloud:<account>:<calendar>:<event>.
   dependency_updates:
-    service: backend/app/services/dependency_updates.py
-    scope: system-wide dependencies from pyproject, installed dists, package.json/lock, Dockerfiles, Compose
-    jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream
+    scope: pyproject, installed dists, package.json/lock, Dockerfiles, Compose.
+    jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream.
 
 alfred:
-  services: chat.py compatibility facade; services/alfred/* v3 runtime/planner/permissions/memory/feedback/streaming/executor; chat_routing.py v2 rollback only; providers.py LLM adapters; tools.py facade; tool_groups/* catalogs
+  runtime: services/alfred/* v3; chat.py facade; chat_routing.py v2 rollback-only.
   behavior:
-    name: Alfred
-    mode: alfred_agent_mode defaults v3; v3 is LLM-owned planner -> scoped agent loop; v2 deterministic routing is rollback-only
-    no_keyword_guardrails: response-quality corrections belong in alfred_lessons/eval examples, not hard-coded user-text filters; deterministic parsing is only for protocols/safety/auth/sanitization
-    entrypoints: dashboard HTTP/SSE/WS, Discord, WhatsApp Admin, future providers all through ChatService facade
-    fail_closed: local provider or provider/planner failure => clear configuration/retry message; no free-form deterministic answer
-    streaming: emit chat.agent_state + tool batch/status microstates; WhatsApp/Discord send final response + confirmation buttons only
-    permissions: actor context injected before planning; Admin sees read/mutation tools, standard sees read-only non-admin tools, visitors use sandboxed Visitor Concierge only
-    source_of_truth: tool results; never invent people/vehicles/schedules/events/device states/DVLA/telemetry
-    entity_resolution: fuzzy references -> resolve_human_entity before exact IDs
-    confirmations: state-changing tools return requires_confirmation; /api/v1/ai/chat/confirm or WS tool_confirmation executes
-    confirmation_binding: session_id + confirmation_id shared across dashboard/Discord/WhatsApp
-    audit: alfred.tool.<tool>, actor Alfred_AI, provider/model/session, sanitized args/outcomes
-  context_limits:
-    MAX_AGENT_TOOL_ITERATIONS: 5
-    MAX_RELEVANT_HISTORY_MESSAGES: 8
-    api_message_max_chars: 4000
-    attachment_max: 25 MB
-    prompt_results: _tool_results_for_prompt compacts outputs; strings >1000 chars truncated; secret-like keys redacted
-    tool_outputs: _compact_value trims long strings to 800 chars
-  memory:
-    store: alfred_memories Postgres JSON + optional pgvector embeddings; scopes user/site/session_summary
-    rules: users own user memory; Admin may create/read site memory; visitors no durable memory; redact/skip secrets and transient visitor data
-    semantic_search: optional pgvector embeddings supplement exact recall; default OpenAI text-embedding-3-small 1536 dimensions; never replace source-of-truth tools or permission checks
-  learning:
-    feedback: assistant responses expose message IDs; dashboard thumbs and Discord/WhatsApp Admin feedback commands store sanitized turn snapshots
-    lessons: LLM critique drafts user/site scoped lessons; review_then_learn requires Admin approval; auto_learn may activate Admin site lessons
-    repair: thumbs-down may draft a corrected answer; repair is read-only and never executes mutations/confirmations
-    reflection: optional post-turn reflection drafts generalized lessons only; no hidden reasoning, secrets, raw JSON, IDs, or transient visitor details; follows alfred_learning_mode
+    mode: alfred_agent_mode defaults v3; LLM-owned planner -> scoped agent loop.
+    fail_closed: provider/planner failure => configuration/retry message; no free-form deterministic answer.
+    source_of_truth: tool results; never invent people/vehicles/schedules/events/device states/DVLA/telemetry.
+    permissions: actor context before planning; Admin mutation/read tools; standard read-only; visitors sandbox only.
+    confirmations: state-changing tools return requires_confirmation; execute via /api/v1/ai/chat/confirm or WS tool_confirmation.
+    audit: alfred.tool.<tool>, actor Alfred_AI, provider/model/session, sanitized args/outcomes.
+  limits: {MAX_AGENT_TOOL_ITERATIONS: 5, MAX_RELEVANT_HISTORY_MESSAGES: 8, api_message_max_chars: 4000, attachment_max: 25MB}
+  memory: alfred_memories Postgres JSON + optional pgvector; users own user memory; Admin site memory; visitors no durable memory; redact secrets/transient visitor data.
+  learning: feedback -> sanitized snapshots; review_then_learn requires Admin approval; repair is read-only and never executes mutations.
   tools:
-    registry: build_agent_tools() remains the stable public API; domain definitions live in backend/app/ai/tool_groups/* and are assembled by tool_groups/registry.py
-    general: resolve_human_entity, get_system_users
-    access_diag: query_presence, query_access_events, diagnose_access_event, investigate_access_incident, query_unifi_protect_events, backfill_access_event_from_protect, test_unifi_alarm_webhook, query_lpr_timing, query_vehicle_detection_history, get_telemetry_trace, query_leaderboard, query_anomalies, summarize_access_rhythm, calculate_visit_duration
-    gate_maintenance: query_device_states, get_maintenance_status, get_active_malfunctions, get_malfunction_history, trigger_manual_malfunction_override, enable_maintenance_mode, disable_maintenance_mode, open_device, command_device, open_gate, toggle_maintenance_mode
-    schedules: query_schedules, get_schedule, create_schedule, update_schedule, delete_schedule, query_schedule_targets, assign_schedule_to_entity, verify_schedule_access, override_schedule
-    visitor_passes: query_visitor_passes, get_visitor_pass, create_visitor_pass, update_visitor_pass, cancel_visitor_pass
-    calendar: trigger_icloud_sync
-    compliance_cameras: lookup_dvla_vehicle, analyze_camera_snapshot, get_camera_snapshot
-    files_reports: read_chat_attachment, export_presence_report_csv, generate_contractor_invoice_pdf
-    notifications: query_notification_catalog, query_notification_workflows, get_notification_workflow, create_notification_workflow, update_notification_workflow, delete_notification_workflow, preview_notification_workflow, test_notification_workflow, trigger_anomaly_alert
-    automations: query_automation_catalog, query_automations, get_automation, create_automation, edit_automation, delete_automation, enable_automation, disable_automation
-    system_ops: query_integration_health, test_integration_connection, query_system_settings, update_system_settings, query_auth_secret_status, query_alfred_runtime_events, rotate_auth_secret, query_dependency_updates, check_dependency_updates, analyze_dependency_update, apply_dependency_update, query_dependency_backups, restore_dependency_backup, query_dependency_update_job, configure_dependency_backup_storage, validate_dependency_backup_storage
-  state_changing: assign_schedule_to_entity, create_notification_workflow, create_automation, create_schedule, create_visitor_pass, cancel_visitor_pass, delete_automation, delete_notification_workflow, delete_schedule, disable_automation, disable_maintenance_mode, edit_automation, enable_automation, enable_maintenance_mode, command_device, open_gate, open_device, override_schedule, trigger_anomaly_alert, trigger_manual_malfunction_override, test_notification_workflow, toggle_maintenance_mode, update_notification_workflow, update_schedule, update_visitor_pass, trigger_icloud_sync, backfill_access_event_from_protect, test_unifi_alarm_webhook, test_integration_connection, update_system_settings, rotate_auth_secret, check_dependency_updates, analyze_dependency_update, apply_dependency_update, restore_dependency_backup, configure_dependency_backup_storage, validate_dependency_backup_storage
+    registry: build_agent_tools() public API; domain tools in backend/app/ai/tool_groups/*; registry rejects duplicates.
+    add_tool: AgentTool name/description/JSON schema/handler + metadata categories/read_only/confirmation + permissions + tests.
+    output: compact JSON; redact secrets/media; state changes require confirmation metadata/tests.
 
 frontend:
-  app_shell: frontend/src/main.tsx owns auth, global refresh, realtime socket, toasts, theme, sidebar, route Suspense, chat launcher
-  shared: frontend/src/shared.tsx owns shared types, API client, route keys, realtime helpers, formatting, small common primitives
-  views: frontend/src/views/* route/domain modules; keep props explicit from shell until a dedicated server-state phase
-  styles: frontend/src/styles.css import manifest; domain CSS under frontend/src/styles/* in cascade order
-  style: operational console; no landing/marketing hero
-  routes_surfaces: Dashboard, People, Groups, Schedules, Passes, Vehicles, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training
-  code_splitting: non-shell routes are React.lazy chunks; do not re-centralize route bodies into main.tsx or raise Vite chunk limits to hide bundle growth
-  design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards; no text overflow
-  api: relative URLs only; LAN/NPM compatible
-  notifications_ui: workflow builder; Tiptap @Variable; endpoint pickers; media toggles; preview/test
-  automations_ui: When/If/Then builder; scoped @Variable picker; dry-run; integration action picker; safe rich-text fallback editors
-  passes_ui: default Active+Scheduled; one-time/duration; WhatsApp transcript tab; Log tab; edit/cancel/delete in detail modal
-  integrations_ui: Home Assistant, iCloud Calendar, Apprise, Discord, WhatsApp, DVLA, UniFi Protect, LLM providers, dependency update hub
-  css_hazards: never broad-style badge span; keep .badge inline-flex; scope integration header spans to title selectors
+  shell: frontend/src/main.tsx owns auth, global refresh, realtime socket, toasts, theme, sidebar, route Suspense, chat launcher.
+  shared: frontend/src/shared.tsx owns shared types, API client, route keys, realtime helpers, formatting, small primitives.
+  views: route/domain modules in frontend/src/views/*; props explicit until server-state phase.
+  styles: operational console, no landing/marketing hero; CSS under frontend/src/styles/*.
+  routes: Dashboard, People, Groups, Schedules, Passes, Vehicles, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training.
+  splitting: non-shell routes are React.lazy chunks; do not move route bodies back into main.tsx or raise Vite chunk limits to hide growth.
+  design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards/text overflow.
+  api: relative URLs only for LAN/NPM compatibility.
+  css_hazards: never broad-style badge span; keep .badge inline-flex; scope integration header spans to title selectors.
 
 extension_points:
-  new_lpr_adapter:
-    path: backend/app/modules/lpr/<vendor>.py
-    contract: normalize vendor payload -> PlateRead
-    registry: backend/app/modules/registry.py if selectable
-    rule: do not import vendor schema into AccessEventService
-  new_gate_controller:
-    path: backend/app/modules/gate/<vendor>.py
-    protocol: GateController -> GateCommandResult
-    registry: modules/registry.py
-  new_notification_sender:
-    path: backend/app/modules/notifications/<channel>.py
-    contract: NotificationSender.send(title, body, NotificationContext)
-    rule: no raw DB models/log blobs
-  new_notification_trigger_variable:
-    registry: backend/app/services/notifications.py
-    tests: rendering/delivery when variables/actions change
-  new_automation_action:
-    registry: backend/app/services/automation_integration_actions.py or automations catalog
-    shape: {id,type,config}; expose enabled/disabled_reason
-    rule: dry-run no side effects; runtime records automation_runs action_results
-  new_ai_tool:
-    path: add AgentTool in the relevant backend/app/ai/tool_groups/<domain>.py; keep backend/app/ai/tools.py as compatibility facade
-    registry: backend/app/ai/tool_groups/registry.py assembles groups and rejects duplicate names
-    definition: AgentTool name/description/JSON schema/handler; _with_tool_metadata sets categories/read_only/confirmation; permissions.py sets role visibility; document memory visibility when relevant
-    output: compact JSON; redact secrets/media
-    state_change: add to state-changing metadata/tests; requires_confirmation before mutation/send/hardware
-    tests: update backend/tests/test_chat_agent.py public tool surface + confirmation metadata guard
+  lpr_adapter: backend/app/modules/lpr/<vendor>.py -> PlateRead; registry if selectable; no vendor schema in AccessEventService.
+  gate_controller: backend/app/modules/gate/<vendor>.py -> GateController/GateCommandResult; registry in modules/registry.py.
+  notification_sender: backend/app/modules/notifications/<channel>.py -> NotificationSender.send(title, body, NotificationContext); no raw DB/log blobs.
+  notification_trigger_variable: backend/app/services/notifications.py catalogs + rendering/delivery tests.
+  automation_action: backend/app/services/automation_integration_actions.py or automations catalog; expose enabled/disabled_reason; dry-run has no side effects.
+  ai_tool: add to backend/app/ai/tool_groups/<domain>.py; registry assembles; update permission/confirmation metadata and backend/tests/test_chat_agent.py.
 
 commands:
-  run:
+  setup:
     - cp .env.example .env
     - mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backend logs/frontend
     - docker compose up --build
-  backend_tests:
-    all: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
-    one: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+  backend:
     syntax: python3 -m compileall -q backend/app
+    tests: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
+    one: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+    restart: docker compose restart backend
   frontend:
+    build: cd frontend && npm run build
     install_build: cd frontend && npm ci && npm run build
     rebuild: docker compose up -d --build frontend
-  backend_restart: docker compose restart backend
   compose: docker compose config && docker compose ps
-  smoke:
+  smoke_readonly:
     - curl -fsS http://localhost:8089/api/v1/health
     - curl -fsS http://localhost:8089/api/v1/auth/status
     - curl -fsS http://localhost:8089/api/v1/maintenance/status
     - curl -fsS http://localhost:8089/api/v1/leaderboard
-    - curl -fsS -X POST http://localhost:8089/api/v1/simulation/misread-sequence/TEST123

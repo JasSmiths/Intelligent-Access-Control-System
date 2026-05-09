@@ -85,6 +85,7 @@ import {
   AuditLog,
   Badge,
   BadgeTone,
+  createActionConfirmation,
   EmptyState,
   formatDate,
   formatFileSize,
@@ -394,23 +395,28 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
   }, [refreshToken]);
 
   async function clearLogs() {
-    if (!window.confirm("Clear all telemetry, audit, and live log records?")) return;
+    if (!window.confirm("Clear telemetry traces and artifacts? Audit history will be preserved.")) return;
     setClearing(true);
     setError("");
     setNotice("");
     try {
-      await api.delete("/api/v1/telemetry/purge");
+      const payload = { scope: "telemetry" };
+      const confirmation = await createActionConfirmation("telemetry.purge", payload, {
+        target_entity: "Telemetry",
+        target_label: "Telemetry traces and artifacts",
+        reason: "Clear telemetry traces and artifacts"
+      });
+      await api.delete(`/api/v1/telemetry/purge?confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
       setTraces([]);
       setTraceCursor(null);
       setTraceDetails({});
       setExpandedTraceId(null);
-      setAuditLogs([]);
-      setAuditCursor(null);
       setExpandedAuditId(null);
       processedRealtimeKeysRef.current.clear();
       onClearRealtime();
+      await loadTelemetry("reset");
       await loadTelemetryStorage();
-      setNotice("Logs cleared");
+      setNotice("Telemetry traces and artifacts cleared. Audit history was preserved.");
     } catch (clearError) {
       setError(clearError instanceof Error ? clearError.message : "Unable to clear logs");
     } finally {

@@ -2,10 +2,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user
+from app.db.session import get_db_session
 from app.models import User
 from app.modules.notifications.base import NotificationDeliveryError
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
@@ -20,6 +23,7 @@ class WhatsAppTestRequest(BaseModel):
     phone_number: str | None = Field(default=None, max_length=40)
     message: str = Field(default="IACS WhatsApp test from Alfred.", max_length=1024)
     values: dict[str, Any] = Field(default_factory=dict)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 @router.get("/status")
@@ -36,7 +40,20 @@ async def whatsapp_admin_targets(_: User = Depends(admin_user)) -> dict[str, Any
 async def send_whatsapp_test(
     request: WhatsAppTestRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, bool]:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action="whatsapp.test_message",
+            payload=confirmation_payload,
+            confirmation_token=request.confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     target = request.phone_number or user.mobile_phone_number
     if not target:
         raise HTTPException(status_code=400, detail="Provide a WhatsApp phone number or add one to your Admin profile.")

@@ -1228,8 +1228,22 @@ async def test_rule_test_endpoint_propagates_delivery_failures(monkeypatch) -> N
     )
     monkeypatch.setattr(notification_api, "get_notification_service", lambda: FailingNotificationService())
 
+    async def consume_confirmation(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    async def write_test_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(notification_api, "consume_action_confirmation", consume_confirmation)
+    monkeypatch.setattr(notification_api, "write_notification_test_audit", write_test_audit)
+
     with pytest.raises(HTTPException) as exc:
-        await notification_api.test_notification_rule(rule_id, _=SimpleNamespace(), session=session)
+        await notification_api.test_notification_rule(
+            rule_id,
+            request=notification_api.StoredNotificationRuleTestRequest(confirmation_token="confirmed"),
+            user=SimpleNamespace(id=uuid.uuid4()),
+            session=session,
+        )
 
     assert exc.value.status_code == 503
     assert "No Apprise endpoints" in str(exc.value.detail)

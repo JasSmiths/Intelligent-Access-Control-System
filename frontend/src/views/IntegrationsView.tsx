@@ -85,6 +85,7 @@ import {
   Badge,
   BadgeTone,
   coerceSettingsPayload,
+  createActionConfirmation,
   discordListSettingKeys,
   EmptyState,
   formatDate,
@@ -2511,7 +2512,15 @@ export function UnifiProtectUpdatesPanel({
     setLoading(true);
     setError("");
     try {
-      const backup = await api.post<UnifiProtectBackup>("/api/v1/integrations/unifi-protect/backups", {});
+      const payload = {};
+      const confirmation = await createActionConfirmation("unifi_protect.backup.create", payload, {
+        target_entity: "UniFiProtect",
+        target_label: "UniFi Protect settings backup",
+        reason: "Create UniFi Protect backup"
+      });
+      const backup = await api.post<UnifiProtectBackup>("/api/v1/integrations/unifi-protect/backups", {
+        confirmation_token: confirmation.confirmation_token
+      });
       setBackups((current) => [backup, ...current]);
     } catch (backupError) {
       setError(backupError instanceof Error ? backupError.message : "Unable to create backup.");
@@ -2534,9 +2543,18 @@ export function UnifiProtectUpdatesPanel({
     setError("");
     setResult(null);
     try {
-      const applied = await api.post<UnifiProtectUpdateApplyResult>("/api/v1/integrations/unifi-protect/update/apply", {
+      const payload = {
         target_version: analysis.target_version,
         confirmed: true
+      };
+      const confirmation = await createActionConfirmation("unifi_protect.update.apply", payload, {
+        target_entity: "UniFiProtect",
+        target_label: analysis.target_version,
+        reason: "Apply UniFi Protect package update"
+      });
+      const applied = await api.post<UnifiProtectUpdateApplyResult>("/api/v1/integrations/unifi-protect/update/apply", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       setResult(applied);
       await loadUpdateData();
@@ -2561,7 +2579,16 @@ export function UnifiProtectUpdatesPanel({
     setLoading(true);
     setError("");
     try {
-      await api.post(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}/restore`, {});
+      const payload = { backup_id: backup.id };
+      const confirmation = await createActionConfirmation("unifi_protect.backup.restore", payload, {
+        target_entity: "UniFiProtect",
+        target_id: backup.id,
+        target_label: backup.created_at || backup.id,
+        reason: "Restore UniFi Protect backup"
+      });
+      await api.post(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}/restore`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await loadUpdateData();
       await onChanged();
     } catch (restoreError) {
@@ -2575,7 +2602,14 @@ export function UnifiProtectUpdatesPanel({
     setLoading(true);
     setError("");
     try {
-      await api.delete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}`);
+      const payload = { backup_id: backup.id };
+      const confirmation = await createActionConfirmation("unifi_protect.backup.delete", payload, {
+        target_entity: "UniFiProtect",
+        target_id: backup.id,
+        target_label: backup.created_at || backup.id,
+        reason: "Delete UniFi Protect backup"
+      });
+      await api.delete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}?confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
       setBackups((current) => current.filter((item) => item.id !== backup.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete backup.");
@@ -3014,9 +3048,19 @@ export function IntegrationModal({
         detail: `Contacting ${definition.title}.`,
         activeStep: 1
       });
-      const request = api.post<{ ok: boolean; message: string }>("/api/v1/settings/test", {
+      const payload = {
         integration: definition.key,
         values: coerceSettingsPayload(form)
+      };
+      const confirmation = await createActionConfirmation("integration.test", payload, {
+        target_entity: "Integration",
+        target_id: definition.key,
+        target_label: definition.title,
+        reason: "Run integration connection test"
+      });
+      const request = api.post<{ ok: boolean; message: string }>("/api/v1/settings/test", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       await sleep(260);
       setFeedback({
@@ -3060,20 +3104,48 @@ export function IntegrationModal({
         activeStep: 1
       });
       if (isDiscord) {
-        await api.post("/api/v1/integrations/discord/test", {
+        const payload = {
           channel_id: form.discord_default_notification_channel_id || undefined,
           message: "This is a test Discord notification from API & Integrations."
+        };
+        const confirmation = await createActionConfirmation("discord.test_notification", payload, {
+          target_entity: "Discord",
+          target_id: payload.channel_id,
+          target_label: "Discord test notification",
+          reason: "Send Discord test notification"
+        });
+        await api.post("/api/v1/integrations/discord/test", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
         });
       } else if (isWhatsApp) {
-        await api.post("/api/v1/integrations/whatsapp/test", {
+        const payload = {
           message: "This is a test WhatsApp notification from API & Integrations.",
           values: coerceSettingsPayload(form)
+        };
+        const confirmation = await createActionConfirmation("whatsapp.test_message", payload, {
+          target_entity: "WhatsApp",
+          target_label: "WhatsApp test message",
+          reason: "Send WhatsApp test message"
+        });
+        await api.post("/api/v1/integrations/whatsapp/test", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
         });
       } else {
-        await api.post("/api/v1/integrations/notifications/test", {
+        const payload = {
           subject: "IACS test notification",
           severity: "info",
           message: "This is a test notification from API & Integrations."
+        };
+        const confirmation = await createActionConfirmation("notification.test", payload, {
+          target_entity: "Notification",
+          target_label: payload.subject,
+          reason: "Send Apprise test notification"
+        });
+        await api.post("/api/v1/integrations/notifications/test", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
         });
       }
       setFeedback({

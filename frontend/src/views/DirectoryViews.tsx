@@ -85,6 +85,7 @@ import {
   api,
   Badge,
   BadgeTone,
+  createActionConfirmation,
   EmptyState,
   fileToDataUrl,
   Group,
@@ -937,9 +938,19 @@ export function PersonModal({
     setSendingHaTest(true);
     setHaTestFeedback({ tone: "info", text: "Sending Home Assistant test notification." });
     try {
-      await api.post("/api/v1/integrations/home-assistant/mobile-notifications/test", {
+      const payload = {
         service_name: form.home_assistant_mobile_app_notify_service,
         person_name: personName
+      };
+      const confirmation = await createActionConfirmation("notification.mobile_test", payload, {
+        target_entity: "NotificationTarget",
+        target_id: payload.service_name,
+        target_label: personName,
+        reason: "Send Home Assistant mobile test notification"
+      });
+      await api.post("/api/v1/integrations/home-assistant/mobile-notifications/test", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       setHaTestFeedback({ tone: "success", text: "Home Assistant accepted the test notification." });
     } catch (testError) {

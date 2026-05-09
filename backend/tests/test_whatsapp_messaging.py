@@ -2767,9 +2767,14 @@ async def test_whatsapp_test_endpoint_rejects_disabled_integration(monkeypatch) 
 
     monkeypatch.setattr(whatsapp_api, "load_whatsapp_config", load_config)
 
+    async def consume_confirmation(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(whatsapp_api, "consume_action_confirmation", consume_confirmation)
+
     with pytest.raises(HTTPException) as exc:
         await whatsapp_api.send_whatsapp_test(
-            whatsapp_api.WhatsAppTestRequest(values={"whatsapp_enabled": False}),
+            whatsapp_api.WhatsAppTestRequest(values={"whatsapp_enabled": False}, confirmation_token="confirmed"),
             SimpleNamespace(id=uuid.uuid4(), mobile_phone_number="+44 7700 900123"),
         )
 
@@ -2795,6 +2800,11 @@ async def test_whatsapp_test_endpoint_uses_modal_values(monkeypatch) -> None:
     monkeypatch.setattr(whatsapp_api, "emit_audit_log", lambda **_kwargs: None)
     monkeypatch.setattr(service, "send_text_message", send_text)
 
+    async def consume_confirmation(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(whatsapp_api, "consume_action_confirmation", consume_confirmation)
+
     result = await whatsapp_api.send_whatsapp_test(
         whatsapp_api.WhatsAppTestRequest(
             message="Test",
@@ -2802,6 +2812,7 @@ async def test_whatsapp_test_endpoint_uses_modal_values(monkeypatch) -> None:
                 "whatsapp_enabled": True,
                 "whatsapp_phone_number_id": "phone-id-from-form",
             },
+            confirmation_token="confirmed",
         ),
         SimpleNamespace(id=uuid.uuid4(), mobile_phone_number="+44 7700 900123"),
     )

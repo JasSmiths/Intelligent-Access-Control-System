@@ -12,7 +12,14 @@ from app.api.dependencies import admin_user
 from app.core.config import settings
 from app.db.session import get_db_session
 from app.models import AuditLog, TelemetrySpan, TelemetryTrace, User
-from app.services.telemetry import TELEMETRY_CATEGORIES, telemetry
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
+from app.services.telemetry import (
+    TELEMETRY_CATEGORIES,
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    telemetry,
+    write_audit_log,
+)
 
 router = APIRouter()
 
@@ -180,24 +187,47 @@ async def telemetry_storage(
 
 @router.delete("/purge")
 async def purge_telemetry(
-    _: User = Depends(admin_user),
+    confirmation_token: str | None = Query(default=None, max_length=160),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    confirmation_payload = {"scope": "telemetry"}
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action="telemetry.purge",
+            payload=confirmation_payload,
+            confirmation_token=confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     await telemetry.flush()
     counts = {
         "traces": await _row_count(session, TelemetryTrace),
         "spans": await _row_count(session, TelemetrySpan),
-        "audit_logs": await _row_count(session, AuditLog),
+        "audit_logs_preserved": await _row_count(session, AuditLog),
     }
-
-    await session.execute(text("TRUNCATE TABLE telemetry_spans, telemetry_traces, audit_logs RESTART IDENTITY"))
-    await session.commit()
 
     artifact_dir = settings.data_dir / "telemetry-artifacts"
     artifact_files = 0
     if artifact_dir.exists():
         artifact_files = sum(1 for path in artifact_dir.rglob("*") if path.is_file())
         shutil.rmtree(artifact_dir)
+
+    await session.execute(text("TRUNCATE TABLE telemetry_spans, telemetry_traces RESTART IDENTITY"))
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="telemetry.purge",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Telemetry",
+        target_label="Telemetry traces and artifacts",
+        metadata={"deleted": {**counts, "artifact_files": artifact_files}},
+    )
+    await session.commit()
 
     return {
         "status": "purged",

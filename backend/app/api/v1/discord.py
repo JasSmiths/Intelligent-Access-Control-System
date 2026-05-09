@@ -13,6 +13,7 @@ from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import MessagingIdentity, Person, User
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, actor_from_user, emit_audit_log
 
@@ -22,6 +23,7 @@ router = APIRouter()
 class DiscordTestRequest(BaseModel):
     channel_id: str | None = Field(default=None, max_length=80)
     message: str = Field(default="IACS Discord integration test", max_length=500)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class DiscordIdentityUpdate(BaseModel):
@@ -97,7 +99,20 @@ async def update_discord_identity(
 async def send_discord_test(
     request: DiscordTestRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, bool]:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action="discord.test_notification",
+            payload=confirmation_payload,
+            confirmation_token=request.confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     service = get_discord_messaging_service()
     status = await service.status()
     channel_id = request.channel_id or str(status.get("default_notification_channel_id") or "")

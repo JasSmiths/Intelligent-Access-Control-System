@@ -39,6 +39,7 @@ from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppNotifier,
     HomeAssistantMobileAppTarget,
 )
+from app.services.dependency_updates import get_dependency_update_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
@@ -50,8 +51,10 @@ from app.services.action_confirmations import (
     consume_action_confirmation,
 )
 from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
+    audit_diff,
     emit_audit_log,
 )
 
@@ -91,6 +94,45 @@ async def _require_real_world_confirmation(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
+def emit_settings_update_audit(
+    user: User,
+    *,
+    before: dict,
+    after: dict,
+) -> None:
+    diff = audit_diff(before, after)
+    if not diff.get("old") and not diff.get("new"):
+        return
+    changed_keys = sorted(set(before) | set(after))
+    emit_audit_log(
+        category=TELEMETRY_CATEGORY_CRUD,
+        action="settings.update",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="SystemSetting",
+        target_label=", ".join(changed_keys[:8]),
+        diff=diff,
+        metadata={"keys": changed_keys, "source": "integrations_endpoint"},
+    )
+
+
+async def update_integration_settings(
+    user: User,
+    values: dict,
+    *,
+    before: dict,
+    after: dict,
+) -> None:
+    await update_settings(values)
+    emit_settings_update_audit(user, before=before, after=after)
+    if any(key.startswith("home_assistant_") for key in values):
+        service = get_home_assistant_service()
+        await service.stop()
+        await service.start()
+    if any(key.startswith(("home_assistant_", "apprise_")) for key in values):
+        await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
+
+
 class GateOpenRequest(BaseModel):
     reason: str = Field(default="Manual dashboard command", max_length=240)
     confirmation_token: str | None = Field(default=None, max_length=160)
@@ -114,11 +156,13 @@ class TestNotificationRequest(BaseModel):
     subject: str = Field(default="IACS test notification", max_length=120)
     severity: str = Field(default="info", max_length=40)
     message: str = Field(default="Notification integration test", max_length=500)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class TestHomeAssistantMobileNotificationRequest(BaseModel):
     service_name: str = Field(pattern=r"^notify\.mobile_app_[A-Za-z0-9_]+$", max_length=255)
     person_name: str = Field(default="this person", max_length=160)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class AddAppriseUrlRequest(BaseModel):
@@ -175,7 +219,7 @@ async def home_assistant_entities(
 
 
 @router.post("/home-assistant/gates/auto-detect")
-async def auto_detect_home_assistant_gates(_: User = Depends(admin_user)) -> dict:
+async def auto_detect_home_assistant_gates(user: User = Depends(admin_user)) -> dict:
     try:
         states = await HomeAssistantClient().list_states()
     except HomeAssistantError as exc:
@@ -188,12 +232,19 @@ async def auto_detect_home_assistant_gates(_: User = Depends(admin_user)) -> dic
         detected,
         default_open_service=config.home_assistant_gate_open_service,
     )
-    await update_settings({"home_assistant_gate_entities": merged})
+    before = {"home_assistant_gate_entities": config.home_assistant_gate_entities}
+    after = {"home_assistant_gate_entities": merged}
+    await update_integration_settings(
+        user,
+        {"home_assistant_gate_entities": merged},
+        before=before,
+        after=after,
+    )
     return {"gate_entities": [cover_entity_state_payload(entity) for entity in merged]}
 
 
 @router.post("/home-assistant/garage-doors/auto-detect")
-async def auto_detect_home_assistant_garage_doors(_: User = Depends(admin_user)) -> dict:
+async def auto_detect_home_assistant_garage_doors(user: User = Depends(admin_user)) -> dict:
     try:
         states = await HomeAssistantClient().list_states()
     except HomeAssistantError as exc:
@@ -206,7 +257,14 @@ async def auto_detect_home_assistant_garage_doors(_: User = Depends(admin_user))
         detected,
         default_open_service=config.home_assistant_gate_open_service,
     )
-    await update_settings({"home_assistant_garage_door_entities": merged})
+    before = {"home_assistant_garage_door_entities": config.home_assistant_garage_door_entities}
+    after = {"home_assistant_garage_door_entities": merged}
+    await update_integration_settings(
+        user,
+        {"home_assistant_garage_door_entities": merged},
+        before=before,
+        after=after,
+    )
     return {"garage_door_entities": [cover_entity_state_payload(entity) for entity in merged]}
 
 
@@ -218,7 +276,7 @@ async def apprise_urls(_: User = Depends(admin_user)) -> dict:
 
 
 @router.post("/apprise/urls")
-async def add_apprise_url(request: AddAppriseUrlRequest, _: User = Depends(admin_user)) -> dict:
+async def add_apprise_url(request: AddAppriseUrlRequest, user: User = Depends(admin_user)) -> dict:
     normalized = normalize_apprise_url(request.url.strip())
     try:
         validate_apprise_urls(normalized)
@@ -228,19 +286,33 @@ async def add_apprise_url(request: AddAppriseUrlRequest, _: User = Depends(admin
     config = await get_runtime_config()
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
     if normalized not in urls:
+        before = {"apprise_urls": config.apprise_urls}
         urls.append(normalized)
-        await update_settings({"apprise_urls": "\n".join(urls)})
+        next_urls = "\n".join(urls)
+        await update_integration_settings(
+            user,
+            {"apprise_urls": next_urls},
+            before=before,
+            after={"apprise_urls": next_urls},
+        )
     return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
 
 
 @router.delete("/apprise/urls/{index}")
-async def remove_apprise_url(index: int, _: User = Depends(admin_user)) -> dict:
+async def remove_apprise_url(index: int, user: User = Depends(admin_user)) -> dict:
     config = await get_runtime_config()
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
     if index < 0 or index >= len(urls):
         raise HTTPException(status_code=404, detail="Apprise URL not found.")
+    before = {"apprise_urls": config.apprise_urls}
     urls.pop(index)
-    await update_settings({"apprise_urls": "\n".join(urls)})
+    next_urls = "\n".join(urls)
+    await update_integration_settings(
+        user,
+        {"apprise_urls": next_urls},
+        before=before,
+        after={"apprise_urls": next_urls},
+    )
     return {"urls": [summarize_apprise_url(row_index, url) for row_index, url in enumerate(urls)]}
 
 
@@ -477,9 +549,18 @@ async def say_announcement(
 @router.post("/home-assistant/mobile-notifications/test")
 async def send_home_assistant_mobile_notification_test(
     request: TestHomeAssistantMobileNotificationRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     person_name = request.person_name.strip() or "this person"
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await _require_real_world_confirmation(
+        session,
+        user=user,
+        action="notification.mobile_test",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
         await HomeAssistantMobileAppNotifier().send(
             HomeAssistantMobileAppTarget(request.service_name),
@@ -521,11 +602,21 @@ async def send_home_assistant_mobile_notification_test(
 @router.post("/notifications/test")
 async def send_test_notification(
     request: TestNotificationRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     config = await get_runtime_config()
     if not config.apprise_urls:
         raise HTTPException(status_code=400, detail="Apprise is not configured.")
+
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await _require_real_world_confirmation(
+        session,
+        user=user,
+        action="notification.test",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
 
     try:
         notification = await get_notification_service().notify(

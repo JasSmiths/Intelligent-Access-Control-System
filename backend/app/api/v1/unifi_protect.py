@@ -4,12 +4,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
+from app.db.session import get_db_session
 from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
 from app.models import User
 from app.modules.unifi_protect.client import UnifiProtectError
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.settings import get_runtime_config
+from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, actor_from_user, write_audit_log
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.unifi_protect_updates import (
     UnifiProtectUpdateError,
@@ -35,6 +39,62 @@ class ProtectUpdateAnalyzeRequest(BaseModel):
 class ProtectUpdateApplyRequest(BaseModel):
     target_version: str | None = Field(default=None, max_length=40)
     confirmed: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class ProtectBackupCreateRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class ProtectBackupRestoreRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+async def require_unifi_confirmation(
+    session: AsyncSession,
+    *,
+    user: User,
+    action: str,
+    payload: dict[str, Any],
+    confirmation_token: str | None,
+) -> None:
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action=action,
+            payload=payload,
+            confirmation_token=confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+async def write_unifi_audit(
+    session: AsyncSession,
+    *,
+    user: User,
+    action: str,
+    target_id: str | None = None,
+    target_label: str | None = None,
+    outcome: str = "success",
+    level: str = "info",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action=action,
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="UniFiProtect",
+        target_id=target_id,
+        target_label=target_label,
+        outcome=outcome,
+        level=level,
+        metadata=metadata or {},
+    )
+    await session.commit()
 
 
 @router.get("/status")
@@ -82,22 +142,74 @@ async def unifi_protect_update_analyze(
 @router.post("/update/apply")
 async def unifi_protect_update_apply(
     request: ProtectUpdateApplyRequest,
-    _: User = Depends(admin_user),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_unifi_confirmation(
+        session,
+        user=user,
+        action="unifi_protect.update.apply",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
-        return await get_unifi_protect_update_service().apply(
+        result = await get_unifi_protect_update_service().apply(
             target_version=request.target_version,
             confirmed=request.confirmed,
         )
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.update.apply",
+            metadata={"target_version": request.target_version or result.get("target_version")},
+        )
+        return result
     except UnifiProtectUpdateError as exc:
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.update.apply",
+            outcome="failed",
+            level="error",
+            metadata={"target_version": request.target_version, "error": str(exc)},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/backups")
-async def unifi_protect_create_backup(_: User = Depends(admin_user)) -> dict[str, Any]:
+async def unifi_protect_create_backup(
+    request: ProtectBackupCreateRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await require_unifi_confirmation(
+        session,
+        user=user,
+        action="unifi_protect.backup.create",
+        payload={},
+        confirmation_token=request.confirmation_token,
+    )
     try:
-        return await get_unifi_protect_update_service().create_backup(reason="manual")
+        backup = await get_unifi_protect_update_service().create_backup(reason="manual")
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.create",
+            target_id=str(backup.get("id") or ""),
+            target_label=str(backup.get("created_at") or "manual backup"),
+            metadata={"backup_id": backup.get("id")},
+        )
+        return backup
     except UnifiProtectUpdateError as exc:
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.create",
+            outcome="failed",
+            level="error",
+            metadata={"error": str(exc)},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -125,22 +237,79 @@ async def unifi_protect_download_backup(
 @router.post("/backups/{backup_id}/restore")
 async def unifi_protect_restore_backup(
     backup_id: str,
-    _: User = Depends(admin_user),
+    request: ProtectBackupRestoreRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    confirmation_payload = {"backup_id": backup_id}
+    await require_unifi_confirmation(
+        session,
+        user=user,
+        action="unifi_protect.backup.restore",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
-        return await get_unifi_protect_update_service().restore_backup(backup_id)
+        result = await get_unifi_protect_update_service().restore_backup(backup_id)
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.restore",
+            target_id=backup_id,
+            target_label=backup_id,
+            metadata={"backup_id": backup_id},
+        )
+        return result
     except UnifiProtectUpdateError as exc:
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.restore",
+            target_id=backup_id,
+            target_label=backup_id,
+            outcome="failed",
+            level="error",
+            metadata={"backup_id": backup_id, "error": str(exc)},
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.delete("/backups/{backup_id}", status_code=204)
 async def unifi_protect_delete_backup(
     backup_id: str,
-    _: User = Depends(admin_user),
+    confirmation_token: str | None = Query(default=None, max_length=160),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> None:
+    confirmation_payload = {"backup_id": backup_id}
+    await require_unifi_confirmation(
+        session,
+        user=user,
+        action="unifi_protect.backup.delete",
+        payload=confirmation_payload,
+        confirmation_token=confirmation_token,
+    )
     try:
         await get_unifi_protect_update_service().delete_backup(backup_id)
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.delete",
+            target_id=backup_id,
+            target_label=backup_id,
+            metadata={"backup_id": backup_id},
+        )
     except UnifiProtectUpdateError as exc:
+        await write_unifi_audit(
+            session,
+            user=user,
+            action="unifi_protect.backup.delete",
+            target_id=backup_id,
+            target_label=backup_id,
+            outcome="failed",
+            level="error",
+            metadata={"backup_id": backup_id, "error": str(exc)},
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

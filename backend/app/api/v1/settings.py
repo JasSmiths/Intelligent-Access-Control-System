@@ -3,10 +3,13 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user, current_user
+from app.db.session import get_db_session
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.auth_secret_management import (
     AuthSecretRotationError,
     auth_secret_security_status,
@@ -37,6 +40,7 @@ class SettingsUpdateRequest(BaseModel):
 class ConnectionTestRequest(BaseModel):
     integration: str = Field(min_length=2, max_length=40)
     values: dict[str, Any] = Field(default_factory=dict)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class AuthSecretRotateRequest(BaseModel):
@@ -139,9 +143,21 @@ async def patch_settings(
 async def test_connection(
     request: ConnectionTestRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str | bool]:
     integration = request.integration.lower()
     values = request.values
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action="integration.test",
+            payload=confirmation_payload,
+            confirmation_token=request.confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         if integration == "home_assistant":
             await _test_home_assistant(values)
