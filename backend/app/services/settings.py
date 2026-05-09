@@ -140,6 +140,31 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "review_then_learn",
         "How Alfred applies response feedback. Use review_then_learn or auto_learn.",
     ),
+    "alfred_semantic_memory_enabled": (
+        "llm",
+        True,
+        "Enable pgvector-backed semantic memory and lesson retrieval for Alfred.",
+    ),
+    "alfred_reflection_enabled": (
+        "llm",
+        True,
+        "Allow Alfred to draft short post-turn reflection lessons through the learning workflow.",
+    ),
+    "alfred_embedding_provider": (
+        "llm",
+        "openai",
+        "Embedding provider for Alfred semantic memory. Use openai, ollama, local, or disabled.",
+    ),
+    "alfred_embedding_model": (
+        "llm",
+        "text-embedding-3-small",
+        "Embedding model used by Alfred semantic memory.",
+    ),
+    "alfred_embedding_dimension": (
+        "llm",
+        1536,
+        "Embedding vector dimension for Alfred semantic memory.",
+    ),
     "llm_timeout_seconds": ("llm", settings.llm_timeout_seconds, "LLM HTTP timeout."),
     "openai_api_key": ("llm", settings.openai_api_key or "", "OpenAI API key."),
     "openai_model": ("llm", "gpt-4o", "OpenAI model."),
@@ -242,6 +267,11 @@ class RuntimeConfig:
     llm_provider: str
     alfred_agent_mode: str
     alfred_learning_mode: str
+    alfred_semantic_memory_enabled: bool
+    alfred_reflection_enabled: bool
+    alfred_embedding_provider: str
+    alfred_embedding_model: str
+    alfred_embedding_dimension: int
     llm_timeout_seconds: float
     openai_api_key: str
     openai_model: str
@@ -479,6 +509,15 @@ async def get_runtime_config() -> RuntimeConfig:
             if str(values["alfred_learning_mode"]).strip().lower() == "auto_learn"
             else "review_then_learn"
         ),
+        alfred_semantic_memory_enabled=bool_value(values["alfred_semantic_memory_enabled"]),
+        alfred_reflection_enabled=bool_value(values["alfred_reflection_enabled"]),
+        alfred_embedding_provider=(
+            str(values["alfred_embedding_provider"]).strip().lower()
+            if str(values["alfred_embedding_provider"]).strip().lower() in {"openai", "ollama", "local", "disabled"}
+            else "openai"
+        ),
+        alfred_embedding_model=str(values["alfred_embedding_model"] or "text-embedding-3-small"),
+        alfred_embedding_dimension=max(1, int(values["alfred_embedding_dimension"] or 1536)),
         llm_timeout_seconds=float(values["llm_timeout_seconds"]),
         openai_api_key=str(values["openai_api_key"] or ""),
         openai_model=str(values["openai_model"]),

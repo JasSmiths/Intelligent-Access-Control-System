@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies import admin_user
+from app.models import User
 from app.modules.lpr.base import PlateRead, now_utc
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.access_events import AccessEventService, get_access_event_service
+from app.simulation.scenarios import FullAccessFlowReport, FullAccessFlowRequest, run_full_access_flow
 
 router = APIRouter()
 
@@ -63,3 +66,16 @@ async def simulate_misread_sequence(
         )
 
     return {"status": "simulated", "registration_number": plate, "candidate_count": str(len(candidates))}
+
+
+@router.post("/e2e/full-access-flow", response_model=FullAccessFlowReport)
+async def simulate_full_access_flow(
+    request: FullAccessFlowRequest,
+    _: User = Depends(admin_user),
+) -> FullAccessFlowReport:
+    """Run the hardware-free end-to-end access-flow simulation suite."""
+
+    try:
+        return await run_full_access_flow(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

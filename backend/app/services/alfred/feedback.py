@@ -15,6 +15,7 @@ from app.ai.providers import ChatMessageInput, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AlfredEvalExample, AlfredFeedback, AlfredLesson, ChatMessage, User
+from app.services.alfred.embeddings import embedding_text, generate_embedding
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log, sanitize_payload
 
@@ -27,6 +28,15 @@ Never include secrets, IDs, raw tool JSON, file URLs, or private contact details
 
 Return compact JSON:
 {"summary":"short","lesson":{"title":"short","lesson":"one concise instruction","tags":["style"],"confidence":0.0},"corrected_answer":"optional corrected answer","eval_example":{"prompt":"user prompt","ideal_answer":"ideal answer"}}"""
+
+TURN_REFLECTION_PROMPT = """Reflect briefly on this completed Alfred IACS chat turn.
+Do not expose or store hidden reasoning. Do not create keyword rules. Do not invent system facts.
+Generalize only durable behavior that would improve future similar turns.
+Never include secrets, IDs, raw tool JSON, file URLs, private contact details, or transient visitor details.
+If there is no useful generalized lesson, return {"reflection":null}.
+
+Return compact JSON:
+{"reflection":{"went_well":"short","could_improve":"short","key_lesson":"one concise generalized instruction","title":"short","tags":["reflection"],"confidence":0.0}}"""
 
 DEFAULT_SEEDED_LESSONS = (
     {
@@ -88,6 +98,123 @@ class AlfredFeedbackError(ValueError):
 
 
 class AlfredFeedbackService:
+    def schedule_reflection(
+        self,
+        provider: Any,
+        *,
+        user_message: str,
+        assistant_text: str,
+        tool_results: list[dict[str, Any]],
+        actor_context: dict[str, Any],
+        session_id: str,
+        provider_name: str,
+        model_name: str | None,
+    ) -> None:
+        try:
+            task = asyncio.create_task(
+                self.reflect_on_turn(
+                    provider,
+                    user_message=user_message,
+                    assistant_text=assistant_text,
+                    tool_results=tool_results,
+                    actor_context=actor_context,
+                    session_id=session_id,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                )
+            )
+        except RuntimeError:
+            logger.info("alfred_reflection_not_scheduled", extra={"session_id": session_id})
+            return
+        task.add_done_callback(self._log_reflection_failure)
+
+    def _log_reflection_failure(self, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.info("alfred_reflection_failed", extra={"error": str(exc)[:240]})
+
+    async def reflect_on_turn(
+        self,
+        provider: Any,
+        *,
+        user_message: str,
+        assistant_text: str,
+        tool_results: list[dict[str, Any]],
+        actor_context: dict[str, Any],
+        session_id: str,
+        provider_name: str,
+        model_name: str | None,
+    ) -> dict[str, Any] | None:
+        """Draft one generalized lesson from a completed safe turn, if useful."""
+
+        runtime = await get_runtime_config()
+        if not bool(getattr(runtime, "alfred_reflection_enabled", True)):
+            return None
+        if _reflection_input_unsafe(user_message, assistant_text, tool_results):
+            return None
+        user = actor_context.get("user") if isinstance(actor_context, dict) else {}
+        actor_uuid = _coerce_uuid((user or {}).get("id"))
+        actor_role = str((user or {}).get("role") or "standard").strip().lower()
+        if not actor_uuid:
+            return None
+        try:
+            result = await provider.complete(
+                [
+                    ChatMessageInput("system", TURN_REFLECTION_PROMPT),
+                    ChatMessageInput(
+                        "user",
+                        json.dumps(
+                            {
+                                "user_message": user_message,
+                                "assistant_text": assistant_text,
+                                "tool_names": _tool_names_for_reflection(tool_results),
+                                "tool_result_count": len(tool_results),
+                                "actor_role": actor_role,
+                                "provider": provider_name,
+                                "model": model_name,
+                            },
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                    ),
+                ]
+            )
+        except Exception as exc:
+            logger.info("alfred_reflection_provider_failed", extra={"error": str(exc)[:180]})
+            return None
+        payload = _first_json_object(result.text)
+        reflection = payload.get("reflection") if isinstance(payload, dict) else None
+        if not isinstance(reflection, dict):
+            return None
+        lesson_text = str(reflection.get("key_lesson") or "").strip()
+        if not lesson_text or _contains_placeholder(lesson_text) or _reflection_text_unsafe(lesson_text):
+            return None
+        tags = reflection.get("tags") if isinstance(reflection.get("tags"), list) else []
+        analysis = sanitize_payload(
+            {
+                "summary": "Post-turn reflection lesson drafted.",
+                "reflection": {
+                    "went_well": str(reflection.get("went_well") or "")[:300],
+                    "could_improve": str(reflection.get("could_improve") or "")[:300],
+                },
+                "lesson": {
+                    "title": str(reflection.get("title") or "Alfred reflection lesson").strip()[:180],
+                    "lesson": lesson_text[:2000],
+                    "tags": [str(tag).strip()[:40] for tag in tags[:10] if str(tag).strip()] + ["reflection"],
+                    "confidence": reflection.get("confidence", 0.55),
+                },
+            }
+        )
+        return await self._create_lesson_from_analysis(
+            feedback_id=f"reflection:{session_id}",
+            actor_uuid=actor_uuid,
+            actor_role=actor_role,
+            rating="reflection",
+            learning_mode=str(getattr(runtime, "alfred_learning_mode", "review_then_learn")),
+            analysis=analysis,
+        )
+
     async def seed_default_lessons(self) -> None:
         async with AsyncSessionLocal() as session:
             for item in DEFAULT_SEEDED_LESSONS:
@@ -282,6 +409,10 @@ class AlfredFeedbackService:
         original_prompt = feedback.original_user_prompt or ""
         original_answer = feedback.original_assistant_response or ""
         turn_snapshot = sanitize_payload(feedback.turn_snapshot or {})
+        feedback_embedding = await generate_embedding(
+            _feedback_embedding_text(feedback),
+            purpose="alfred_feedback",
+        )
         learning_mode = runtime.alfred_learning_mode
         source_channel = feedback.source_channel
         provider_name = feedback.provider or runtime.llm_provider
@@ -328,6 +459,8 @@ class AlfredFeedbackService:
             if row:
                 row.analysis = analysis
                 row.corrected_answer = corrected_answer or None
+                if row.embedding is None:
+                    row.embedding = feedback_embedding
                 row.lesson_id = _coerce_uuid(lesson.get("id")) if lesson else None
                 row.status = "processed" if lesson or eval_example else "analysis_failed"
                 await session.commit()
@@ -415,12 +548,20 @@ class AlfredFeedbackService:
             row = await session.get(AlfredLesson, lesson_uuid)
             if not row or row.deleted_at:
                 raise AlfredFeedbackError("Lesson not found.")
+            refresh_embedding = False
             if title is not None:
                 row.title = title.strip()[:180] or row.title
                 row.edited_by_user_id = reviewer.id
+                refresh_embedding = True
             if lesson_text is not None:
                 row.lesson = lesson_text.strip() or row.lesson
                 row.edited_by_user_id = reviewer.id
+                refresh_embedding = True
+            if refresh_embedding:
+                row.embedding = await generate_embedding(
+                    embedding_text(row.title, row.lesson, " ".join(row.tags or [])),
+                    purpose="alfred_lesson_review",
+                )
             if decision == "approve":
                 row.status = "active"
                 row.approved_by_user_id = reviewer.id
@@ -597,15 +738,26 @@ class AlfredFeedbackService:
             confidence = max(0.0, min(1.0, float(raw_lesson.get("confidence", 0.6))))
         except (TypeError, ValueError):
             confidence = 0.6
+        tags = [
+            str(tag).strip()[:40]
+            for tag in (raw_lesson.get("tags") if isinstance(raw_lesson.get("tags"), list) else [])[:12]
+            if str(tag).strip()
+        ]
+        title = str(raw_lesson.get("title") or "Alfred feedback lesson").strip()[:180]
+        embedding = await generate_embedding(
+            embedding_text(title, lesson_text, " ".join(tags)),
+            purpose="alfred_lesson",
+        )
         async with AsyncSessionLocal() as session:
             row = AlfredLesson(
                 scope=scope,
                 owner_user_id=None if scope == "site" else actor_uuid,
-                title=str(raw_lesson.get("title") or "Alfred feedback lesson").strip()[:180],
+                title=title,
                 lesson=lesson_text[:2000],
-                tags=[str(tag).strip()[:40] for tag in (raw_lesson.get("tags") if isinstance(raw_lesson.get("tags"), list) else [])[:12] if str(tag).strip()],
+                tags=tags,
                 source_feedback_ids=[feedback_id],
                 confidence=confidence,
+                embedding=embedding,
                 status=status,
                 created_by_user_id=actor_uuid,
                 approved_by_user_id=actor_uuid if status == "active" and actor_role == "admin" else None,
@@ -637,6 +789,10 @@ class AlfredFeedbackService:
         target_answer = safe_ideal_answer or safe_corrected_answer
         if not target_answer:
             return None
+        embedding = await generate_embedding(
+            embedding_text(prompt, safe_ideal_answer, safe_corrected_answer, lesson_text),
+            purpose="alfred_eval_example",
+        )
         async with AsyncSessionLocal() as session:
             row = AlfredEvalExample(
                 feedback_id=_coerce_uuid(feedback_id),
@@ -647,6 +803,7 @@ class AlfredFeedbackService:
                 corrected_answer=safe_corrected_answer[:4000] or None,
                 lesson=lesson_text[:2000] or None,
                 metadata_=sanitize_payload(metadata),
+                embedding=embedding,
             )
             session.add(row)
             await session.commit()
@@ -757,6 +914,54 @@ def _safe_corrected_answer(
     if _needs_live_facts(corrected) and not _turn_has_tool_results(turn_snapshot) and not ideal_answer.strip():
         return ""
     return corrected[:4000]
+
+
+def _feedback_embedding_text(feedback: AlfredFeedback) -> str:
+    return embedding_text(
+        feedback.original_user_prompt,
+        feedback.original_assistant_response,
+        feedback.reason or "",
+        feedback.ideal_answer or "",
+    )
+
+
+def _tool_names_for_reflection(tool_results: list[dict[str, Any]]) -> list[str]:
+    return [str(item.get("name") or "")[:120] for item in tool_results[:12] if isinstance(item, dict)]
+
+
+def _reflection_input_unsafe(
+    user_message: str,
+    assistant_text: str,
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    text_value = json.dumps(
+        {
+            "user_message": user_message,
+            "assistant_text": assistant_text,
+            "tool_results": tool_results[:12],
+        },
+        default=str,
+    ).lower()
+    return _reflection_text_unsafe(text_value)
+
+
+def _reflection_text_unsafe(value: str) -> bool:
+    lowered = str(value or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "api_key",
+            "apikey",
+            "secret",
+            "password",
+            "token",
+            "bearer ",
+            "cookie",
+            "set-cookie",
+            "raw_payload",
+            "private key",
+        )
+    )
 
 
 def _public_analysis(value: Any) -> dict[str, Any] | None:

@@ -41,7 +41,7 @@ def agent_status_payload(runtime: Any, *, memory_status: dict[str, Any] | None =
             if capability["local_provider_limited"]
             else ""
         ),
-        "memory": memory_status or {"enabled": True, "backend": "postgres_json"},
+        "memory": memory_status or {"enabled": True, "backend": "postgres_json_pgvector"},
     }
 
 

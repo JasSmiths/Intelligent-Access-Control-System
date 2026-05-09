@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 
 from app.ai.providers import ChatMessageInput
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AlfredMemory
+from app.models import AlfredLesson, AlfredMemory
+from app.services.alfred.embeddings import embedding_text, generate_embedding, vector_literal
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log
 
 logger = get_logger(__name__)
@@ -26,6 +28,38 @@ Return {"memories":[]} when there is nothing worth remembering."""
 
 
 class AlfredMemoryService:
+    async def semantic_search(
+        self,
+        query: str,
+        limit: int = 5,
+        actor_id: str | uuid.UUID | int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return semantically relevant visible Alfred memories and lessons.
+
+        Exact memory recall remains the primary durable-memory path. This
+        search is an additive hint for the planner and falls back to lexical
+        scoring when embeddings or pgvector are unavailable.
+        """
+
+        bounded_limit = max(1, min(int(limit or 5), 12))
+        actor_uuid = _coerce_uuid(actor_id)
+        query_text = str(query or "").strip()
+        if not query_text:
+            return []
+        query_embedding = await generate_embedding(query_text, purpose="alfred_semantic_query")
+        if query_embedding:
+            try:
+                rows = await self._semantic_vector_search(
+                    query_embedding=query_embedding,
+                    limit=bounded_limit,
+                    actor_uuid=actor_uuid,
+                )
+                if rows:
+                    return rows
+            except Exception as exc:
+                logger.info("alfred_semantic_search_failed", extra={"error": str(exc)[:180]})
+        return await self._lexical_semantic_fallback(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
+
     async def recall(
         self,
         *,
@@ -153,15 +187,21 @@ class AlfredMemoryService:
             confidence_value = max(0.0, min(1.0, float(confidence if confidence is not None else 0.6)))
         except (TypeError, ValueError):
             confidence_value = 0.6
+        compact_content = _compact_content(content)
+        embedding = await generate_embedding(
+            _memory_embedding_text(title=title, kind=kind, content=compact_content, tags=tags),
+            purpose="alfred_memory_create",
+        )
         row = AlfredMemory(
             scope=scope,
             owner_user_id=None if scope == "site" else owner_uuid,
             kind=kind.strip()[:80] or "preference",
             title=title,
-            content=_compact_content(content),
+            content=compact_content,
             tags=[str(tag).strip()[:40] for tag in tags[:12] if str(tag).strip()],
             source_session_id=_coerce_uuid(source_session_id),
             confidence=confidence_value,
+            embedding=embedding,
         )
         async with AsyncSessionLocal() as session:
             session.add(row)
@@ -229,7 +269,129 @@ class AlfredMemoryService:
                 )
             ).all()
         counts = {str(scope): int(count) for scope, count in rows}
-        return {"enabled": True, "backend": "postgres_json", "counts": counts}
+        return {"enabled": True, "backend": "postgres_json_pgvector", "counts": counts}
+
+    async def _semantic_vector_search(
+        self,
+        *,
+        query_embedding: list[float],
+        limit: int,
+        actor_uuid: uuid.UUID | None,
+    ) -> list[dict[str, Any]]:
+        embedding = vector_literal(query_embedding)
+        memory_scope_sql = "scope = 'site'"
+        lesson_scope_sql = "scope = 'site'"
+        params: dict[str, Any] = {"embedding": embedding, "limit": limit}
+        if actor_uuid:
+            memory_scope_sql = "(scope = 'site' OR (scope = 'user' AND owner_user_id = :actor_uuid))"
+            lesson_scope_sql = "(scope = 'site' OR (scope = 'user' AND owner_user_id = :actor_uuid))"
+            params["actor_uuid"] = actor_uuid
+
+        async with AsyncSessionLocal() as session:
+            memory_rows = (
+                await session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            id::text AS id,
+                            scope,
+                            kind,
+                            title,
+                            content,
+                            tags,
+                            confidence,
+                            1 - (embedding <=> CAST(:embedding AS vector)) AS score,
+                            updated_at
+                        FROM alfred_memories
+                        WHERE deleted_at IS NULL
+                          AND embedding IS NOT NULL
+                          AND {memory_scope_sql}
+                        ORDER BY embedding <=> CAST(:embedding AS vector)
+                        LIMIT :limit
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().all()
+            lesson_rows = (
+                await session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            id::text AS id,
+                            scope,
+                            title,
+                            lesson,
+                            tags,
+                            confidence,
+                            1 - (embedding <=> CAST(:embedding AS vector)) AS score,
+                            updated_at
+                        FROM alfred_lessons
+                        WHERE status = 'active'
+                          AND deleted_at IS NULL
+                          AND embedding IS NOT NULL
+                          AND {lesson_scope_sql}
+                        ORDER BY embedding <=> CAST(:embedding AS vector)
+                        LIMIT :limit
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().all()
+
+        results = [
+            _memory_search_result(row, source="semantic") for row in memory_rows
+        ] + [
+            _lesson_search_result(row, source="semantic") for row in lesson_rows
+        ]
+        results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return results[:limit]
+
+    async def _lexical_semantic_fallback(
+        self,
+        query: str,
+        *,
+        limit: int,
+        actor_uuid: uuid.UUID | None,
+    ) -> list[dict[str, Any]]:
+        async with AsyncSessionLocal() as session:
+            memory_filter = [AlfredMemory.scope == "site"]
+            lesson_filter = [AlfredLesson.scope == "site"]
+            if actor_uuid:
+                memory_filter.append((AlfredMemory.scope == "user") & (AlfredMemory.owner_user_id == actor_uuid))
+                lesson_filter.append((AlfredLesson.scope == "user") & (AlfredLesson.owner_user_id == actor_uuid))
+            memories = (
+                await session.scalars(
+                    select(AlfredMemory)
+                    .where(AlfredMemory.deleted_at.is_(None))
+                    .where(or_(*memory_filter))
+                    .order_by(AlfredMemory.updated_at.desc())
+                    .limit(40)
+                )
+            ).all()
+            lessons = (
+                await session.scalars(
+                    select(AlfredLesson)
+                    .where(AlfredLesson.status == "active")
+                    .where(AlfredLesson.deleted_at.is_(None))
+                    .where(or_(*lesson_filter))
+                    .order_by(AlfredLesson.confidence.desc(), AlfredLesson.updated_at.desc())
+                    .limit(40)
+                )
+            ).all()
+
+        query_terms = _semantic_terms(query)
+        scored: list[dict[str, Any]] = []
+        for row in memories:
+            score = _lexical_score(query_terms, _memory_embedding_text(title=row.title, kind=row.kind, content=row.content, tags=row.tags))
+            if score > 0:
+                scored.append(_public_memory_search_result(row, score=score, source="lexical"))
+        for row in lessons:
+            score = _lexical_score(query_terms, embedding_text(row.title, row.lesson, " ".join(row.tags or [])))
+            if score > 0:
+                scored.append(_public_lesson_search_result(row, score=score, source="lexical"))
+        scored.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return scored[:limit]
 
     def _public_memory(self, row: AlfredMemory, *, include_owner: bool = False) -> dict[str, Any]:
         payload = {
@@ -271,6 +433,87 @@ def _compact_content(value: dict[str, Any]) -> dict[str, Any]:
             continue
         clean[key_text] = str(item)[:1200] if not isinstance(item, (dict, list, bool, int, float)) else item
     return clean or {"note": "Memory recorded."}
+
+
+def _memory_embedding_text(*, title: str, kind: str, content: dict[str, Any], tags: list[Any]) -> str:
+    return embedding_text(title, kind, json.dumps(content, default=str, sort_keys=True), " ".join(str(tag) for tag in tags))
+
+
+def _memory_search_result(row: Any, *, source: str) -> dict[str, Any]:
+    content = row.get("content") if hasattr(row, "get") else getattr(row, "content", {})
+    return {
+        "source_type": "memory",
+        "source": source,
+        "id": str(row["id"] if hasattr(row, "__getitem__") else row.id),
+        "scope": str(row["scope"] if hasattr(row, "__getitem__") else row.scope),
+        "kind": str(row["kind"] if hasattr(row, "__getitem__") else row.kind),
+        "title": str(row["title"] if hasattr(row, "__getitem__") else row.title),
+        "content": content if isinstance(content, dict) else {},
+        "tags": list(row["tags"] if hasattr(row, "__getitem__") and isinstance(row["tags"], list) else getattr(row, "tags", []) or []),
+        "confidence": float(row["confidence"] if hasattr(row, "__getitem__") else row.confidence or 0.0),
+        "score": float(row["score"] if hasattr(row, "__getitem__") else 0.0),
+    }
+
+
+def _lesson_search_result(row: Any, *, source: str) -> dict[str, Any]:
+    return {
+        "source_type": "lesson",
+        "source": source,
+        "id": str(row["id"] if hasattr(row, "__getitem__") else row.id),
+        "scope": str(row["scope"] if hasattr(row, "__getitem__") else row.scope),
+        "title": str(row["title"] if hasattr(row, "__getitem__") else row.title),
+        "lesson": str(row["lesson"] if hasattr(row, "__getitem__") else row.lesson),
+        "tags": list(row["tags"] if hasattr(row, "__getitem__") and isinstance(row["tags"], list) else getattr(row, "tags", []) or []),
+        "confidence": float(row["confidence"] if hasattr(row, "__getitem__") else row.confidence or 0.0),
+        "score": float(row["score"] if hasattr(row, "__getitem__") else 0.0),
+    }
+
+
+def _public_memory_search_result(row: AlfredMemory, *, score: float, source: str) -> dict[str, Any]:
+    return {
+        "source_type": "memory",
+        "source": source,
+        "id": str(row.id),
+        "scope": row.scope,
+        "kind": row.kind,
+        "title": row.title,
+        "content": row.content,
+        "tags": row.tags,
+        "confidence": row.confidence,
+        "score": score,
+    }
+
+
+def _public_lesson_search_result(row: AlfredLesson, *, score: float, source: str) -> dict[str, Any]:
+    return {
+        "source_type": "lesson",
+        "source": source,
+        "id": str(row.id),
+        "scope": row.scope,
+        "title": row.title,
+        "lesson": row.lesson,
+        "tags": row.tags,
+        "confidence": row.confidence,
+        "score": score,
+    }
+
+
+def _semantic_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", str(value or "").lower())
+        if token not in {"about", "after", "before", "could", "should", "there", "their", "would"}
+    }
+
+
+def _lexical_score(query_terms: set[str], text_value: str) -> float:
+    if not query_terms:
+        return 0.0
+    terms = _semantic_terms(text_value)
+    overlap = query_terms & terms
+    if not overlap:
+        return 0.0
+    return len(overlap) / max(1.0, len(query_terms))
 
 
 def _first_json_object(text: str) -> dict[str, Any] | None:

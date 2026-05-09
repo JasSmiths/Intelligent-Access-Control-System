@@ -20,6 +20,7 @@ from app.services.alfred.feedback import (
     parse_feedback_command,
 )
 from app.services.alfred import feedback as feedback_module
+from app.services.alfred import embeddings as embeddings_module
 from app.services.alfred import memory as alfred_memory_module
 from app.services.alfred.planner import PLANNER_PROMPT
 from app.services.alfred.permissions import filter_tools_for_actor
@@ -124,9 +125,12 @@ def test_system_prompt_sets_warm_wit_persona_and_preserves_safety_rules() -> Non
     assert "jokes must never soften risk or hide uncertainty" in SYSTEM_PROMPT
     assert "treat them as approved behavioral guidance, not scripts or replacement answers" in SYSTEM_PROMPT
     assert "Do not use keyword rules, regex routing, or hardcoded intent blocks" in PLANNER_PROMPT
+    assert "Reason privately" in PLANNER_PROMPT
+    assert "2-3 plausible tool-selection candidates" in PLANNER_PROMPT
+    assert "Never include private reasoning" in PLANNER_PROMPT
     assert "oil delivery" in PLANNER_PROMPT
     assert "query_anomalies" in PLANNER_PROMPT
-    assert "never as keyword rules or canned text" in PLANNER_PROMPT
+    assert "semantic analogy" in PLANNER_PROMPT
 
 
 def test_training_lesson_recall_selects_relevant_guidance_without_prompt_stuffing() -> None:
@@ -331,6 +335,16 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
         async def recall(self, **_kwargs):
             return [{"scope": "user", "title": "Call me Jas", "content": {"note": "Prefers short answers."}}]
 
+        async def semantic_search(self, *_args, **_kwargs):
+            return [
+                {
+                    "source_type": "lesson",
+                    "title": "Presence phrasing",
+                    "lesson": "Treat am I home as a current presence check.",
+                    "score": 0.87,
+                }
+            ]
+
         async def remember_from_turn(self, *_args, **_kwargs):
             return 0
 
@@ -390,6 +404,8 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
     assert planner_payload["actor_context"]["user"]["username"] == "jas"
     assert planner_payload["actor_context"]["vehicles"][0]["registration_number"] == "VIP123"
     assert planner_payload["actor_context"]["alfred_lessons"][0]["title"] == "Short answers"
+    assert planner_payload["actor_context"]["relevant_past_lessons"][0]["title"] == "Presence phrasing"
+    assert planner_payload["relevant_past_lessons"][0]["source_type"] == "lesson"
     assert planner_payload["memory"][0]["title"] == "Call me Jas"
     assert lesson_recall_kwargs["message"] == "Check my presence"
     assert result.text == "You are present."
@@ -1437,6 +1453,179 @@ async def test_alfred_memory_recall_serializes_rows_before_session_closes(monkey
 
     assert rows[0]["title"] == "Short answers"
     assert rows[0]["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_falls_back_to_lexical_with_user_scope(monkeypatch) -> None:
+    now = datetime.now(tz=UTC)
+    actor_id = uuid.uuid4()
+    queries: list[str] = []
+
+    async def no_embedding(*_args, **_kwargs):
+        return None
+
+    class ScalarResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class Session:
+        calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalars(self, query):
+            queries.append(str(query))
+            self.calls += 1
+            if self.calls == 1:
+                return ScalarResult(
+                    [
+                        SimpleNamespace(
+                            id=uuid.uuid4(),
+                            scope="user",
+                            kind="preference",
+                            title="Gate status style",
+                            content={"note": "Keep gate status answers concise."},
+                            tags=["device-status"],
+                            confidence=0.8,
+                        )
+                    ]
+                )
+            return ScalarResult(
+                [
+                    SimpleNamespace(
+                        id=uuid.uuid4(),
+                        scope="site",
+                        title="Gate status answers",
+                        lesson="Answer gate status questions directly from current device state.",
+                        tags=["device-status"],
+                        confidence=0.9,
+                        status="active",
+                        active_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(alfred_memory_module, "generate_embedding", no_embedding)
+    monkeypatch.setattr(alfred_memory_module, "AsyncSessionLocal", Session)
+
+    results = await alfred_memory_module.AlfredMemoryService().semantic_search(
+        "gate status concise",
+        actor_id=str(actor_id),
+    )
+
+    assert results
+    assert {result["source_type"] for result in results} == {"memory", "lesson"}
+    assert all(result["source"] == "lexical" for result in results)
+    assert any("owner_user_id" in query for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_openai_embedding_provider_success_and_failure(monkeypatch) -> None:
+    vector = [0.01] * embeddings_module.ALFRED_EMBEDDING_DIMENSION
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            alfred_semantic_memory_enabled=True,
+            alfred_embedding_provider="openai",
+            alfred_embedding_dimension=embeddings_module.ALFRED_EMBEDDING_DIMENSION,
+            alfred_embedding_model="text-embedding-3-small",
+            openai_api_key="key",
+            openai_base_url="https://api.openai.test/v1",
+            llm_timeout_seconds=30,
+        )
+
+    class SuccessResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"data": [{"embedding": vector}]}
+
+    class FailureResponse:
+        status_code = 500
+        text = "boom"
+
+        def json(self):
+            return {}
+
+    class Client:
+        response = SuccessResponse()
+
+        def __init__(self, **_kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return self.response
+
+    monkeypatch.setattr(embeddings_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(embeddings_module.httpx, "AsyncClient", Client)
+
+    assert await embeddings_module.generate_embedding("hello") == vector
+    Client.response = FailureResponse()
+    assert await embeddings_module.generate_embedding("hello") is None
+
+
+@pytest.mark.asyncio
+async def test_reflection_lessons_follow_learning_mode(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class ReflectionProvider:
+        async def complete(self, *_args, **_kwargs):
+            return LlmResult(
+                text=(
+                    '{"reflection":{"went_well":"Used source tools.",'
+                    '"could_improve":"Be more direct.",'
+                    '"key_lesson":"For routine gate status checks, answer directly from the device-state tool.",'
+                    '"title":"Gate status reflection",'
+                    '"tags":["device-status"],'
+                    '"confidence":0.77}}'
+                )
+            )
+
+    async def fake_create_lesson(self, **kwargs):
+        captured.append(kwargs)
+        return {
+            "status": "active" if kwargs["learning_mode"] == "auto_learn" else "pending",
+            "lesson": kwargs["analysis"]["lesson"]["lesson"],
+        }
+
+    monkeypatch.setattr(AlfredFeedbackService, "_create_lesson_from_analysis", fake_create_lesson)
+    service = AlfredFeedbackService()
+
+    for mode in ("review_then_learn", "auto_learn"):
+        async def fake_runtime_config(mode=mode):
+            return SimpleNamespace(alfred_reflection_enabled=True, alfred_learning_mode=mode)
+
+        monkeypatch.setattr(feedback_module, "get_runtime_config", fake_runtime_config)
+        lesson = await service.reflect_on_turn(
+            ReflectionProvider(),
+            user_message="Is the gate open?",
+            assistant_text="The gate is closed.",
+            tool_results=[{"name": "query_device_states", "output": {"devices": [{"state": "closed"}]}}],
+            actor_context={"user": {"id": str(uuid.uuid4()), "role": "admin"}},
+            session_id=str(uuid.uuid4()),
+            provider_name="openai",
+            model_name="gpt-test",
+        )
+        expected_status = "active" if mode == "auto_learn" else "pending"
+        assert lesson and lesson["status"] == expected_status
+
+    assert [item["learning_mode"] for item in captured] == ["review_then_learn", "auto_learn"]
 
 
 def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:

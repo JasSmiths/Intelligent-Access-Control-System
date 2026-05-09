@@ -20,6 +20,7 @@ async def init_database() -> None:
 
     if settings.auto_create_schema:
         async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS first_name VARCHAR(80) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS last_name VARCHAR(80) NOT NULL DEFAULT ''"))
@@ -503,6 +504,7 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_user_id ON messaging_identities (user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_person_id ON messaging_identities (person_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_last_seen_at ON messaging_identities (last_seen_at)"))
+            await _ensure_alfred_semantic_schema(conn)
         logger.info("database_schema_ready")
 
     migration = await migrate_encrypted_payloads_for_active_auth_secret()
@@ -515,3 +517,52 @@ async def init_database() -> None:
 
     if settings.seed_demo_data:
         logger.warning("seed_demo_data_ignored")
+
+
+async def _ensure_alfred_semantic_schema(conn) -> None:
+    """Keep Alfred semantic columns/indexes present for bootstrap deployments."""
+
+    for table_name in (
+        "alfred_memories",
+        "alfred_lessons",
+        "alfred_feedback",
+        "alfred_eval_examples",
+    ):
+        await conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS embedding vector(1536)"))
+
+    await conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_alfred_memories_embedding_hnsw
+            ON alfred_memories USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_alfred_lessons_embedding_hnsw
+            ON alfred_lessons USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_alfred_feedback_embedding_hnsw
+            ON alfred_feedback USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_alfred_eval_examples_embedding_hnsw
+            ON alfred_eval_examples USING hnsw (embedding vector_cosine_ops)
+            WHERE embedding IS NOT NULL
+            """
+        )
+    )

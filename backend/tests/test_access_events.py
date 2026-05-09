@@ -486,9 +486,27 @@ async def test_closed_gate_state_resolves_allowed_read_as_entry() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["open", "opening", "closing"])
-async def test_non_closed_gate_state_resolves_allowed_read_as_exit(state: str) -> None:
+async def test_non_closed_gate_state_resolves_present_person_as_exit(state: str) -> None:
     service = AccessEventService()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
+
+    direction, resolution = await service._resolve_direction(
+        FakePresenceSession(PresenceState.PRESENT),
+        plate_read_with_gate_state(state),
+        person,
+        allowed=True,
+    )
+
+    assert direction == AccessDirection.EXIT
+    assert resolution["source"] == "gate_state"
+    assert not service._automatic_open_allowed(resolution)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["open", "opening", "closing"])
+async def test_non_closed_gate_state_resolves_absent_known_person_as_entry(state: str) -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Cora")
 
     direction, resolution = await service._resolve_direction(
         FakePresenceSession(PresenceState.EXITED),
@@ -497,8 +515,9 @@ async def test_non_closed_gate_state_resolves_allowed_read_as_exit(state: str) -
         allowed=True,
     )
 
-    assert direction == AccessDirection.EXIT
-    assert resolution["source"] == "gate_state"
+    assert direction == AccessDirection.ENTRY
+    assert resolution["source"] == "presence_over_gate_state"
+    assert resolution["gate_state_direction"] == "exit"
     assert not service._automatic_open_allowed(resolution)
 
 

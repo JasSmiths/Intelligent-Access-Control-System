@@ -506,7 +506,23 @@ class ChatService(ChatRoutingMixin):
             user_role=str(user.get("role") or "") or None,
             message=message,
         )
-        planning_context = {**actor_context, "alfred_lessons": active_lessons}
+        relevant_past_lessons: list[dict[str, Any]] = []
+        semantic_search = getattr(alfred_memory_service, "semantic_search", None)
+        if callable(semantic_search):
+            try:
+                relevant_past_lessons = await semantic_search(
+                    message,
+                    limit=5,
+                    actor_id=str(user.get("id") or "") or None,
+                )
+            except Exception as exc:
+                logger.info("alfred_semantic_context_failed", extra={"error": str(exc)[:180]})
+                relevant_past_lessons = []
+        planning_context = {
+            **actor_context,
+            "alfred_lessons": active_lessons,
+            "relevant_past_lessons": relevant_past_lessons,
+        }
         visible_tools = filter_tools_for_actor(self._tools.values(), actor_context)
 
         await emit_agent_state(status_callback, "selecting_tools", "Selecting tools")
@@ -519,6 +535,7 @@ class ChatService(ChatRoutingMixin):
                 session_memory=memory,
                 tools=visible_tools,
                 attachments=attachment_refs,
+                relevant_past_lessons=relevant_past_lessons,
             )
         except Exception as exc:
             logger.warning(
@@ -584,6 +601,7 @@ class ChatService(ChatRoutingMixin):
             **actor_context,
             "alfred_memory": durable_memory,
             "alfred_lessons": active_lessons,
+            "relevant_past_lessons": relevant_past_lessons,
             "alfred_plan": {
                 "selected_domains": list(selection.selected_domains),
                 "selected_tool_names": [tool.name for tool in selected_tools],
@@ -609,7 +627,7 @@ class ChatService(ChatRoutingMixin):
                 route=route,
                 user_message=message,
                 attachments=attachment_refs,
-                actor_context=actor_context,
+                actor_context=prompt_context,
                 status_callback=status_callback,
             )
             if isinstance(result, ChatTurnResult):
@@ -664,6 +682,18 @@ class ChatService(ChatRoutingMixin):
                 actor_context=actor_context,
                 session_id=str(session_uuid),
             )
+            schedule_reflection = getattr(alfred_feedback_service, "schedule_reflection", None)
+            if callable(schedule_reflection):
+                schedule_reflection(
+                    provider,
+                    user_message=message,
+                    assistant_text=text,
+                    tool_results=tool_results,
+                    actor_context=actor_context,
+                    session_id=str(session_uuid),
+                    provider_name=provider.name,
+                    model_name=self._model_for_provider(runtime, provider.name),
+                )
         await event_bus.publish(
             "chat.message",
             {

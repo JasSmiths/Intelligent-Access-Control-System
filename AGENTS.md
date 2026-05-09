@@ -303,12 +303,14 @@ alfred:
     prompt_results: _tool_results_for_prompt compacts outputs; strings >1000 chars truncated; secret-like keys redacted
     tool_outputs: _compact_value trims long strings to 800 chars
   memory:
-    store: alfred_memories Postgres JSON; scopes user/site/session_summary; no vector store
+    store: alfred_memories Postgres JSON + optional pgvector embeddings; scopes user/site/session_summary
     rules: users own user memory; Admin may create/read site memory; visitors no durable memory; redact/skip secrets and transient visitor data
+    semantic_search: optional pgvector embeddings supplement exact recall; default OpenAI text-embedding-3-small 1536 dimensions; never replace source-of-truth tools or permission checks
   learning:
     feedback: assistant responses expose message IDs; dashboard thumbs and Discord/WhatsApp Admin feedback commands store sanitized turn snapshots
     lessons: LLM critique drafts user/site scoped lessons; review_then_learn requires Admin approval; auto_learn may activate Admin site lessons
     repair: thumbs-down may draft a corrected answer; repair is read-only and never executes mutations/confirmations
+    reflection: optional post-turn reflection drafts generalized lessons only; no hidden reasoning, secrets, raw JSON, IDs, or transient visitor details; follows alfred_learning_mode
   tools:
     registry: build_agent_tools() remains the stable public API; domain definitions live in backend/app/ai/tool_groups/* and are assembled by tool_groups/registry.py
     general: resolve_human_entity, get_system_users

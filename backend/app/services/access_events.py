@@ -71,6 +71,7 @@ from app.services.visitor_passes import get_visitor_pass_service, serialize_visi
 logger = get_logger(__name__)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
+PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_preserve_gate_observation"
 GATE_MALFUNCTION_PAYLOAD_KEY = "_iacs_gate_malfunction"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
@@ -262,6 +263,9 @@ class AccessEventService:
         )
 
     async def _read_with_gate_observation(self, read: PlateRead) -> PlateRead:
+        if self._should_preserve_supplied_gate_observation(read):
+            return read
+
         observed_at = datetime.now(tz=UTC)
         detail: str | None = None
         try:
@@ -295,6 +299,14 @@ class AccessEventService:
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+        )
+
+    def _should_preserve_supplied_gate_observation(self, read: PlateRead) -> bool:
+        raw_payload = read.raw_payload or {}
+        return bool(
+            read.source in {"simulator", "simulation_e2e"}
+            and raw_payload.get(PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY) is True
+            and isinstance(raw_payload.get(GATE_OBSERVATION_PAYLOAD_KEY), dict)
         )
 
     async def _process_queue(self) -> None:
@@ -2743,6 +2755,12 @@ class AccessEventService:
             return direction, resolution
 
         if gate_state in DEPARTURE_GATE_STATES:
+            if person and not await self._person_is_present(session, person):
+                resolution["source"] = "presence_over_gate_state"
+                resolution["direction"] = AccessDirection.ENTRY.value
+                resolution["gate_state_direction"] = AccessDirection.EXIT.value
+                resolution["presence_state"] = PresenceState.EXITED.value
+                return AccessDirection.ENTRY, resolution
             resolution["source"] = "gate_state"
             resolution["direction"] = AccessDirection.EXIT.value
             return AccessDirection.EXIT, resolution
