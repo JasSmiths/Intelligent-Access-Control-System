@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from hashlib import sha256
 from datetime import UTC, datetime
 from typing import Any
 
+import redis.asyncio as redis_asyncio
 from sqlalchemy import func, or_, select, text
 
 from app.ai.providers import ChatMessageInput
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AlfredLesson, AlfredMemory
@@ -18,6 +21,8 @@ from app.services.alfred.embeddings import embedding_text, generate_embedding, v
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log
 
 logger = get_logger(__name__)
+SEMANTIC_SEARCH_CACHE_TTL_SECONDS = 300
+_semantic_cache_client: redis_asyncio.Redis | None = None
 
 MEMORY_EXTRACTION_PROMPT = """Extract durable Alfred memory from the completed IACS chat turn.
 Only keep stable preferences, useful context, or operator instructions that will help future IACS conversations.
@@ -46,6 +51,10 @@ class AlfredMemoryService:
         query_text = str(query or "").strip()
         if not query_text:
             return []
+        cache_key = _semantic_search_cache_key(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
+        cached = await _semantic_cache_get(cache_key)
+        if cached is not None:
+            return cached
         query_embedding = await generate_embedding(query_text, purpose="alfred_semantic_query")
         if query_embedding:
             try:
@@ -55,10 +64,13 @@ class AlfredMemoryService:
                     actor_uuid=actor_uuid,
                 )
                 if rows:
+                    await _semantic_cache_set(cache_key, rows)
                     return rows
             except Exception as exc:
                 logger.info("alfred_semantic_search_failed", extra={"error": str(exc)[:180]})
-        return await self._lexical_semantic_fallback(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
+        rows = await self._lexical_semantic_fallback(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
+        await _semantic_cache_set(cache_key, rows)
+        return rows
 
     async def recall(
         self,
@@ -105,6 +117,7 @@ class AlfredMemoryService:
         tool_results: list[dict[str, Any]],
         actor_context: dict[str, Any],
         session_id: str,
+        model_name: str | None = None,
     ) -> int:
         user = actor_context.get("user") if isinstance(actor_context, dict) else {}
         user_id = str((user or {}).get("id") or "")
@@ -112,7 +125,8 @@ class AlfredMemoryService:
         if not user_id:
             return 0
         try:
-            result = await provider.complete(
+            result = await _provider_complete(
+                provider,
                 [
                     ChatMessageInput("system", MEMORY_EXTRACTION_PROMPT),
                     ChatMessageInput(
@@ -129,7 +143,8 @@ class AlfredMemoryService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                model_name=model_name,
             )
         except Exception as exc:
             logger.info("alfred_memory_extract_failed", extra={"error": str(exc)[:180]})
@@ -137,19 +152,28 @@ class AlfredMemoryService:
         payload = _first_json_object(result.text)
         if not isinstance(payload, dict):
             return 0
-        memories = payload.get("memories") if isinstance(payload.get("memories"), list) else []
+        raw_memories = payload.get("memories")
+        memories: list[Any] = raw_memories if isinstance(raw_memories, list) else []
         created = 0
         for item in memories[:5]:
             if not isinstance(item, dict):
                 continue
+            content_value = item.get("content")
+            content = (
+                content_value
+                if isinstance(content_value, dict)
+                else {"note": str(content_value or "")}
+            )
+            tags_value = item.get("tags")
+            tags = tags_value if isinstance(tags_value, list) else []
             if await self.create_memory(
                 user_id=user_id,
                 user_role=user_role,
                 scope=str(item.get("scope") or "user"),
                 kind=str(item.get("kind") or "preference"),
                 title=str(item.get("title") or ""),
-                content=item.get("content") if isinstance(item.get("content"), dict) else {"note": str(item.get("content") or "")},
-                tags=item.get("tags") if isinstance(item.get("tags"), list) else [],
+                content=content,
+                tags=tags,
                 source_session_id=session_id,
                 confidence=item.get("confidence"),
             ):
@@ -418,6 +442,56 @@ def _coerce_uuid(value: Any) -> uuid.UUID | None:
         return None
 
 
+def _semantic_search_cache_key(query: str, *, limit: int, actor_uuid: uuid.UUID | None) -> str:
+    payload = {
+        "actor": str(actor_uuid) if actor_uuid else "site",
+        "limit": int(limit),
+        "query": str(query or "").strip().lower(),
+    }
+    digest = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"iacs:alfred:semantic_search:v1:{digest}"
+
+
+def _semantic_cache() -> redis_asyncio.Redis:
+    global _semantic_cache_client
+    if _semantic_cache_client is None:
+        _semantic_cache_client = redis_asyncio.from_url(
+            get_settings().redis_url,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+    return _semantic_cache_client
+
+
+async def _semantic_cache_get(key: str) -> list[dict[str, Any]] | None:
+    try:
+        raw = await _semantic_cache().get(key)
+    except Exception as exc:
+        logger.debug("alfred_semantic_cache_get_failed", extra={"error": str(exc)[:120]})
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [item for item in payload if isinstance(item, dict)]
+
+
+async def _semantic_cache_set(key: str, rows: list[dict[str, Any]]) -> None:
+    try:
+        await _semantic_cache().setex(
+            key,
+            SEMANTIC_SEARCH_CACHE_TTL_SECONDS,
+            json.dumps(rows, default=str, separators=(",", ":")),
+        )
+    except Exception as exc:
+        logger.debug("alfred_semantic_cache_set_failed", extra={"error": str(exc)[:120]})
+
+
 def _contains_secretish(value: Any) -> bool:
     text = json.dumps(value, default=str).lower()
     return any(marker in text for marker in ("password", "api_key", "secret", "token", "bearer "))
@@ -547,6 +621,16 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+async def _provider_complete(provider: Any, messages: list[ChatMessageInput], *, model_name: str | None) -> Any:
+    if model_name:
+        try:
+            return await provider.complete(messages, model=model_name)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+    return await provider.complete(messages)
 
 
 alfred_memory_service = AlfredMemoryService()

@@ -335,6 +335,11 @@
   line-height: 1.2;
 }
 
+.chat-response-duration {
+  min-width: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
 .chat-feedback-row small.error,
 .chat-feedback-error {
   color: var(--danger);
@@ -843,7 +848,8 @@
 }
 
 .typing-activities {
-  display: grid;
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
 }
 
@@ -862,6 +868,11 @@
 
 .typing-activity.requires_confirmation {
   color: var(--warning);
+}
+
+.typing-activity-count {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .typing-bubble {
@@ -1522,7 +1533,7 @@
   .reports-grid,
   .integrations-grid,
   .settings-grid {
-    padding: 18px 14px calc(22px + env(safe-area-inset-bottom));
+    padding: 18px 14px calc(22px + env(safe-area-inset-bottom) + var(--alfred-launcher-clearance));
   }
 
   .dashboard-intro {

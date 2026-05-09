@@ -6,6 +6,8 @@ from app.ai.tools import (
     AgentTool,
     SCHEDULE_LOOKUP_PROPERTIES,
     SCHEDULE_TIME_BLOCKS_SCHEMA,
+)
+from app.ai.tool_groups.schedules_handlers import (
     assign_schedule_to_entity,
     create_schedule,
     delete_schedule,
@@ -16,10 +18,35 @@ from app.ai.tools import (
     update_schedule,
     verify_schedule_access,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "override_schedule": ("Schedules",),
+    "query_schedules": ("Schedules", "Access_Diagnostics"),
+    "get_schedule": ("Schedules", "Access_Diagnostics"),
+    "create_schedule": ("Schedules",),
+    "update_schedule": ("Schedules",),
+    "delete_schedule": ("Schedules",),
+    "query_schedule_targets": ("Schedules",),
+    "assign_schedule_to_entity": ("Schedules",),
+    "verify_schedule_access": ("Schedules", "Access_Diagnostics"),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "assign_schedule_to_entity",
+    "create_schedule",
+    "delete_schedule",
+    "override_schedule",
+    "update_schedule",
+}
+
+DEFAULT_LIMITS = {"query_schedule_targets": 25}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="override_schedule",
                     description=(
@@ -100,7 +127,9 @@ def build_tools() -> list[AgentTool]:
                                 "description": "Natural-language replacement allowed time, for example weekdays 08:00-17:00.",
                             },
                             "time_blocks": SCHEDULE_TIME_BLOCKS_SCHEMA,
+                            "confirm": {"type": "boolean"},
                         },
+                        "required": ["confirm"],
                         "additionalProperties": False,
                     },
                     handler=update_schedule,
@@ -152,8 +181,9 @@ def build_tools() -> list[AgentTool]:
                             "schedule_id": {"type": "string"},
                             "schedule_name": {"type": "string"},
                             "clear_schedule": {"type": "boolean"},
+                            "confirm": {"type": "boolean"},
                         },
-                        "required": ["entity_type"],
+                        "required": ["entity_type", "confirm"],
                         "additionalProperties": False,
                     },
                     handler=assign_schedule_to_entity,
@@ -179,4 +209,8 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=verify_schedule_access,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+    )

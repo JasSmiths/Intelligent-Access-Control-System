@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.gate_maintenance_handlers import (
     disable_maintenance_mode,
     enable_maintenance_mode,
     get_active_malfunctions,
@@ -15,10 +15,37 @@ from app.ai.tools import (
     toggle_maintenance_mode,
     trigger_manual_malfunction_override,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_device_states": ("Gate_Hardware", "General"),
+    "get_maintenance_status": ("Maintenance", "Gate_Hardware", "Access_Diagnostics"),
+    "get_active_malfunctions": ("Gate_Hardware", "Access_Diagnostics"),
+    "get_malfunction_history": ("Gate_Hardware", "Access_Diagnostics"),
+    "trigger_manual_malfunction_override": ("Gate_Hardware",),
+    "enable_maintenance_mode": ("Maintenance",),
+    "disable_maintenance_mode": ("Maintenance",),
+    "open_device": ("Gate_Hardware",),
+    "command_device": ("Gate_Hardware",),
+    "open_gate": ("Gate_Hardware",),
+    "toggle_maintenance_mode": ("Maintenance",),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "command_device",
+    "disable_maintenance_mode",
+    "enable_maintenance_mode",
+    "open_device",
+    "open_gate",
+    "toggle_maintenance_mode",
+    "trigger_manual_malfunction_override",
+}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="query_device_states",
                     description="Return current states for configured gates, doors, and garage doors.",
@@ -216,4 +243,7 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=toggle_maintenance_mode,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+    )

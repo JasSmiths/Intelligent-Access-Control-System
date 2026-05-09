@@ -22,7 +22,6 @@ from app.models import (
     AuditLog,
     Anomaly,
     GateStateObservation,
-    Group,
     NotificationRule,
     Person,
     Presence,
@@ -86,6 +85,7 @@ from app.services.settings import get_runtime_config, list_settings, update_sett
 from app.services.snapshots import get_snapshot_manager
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_ACCESS, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry, write_audit_log
+from app.services.alfred.answer_contracts import artifact_payload
 from app.services.visitor_passes import (
     DEFAULT_WINDOW_MINUTES,
     VisitorPassError,
@@ -98,6 +98,11 @@ ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context", default={})
 logger = get_logger(__name__)
 DEFAULT_AGENT_TIMEZONE = "Europe/London"
+SAFETY_READ_ONLY = "read_only"
+SAFETY_CONFIRMATION_REQUIRED = "confirmation_required"
+SAFETY_ADMIN_ONLY = "admin_only"
+SAFETY_LEVELS = {SAFETY_READ_ONLY, SAFETY_CONFIRMATION_REQUIRED, SAFETY_ADMIN_ONLY}
+ADMIN_PERMISSION = "admin"
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
@@ -297,9 +302,41 @@ class AgentTool:
     parameters: dict[str, Any]
     handler: ToolHandler
     categories: tuple[str, ...] = ("General",)
+    safety_level: str = SAFETY_READ_ONLY
+    required_permissions: tuple[str, ...] = ()
     read_only: bool = True
     requires_confirmation: bool = False
+    rate_limit: dict[str, Any] | None = None
+    example_inputs: tuple[dict[str, Any], ...] = ()
+    return_schema: dict[str, Any] | None = None
     default_limit: int | None = None
+
+    def __post_init__(self) -> None:
+        categories = tuple(str(category).strip() for category in self.categories if str(category).strip())
+        permissions = tuple(
+            str(permission).strip().lower()
+            for permission in self.required_permissions
+            if str(permission).strip()
+        )
+        safety_level = str(self.safety_level or SAFETY_READ_ONLY).strip().lower()
+        if safety_level not in SAFETY_LEVELS:
+            safety_level = SAFETY_READ_ONLY
+        read_only = bool(self.read_only)
+        requires_confirmation = bool(self.requires_confirmation)
+
+        if safety_level == SAFETY_CONFIRMATION_REQUIRED or requires_confirmation or not read_only:
+            safety_level = SAFETY_CONFIRMATION_REQUIRED
+            read_only = False
+            requires_confirmation = True
+        elif safety_level == SAFETY_ADMIN_ONLY and ADMIN_PERMISSION not in permissions:
+            permissions = (*permissions, ADMIN_PERMISSION)
+
+        object.__setattr__(self, "categories", categories or ("General",))
+        object.__setattr__(self, "required_permissions", permissions)
+        object.__setattr__(self, "safety_level", safety_level)
+        object.__setattr__(self, "read_only", read_only)
+        object.__setattr__(self, "requires_confirmation", requires_confirmation)
+        object.__setattr__(self, "example_inputs", tuple(self.example_inputs or ()))
 
     def as_llm_tool(self) -> dict[str, Any]:
         return {
@@ -310,162 +347,9 @@ class AgentTool:
 
 
 def build_agent_tools() -> dict[str, AgentTool]:
-    from app.ai.tool_groups.registry import build_grouped_tools
+    from app.ai.tool_groups.registry import build_grouped_tool_map
 
-    return _with_tool_metadata(build_grouped_tools())
-
-
-def _with_tool_metadata(tools: list[AgentTool]) -> dict[str, AgentTool]:
-    categories: dict[str, tuple[str, ...]] = {
-        "resolve_human_entity": ("General",),
-        "query_presence": ("Access_Logs", "General"),
-        "query_access_events": ("Access_Logs", "Access_Diagnostics", "General"),
-        "diagnose_access_event": ("Access_Diagnostics",),
-        "investigate_access_incident": ("Access_Diagnostics", "Access_Logs", "Gate_Hardware", "Notifications"),
-        "query_unifi_protect_events": ("Access_Diagnostics", "Cameras"),
-        "backfill_access_event_from_protect": ("Access_Diagnostics",),
-        "test_unifi_alarm_webhook": ("Access_Diagnostics", "Cameras"),
-        "query_lpr_timing": ("Access_Diagnostics", "Access_Logs"),
-        "query_vehicle_detection_history": ("Access_Logs", "Access_Diagnostics", "Compliance_DVLA"),
-        "get_telemetry_trace": ("Access_Diagnostics", "Users_Settings"),
-        "query_anomalies": ("Access_Logs", "Access_Diagnostics", "General"),
-        "analyze_alert_snapshot": ("Access_Diagnostics", "Cameras"),
-        "summarize_access_rhythm": ("Access_Logs", "General"),
-        "calculate_visit_duration": ("Access_Logs",),
-        "trigger_anomaly_alert": ("Access_Logs", "Notifications"),
-        "query_device_states": ("Gate_Hardware", "General"),
-        "open_device": ("Gate_Hardware",),
-        "command_device": ("Gate_Hardware",),
-        "open_gate": ("Gate_Hardware",),
-        "get_active_malfunctions": ("Gate_Hardware", "Access_Diagnostics"),
-        "get_malfunction_history": ("Gate_Hardware", "Access_Diagnostics"),
-        "trigger_manual_malfunction_override": ("Gate_Hardware",),
-        "get_maintenance_status": ("Maintenance", "Gate_Hardware", "Access_Diagnostics"),
-        "enable_maintenance_mode": ("Maintenance",),
-        "disable_maintenance_mode": ("Maintenance",),
-        "toggle_maintenance_mode": ("Maintenance",),
-        "lookup_dvla_vehicle": ("Compliance_DVLA",),
-        "query_leaderboard": ("Access_Logs", "Compliance_DVLA"),
-        "analyze_camera_snapshot": ("Cameras", "Access_Diagnostics"),
-        "get_camera_snapshot": ("Cameras",),
-        "read_chat_attachment": ("Reports_Files", "General"),
-        "export_presence_report_csv": ("Reports_Files", "Access_Logs"),
-        "generate_contractor_invoice_pdf": ("Reports_Files", "Access_Logs"),
-        "query_notification_catalog": ("Notifications",),
-        "query_notification_workflows": ("Notifications",),
-        "get_notification_workflow": ("Notifications",),
-        "create_notification_workflow": ("Notifications",),
-        "update_notification_workflow": ("Notifications",),
-        "delete_notification_workflow": ("Notifications",),
-        "preview_notification_workflow": ("Notifications",),
-        "test_notification_workflow": ("Notifications",),
-        "query_automation_catalog": ("Automations", "Notifications", "Gate_Hardware", "Maintenance"),
-        "query_automations": ("Automations",),
-        "get_automation": ("Automations",),
-        "create_automation": ("Automations",),
-        "edit_automation": ("Automations",),
-        "delete_automation": ("Automations",),
-        "enable_automation": ("Automations",),
-        "disable_automation": ("Automations",),
-        "query_schedules": ("Schedules", "Access_Diagnostics"),
-        "get_schedule": ("Schedules", "Access_Diagnostics"),
-        "create_schedule": ("Schedules",),
-        "update_schedule": ("Schedules",),
-        "delete_schedule": ("Schedules",),
-        "query_schedule_targets": ("Schedules",),
-        "assign_schedule_to_entity": ("Schedules",),
-        "override_schedule": ("Schedules",),
-        "verify_schedule_access": ("Schedules", "Access_Diagnostics"),
-        "get_system_users": ("Users_Settings",),
-        "query_integration_health": ("System_Operations", "Users_Settings", "General"),
-        "test_integration_connection": ("System_Operations", "Users_Settings"),
-        "query_system_settings": ("System_Operations", "Users_Settings"),
-        "update_system_settings": ("System_Operations", "Users_Settings"),
-        "query_auth_secret_status": ("System_Operations", "Users_Settings"),
-        "rotate_auth_secret": ("System_Operations", "Users_Settings"),
-        "query_alfred_runtime_events": ("System_Operations", "Users_Settings"),
-        "query_dependency_updates": ("System_Operations",),
-        "check_dependency_updates": ("System_Operations",),
-        "analyze_dependency_update": ("System_Operations",),
-        "apply_dependency_update": ("System_Operations",),
-        "query_dependency_backups": ("System_Operations",),
-        "restore_dependency_backup": ("System_Operations",),
-        "query_dependency_update_job": ("System_Operations",),
-        "configure_dependency_backup_storage": ("System_Operations",),
-        "validate_dependency_backup_storage": ("System_Operations",),
-        "query_visitor_passes": ("Visitor_Passes", "Access_Logs", "General"),
-        "get_visitor_pass": ("Visitor_Passes", "Access_Logs"),
-        "create_visitor_pass": ("Visitor_Passes",),
-        "update_visitor_pass": ("Visitor_Passes",),
-        "cancel_visitor_pass": ("Visitor_Passes",),
-        "trigger_icloud_sync": ("Calendar_Integrations", "Visitor_Passes"),
-    }
-    state_changing = {
-        "assign_schedule_to_entity",
-        "cancel_visitor_pass",
-        "create_notification_workflow",
-        "create_automation",
-        "create_schedule",
-        "create_visitor_pass",
-        "trigger_icloud_sync",
-        "delete_notification_workflow",
-        "delete_automation",
-        "delete_schedule",
-        "disable_automation",
-        "disable_maintenance_mode",
-        "edit_automation",
-        "enable_automation",
-        "enable_maintenance_mode",
-        "command_device",
-        "backfill_access_event_from_protect",
-        "open_gate",
-        "open_device",
-        "override_schedule",
-        "test_integration_connection",
-        "update_system_settings",
-        "rotate_auth_secret",
-        "check_dependency_updates",
-        "analyze_dependency_update",
-        "apply_dependency_update",
-        "restore_dependency_backup",
-        "configure_dependency_backup_storage",
-        "validate_dependency_backup_storage",
-        "investigate_access_incident",
-        "trigger_anomaly_alert",
-        "trigger_manual_malfunction_override",
-        "test_unifi_alarm_webhook",
-        "test_notification_workflow",
-        "toggle_maintenance_mode",
-        "update_notification_workflow",
-        "update_schedule",
-        "update_visitor_pass",
-    }
-    defaults = {
-        "query_access_events": 10,
-        "query_anomalies": 10,
-        "query_leaderboard": 10,
-        "query_lpr_timing": 25,
-        "query_unifi_protect_events": 25,
-        "query_notification_workflows": 20,
-        "query_automations": 20,
-        "query_schedule_targets": 25,
-        "query_visitor_passes": 20,
-        "query_alfred_runtime_events": 20,
-        "get_telemetry_trace": 20,
-    }
-    return {
-        tool.name: AgentTool(
-            name=tool.name,
-            description=tool.description,
-            parameters=tool.parameters,
-            handler=tool.handler,
-            categories=categories.get(tool.name, tool.categories),
-            read_only=tool.name not in state_changing,
-            requires_confirmation=tool.name in state_changing,
-            default_limit=defaults.get(tool.name, tool.default_limit),
-        )
-        for tool in tools
-    }
+    return build_grouped_tool_map()
 
 
 def set_chat_tool_context(
@@ -846,237 +730,15 @@ async def validate_dependency_backup_storage(arguments: dict[str, Any]) -> dict[
 
 
 async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
-    query_text = str(arguments.get("query") or "").strip()
-    if not query_text:
-        return {"status": "not_found", "query": query_text, "matches": [], "error": "query is required."}
+    from app.ai.tool_groups.general_handlers import resolve_human_entity as handler
 
-    requested_types = arguments.get("entity_types")
-    if isinstance(requested_types, list) and requested_types:
-        entity_types = {
-            str(item).strip().lower()
-            for item in requested_types
-            if str(item).strip().lower() in {"person", "vehicle", "group", "device", "visitor_pass"}
-        }
-    else:
-        entity_types = {"person", "vehicle", "group", "device", "visitor_pass"}
-    include_inactive = bool(arguments.get("include_inactive"))
-    query_key = _entity_match_key(query_text)
-    matches: list[dict[str, Any]] = []
-
-    async with AsyncSessionLocal() as session:
-        if "person" in entity_types:
-            people = (
-                await session.scalars(
-                    select(Person)
-                    .options(selectinload(Person.group), selectinload(Person.vehicles))
-                    .order_by(Person.display_name)
-                )
-            ).all()
-            for person in people:
-                if not include_inactive and not person.is_active:
-                    continue
-                haystack = " ".join(
-                    str(value or "")
-                    for value in [
-                        person.display_name,
-                        person.first_name,
-                        person.last_name,
-                        person.notes,
-                        person.group.name if person.group else "",
-                        " ".join(vehicle.registration_number for vehicle in person.vehicles),
-                        " ".join(str(vehicle.make or "") for vehicle in person.vehicles),
-                        " ".join(str(vehicle.model or "") for vehicle in person.vehicles),
-                        " ".join(str(vehicle.color or "") for vehicle in person.vehicles),
-                    ]
-                )
-                score = _entity_match_score(query_key, haystack, exact_value=person.display_name)
-                if score:
-                    matches.append(
-                        _compact_observation(
-                            {
-                                "type": "person",
-                                "score": score,
-                                "id": str(person.id),
-                                "display_name": person.display_name,
-                                "group": person.group.name if person.group else None,
-                                "is_active": person.is_active,
-                                "vehicle_ids": [str(vehicle.id) for vehicle in person.vehicles],
-                                "registration_numbers": [vehicle.registration_number for vehicle in person.vehicles],
-                            }
-                        )
-                    )
-
-        if "vehicle" in entity_types:
-            vehicles = (
-                await session.scalars(
-                    select(Vehicle)
-                    .options(selectinload(Vehicle.owner), selectinload(Vehicle.schedule))
-                    .order_by(Vehicle.registration_number)
-                )
-            ).all()
-            plate_query = normalize_registration_number(query_text)
-            for vehicle in vehicles:
-                if not include_inactive and not vehicle.is_active:
-                    continue
-                haystack = " ".join(
-                    str(value or "")
-                    for value in [
-                        vehicle.registration_number,
-                        vehicle.make,
-                        vehicle.model,
-                        vehicle.color,
-                        vehicle.description,
-                        vehicle.owner.display_name if vehicle.owner else "",
-                    ]
-                )
-                score = _entity_match_score(query_key, haystack, exact_value=vehicle.registration_number)
-                if plate_query and plate_query == vehicle.registration_number:
-                    score = max(score, 100)
-                elif plate_query and plate_query in vehicle.registration_number:
-                    score = max(score, 90)
-                if score:
-                    matches.append(
-                        _compact_observation(
-                            {
-                                "type": "vehicle",
-                                "score": score,
-                                "id": str(vehicle.id),
-                                "registration_number": vehicle.registration_number,
-                                "make": vehicle.make,
-                                "model": vehicle.model,
-                                "color": vehicle.color,
-                                "owner_id": str(vehicle.person_id) if vehicle.person_id else None,
-                                "owner": vehicle.owner.display_name if vehicle.owner else None,
-                                "schedule_id": str(vehicle.schedule_id) if vehicle.schedule_id else None,
-                                "schedule_name": vehicle.schedule.name if vehicle.schedule else None,
-                                "is_active": vehicle.is_active,
-                            }
-                        )
-                    )
-
-        if "group" in entity_types:
-            groups = (await session.scalars(select(Group).order_by(Group.name))).all()
-            for group in groups:
-                haystack = " ".join(str(value or "") for value in [group.name, group.category.value, group.subtype, group.description])
-                score = _entity_match_score(query_key, haystack, exact_value=group.name)
-                if score:
-                    matches.append(
-                        _compact_observation(
-                            {
-                                "type": "group",
-                                "score": score,
-                                "id": str(group.id),
-                                "name": group.name,
-                                "category": group.category.value,
-                                "subtype": group.subtype,
-                            }
-                        )
-                    )
-
-        if "visitor_pass" in entity_types:
-            config = await get_runtime_config()
-            service = get_visitor_pass_service()
-            changed = await service.refresh_statuses(session=session, publish=False)
-            if changed:
-                await session.commit()
-            visitor_passes = await service.list_passes(session, statuses=None, search=query_text, limit=10)
-            for visitor_pass in visitor_passes:
-                haystack = " ".join(
-                    str(value or "")
-                    for value in [
-                        visitor_pass.visitor_name,
-                        visitor_pass.number_plate,
-                        visitor_pass.vehicle_make,
-                        visitor_pass.vehicle_colour,
-                        visitor_pass.status.value,
-                    ]
-                )
-                score = _entity_match_score(query_key, haystack, exact_value=visitor_pass.visitor_name)
-                if score:
-                    payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
-                    payload.update(
-                        {
-                            "type": "visitor_pass",
-                            "score": score,
-                            "display_name": visitor_pass.visitor_name,
-                            "visitor_pass_id": str(visitor_pass.id),
-                        }
-                    )
-                    matches.append(_compact_observation(payload))
-
-    if "device" in entity_types:
-        config = await get_runtime_config()
-        device_rows = [
-            ("gate", entity)
-            for entity in list(getattr(config, "home_assistant_gate_entities", None) or [])
-            if isinstance(entity, dict)
-        ] + [
-            ("garage_door", entity)
-            for entity in list(getattr(config, "home_assistant_garage_door_entities", None) or [])
-            if isinstance(entity, dict)
-        ]
-        for kind, entity in device_rows:
-            if not include_inactive and entity.get("enabled") is False:
-                continue
-            name = str(entity.get("name") or entity.get("entity_id") or "")
-            haystack = f"{name} {entity.get('entity_id') or ''} {kind.replace('_', ' ')}"
-            score = _entity_match_score(query_key, haystack, exact_value=name)
-            if score:
-                matches.append(
-                    _compact_observation(
-                        {
-                            "type": "device",
-                            "score": score,
-                            "kind": kind,
-                            "entity_id": str(entity.get("entity_id") or ""),
-                            "name": name,
-                            "enabled": bool(entity.get("enabled", True)),
-                            "schedule_id": entity.get("schedule_id"),
-                        }
-                    )
-                )
-
-    matches = sorted(
-        matches,
-        key=lambda item: (
-            -int(item.get("score") or 0),
-            str(item.get("type") or ""),
-            str(item.get("display_name") or item.get("name") or item.get("registration_number") or ""),
-        ),
-    )
-    if not matches:
-        return {"status": "not_found", "query": query_text, "entity_types": sorted(entity_types), "matches": []}
-
-    top_score = int(matches[0].get("score") or 0)
-    top_matches = [match for match in matches if int(match.get("score") or 0) >= top_score - 5]
-    status = "unique" if len(top_matches) == 1 and top_score >= 70 else "ambiguous"
-    return {
-        "status": status,
-        "query": query_text,
-        "entity_types": sorted(entity_types),
-        "match": matches[0] if status == "unique" else None,
-        "matches": matches[:10],
-    }
+    return await handler(arguments)
 
 
 async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
-    person_filter = _normalize(arguments.get("person"))
-    config = await get_runtime_config()
-    async with AsyncSessionLocal() as session:
-        query = select(Presence).options(selectinload(Presence.person)).order_by(Presence.updated_at.desc())
-        rows = (await session.scalars(query)).all()
+    from app.ai.tool_groups.general_handlers import query_presence as handler
 
-    records = [
-        {
-            "person": row.person.display_name,
-            "state": row.state.value,
-            "last_changed_at": _agent_datetime_iso(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
-            "last_changed_at_display": _agent_datetime_display(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
-        }
-        for row in rows
-        if not person_filter or person_filter in row.person.display_name.lower()
-    ]
-    return {"presence": records, "timezone": config.site_timezone}
+    return await handler(arguments)
 
 
 async def query_device_states(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1535,6 +1197,7 @@ async def query_visitor_passes(arguments: dict[str, Any]) -> dict[str, Any]:
             "search": search,
             "fuzzy_name": fuzzy_name or None,
         },
+        "answer_artifacts": _visitor_pass_answer_artifacts(arguments, records, config.site_timezone),
     }
 
 
@@ -1566,11 +1229,98 @@ async def get_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
         resolved = await _resolve_visitor_pass_for_agent(session, arguments)
         if isinstance(resolved, dict):
             return resolved
+        record = _visitor_pass_agent_payload(resolved, config.site_timezone)
         return {
             "found": True,
-            "visitor_pass": _visitor_pass_agent_payload(resolved, config.site_timezone),
+            "visitor_pass": record,
             "timezone": config.site_timezone,
+            "answer_artifacts": _visitor_pass_answer_artifacts(
+                arguments,
+                [record],
+                config.site_timezone,
+            ),
         }
+
+
+def _visitor_pass_answer_artifacts(
+    arguments: dict[str, Any],
+    records: list[dict[str, Any]],
+    timezone_name: str,
+) -> list[dict[str, Any]]:
+    subject = _preferred_subject_label(arguments, records[0].get("visitor_name") if records else "the visitor")
+    if not records:
+        return [
+            artifact_payload(
+                domain="visitor_passes",
+                answer_type="visitor_pass_empty",
+                subject_label=subject,
+                primary_fact={
+                    "id": "visitor_pass.match_count",
+                    "label": "Matching visitor passes",
+                    "value": 0,
+                    "display_value": "0",
+                    "kind": "count",
+                    "must_appear": False,
+                },
+                fallback_text=f"I couldn't find a matching visitor pass for {subject}.",
+            )
+        ]
+    record = records[0]
+    subject = _preferred_subject_label(arguments, record.get("visitor_name") or subject)
+    arrival_display = _display_iso_datetime(record.get("arrival_time"), timezone_name)
+    departure_display = _display_iso_datetime(record.get("departure_time"), timezone_name)
+    duration = str(record.get("duration_human") or "").strip()
+    if departure_display:
+        answer_type = "visitor_departure"
+        fact_id = "visitor.departure_time"
+        label = "Visitor departure"
+        display = _compact_time_label(departure_display)
+        fallback = f"{subject} left at {display}."
+    elif arrival_display:
+        answer_type = "visitor_arrival"
+        fact_id = "visitor.arrival_time"
+        label = "Visitor arrival"
+        display = _compact_time_label(arrival_display)
+        fallback = f"{subject} arrived at {display}."
+    elif duration:
+        answer_type = "visitor_duration"
+        fact_id = "visitor.duration"
+        label = "Visitor duration"
+        display = duration
+        fallback = f"{subject} was on site for {display}."
+    else:
+        answer_type = "visitor_pass"
+        fact_id = "visitor.status"
+        label = "Visitor pass status"
+        display = str(record.get("status") or "visitor pass")
+        fallback = f"{subject} has a {display} visitor pass."
+    return [
+        artifact_payload(
+            domain="visitor_passes",
+            answer_type=answer_type,
+            subject_label=subject,
+            primary_fact={
+                "id": fact_id,
+                "label": label,
+                "value": record.get("departure_time") or record.get("arrival_time") or record.get("duration_on_site_seconds") or record.get("status"),
+                "display_value": display,
+                "kind": "timestamp" if fact_id.endswith("_time") else "duration" if fact_id.endswith("duration") else "status",
+                "source": "visitor_passes",
+                "must_appear": True,
+            },
+            source_records=[
+                {
+                    "visitor_pass_id": record.get("id"),
+                    "arrival_time": arrival_display,
+                    "departure_time": departure_display,
+                    "status": record.get("status"),
+                    "creation_source": record.get("creation_source"),
+                }
+            ],
+            display={"voice": "natural_concise", "no_timezone_labels": True},
+            fallback_text=fallback,
+        )
+    ]
 
 
 async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1937,7 +1687,82 @@ async def query_access_events(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    return {"events": records, "count": len(records), "timezone": config.site_timezone}
+    return {
+        "events": records,
+        "count": len(records),
+        "timezone": config.site_timezone,
+        "answer_artifacts": _access_events_answer_artifacts(arguments, records),
+    }
+
+
+def _access_events_answer_artifacts(arguments: dict[str, Any], records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    subject = _preferred_subject_label(arguments, records[0].get("person") if records else "the matched subject")
+    if not records:
+        return [
+            artifact_payload(
+                domain="access_logs",
+                answer_type="no_access_match",
+                subject_label=subject,
+                primary_fact={
+                    "id": "access_event.match_count",
+                    "label": "Matching access events",
+                    "value": 0,
+                    "display_value": "0",
+                    "kind": "count",
+                    "source": "access_events",
+                    "must_appear": False,
+                },
+                time_scope={"day": arguments.get("day") or "recent"},
+                fallback_text=f"I couldn't find any matching access events for {subject}.",
+            )
+        ]
+    event = records[0]
+    direction = str(event.get("direction") or "").strip()
+    answer_type = "latest_departure" if direction == AccessDirection.EXIT.value else "latest_arrival"
+    verb = "left" if direction == AccessDirection.EXIT.value else "arrived"
+    display = str(event.get("occurred_at_display") or "").strip()
+    compact_display = _compact_time_label(display)
+    subject = _preferred_subject_label(arguments, event.get("person") or event.get("registration_number") or subject)
+    return [
+        artifact_payload(
+            domain="access_logs",
+            answer_type=answer_type,
+            subject_label=subject,
+            primary_fact={
+                "id": "access_event.occurred_at",
+                "label": "Access event time",
+                "value": event.get("occurred_at"),
+                "display_value": compact_display or display,
+                "kind": "timestamp",
+                "source": "access_events",
+                "must_appear": True,
+            },
+            supporting_facts=[
+                {
+                    "id": "access_event.direction",
+                    "label": "Direction",
+                    "value": direction,
+                    "display_value": verb,
+                    "kind": "direction",
+                    "source": "access_events",
+                    "must_appear": False,
+                }
+            ],
+            time_scope={"day": arguments.get("day") or "recent"},
+            source_records=[
+                {
+                    "access_event_id": event.get("id"),
+                    "direction": direction,
+                    "decision": event.get("decision"),
+                    "source": event.get("source"),
+                    "occurred_at": event.get("occurred_at"),
+                    "occurred_at_display": display,
+                }
+            ],
+            display={"verb": verb, "voice": "natural_concise", "no_timezone_labels": True},
+            fallback_text=f"{subject} {verb} at {compact_display or display}.",
+        )
+    ]
 
 
 async def diagnose_access_event(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2658,7 +2483,238 @@ async def query_anomalies(arguments: dict[str, Any]) -> dict[str, Any]:
         "search": search or None,
         "suspected_delivery": suspected_delivery,
         "timezone": config.site_timezone,
+        "answer_artifacts": _anomaly_answer_artifacts(arguments, records),
     }
+
+
+async def query_alert_activity(arguments: dict[str, Any]) -> dict[str, Any]:
+    limit = _bounded_int(arguments.get("limit"), default=50, minimum=1, maximum=100)
+    severity = _normalize(arguments.get("severity"))
+    status_filter = _alert_status_from_argument(arguments.get("status") or "all")
+    search = _normalize(arguments.get("search"))
+    config = await get_runtime_config()
+    day = arguments.get("day") or "today"
+    start, end = _period_bounds(day, config.site_timezone)
+    async with AsyncSessionLocal() as session:
+        query = (
+            select(Anomaly)
+            .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+            .where(
+                or_(
+                    (Anomaly.created_at >= start) & (Anomaly.created_at <= end),
+                    (Anomaly.resolved_at >= start) & (Anomaly.resolved_at <= end),
+                )
+            )
+            .order_by(Anomaly.created_at.desc())
+            .limit(250)
+        )
+        anomalies = (await session.scalars(query)).all()
+
+    records: list[dict[str, Any]] = []
+    raised: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = []
+    for anomaly in anomalies:
+        if severity and severity != _enum_text(anomaly.severity):
+            continue
+        record = _anomaly_agent_payload(anomaly, timezone_name=config.site_timezone)
+        if not _anomaly_matches_search(record, anomaly, search=search, suspected_delivery=False):
+            continue
+        created_at = anomaly.created_at if anomaly.created_at.tzinfo else anomaly.created_at.replace(tzinfo=UTC)
+        resolved_at = anomaly.resolved_at
+        if resolved_at and resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=UTC)
+        was_raised = start <= created_at <= end
+        was_resolved = bool(resolved_at and start <= resolved_at <= end)
+        if status_filter == "open" and record.get("status") != "open":
+            continue
+        if status_filter == "resolved" and not was_resolved:
+            continue
+        if was_raised:
+            raised.append(record)
+        if was_resolved:
+            resolved.append(record)
+        records.append(record)
+        if len(records) >= limit:
+            break
+
+    raised = raised[:limit]
+    resolved = resolved[:limit]
+    return {
+        "alerts": records[:limit],
+        "raised": raised,
+        "resolved": resolved,
+        "raised_count": len(raised),
+        "resolved_count": len(resolved),
+        "count": len(records[:limit]),
+        "status": status_filter,
+        "day": day,
+        "search": search or None,
+        "timezone": config.site_timezone,
+        "answer_artifacts": _alert_activity_answer_artifacts(arguments, raised, resolved),
+    }
+
+
+def _anomaly_answer_artifacts(arguments: dict[str, Any], records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    search = str(arguments.get("search") or "matching alerts").strip()
+    suspected_delivery = bool(arguments.get("suspected_delivery") or arguments.get("possible_delivery"))
+    if not records:
+        subject = search if search != "matching alerts" else "alerts"
+        fallback = (
+            f"I couldn't find any matching active or resolved alerts for {subject}."
+            if subject != "alerts"
+            else "I couldn't find any matching active or resolved alerts."
+        )
+        return [
+            artifact_payload(
+                domain="alerts",
+                answer_type="alert_activity_empty",
+                subject_label=subject,
+                primary_fact={
+                    "id": "alerts.match_count",
+                    "label": "Matching alerts",
+                    "value": 0,
+                    "display_value": "0",
+                    "kind": "count",
+                    "source": "anomalies",
+                    "must_appear": False,
+                },
+                time_scope={"day": arguments.get("day") or "recent"},
+                display={"voice": "natural_concise", "no_timezone_labels": True},
+                fallback_text=fallback,
+            )
+        ]
+    alert = records[0]
+    when = str(alert.get("created_at_display") or alert.get("resolved_at_display") or "").strip()
+    indicators = alert.get("delivery_indicators") if isinstance(alert.get("delivery_indicators"), list) else []
+    evidence = "; ".join(str(item) for item in indicators[:2] if item)
+    message = str(alert.get("message") or alert.get("type") or "alert").strip()
+    display = f"{_compact_time_label(when)}: {message}" if when else message
+    if suspected_delivery and evidence:
+        display = f"{display}. Evidence: {evidence}"
+    return [
+        artifact_payload(
+            domain="alerts",
+            answer_type="delivery_alert_match" if suspected_delivery else "alert_match",
+            subject_label=search or "alerts",
+            primary_fact={
+                "id": "alert.latest",
+                "label": "Latest matching alert",
+                "value": alert.get("id"),
+                "display_value": display,
+                "kind": "alert",
+                "source": "anomalies",
+                "must_appear": True,
+            },
+            source_records=[
+                {
+                    "alert_id": alert.get("id"),
+                    "status": alert.get("status"),
+                    "created_at": alert.get("created_at"),
+                    "created_at_display": when,
+                    "resolved_at": alert.get("resolved_at"),
+                    "resolved_at_display": alert.get("resolved_at_display"),
+                }
+            ],
+            display={"voice": "natural_concise", "no_timezone_labels": True},
+            fallback_text=f"The latest matching alert was {display}.",
+        )
+    ]
+
+
+def _alert_activity_answer_artifacts(
+    arguments: dict[str, Any],
+    raised: list[dict[str, Any]],
+    resolved: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    day = str(arguments.get("day") or "today")
+    scope_label = "today" if day == "today" else day
+    raised_count = len(raised)
+    resolved_count = len(resolved)
+    if not raised_count and not resolved_count:
+        return [
+            artifact_payload(
+                domain="alerts",
+                answer_type="alert_activity_empty",
+                subject_label="alerts",
+                primary_fact={
+                    "id": "alerts.activity_count",
+                    "label": "Alert activity",
+                    "value": 0,
+                    "display_value": "0",
+                    "kind": "count",
+                    "source": "anomalies",
+                    "must_appear": False,
+                },
+                time_scope={"day": day, "label": scope_label},
+                fallback_text=f"No alerts were raised or resolved {scope_label}.",
+            )
+        ]
+    parts = [f"{raised_count} raised", f"{resolved_count} resolved"]
+    latest_bits: list[str] = []
+    if raised:
+        latest = raised[0]
+        latest_bits.append(
+            f"latest raised at {_compact_time_label(latest.get('created_at_display'))}: "
+            f"{latest.get('message') or latest.get('type') or 'alert'}"
+        )
+    if resolved:
+        latest = resolved[0]
+        latest_bits.append(
+            f"latest resolved at {_compact_time_label(latest.get('resolved_at_display'))}: "
+            f"{latest.get('message') or latest.get('type') or 'alert'}"
+        )
+    display = f"{scope_label}: {', '.join(parts)}"
+    if latest_bits:
+        display = f"{display}. {'; '.join(latest_bits)}"
+    return [
+        artifact_payload(
+            domain="alerts",
+            answer_type="alert_activity",
+            subject_label="alerts",
+            primary_fact={
+                "id": "alerts.activity_summary",
+                "label": "Alert activity summary",
+                "value": {"raised": raised_count, "resolved": resolved_count},
+                "display_value": display,
+                "kind": "alert_activity",
+                "source": "anomalies",
+                "must_appear": True,
+            },
+            supporting_facts=[
+                {
+                    "id": "alerts.raised_count",
+                    "label": "Raised alerts",
+                    "value": raised_count,
+                    "display_value": str(raised_count),
+                    "kind": "count",
+                    "source": "anomalies",
+                    "must_appear": False,
+                },
+                {
+                    "id": "alerts.resolved_count",
+                    "label": "Resolved alerts",
+                    "value": resolved_count,
+                    "display_value": str(resolved_count),
+                    "kind": "count",
+                    "source": "anomalies",
+                    "must_appear": False,
+                },
+            ],
+            time_scope={"day": day, "label": scope_label},
+            source_records=[
+                *[
+                    {"alert_id": item.get("id"), "activity": "raised", "created_at": item.get("created_at")}
+                    for item in raised[:5]
+                ],
+                *[
+                    {"alert_id": item.get("id"), "activity": "resolved", "resolved_at": item.get("resolved_at")}
+                    for item in resolved[:5]
+                ],
+            ],
+            display={"voice": "natural_concise", "no_timezone_labels": True, "alerts_only": True},
+            fallback_text=display + ".",
+        )
+    ]
 
 
 async def analyze_alert_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3004,13 +3060,278 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    duration_seconds = int(total.total_seconds())
+    duration_human = _human_duration(total)
+    display_duration = _human_duration_natural(duration_seconds)
+    subject = _preferred_subject_label(arguments, "The matched visit")
+    latest_interval = intervals[-1] if intervals else None
+    answer_artifacts = [
+        artifact_payload(
+            domain="access_logs",
+            answer_type="visit_duration",
+            subject_label=subject,
+            primary_fact={
+                "id": "visit.duration",
+                "label": "Visit duration",
+                "value": duration_seconds,
+                "display_value": display_duration,
+                "kind": "duration",
+                "source": "access_events",
+                "must_appear": bool(duration_seconds),
+                "metadata": {"legacy_display": duration_human},
+            },
+            time_scope={"day": arguments.get("day") or "today"},
+            source_records=[
+                {
+                    "entry_at": interval.get("entry_display"),
+                    "exit_at": interval.get("exit_display") or interval.get("exit"),
+                    "entry": interval.get("entry"),
+                    "exit": interval.get("exit"),
+                }
+                for interval in intervals
+                if isinstance(interval, dict)
+            ],
+            display={"voice": "natural_concise", "no_timezone_labels": True},
+            fallback_text=(
+                f"{subject} has been here for {display_duration}."
+                if isinstance(latest_interval, dict) and latest_interval.get("exit") == "still_present"
+                else f"{subject} was here for {display_duration}."
+                if duration_seconds
+                else "I couldn't find enough matching access events to calculate a visit duration."
+            ),
+        )
+    ]
     return {
-        "duration_seconds": int(total.total_seconds()),
-        "duration_human": _human_duration(total),
+        "duration_seconds": duration_seconds,
+        "duration_human": duration_human,
+        "duration_display": display_duration,
         "intervals": intervals,
         "matched_events": len(events),
         "timezone": timezone_name,
+        "answer_artifacts": answer_artifacts,
     }
+
+
+async def calculate_absence_duration(arguments: dict[str, Any]) -> dict[str, Any]:
+    mode = str(arguments.get("mode") or "latest").strip().lower()
+    if mode not in {"latest", "total"}:
+        mode = "latest"
+    result = await query_access_events(
+        {
+            "person": arguments.get("person"),
+            "person_id": arguments.get("person_id"),
+            "vehicle_id": arguments.get("vehicle_id"),
+            "group": arguments.get("group"),
+            "day": arguments.get("day") or "today",
+            "limit": 100,
+        }
+    )
+    timezone_name = str(result.get("timezone") or DEFAULT_AGENT_TIMEZONE)
+    events = sorted(
+        result["events"],
+        key=lambda item: datetime.fromisoformat(str(item["occurred_at"])).astimezone(UTC),
+    )
+    subject = next(
+        (
+            str(event.get("person") or event.get("registration_number") or "").strip()
+            for event in events
+            if str(event.get("person") or event.get("registration_number") or "").strip()
+        ),
+        str(arguments.get("person") or arguments.get("group") or "The matched subject").strip(),
+    )
+    open_exit: datetime | None = None
+    total = timedelta()
+    intervals: list[dict[str, str | None]] = []
+
+    for event in events:
+        occurred = datetime.fromisoformat(event["occurred_at"])
+        if event["decision"] != AccessDecision.GRANTED.value:
+            continue
+        if event["direction"] == AccessDirection.EXIT.value:
+            if open_exit is None:
+                open_exit = occurred
+        elif event["direction"] == AccessDirection.ENTRY.value and open_exit:
+            interval_seconds = max(0, int((occurred - open_exit).total_seconds()))
+            total += occurred - open_exit
+            intervals.append(
+                {
+                    "exit": _agent_datetime_iso(open_exit, timezone_name),
+                    "exit_display": _agent_datetime_display(open_exit, timezone_name),
+                    "entry": _agent_datetime_iso(occurred, timezone_name),
+                    "entry_display": _agent_datetime_display(occurred, timezone_name),
+                    "seconds": interval_seconds,
+                    "duration_human": _human_duration(timedelta(seconds=interval_seconds)),
+                }
+            )
+            open_exit = None
+
+    status = "returned" if intervals else "not_found"
+    as_of: datetime | None = None
+    if open_exit:
+        now = _agent_now(timezone_name)
+        interval_seconds = max(0, int((now - open_exit).total_seconds()))
+        as_of = now
+        total += now - open_exit
+        status = "still_away"
+        intervals.append(
+            {
+                "exit": _agent_datetime_iso(open_exit, timezone_name),
+                "exit_display": _agent_datetime_display(open_exit, timezone_name),
+                "entry": "still_away",
+                "entry_display": None,
+                "seconds": interval_seconds,
+                "duration_human": _human_duration(timedelta(seconds=interval_seconds)),
+            }
+        )
+
+    total_seconds = max(0, int(total.total_seconds()))
+    latest_interval = intervals[-1] if intervals else None
+    primary_seconds = total_seconds
+    if mode == "latest" and latest_interval:
+        primary_seconds = int(latest_interval.get("seconds") or 0)
+    duration_human = _human_duration(timedelta(seconds=primary_seconds))
+    display_duration = _human_duration_natural(primary_seconds)
+    display_subject = _preferred_subject_label(arguments, subject or "The matched subject")
+    source_records: list[dict[str, Any]] = []
+    fallback_text = ""
+    if latest_interval:
+        left_display_raw = latest_interval.get("exit_display")
+        returned_display_raw = latest_interval.get("entry_display")
+        left_display, returned_display = _compact_interval_labels(left_display_raw, returned_display_raw)
+        if latest_interval.get("entry") == "still_away" and str(arguments.get("day") or "today") == "today":
+            left_display = _compact_time_label(left_display_raw)
+        source_records.append(
+            {
+                "left_at": left_display,
+                "returned_at": returned_display or latest_interval.get("entry"),
+                "left_at_full": left_display_raw,
+                "returned_at_full": returned_display_raw,
+                "seconds": latest_interval.get("seconds"),
+                "mode": mode,
+            }
+        )
+        if mode == "total" and len(intervals) > 1:
+            fallback_text = f"{display_subject} was out for {display_duration} in total across {len(intervals)} matched absences."
+        elif latest_interval.get("entry") == "still_away":
+            suffix = f" since {left_display}" if left_display else ""
+            fallback_text = f"{display_subject} has been out for {display_duration}{suffix}. Still away, so the clock is still running."
+        elif left_display and returned_display:
+            fallback_text = f"{display_subject} was out for {display_duration}, from {left_display} to {returned_display}."
+        else:
+            fallback_text = f"{display_subject} was out for {display_duration}."
+    else:
+        fallback_text = "I couldn't find enough matching access events to calculate an absence duration."
+    response_hint = _absence_duration_answer_hint(
+        subject=subject or "The matched subject",
+        duration=duration_human,
+        primary_interval=latest_interval,
+        status=status,
+        as_of=as_of,
+        timezone_name=timezone_name,
+        mode=mode,
+        total_human=_human_duration(timedelta(seconds=total_seconds)),
+        interval_count=len(intervals),
+    )
+    return {
+        "subject": subject or "The matched subject",
+        "absence_seconds": primary_seconds,
+        "absence_human": duration_human,
+        "absence_display": display_duration,
+        "total_absence_seconds": total_seconds,
+        "total_absence_human": _human_duration(timedelta(seconds=total_seconds)),
+        "total_absence_display": _human_duration_natural(total_seconds),
+        "intervals": intervals,
+        "primary_interval": latest_interval,
+        "mode": mode,
+        "matched_events": len(events),
+        "status": status,
+        "timezone": timezone_name,
+        "as_of": _agent_datetime_iso(as_of, timezone_name) if as_of else None,
+        "as_of_display": _agent_datetime_display(as_of, timezone_name) if as_of else None,
+        "answer_hints": [response_hint] if response_hint else [],
+        "answer_artifacts": [
+            artifact_payload(
+                domain="access_logs",
+                answer_type="absence_duration",
+                subject_label=display_subject,
+                primary_fact={
+                    "id": "absence.duration.total" if mode == "total" else "absence.duration.latest",
+                    "label": "Total absence duration" if mode == "total" else "Latest absence duration",
+                    "value": primary_seconds,
+                    "display_value": display_duration,
+                    "kind": "duration",
+                    "source": "access_events",
+                    "must_appear": bool(primary_seconds),
+                    "metadata": {
+                        "mode": mode,
+                        "total_seconds": total_seconds,
+                        "legacy_display": duration_human,
+                        "interval_count": len(intervals),
+                    },
+                },
+                supporting_facts=[
+                    {
+                        "id": "absence.interval_count",
+                        "label": "Matched absence intervals",
+                        "value": len(intervals),
+                        "display_value": str(len(intervals)),
+                        "kind": "count",
+                        "source": "access_events",
+                        "must_appear": mode == "total" and len(intervals) > 1,
+                    }
+                ],
+                time_scope={"day": arguments.get("day") or "today", "mode": mode, "status": status},
+                source_records=source_records,
+                display={"voice": "natural_concise", "no_timezone_labels": True, "subject_full_name": subject},
+                fallback_text=fallback_text,
+            )
+        ],
+    }
+
+
+def _absence_duration_answer_hint(
+    *,
+    subject: str,
+    duration: str,
+    primary_interval: dict[str, Any] | None,
+    status: str,
+    as_of: datetime | None,
+    timezone_name: str,
+    mode: str,
+    total_human: str,
+    interval_count: int,
+) -> str:
+    if not duration or duration == "0m":
+        return ""
+    latest = primary_interval or {}
+    left_at = str(latest.get("exit_display") or "").strip()
+    returned_at = str(latest.get("entry_display") or "").strip()
+    latest_duration = str(latest.get("duration_human") or "").strip()
+    if mode == "total" and interval_count > 1:
+        latest_suffix = ""
+        if latest_duration and left_at and returned_at:
+            latest_suffix = f" The latest matched absence was {latest_duration}, from {left_at} to {returned_at}."
+        return (
+            f"Answer conversationally: {subject} was out for {total_human} in total across "
+            f"{interval_count} matched absences.{latest_suffix} Keep it crisp, factual, and Alfred-warm."
+        )
+    if status == "still_away":
+        as_of_display = _agent_datetime_display(as_of, timezone_name) if as_of else ""
+        as_of_suffix = f". Still marked away as of {as_of_display}" if as_of_display else ". Still marked away"
+        since_suffix = f" since {left_at}" if left_at else ""
+        return (
+            f"Answer conversationally: {subject} has been out for {duration}{since_suffix}{as_of_suffix}. "
+            "Keep it crisp, factual, and Alfred-warm; avoid robotic audit-log phrasing."
+        )
+    if left_at and returned_at:
+        return (
+            f"Answer conversationally: {subject} was out for {duration}, from {left_at} to {returned_at}. "
+            "Keep it crisp, factual, and Alfred-warm; avoid robotic audit-log phrasing."
+        )
+    return (
+        f"Answer conversationally: {subject} was out for {duration}. "
+        "Keep it crisp, factual, and Alfred-warm; avoid robotic audit-log phrasing."
+    )
 
 
 async def trigger_anomaly_alert(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3049,24 +3370,9 @@ async def trigger_anomaly_alert(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def get_system_users(arguments: dict[str, Any]) -> dict[str, Any]:
-    include_inactive = bool(arguments.get("include_inactive"))
-    async with AsyncSessionLocal() as session:
-        query = select(User).order_by(User.first_name, User.last_name)
-        users = (await session.scalars(query)).all()
+    from app.ai.tool_groups.general_handlers import get_system_users as handler
 
-    records = [
-        {
-            "full_name": user.full_name,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "username": user.username,
-            "role": user.role.value,
-            "is_active": user.is_active,
-        }
-        for user in users
-        if include_inactive or user.is_active
-    ]
-    return {"users": records, "count": len(records)}
+    return await handler(arguments)
 
 
 async def lookup_dvla_vehicle(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3870,18 +4176,39 @@ async def update_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
         if not schedule:
             return {"updated": False, "error": "Schedule not found."}
 
-        if "time_blocks" in arguments or _natural_schedule_text_from_arguments(arguments):
+        has_time_update = "time_blocks" in arguments or bool(_natural_schedule_text_from_arguments(arguments))
+        next_time_blocks = None
+        if has_time_update:
             try:
-                schedule.time_blocks = _time_blocks_from_agent_arguments(arguments)
+                next_time_blocks = _time_blocks_from_agent_arguments(arguments)
             except (TypeError, ValueError) as exc:
                 return {"updated": False, "error": str(exc)}
+        next_name = None
         if "name" in arguments:
-            name = str(arguments.get("name") or "").strip()
-            if not name:
+            next_name = str(arguments.get("name") or "").strip()
+            if not next_name:
                 return {"updated": False, "error": "Schedule name cannot be empty."}
-            schedule.name = name
-        if "description" in arguments:
-            schedule.description = _optional_text(arguments.get("description"))
+        next_description = None
+        has_description_update = "description" in arguments
+        if has_description_update:
+            next_description = _optional_text(arguments.get("description"))
+
+        if not bool(arguments.get("confirm")):
+            return {
+                "updated": False,
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "target": schedule.name,
+                "schedule_name": schedule.name,
+                "detail": f"Update the {schedule.name} schedule?",
+            }
+
+        if has_time_update:
+            schedule.time_blocks = next_time_blocks
+        if next_name is not None:
+            schedule.name = next_name
+        if has_description_update:
+            schedule.description = next_description
 
         try:
             await session.commit()
@@ -3982,6 +4309,24 @@ async def assign_schedule_to_entity(arguments: dict[str, Any]) -> dict[str, Any]
         schedule = None if clear_schedule else await _resolve_schedule(session, arguments)
         if not clear_schedule and not schedule:
             return {"assigned": False, "error": "Schedule not found. Supply schedule_id or schedule_name, or set clear_schedule=true."}
+        if not bool(arguments.get("confirm")):
+            target = str(
+                arguments.get("entity_name")
+                or arguments.get("registration_number")
+                or arguments.get("entity_id")
+                or entity_type
+                or "schedule target"
+            ).strip()
+            schedule_label = "clear the schedule" if clear_schedule else f"assign {schedule.name if schedule else 'the schedule'}"
+            return {
+                "assigned": False,
+                "requires_confirmation": True,
+                "confirmation_field": "confirm",
+                "target": target,
+                "entity_type": entity_type,
+                "schedule_name": schedule.name if schedule else None,
+                "detail": f"Confirm {schedule_label} for {target}?",
+            }
 
         if entity_type == "person":
             person = await _resolve_person(session, arguments)
@@ -4030,7 +4375,7 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             if not schedule:
                 return {"verified": False, "error": "Schedule not found."}
             allowed = schedule_allows_at(schedule, occurred_at, config.site_timezone)
-            return {
+            payload = {
                 "verified": True,
                 "allowed": allowed,
                 "source": "schedule",
@@ -4040,6 +4385,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "schedule": _serialize_schedule_for_agent(schedule),
                 "reason": f"{schedule.name} allows this time." if allowed else f"{schedule.name} does not allow this time.",
             }
+            payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=schedule.name)
+            return payload
 
         if entity_type == "person":
             person = await _resolve_person(session, arguments)
@@ -4052,7 +4399,7 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 timezone_name=config.site_timezone,
                 default_policy=config.schedule_default_policy,
             )
-            return {
+            payload = {
                 "verified": True,
                 "entity_type": "person",
                 "person": person.display_name,
@@ -4067,6 +4414,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "timezone": config.site_timezone,
                 "reason": evaluation.reason,
             }
+            payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=person.display_name)
+            return payload
 
         if entity_type == "vehicle":
             vehicle = await _resolve_vehicle(session, arguments)
@@ -4079,7 +4428,7 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 timezone_name=config.site_timezone,
                 default_policy=config.schedule_default_policy,
             )
-            return {
+            payload = {
                 "verified": True,
                 "entity_type": "vehicle",
                 "registration_number": vehicle.registration_number,
@@ -4095,6 +4444,8 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 "timezone": config.site_timezone,
                 "reason": evaluation.reason,
             }
+            payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=vehicle.registration_number)
+            return payload
 
     if entity_type in {"gate", "garage_door", "door"}:
         door = await _resolve_cover_target(arguments, entity_type=entity_type)
@@ -4109,7 +4460,7 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
                 default_policy=config.schedule_default_policy,
                 source=str(door["kind"]),
             )
-        return {
+        payload = {
             "verified": True,
             "entity_type": door["kind"],
             "entity_id": door["entity"]["entity_id"],
@@ -4123,8 +4474,55 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             "timezone": config.site_timezone,
             "reason": evaluation.reason,
         }
+        payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=door["entity"]["name"])
+        return payload
 
     return {"verified": False, "error": "entity_type must be schedule, person, vehicle, gate, garage_door, or door."}
+
+
+def _schedule_answer_artifacts(payload: dict[str, Any], *, subject: str) -> list[dict[str, Any]]:
+    allowed = bool(payload.get("allowed"))
+    reason = str(payload.get("reason") or "").strip()
+    checked_at = _compact_time_label(payload.get("checked_at_display"))
+    display = reason or (f"{subject} is allowed at {checked_at}." if allowed else f"{subject} is not allowed at {checked_at}.")
+    return [
+        artifact_payload(
+            domain="schedules",
+            answer_type="schedule_access_verification",
+            subject_label=subject,
+            primary_fact={
+                "id": "schedule.access_allowed",
+                "label": "Schedule access allowed",
+                "value": allowed,
+                "display_value": display,
+                "kind": "boolean",
+                "source": "schedules",
+                "must_appear": True,
+            },
+            supporting_facts=[
+                {
+                    "id": "schedule.checked_at",
+                    "label": "Checked time",
+                    "value": payload.get("checked_at"),
+                    "display_value": checked_at,
+                    "kind": "timestamp",
+                    "source": "schedules",
+                    "must_appear": False,
+                }
+            ],
+            source_records=[
+                {
+                    "entity_type": payload.get("entity_type") or "schedule",
+                    "source": payload.get("source"),
+                    "schedule_id": payload.get("schedule_id"),
+                    "schedule_name": payload.get("schedule_name"),
+                    "checked_at": payload.get("checked_at"),
+                }
+            ],
+            display={"voice": "natural_concise", "no_timezone_labels": True},
+            fallback_text=display,
+        )
+    ]
 
 
 async def _resolve_notification_rule(session, arguments: dict[str, Any]) -> NotificationRule | None:
@@ -7291,3 +7689,48 @@ def _human_duration(duration: timedelta) -> str:
     if hours:
         return f"{hours}h"
     return f"{minutes}m"
+
+
+def _human_duration_natural(duration: timedelta | int | float) -> str:
+    seconds = int(duration.total_seconds()) if isinstance(duration, timedelta) else int(duration)
+    minutes_total = max(0, (seconds + 30) // 60)
+    hours, minutes = divmod(minutes_total, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes} min" if minutes == 1 else f"{minutes} mins"
+
+
+def _preferred_subject_label(arguments: dict[str, Any], fallback: Any) -> str:
+    for key in ("person", "visitor_name", "group", "registration_number"):
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            if key in {"person", "visitor_name"} and value == value.lower() and value.replace(" ", "").isalpha():
+                return value.title()
+            return value
+    return str(fallback or "The matched subject").strip() or "The matched subject"
+
+
+def _compact_time_label(display_value: Any) -> str:
+    value = str(display_value or "").strip()
+    if ", " not in value:
+        return value
+    return value.rsplit(", ", 1)[-1].strip() or value
+
+
+def _compact_interval_labels(left_display: Any, right_display: Any) -> tuple[str, str]:
+    left = str(left_display or "").strip()
+    right = str(right_display or "").strip()
+    if left[:12] and left[:12] == right[:12]:
+        return _compact_time_label(left), _compact_time_label(right)
+    return left, right
+
+
+def _display_iso_datetime(value: Any, timezone_name: str) -> str | None:
+    if not value:
+        return None
+    try:
+        return _agent_datetime_display(datetime.fromisoformat(str(value)), timezone_name)
+    except (TypeError, ValueError):
+        return None

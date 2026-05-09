@@ -6,6 +6,7 @@ import json
 import re
 import asyncio
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ FEEDBACK_ANALYSIS_PROMPT = """You convert Alfred response feedback into durable 
 Do not create keyword rules. Produce concise behavioral guidance and examples that help an LLM answer similar future IACS requests better.
 Only use the provided turn snapshot and user feedback. Do not invent system facts.
 Never include secrets, IDs, raw tool JSON, file URLs, or private contact details in lesson text.
+Never create lessons that tell Alfred to mention time zones, timezone labels, or local-time labels; IACS user-facing times use the site clock silently.
 
 Return compact JSON:
 {"summary":"short","lesson":{"title":"short","lesson":"one concise instruction","tags":["style"],"confidence":0.0},"corrected_answer":"optional corrected answer","eval_example":{"prompt":"user prompt","ideal_answer":"ideal answer"}}"""
@@ -33,6 +35,7 @@ TURN_REFLECTION_PROMPT = """Reflect briefly on this completed Alfred IACS chat t
 Do not expose or store hidden reasoning. Do not create keyword rules. Do not invent system facts.
 Generalize only durable behavior that would improve future similar turns.
 Never include secrets, IDs, raw tool JSON, file URLs, private contact details, or transient visitor details.
+Never create lessons that tell Alfred to mention time zones, timezone labels, or local-time labels; IACS user-facing times use the site clock silently.
 If there is no useful generalized lesson, return {"reflection":null}.
 
 Return compact JSON:
@@ -59,6 +62,34 @@ DEFAULT_SEEDED_LESSONS = (
         "tags": ["access-incidents", "suppressed-reads", "diagnostic-chain"],
         "confidence": 0.98,
     },
+    {
+        "title": "Distinguish absence duration from visit duration",
+        "lesson": (
+            "When the user asks how long someone was away from site, answer the absence interval by pairing "
+            "the person's exit with their next entry. Use visit duration only for questions about how long "
+            "someone stayed on site, was here, or visited."
+        ),
+        "tags": ["access-logs", "absence-duration", "semantic-routing"],
+        "confidence": 0.97,
+    },
+    {
+        "title": "Keep duration answers human",
+        "lesson": (
+            "For simple absence or visit duration questions, answer with the duration first in Alfred's natural voice. "
+            "Include the exact leave, return, or as-of times as evidence, but avoid robotic audit-log phrasing."
+        ),
+        "tags": ["access-logs", "absence-duration", "visit-duration", "concise-response", "persona"],
+        "confidence": 0.96,
+    },
+    {
+        "title": "Use the site clock silently",
+        "lesson": (
+            "For user-facing time answers, give the time plainly on the site clock. Do not mention time zone names, "
+            "time zone abbreviations, UTC offsets, or local-time labels."
+        ),
+        "tags": ["time", "site-clock", "concise-response", "persona"],
+        "confidence": 0.96,
+    },
 )
 
 DEFAULT_SEEDED_EVAL_EXAMPLES = (
@@ -79,6 +110,97 @@ DEFAULT_SEEDED_EVAL_EXAMPLES = (
         "metadata": {
             "seed": "ash_1818_suppressed_read_incident",
             "tags": ["access-incidents", "suppressed-reads", "notifications"],
+        },
+    },
+    {
+        "prompt": "How long was Sylv out for?",
+        "ideal_answer": (
+            "Treat this as an absence-duration question. Use access-log evidence to pair Sylv's exit with "
+            "the following entry, then answer with the off-site interval and the leave/return times. Do not "
+            "use the on-site visit-duration calculation for this wording."
+        ),
+        "lesson": (
+            "Absence-duration questions require exit-to-next-entry pairing; visit-duration questions require "
+            "entry-to-next-exit pairing."
+        ),
+        "metadata": {
+            "seed": "sylv_absence_duration_exit_to_entry",
+            "tags": ["access-logs", "absence-duration", "semantic-routing"],
+        },
+    },
+    {
+        "prompt": "how long has Ash been gone?",
+        "ideal_answer": (
+            "Use the latest granted exit for Ash and, if there is no later entry, answer the ongoing absence "
+            "duration naturally from that exit to now. Do not use robotic 'latest logged departure' wording "
+            "and do not mention a time zone."
+        ),
+        "lesson": (
+            "Ongoing absence answers should be concise, warm, and based on the selected exit-to-now interval."
+        ),
+        "metadata": {
+            "seed": "ash_ongoing_absence_human_voice",
+            "tags": ["access-logs", "absence-duration", "persona"],
+        },
+    },
+    {
+        "prompt": "When did Sylv get back?",
+        "ideal_answer": (
+            "Treat 'got back' as latest granted entry evidence for Sylv. Answer with the return time plainly, "
+            "without redundant access-log terminology such as 'arrival logged as entry'."
+        ),
+        "lesson": "Return-time questions should answer from entry evidence in ordinary language.",
+        "metadata": {
+            "seed": "sylv_return_time_plain_language",
+            "tags": ["access-logs", "arrival-return", "concise-response"],
+        },
+    },
+    {
+        "prompt": "What alerts have been raised/resolved today?",
+        "ideal_answer": (
+            "Use alert activity only: alerts raised and alerts resolved in today's period. Do not include gate "
+            "maintenance, device health, or malfunction summaries unless the user asks for those domains."
+        ),
+        "lesson": "Raised/resolved alert questions require the alert activity tool and must stay scoped to alerts.",
+        "metadata": {
+            "seed": "alerts_raised_resolved_today_scope",
+            "tags": ["alerts", "scope-control"],
+        },
+    },
+    {
+        "prompt": "oil delivery arrive today?",
+        "ideal_answer": (
+            "Search active and resolved alert evidence for likely delivery matches. If none match, say plainly "
+            "that no matching oil delivery alert was found today; do not use cute ledger phrasing."
+        ),
+        "lesson": "No-match delivery answers should be factual and plain, with no decorative ledger wording.",
+        "metadata": {
+            "seed": "oil_delivery_no_match_plain",
+            "tags": ["alerts", "delivery", "no-match"],
+        },
+    },
+    {
+        "prompt": "What time does Steph usually get back?",
+        "ideal_answer": (
+            "Use arrival/return semantics and source-of-truth access evidence or rhythm summaries. Do not answer "
+            "from departure data when the user asks when someone gets back."
+        ),
+        "lesson": "Usual return questions require arrival/entry evidence, not departure/exit evidence.",
+        "metadata": {
+            "seed": "steph_usual_return_arrival_semantics",
+            "tags": ["access-logs", "arrival-return", "rhythm"],
+        },
+    },
+    {
+        "prompt": "what time did Stu leave?",
+        "ideal_answer": (
+            "Resolve Stu as a visitor if that is the matching source-of-truth record, then answer from the visitor "
+            "pass departure evidence as a first-class access subject."
+        ),
+        "lesson": "Visitor pass subjects must be treated as first-class access subjects for arrival and departure answers.",
+        "metadata": {
+            "seed": "stu_visitor_departure_path",
+            "tags": ["visitor-passes", "access-logs", "departure"],
         },
     },
 )
@@ -131,6 +253,8 @@ class AlfredFeedbackService:
     def _log_reflection_failure(self, task: asyncio.Task) -> None:
         try:
             task.result()
+        except asyncio.CancelledError:
+            return
         except Exception as exc:
             logger.info("alfred_reflection_failed", extra={"error": str(exc)[:240]})
 
@@ -149,7 +273,7 @@ class AlfredFeedbackService:
         """Draft one generalized lesson from a completed safe turn, if useful."""
 
         runtime = await get_runtime_config()
-        if not bool(getattr(runtime, "alfred_reflection_enabled", True)):
+        if not bool(getattr(runtime, "alfred_reflection_enabled", False)):
             return None
         if _reflection_input_unsafe(user_message, assistant_text, tool_results):
             return None
@@ -159,7 +283,8 @@ class AlfredFeedbackService:
         if not actor_uuid:
             return None
         try:
-            result = await provider.complete(
+            result = await _provider_complete(
+                provider,
                 [
                     ChatMessageInput("system", TURN_REFLECTION_PROMPT),
                     ChatMessageInput(
@@ -178,7 +303,8 @@ class AlfredFeedbackService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                model_name=model_name,
             )
         except Exception as exc:
             logger.info("alfred_reflection_provider_failed", extra={"error": str(exc)[:180]})
@@ -288,6 +414,7 @@ class AlfredFeedbackService:
                     .limit(80)
                 )
             ).all()
+        rows = [row for row in rows if not _lesson_text_unsafe_for_learning(row.lesson)]
         rows = _rank_lessons_for_prompt(message or "", rows, limit=max(1, min(limit, 12)))
         include_owner = str(user_role or "").lower() == "admin"
         return [self._public_lesson(row, include_owner=include_owner) for row in rows]
@@ -422,6 +549,7 @@ class AlfredFeedbackService:
 
         analysis = await self._analyze_feedback(
             runtime_provider=runtime.llm_provider,
+            model_name=str(getattr(runtime, "alfred_background_model", "") or "").strip() or None,
             rating=rating,
             reason=reason,
             ideal_answer=ideal_answer,
@@ -516,7 +644,11 @@ class AlfredFeedbackService:
                     select(AlfredFeedback).order_by(AlfredFeedback.created_at.desc()).limit(max(1, min(limit, 250)))
                 )
             ).all()
-        return [self._public_feedback(row) for row in rows]
+            user_labels = await self._user_label_map(session, (row.actor_user_id for row in rows))
+        return [
+            self._public_feedback(row) | {"source": _feedback_training_source(row, user_labels)}
+            for row in rows
+        ]
 
     async def list_lessons(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as session:
@@ -528,7 +660,21 @@ class AlfredFeedbackService:
                     query.order_by(AlfredLesson.updated_at.desc()).limit(max(1, min(limit, 250)))
                 )
             ).all()
-        return [self._public_lesson(row, include_owner=True) for row in rows]
+            feedback_rows = await self._source_feedback_rows(session, rows)
+            user_labels = await self._user_label_map(
+                session,
+                [
+                    *(getattr(row, "created_by_user_id", None) for row in rows),
+                    *(getattr(row, "owner_user_id", None) for row in rows),
+                    *(row.actor_user_id for row in feedback_rows),
+                ],
+            )
+        feedback_by_id = {str(row.id): row for row in feedback_rows}
+        return [
+            self._public_lesson(row, include_owner=True)
+            | {"source": _lesson_training_source(row, feedback_by_id, user_labels)}
+            for row in rows
+        ]
 
     async def review_lesson(
         self,
@@ -596,7 +742,16 @@ class AlfredFeedbackService:
                     .limit(max(1, min(limit, 500)))
                 )
             ).all()
-        return [self._public_eval(row) for row in rows]
+            feedback_rows = await self._feedback_rows_by_ids(
+                session,
+                (row.feedback_id for row in rows if row.feedback_id),
+            )
+            user_labels = await self._user_label_map(session, (row.actor_user_id for row in feedback_rows))
+        feedback_by_id = {str(row.id): row for row in feedback_rows}
+        return [
+            self._public_eval(row) | {"source": _eval_training_source(row, feedback_by_id, user_labels)}
+            for row in rows
+        ]
 
     async def export_eval_jsonl(self) -> str:
         examples = await self.list_eval_examples(limit=500)
@@ -667,6 +822,7 @@ class AlfredFeedbackService:
         self,
         *,
         runtime_provider: str,
+        model_name: str | None = None,
         rating: str,
         reason: str,
         ideal_answer: str,
@@ -676,7 +832,8 @@ class AlfredFeedbackService:
     ) -> dict[str, Any]:
         try:
             provider = get_llm_provider(runtime_provider)
-            result = await provider.complete(
+            result = await _provider_complete(
+                provider,
                 [
                     ChatMessageInput("system", FEEDBACK_ANALYSIS_PROMPT),
                     ChatMessageInput(
@@ -694,7 +851,8 @@ class AlfredFeedbackService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                model_name=model_name,
             )
         except Exception as exc:
             logger.info("alfred_feedback_analysis_failed", extra={"error": str(exc)[:180]})
@@ -730,7 +888,13 @@ class AlfredFeedbackService:
         if not lesson_text:
             return None
         scope = "site" if actor_role == "admin" else "user"
-        status = "active" if learning_mode == "auto_learn" else "pending"
+        unsafe_lesson = _lesson_text_unsafe_for_learning(lesson_text)
+        if unsafe_lesson:
+            status = "rejected"
+        elif rating == "reflection":
+            status = "pending"
+        else:
+            status = "active" if learning_mode == "auto_learn" else "pending"
         if scope == "site" and actor_role != "admin":
             scope = "user"
         now = datetime.now(tz=UTC)
@@ -743,6 +907,8 @@ class AlfredFeedbackService:
             for tag in (raw_lesson.get("tags") if isinstance(raw_lesson.get("tags"), list) else [])[:12]
             if str(tag).strip()
         ]
+        if unsafe_lesson and "quarantined" not in tags:
+            tags.append("quarantined")
         title = str(raw_lesson.get("title") or "Alfred feedback lesson").strip()[:180]
         embedding = await generate_embedding(
             embedding_text(title, lesson_text, " ".join(tags)),
@@ -763,6 +929,8 @@ class AlfredFeedbackService:
                 approved_by_user_id=actor_uuid if status == "active" and actor_role == "admin" else None,
                 approved_at=now if status == "active" and actor_role == "admin" else None,
                 active_at=now if status == "active" else None,
+                rejected_by_user_id=actor_uuid if unsafe_lesson else None,
+                rejected_at=now if unsafe_lesson else None,
             )
             session.add(row)
             await session.commit()
@@ -871,6 +1039,162 @@ class AlfredFeedbackService:
             "updated_at": row.updated_at.isoformat(),
         }
 
+    async def _source_feedback_rows(
+        self,
+        session: Any,
+        lessons: Iterable[AlfredLesson],
+    ) -> list[AlfredFeedback]:
+        feedback_ids: set[uuid.UUID] = set()
+        for lesson in lessons:
+            for source_id in _source_feedback_values(lesson):
+                feedback_id = _coerce_uuid(source_id)
+                if feedback_id:
+                    feedback_ids.add(feedback_id)
+        return await self._feedback_rows_by_ids(session, feedback_ids)
+
+    async def _feedback_rows_by_ids(self, session: Any, feedback_ids: Iterable[Any]) -> list[AlfredFeedback]:
+        ids = {feedback_id for feedback_id in (_coerce_uuid(value) for value in feedback_ids) if feedback_id}
+        if not ids:
+            return []
+        return (
+            await session.scalars(
+                select(AlfredFeedback).where(AlfredFeedback.id.in_(ids))
+            )
+        ).all()
+
+    async def _user_label_map(self, session: Any, user_ids: Iterable[Any]) -> dict[str, str]:
+        ids = {user_id for user_id in (_coerce_uuid(value) for value in user_ids) if user_id}
+        if not ids:
+            return {}
+        rows = (await session.scalars(select(User).where(User.id.in_(ids)))).all()
+        return {str(row.id): _user_display_name(row) for row in rows}
+
+
+def _feedback_training_source(row: AlfredFeedback, user_labels: dict[str, str]) -> dict[str, Any]:
+    actor_id = str(row.actor_user_id) if getattr(row, "actor_user_id", None) else None
+    return _training_source_payload(
+        kind="user_feedback",
+        label=user_labels.get(actor_id or "", "") or "Unknown user",
+        detail=_source_channel_label(getattr(row, "source_channel", None)),
+        channel=getattr(row, "source_channel", None),
+        actor_user_id=actor_id,
+    )
+
+
+def _lesson_training_source(
+    row: AlfredLesson,
+    feedback_by_id: dict[str, AlfredFeedback],
+    user_labels: dict[str, str],
+) -> dict[str, Any]:
+    source_ids = _source_feedback_values(row)
+    actor_id = str(row.created_by_user_id) if getattr(row, "created_by_user_id", None) else None
+    actor_label = user_labels.get(actor_id or "", "")
+    if any(str(source_id).startswith("reflection:") for source_id in source_ids):
+        return _training_source_payload(
+            kind="self_learning",
+            label="Alfred Self Learning",
+            detail=f"from {actor_label}'s chat" if actor_label else "Post-turn reflection",
+            actor_user_id=actor_id,
+        )
+
+    for source_id in source_ids:
+        feedback_id = _coerce_uuid(source_id)
+        if not feedback_id:
+            continue
+        feedback = feedback_by_id.get(str(feedback_id))
+        if feedback:
+            return _feedback_training_source(feedback, user_labels)
+
+    if actor_id:
+        return _training_source_payload(
+            kind="manual_training",
+            label=actor_label or "Unknown user",
+            detail="Manual training",
+            actor_user_id=actor_id,
+        )
+
+    if not source_ids:
+        return _training_source_payload(kind="seed", label="Alfred Seed Data", detail="Built-in lesson")
+
+    return _training_source_payload(kind="system", label="Alfred Training", detail="Unknown source")
+
+
+def _eval_training_source(
+    row: AlfredEvalExample,
+    feedback_by_id: dict[str, AlfredFeedback],
+    user_labels: dict[str, str],
+) -> dict[str, Any]:
+    feedback = feedback_by_id.get(str(row.feedback_id)) if getattr(row, "feedback_id", None) else None
+    if feedback:
+        return _feedback_training_source(feedback, user_labels)
+    metadata = row.metadata_ if isinstance(getattr(row, "metadata_", None), dict) else {}
+    if metadata.get("seed"):
+        return _training_source_payload(kind="seed", label="Alfred Seed Data", detail="Built-in eval")
+    source_channel = metadata.get("source_channel")
+    if source_channel:
+        return _training_source_payload(
+            kind="system",
+            label="Alfred Training",
+            detail=_source_channel_label(str(source_channel)),
+            channel=str(source_channel),
+        )
+    return _training_source_payload(kind="system", label="Alfred Training", detail="Generated eval")
+
+
+def _source_feedback_values(row: Any) -> list[str]:
+    values = getattr(row, "source_feedback_ids", []) or []
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if str(value).strip()]
+
+
+def _training_source_payload(
+    *,
+    kind: str,
+    label: str,
+    detail: str | None = None,
+    channel: str | None = None,
+    actor_user_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "label": str(label or "Unknown source").strip()[:160] or "Unknown source",
+        "detail": str(detail or "").strip()[:160] or None,
+        "channel": str(channel or "").strip()[:40] or None,
+        "actor_user_id": actor_user_id,
+    }
+
+
+def _source_channel_label(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"dashboard", "ui", "web"}:
+        return "UI"
+    if normalized in {"whatsapp", "whatsapp_cloud"}:
+        return "WhatsApp"
+    if normalized == "discord":
+        return "Discord"
+    if normalized == "alfred":
+        return "Alfred"
+    if not normalized:
+        return "Unknown source"
+    return re.sub(r"[_-]+", " ", normalized).strip().title()
+
+
+def _user_display_name(user: User) -> str:
+    return (
+        str(getattr(user, "full_name", "") or "").strip()
+        or " ".join(
+            part
+            for part in [
+                str(getattr(user, "first_name", "") or "").strip(),
+                str(getattr(user, "last_name", "") or "").strip(),
+            ]
+            if part
+        )
+        or str(getattr(user, "username", "") or "").strip()
+        or "Unknown user"
+    )
+
 
 def parse_feedback_command(text: str) -> dict[str, str] | None:
     match = FEEDBACK_COMMAND_RE.match(text or "")
@@ -961,6 +1285,29 @@ def _reflection_text_unsafe(value: str) -> bool:
             "raw_payload",
             "private key",
         )
+    )
+
+
+def _lesson_text_unsafe_for_learning(value: str) -> bool:
+    lowered = str(value or "").lower()
+    if _reflection_text_unsafe(lowered):
+        return True
+    time_markers = ("time zone", "timezone", "utc offset", "gmt", "bst")
+    instruction_markers = ("mention", "state", "include", "explicit", "label", "show", "clarify")
+    prohibition_markers = (
+        "do not mention",
+        "never mention",
+        "do not include",
+        "never include",
+        "do not state",
+        "never state",
+        "avoid mention",
+        "avoid mentioning",
+    )
+    if any(marker in lowered for marker in time_markers) and any(marker in lowered for marker in prohibition_markers):
+        return False
+    return any(marker in lowered for marker in time_markers) and any(
+        marker in lowered for marker in instruction_markers
     )
 
 
@@ -1228,6 +1575,16 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
                         break
                     return parsed if isinstance(parsed, dict) else None
     return None
+
+
+async def _provider_complete(provider: Any, messages: list[ChatMessageInput], *, model_name: str | None) -> Any:
+    if model_name:
+        try:
+            return await provider.complete(messages, model=model_name)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+    return await provider.complete(messages)
 
 
 alfred_feedback_service = AlfredFeedbackService()

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.compliance_cameras_files_handlers import (
     analyze_camera_snapshot,
     export_presence_report_csv,
     generate_contractor_invoice_pdf,
@@ -11,10 +11,22 @@ from app.ai.tools import (
     lookup_dvla_vehicle,
     read_chat_attachment,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "lookup_dvla_vehicle": ("Compliance_DVLA",),
+    "analyze_camera_snapshot": ("Cameras", "Access_Diagnostics"),
+    "read_chat_attachment": ("Reports_Files", "General"),
+    "export_presence_report_csv": ("Reports_Files", "Access_Logs"),
+    "generate_contractor_invoice_pdf": ("Reports_Files", "Access_Logs"),
+    "get_camera_snapshot": ("Cameras",),
+}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="lookup_dvla_vehicle",
                     description="Look up UK vehicle details from the DVLA Vehicle Enquiry Service by registration number.",
@@ -110,4 +122,6 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=get_camera_snapshot,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+    )

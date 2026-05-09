@@ -2178,14 +2178,16 @@ def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -
 
 
 @pytest.mark.parametrize(
-    ("pronouns", "object_pronoun", "possessive_determiner"),
+    ("first_name", "pronouns", "object_pronoun", "possessive_determiner"),
     [
-        ("he/him", "him", "his"),
-        ("she/her", "her", "her"),
-        (None, "them", "their"),
+        ("Jason", "he/him", "him", "his"),
+        ("Jason", "she/her", "her", "her"),
+        ("Jason", None, "him", "his"),
+        ("Taylor", None, "them", "their"),
     ],
 )
 def test_notification_facts_use_person_pronouns(
+    first_name: str,
     pronouns: str | None,
     object_pronoun: str,
     possessive_determiner: str,
@@ -2202,9 +2204,9 @@ def test_notification_facts_use_person_pronouns(
         occurred_at=datetime(2026, 5, 5, 10, 0, tzinfo=UTC),
     )
     person = SimpleNamespace(
-        first_name="Jason",
+        first_name=first_name,
         last_name="Smith",
-        display_name="Jason Smith",
+        display_name=f"{first_name} Smith",
         pronouns=pronouns,
         group=SimpleNamespace(name="Family"),
     )
@@ -2228,7 +2230,7 @@ def test_notification_facts_use_person_pronouns(
         ),
         (
             None,
-            "Jason's Tesla Model Y has been detected at the gate. I've let them in.",
+            "Jason's Tesla Model Y has been detected at the gate. I've let him in.",
         ),
     ],
 )
@@ -2243,3 +2245,19 @@ def test_authorized_entry_message_uses_person_pronouns(pronouns: str | None, exp
     )
 
     assert service._authorized_entry_message(person, vehicle) == expected
+
+
+def test_authorized_entry_message_uses_them_for_unknown_unset_pronouns() -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(first_name="Taylor", display_name="Taylor Smith", pronouns=None)
+    vehicle = SimpleNamespace(
+        make="Tesla",
+        model="Model Y",
+        description=None,
+        registration_number="PE70DHX",
+    )
+
+    assert (
+        service._authorized_entry_message(person, vehicle)
+        == "Taylor's Tesla Model Y has been detected at the gate. I've let them in."
+    )

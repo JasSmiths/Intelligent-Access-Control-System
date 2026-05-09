@@ -175,6 +175,10 @@ notifications:
     token: HMAC(auth_secret_key, token); one-time consume with outcome.
   bus: publish notification.failed/skipped/sent for UI/logs; Automation Engine must not cycle on notification.* status events.
 
+events:
+  bus: backend/app/services/event_bus.py owns realtime transport; preserve existing string event names and payload shapes.
+  typed_publishers: backend/app/services/domain_events.py wraps event_bus; migrate one event at a time with compatibility tests.
+
 automation:
   service: backend/app/services/automations.py
   routes: /api/v1/automations/*
@@ -227,10 +231,16 @@ alfred:
     audit: alfred.tool.<tool>, actor Alfred_AI, provider/model/session, sanitized args/outcomes.
   limits: {MAX_AGENT_TOOL_ITERATIONS: 5, MAX_RELEVANT_HISTORY_MESSAGES: 8, api_message_max_chars: 4000, attachment_max: 25MB}
   memory: alfred_memories Postgres JSON + optional pgvector; users own user memory; Admin site memory; visitors no durable memory; redact secrets/transient visitor data.
+  semantic_cache: Redis TTL cache for semantic_search keyed by query, actor, and limit; cache failure must fall back silently.
   learning: feedback -> sanitized snapshots; review_then_learn requires Admin approval; repair is read-only and never executes mutations.
   tools:
-    registry: build_agent_tools() public API; domain tools in backend/app/ai/tool_groups/*; registry rejects duplicates.
-    add_tool: AgentTool name/description/JSON schema/handler + metadata categories/read_only/confirmation + permissions + tests.
+    registry: build_agent_tools() public API; domain tools in backend/app/ai/tool_groups/*; registry rejects duplicates and unsafe metadata.
+    metadata: tool group owns categories, safety_level, required_permissions, default_limit, examples/rate limits/return schema when needed.
+    safety_levels: read_only, confirmation_required, admin_only; non-read-only tools must require confirmation.
+    add_tool: add AgentTool + group metadata; confirmation tools must expose confirm/confirm_send/confirmed and return requires_confirmation before mutation.
+    handlers: keep tool handlers beside their domain catalog when practical; preserve app.ai.tools facade shims for public imports.
+    planner: domain cards are generated from registry metadata; do not add keyword prefilters or deterministic routing shortcuts.
+    tests: update backend/tests/test_chat_agent.py registry surface/permissions/card tests and touched domain tests.
     output: compact JSON; redact secrets/media; state changes require confirmation metadata/tests.
 
 frontend:
@@ -249,8 +259,10 @@ extension_points:
   gate_controller: backend/app/modules/gate/<vendor>.py -> GateController/GateCommandResult; registry in modules/registry.py.
   notification_sender: backend/app/modules/notifications/<channel>.py -> NotificationSender.send(title, body, NotificationContext); no raw DB/log blobs.
   notification_trigger_variable: backend/app/services/notifications.py catalogs + rendering/delivery tests.
+  domain_event: add typed publisher in backend/app/services/domain_events.py; keep existing event name/payload compatible and test it.
   automation_action: backend/app/services/automation_integration_actions.py or automations catalog; expose enabled/disabled_reason; dry-run has no side effects.
-  ai_tool: add to backend/app/ai/tool_groups/<domain>.py; registry assembles; update permission/confirmation metadata and backend/tests/test_chat_agent.py.
+  ai_tool: add to backend/app/ai/tool_groups/<domain>.py; declare group metadata there; registry assembles; update permission/confirmation tests in backend/tests/test_chat_agent.py.
+  ai_handler: expose handlers through backend/app/ai/tool_groups/<domain>_handlers.py; keep app.ai.tools shims stable while moving bodies.
 
 commands:
   setup:
@@ -261,6 +273,7 @@ commands:
     syntax: python3 -m compileall -q backend/app
     tests: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
     one: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+    alfred_ci: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
     restart: docker compose restart backend
   frontend:
     build: cd frontend && npm run build

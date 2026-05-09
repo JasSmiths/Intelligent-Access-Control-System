@@ -3,10 +3,19 @@ import { Bot, Check, Download, Link2, Loader2, RefreshCw, ThumbsDown, ThumbsUp, 
 
 import { api, Badge, titleCase, useSettings } from "../shared";
 
+type AlfredTrainingSource = {
+  kind: "user_feedback" | "self_learning" | "manual_training" | "seed" | "system" | string;
+  label: string;
+  detail: string | null;
+  channel: string | null;
+  actor_user_id: string | null;
+};
+
 type AlfredFeedbackRecord = {
   id: string;
   rating: "up" | "down" | string;
   source_channel: string;
+  source?: AlfredTrainingSource | null;
   original_user_prompt: string;
   original_assistant_response: string;
   reason: string | null;
@@ -24,6 +33,7 @@ type AlfredLessonRecord = {
   lesson: string;
   tags: string[];
   source_feedback_ids: string[];
+  source?: AlfredTrainingSource | null;
   confidence: number;
   status: string;
   created_at: string;
@@ -38,6 +48,7 @@ type AlfredEvalExample = {
   ideal_answer: string | null;
   corrected_answer: string | null;
   lesson: string | null;
+  source?: AlfredTrainingSource | null;
   created_at: string;
 };
 
@@ -267,6 +278,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                   />
                   <div className="alfred-training-meta">
                     <Badge tone={lesson.scope === "site" ? "purple" : "gray"}>{lesson.scope}</Badge>
+                    <TrainingSourcePill source={lessonSourceForDisplay(lesson, linkedFeedback)} />
                     <span>{Math.round(lesson.confidence * 100)}% confidence</span>
                     <span>{linkedFeedback.length} feedback</span>
                   </div>
@@ -297,6 +309,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                   <p>{lesson.lesson}</p>
                   <div className="alfred-training-meta">
                     <Badge tone={lesson.status === "active" ? "green" : "gray"}>{lesson.status}</Badge>
+                    <TrainingSourcePill source={lessonSourceForDisplay(lesson, linkedFeedback)} />
                     <span>{linkedFeedback.length} feedback</span>
                     <span>{linkedEvalCount} eval</span>
                     <span>{formatShortDate(lesson.updated_at)}</span>
@@ -332,7 +345,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                   ) : null}
                   <div className="alfred-training-meta">
                     <Badge tone={item.rating === "up" ? "green" : "red"}>{item.rating}</Badge>
-                    <span>{item.source_channel}</span>
+                    <TrainingSourcePill source={item.source} fallback={item.source_channel} />
                     <span>{linkedExamples.length} eval</span>
                     <span>{formatShortDate(item.created_at)}</span>
                     <span>#{shortId(item.id)}</span>
@@ -367,6 +380,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                     </div>
                   ) : null}
                   <div className="alfred-training-meta">
+                    <TrainingSourcePill source={example.source ?? sourceFeedback?.source} fallback={sourceFeedback?.source_channel} />
                     {sourceFeedback ? <span>Feedback #{shortId(sourceFeedback.id)}</span> : <span>Unlinked</span>}
                     <span>{formatShortDate(example.created_at)}</span>
                   </div>
@@ -382,6 +396,43 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
 
 function shortId(value: string) {
   return value.replaceAll("-", "").slice(0, 8);
+}
+
+function lessonSourceForDisplay(lesson: AlfredLessonRecord, linkedFeedback: AlfredFeedbackRecord[]) {
+  return lesson.source ?? linkedFeedback[0]?.source ?? null;
+}
+
+function TrainingSourcePill({ source, fallback }: { source?: AlfredTrainingSource | null; fallback?: string }) {
+  const label = formatTrainingSource(source, fallback);
+  const tone = trainingSourceTone(source);
+  return (
+    <span className={`alfred-training-source ${tone}`} title={label}>
+      {label}
+    </span>
+  );
+}
+
+function trainingSourceTone(source?: AlfredTrainingSource | null) {
+  if (source?.kind === "user_feedback" || source?.kind === "manual_training") return "user_feedback";
+  if (source?.kind === "self_learning") return "self_learning";
+  if (source?.kind === "seed") return "seed";
+  return "system";
+}
+
+function formatTrainingSource(source?: AlfredTrainingSource | null, fallback?: string) {
+  const fallbackLabel = fallback ? sourceChannelLabel(fallback) : "Unknown source";
+  if (!source) return fallbackLabel;
+  const label = source.label?.trim() || fallbackLabel;
+  const detail = source.detail?.trim();
+  return detail ? `${label} · ${detail}` : label;
+}
+
+function sourceChannelLabel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (["dashboard", "ui", "web"].includes(normalized)) return "UI";
+  if (normalized === "whatsapp" || normalized === "whatsapp_cloud") return "WhatsApp";
+  if (normalized === "discord") return "Discord";
+  return titleCase(value);
 }
 
 function EmptyTrainingState({ text }: { text: string }) {

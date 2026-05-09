@@ -3,7 +3,7 @@
 .reports-grid,
 .integrations-grid,
 .settings-grid {
-  padding: 20px 28px 30px;
+  padding: 20px 28px calc(30px + var(--alfred-launcher-clearance));
 }
 
 .dashboard-intro {

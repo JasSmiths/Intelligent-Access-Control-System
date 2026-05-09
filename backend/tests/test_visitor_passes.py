@@ -9,6 +9,7 @@ from app.ai import tools as ai_tools
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.access_events import AccessEventService
+from app.services.domain_events import publish_visitor_pass_status_changed
 from app.services.visitor_passes import (
     VisitorPassService,
     append_visitor_pass_whatsapp_history,
@@ -72,6 +73,49 @@ def test_visitor_pass_lifecycle_statuses() -> None:
 
     row.status = VisitorPassStatus.USED
     assert service.status_for(row, expected + timedelta(days=1)) == VisitorPassStatus.USED
+
+
+@pytest.mark.asyncio
+async def test_visitor_pass_status_changed_domain_event_preserves_payload_shape() -> None:
+    published: list[tuple[str, dict]] = []
+
+    class FakeBus:
+        async def publish(self, event_type: str, payload: dict) -> None:
+            published.append((event_type, payload))
+
+    visitor_payload = {"id": "pass-1", "status": "expired", "visitor_name": "Sarah"}
+
+    await publish_visitor_pass_status_changed(visitor_payload, bus=FakeBus())
+
+    assert published == [("visitor_pass.status_changed", {"visitor_pass": visitor_payload})]
+
+
+@pytest.mark.asyncio
+async def test_refresh_statuses_publishes_compatible_status_changed_event(monkeypatch) -> None:
+    service = VisitorPassService()
+    expected = datetime(2026, 4, 29, 15, 0, tzinfo=UTC)
+    row = visitor_pass(expected_time=expected, window_minutes=30)
+    published: list[tuple[str, dict]] = []
+
+    async def audit_noop(*_args, **_kwargs):
+        return None
+
+    async def fake_publish(event_type: str, payload: dict) -> None:
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr("app.services.visitor_passes.event_bus.publish", fake_publish)
+
+    changed = await service.refresh_statuses(
+        session=FakeVisitorPassSession([row]),
+        now=expected + timedelta(minutes=31),
+        publish=True,
+    )
+
+    assert changed == [row]
+    assert published == [
+        ("visitor_pass.status_changed", {"visitor_pass": serialize_visitor_pass(row)})
+    ]
 
 
 def test_calendar_visitor_pass_uses_asymmetric_valid_window() -> None:

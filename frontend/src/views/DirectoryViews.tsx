@@ -992,6 +992,14 @@ export function PersonModal({
     ));
   }, [form.first_name, pronounSelectionTouched]);
 
+  const suggestedPronounValue = suggestedPersonPronouns(form.first_name);
+  const autoDetectedUnsavedPronouns = Boolean(
+    suggestedPronounValue &&
+    form.pronouns === suggestedPronounValue &&
+    form.pronouns !== (person?.pronouns ?? "") &&
+    !pronounSelectionTouched
+  );
+
   React.useEffect(() => {
     if (!haDiscovery) return;
     const firstName = form.first_name.trim();
@@ -1140,7 +1148,12 @@ export function PersonModal({
             </select>
           </label>
           <label className="field">
-            <span>Pronouns</span>
+            <span className="field-label-row">
+              <span>Pronouns</span>
+              {autoDetectedUnsavedPronouns ? (
+                <span className="pronoun-auto-pill">Auto Detected - Click Save to Apply</span>
+              ) : null}
+            </span>
             <select value={form.pronouns} onChange={(event) => updatePronouns(event.target.value)}>
               <option value="">Unspecified</option>
               <option value="he/him">He / him</option>

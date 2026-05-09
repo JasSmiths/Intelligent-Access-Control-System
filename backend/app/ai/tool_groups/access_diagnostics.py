@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.access_diagnostics_handlers import (
     analyze_alert_snapshot,
     backfill_access_event_from_protect,
+    calculate_absence_duration,
     calculate_visit_duration,
     diagnose_access_event,
     get_telemetry_trace,
     investigate_access_incident,
     query_access_events,
+    query_alert_activity,
     query_anomalies,
     query_leaderboard,
     query_lpr_timing,
@@ -20,16 +22,57 @@ from app.ai.tools import (
     test_unifi_alarm_webhook,
     trigger_anomaly_alert,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_access_events": ("Access_Logs", "Access_Diagnostics", "General"),
+    "diagnose_access_event": ("Access_Diagnostics",),
+    "investigate_access_incident": ("Access_Diagnostics", "Access_Logs", "Gate_Hardware", "Notifications"),
+    "query_unifi_protect_events": ("Access_Diagnostics", "Cameras"),
+    "backfill_access_event_from_protect": ("Access_Diagnostics",),
+    "test_unifi_alarm_webhook": ("Access_Diagnostics", "Cameras"),
+    "query_lpr_timing": ("Access_Diagnostics", "Access_Logs"),
+    "query_vehicle_detection_history": ("Access_Logs", "Access_Diagnostics", "Compliance_DVLA"),
+    "get_telemetry_trace": ("Access_Diagnostics", "Users_Settings"),
+    "query_leaderboard": ("Access_Logs", "Compliance_DVLA"),
+    "query_anomalies": ("Access_Logs", "Access_Diagnostics", "General"),
+    "query_alert_activity": ("Access_Logs", "Access_Diagnostics", "General"),
+    "analyze_alert_snapshot": ("Access_Diagnostics", "Cameras"),
+    "summarize_access_rhythm": ("Access_Logs", "General"),
+    "calculate_visit_duration": ("Access_Logs",),
+    "calculate_absence_duration": ("Access_Logs",),
+    "trigger_anomaly_alert": ("Access_Logs", "Notifications"),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "backfill_access_event_from_protect",
+    "investigate_access_incident",
+    "test_unifi_alarm_webhook",
+    "trigger_anomaly_alert",
+}
+
+DEFAULT_LIMITS = {
+    "query_access_events": 10,
+    "query_anomalies": 10,
+    "query_alert_activity": 25,
+    "query_leaderboard": 10,
+    "query_lpr_timing": 25,
+    "query_unifi_protect_events": 25,
+    "get_telemetry_trace": 20,
+}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="query_access_events",
                     description=(
                         "LPR/access log lookup for arrivals, exits, denials, and who came or went. "
                         "Use this when the user semantically asks when or whether someone arrived, left, headed out, bolted, "
-                        "went, came in, got back, or changed site presence. Resolve fuzzy people/vehicles first when needed."
+                        "went, came in, got back, or changed site presence. This returns event timestamps and event lists, "
+                        "not elapsed durations. Resolve fuzzy people/vehicles first when needed."
                     ),
                     parameters={
                         "type": "object",
@@ -55,6 +98,10 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_access_events,
+                    return_schema={
+                        "answer_types": ["event_time", "access_event_list"],
+                        "not_sufficient_for": ["absence_duration", "visit_duration"],
+                    },
                 ),
         AgentTool(
                     name="diagnose_access_event",
@@ -310,6 +357,30 @@ def build_tools() -> list[AgentTool]:
                     handler=query_anomalies,
                 ),
         AgentTool(
+                    name="query_alert_activity",
+                    description=(
+                        "Return alerts raised and alerts resolved in a period. Use this for alert-only questions such as "
+                        "what alerts were raised today, what alerts were resolved today, or raised/resolved alert activity. "
+                        "This inspects alert/anomaly records only and does not include gate maintenance or malfunction summaries."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "severity": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["open", "active", "resolved", "all"],
+                                "description": "Defaults to all for raised/resolved activity.",
+                            },
+                            "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
+                            "search": {"type": "string", "description": "Optional alert text, plate, note, or context search."},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=query_alert_activity,
+                ),
+        AgentTool(
                     name="analyze_alert_snapshot",
                     description=(
                         "Analyze a retained active or resolved alert snapshot with the active vision-capable provider. "
@@ -340,7 +411,11 @@ def build_tools() -> list[AgentTool]:
                 ),
         AgentTool(
                     name="calculate_visit_duration",
-                    description="Calculate how long a person or group stayed on site today or recently.",
+                    description=(
+                        "Calculate on-site visit duration by pairing an entry with a following exit. "
+                        "Use for elapsed on-site duration questions, including how long someone stayed, visited, or was here. "
+                        "This returns a duration, not just an arrival timestamp."
+                    ),
                     parameters={
                         "type": "object",
                         "properties": {
@@ -352,6 +427,34 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=calculate_visit_duration,
+                    return_schema={"answer_types": ["visit_duration"], "fact_kind": "elapsed_duration"},
+                ),
+        AgentTool(
+                    name="calculate_absence_duration",
+                    description=(
+                        "Calculate off-site absence duration by pairing an exit with the next entry. "
+                        "Use for elapsed off-site duration questions, including ongoing still-away absence and returned absence. "
+                        "This is the inverse of visit duration: exit-to-entry, not entry-to-exit. "
+                        "By default, report the latest matched absence; use mode=total only when the user asks for total time out."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "person": {"type": "string"},
+                            "person_id": {"type": "string"},
+                            "vehicle_id": {"type": "string"},
+                            "group": {"type": "string"},
+                            "day": {"type": "string", "enum": ["today", "yesterday", "recent"]},
+                            "mode": {"type": "string", "enum": ["latest", "total"]},
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=calculate_absence_duration,
+                    return_schema={
+                        "answer_types": ["absence_duration"],
+                        "fact_kind": "elapsed_duration",
+                        "handles": ["ongoing_absence", "returned_absence"],
+                    },
                 ),
         AgentTool(
                     name="trigger_anomaly_alert",
@@ -369,4 +472,8 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=trigger_anomaly_alert,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+    )

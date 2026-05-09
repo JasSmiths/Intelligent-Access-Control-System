@@ -309,6 +309,8 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
   const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
   const [clearing, setClearing] = React.useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = React.useState(false);
+  const [clearError, setClearError] = React.useState("");
   const [liveFilter, setLiveFilter] = React.useState("all");
   const [countdownNow, setCountdownNow] = React.useState(() => Date.now());
   const reloadTimerRef = React.useRef<number | null>(null);
@@ -395,9 +397,9 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
   }, [refreshToken]);
 
   async function clearLogs() {
-    if (!window.confirm("Clear telemetry traces and artifacts? Audit history will be preserved.")) return;
     setClearing(true);
     setError("");
+    setClearError("");
     setNotice("");
     try {
       const payload = { scope: "telemetry" };
@@ -416,9 +418,12 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
       onClearRealtime();
       await loadTelemetry("reset");
       await loadTelemetryStorage();
+      setClearConfirmOpen(false);
       setNotice("Telemetry traces and artifacts cleared. Audit history was preserved.");
     } catch (clearError) {
-      setError(clearError instanceof Error ? clearError.message : "Unable to clear logs");
+      const message = clearError instanceof Error ? clearError.message : "Unable to clear logs";
+      setClearError(message);
+      setError(message);
     } finally {
       setClearing(false);
     }
@@ -546,13 +551,34 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
   return (
     <section className="view-stack telemetry-workspace">
       <Toolbar title="Telemetry & Audit" badge={logStorageLabel} icon={activeTab.icon}>
-        <button className="danger-button" onClick={clearLogs} type="button" disabled={clearing}>
+        <button
+          className="danger-button"
+          onClick={() => {
+            setClearError("");
+            setClearConfirmOpen(true);
+          }}
+          type="button"
+          disabled={clearing}
+        >
           <Trash2 size={15} /> {clearing ? "Clearing..." : "Clear Logs"}
         </button>
         <button className="secondary-button" onClick={refreshLogs} type="button">
           <RefreshCcw size={15} /> Refresh
         </button>
       </Toolbar>
+
+      {clearConfirmOpen ? (
+        <ClearLogsConfirmModal
+          error={clearError}
+          loading={clearing}
+          onCancel={() => {
+            if (clearing) return;
+            setClearConfirmOpen(false);
+            setClearError("");
+          }}
+          onConfirm={clearLogs}
+        />
+      ) : null}
 
       <div className="telemetry-layout">
         <aside className="telemetry-tabs" aria-label="Log categories">
@@ -652,6 +678,47 @@ export function LogsView({ logs, onClearRealtime, refreshToken }: { logs: Realti
         </div>
       </div>
     </section>
+  );
+}
+
+export function ClearLogsConfirmModal({
+  error,
+  loading,
+  onCancel,
+  onConfirm
+}: {
+  error: string;
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return createPortal(
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-logs-confirm-title">
+        <div className="modal-header">
+          <div className="gate-confirm-title">
+            <span className="gate-confirm-icon danger">
+              <Trash2 size={20} />
+            </span>
+            <div>
+              <h2 id="clear-logs-confirm-title">Clear Logs?</h2>
+              <p>Telemetry traces and artifacts will be purged. Audit history will be preserved.</p>
+            </div>
+          </div>
+        </div>
+        {error ? <div className="auth-error inline-error">{error}</div> : null}
+        <div className="modal-actions">
+          <button className="secondary-button" disabled={loading} onClick={onCancel} type="button">
+            Keep logs
+          </button>
+          <button className="danger-button" disabled={loading} onClick={onConfirm} type="button">
+            {loading ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+            {loading ? "Clearing..." : "Clear Logs"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 

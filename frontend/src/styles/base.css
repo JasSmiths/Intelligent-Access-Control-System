@@ -27,6 +27,7 @@
   --shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
   --shadow-strong: 0 18px 45px rgba(15, 23, 42, 0.16);
   --app-viewport-height: 100vh;
+  --alfred-launcher-clearance: 104px;
 }
 
 :root[data-theme="dark"] {
@@ -389,6 +390,7 @@ h2 {
 .main {
   min-height: var(--app-viewport-height);
   margin-left: 258px;
+  scroll-padding-bottom: var(--alfred-launcher-clearance);
 }
 
 .sidebar,

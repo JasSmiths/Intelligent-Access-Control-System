@@ -153,6 +153,7 @@ export type ChatMessageItem = {
   streaming?: boolean;
   userMessageId?: string | null;
   assistantMessageId?: string | null;
+  responseDurationMs?: number | null;
   feedback?: {
     rating?: "up" | "down";
     status?: "saving" | "saved" | "error";
@@ -239,6 +240,15 @@ export function cleanChatText(text: string, attachments: ChatAttachment[] = []) 
     cleaned = "Here's the latest snapshot.";
   }
   return cleaned;
+}
+
+export function formatChatResponseDuration(durationMs: number | null | undefined) {
+  if (durationMs === null || durationMs === undefined) return "";
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 export async function copyToClipboard(text: string) {
@@ -432,6 +442,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   const feedRef = React.useRef<HTMLDivElement | null>(null);
   const activeAssistantMessageRef = React.useRef<string | null>(null);
   const awaitingResponseRef = React.useRef(false);
+  const activeTurnStartedAtRef = React.useRef<number | null>(null);
   const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
   const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
@@ -444,6 +455,16 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     "--chat-vvh": `${Math.round(viewportHeight)}px`,
     "--chat-vv-top": `${Math.round(viewportTop)}px`
   } as React.CSSProperties;
+
+  const markTurnStarted = React.useCallback(() => {
+    activeTurnStartedAtRef.current = performance.now();
+  }, []);
+
+  const finishTurnDuration = React.useCallback(() => {
+    const startedAt = activeTurnStartedAtRef.current;
+    activeTurnStartedAtRef.current = null;
+    return startedAt === null ? null : Math.max(0, performance.now() - startedAt);
+  }, []);
 
   React.useEffect(() => {
     setShowTeaser(sessionStorage.getItem(teaserStorageKey) !== "true");
@@ -575,6 +596,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       }
       if (data.type === "chat.thinking") {
         awaitingResponseRef.current = true;
+        if (activeTurnStartedAtRef.current === null) markTurnStarted();
         setThinking(true);
         setToolStatus("Thinking...");
         setToolActivities([]);
@@ -666,6 +688,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       }
       if (data.type === "chat.response") {
         awaitingResponseRef.current = false;
+        const responseDurationMs = finishTurnDuration();
         const text = typeof payload.text === "string" ? payload.text : "";
         const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
         const confirmationAction = chatPendingAction(payload.pending_action) ?? chatConfirmationAction(payload.tool_results);
@@ -686,7 +709,8 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
 	                  confirmationAction,
 	                  streaming: false,
                     userMessageId,
-                    assistantMessageId
+                    assistantMessageId,
+                    responseDurationMs
 	                }
 	                : message
 	            );
@@ -700,7 +724,8 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
 	              attachments: responseAttachments,
 	              confirmationAction,
                 userMessageId,
-                assistantMessageId
+                assistantMessageId,
+                responseDurationMs
 	            }
 	          ];
         });
@@ -711,12 +736,14 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       }
       if (data.type === "chat.error") {
         awaitingResponseRef.current = false;
+        const responseDurationMs = finishTurnDuration();
         setMessages((current) => [
           ...current,
           {
             id: clientId("alfred-error"),
             role: "assistant",
-            text: typeof payload.message === "string" ? payload.message : "Alfred could not complete that request."
+            text: typeof payload.message === "string" ? payload.message : "Alfred could not complete that request.",
+            responseDurationMs
           }
         ]);
         setThinking(false);
@@ -732,6 +759,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       if (socketRef.current === socket) socketRef.current = null;
       const interruptedTurn = awaitingResponseRef.current;
       awaitingResponseRef.current = false;
+      activeTurnStartedAtRef.current = null;
       setConnected(false);
       setThinking(false);
       setToolStatus("");
@@ -762,7 +790,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [connectionNonce, open]);
+  }, [connectionNonce, finishTurnDuration, markTurnStarted, open]);
 
   React.useEffect(() => {
     if (!feedRef.current) return;
@@ -856,9 +884,10 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       }
     }));
     awaitingResponseRef.current = true;
+    markTurnStarted();
     setThinking(true);
     setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
-  }, [connected, sessionId, thinking]);
+  }, [connected, markTurnStarted, sessionId, thinking]);
 
   const submitFeedback = React.useCallback(async (
     message: ChatMessageItem,
@@ -991,6 +1020,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       ...current,
       { id: clientId("user"), role: "user", text, attachments }
     ]);
+    markTurnStarted();
     socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
     awaitingResponseRef.current = true;
     setDraft("");
@@ -999,7 +1029,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
     setThinking(true);
     setToolStatus("Thinking...");
-  }, [canSend, draft, readyAttachments, sessionId]);
+  }, [canSend, draft, markTurnStarted, readyAttachments, sessionId]);
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Escape" && llmPickerOpen) {
@@ -1360,6 +1390,11 @@ export function ChatMessageBubble({
             >
               <ThumbsDown size={13} />
             </button>
+            {message.responseDurationMs !== null && message.responseDurationMs !== undefined ? (
+              <small className="chat-response-duration" title="Response time">
+                {formatChatResponseDuration(message.responseDurationMs)}
+              </small>
+            ) : null}
             {message.feedback?.status === "saved" ? <small>Saved</small> : null}
             {message.feedback?.status === "error" ? <small className="error">{message.feedback.error}</small> : null}
           </div>
@@ -1531,6 +1566,9 @@ export function ChatAttachmentPreview({
 }
 
 export function TypingIndicator({ activities, status }: { activities: ChatToolActivity[]; status: string }) {
+  const activeActivity = activities.find((activity) => activity.status === "running" || activity.status === "requires_confirmation")
+    ?? activities[0];
+  const extraActivityCount = activeActivity ? Math.max(0, activities.length - 1) : 0;
   return (
     <motion.div
       className="typing-row"
@@ -1538,13 +1576,12 @@ export function TypingIndicator({ activities, status }: { activities: ChatToolAc
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
     >
-      {activities.length ? (
+      {activeActivity ? (
         <span className="typing-activities">
-          {activities.slice(0, 3).map((activity) => (
-            <span className={`typing-activity ${activity.status}`} key={activity.id}>
-              {activity.label}
-            </span>
-          ))}
+          <span className={`typing-activity ${activeActivity.status}`}>
+            {activeActivity.label}
+          </span>
+          {extraActivityCount ? <span className="typing-activity-count">+{extraActivityCount}</span> : null}
         </span>
       ) : status ? <span className="typing-status">{status}</span> : null}
       <span className="typing-bubble" aria-label="Alfred is typing">

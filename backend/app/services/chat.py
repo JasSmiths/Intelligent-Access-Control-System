@@ -24,9 +24,21 @@ from app.services.alfred.executor import can_execute_parallel
 from app.services.alfred.feedback import alfred_feedback_service
 from app.services.alfred.memory import alfred_memory_service
 from app.services.alfred.permissions import filter_tools_for_actor, validate_tool_call
-from app.services.alfred.planner import PlannerSelection, plan_with_llm, tools_for_selection
+from app.services.alfred.planner import PlannerSelection, ToolCallPlan, plan_with_llm, tools_for_selection
 from app.services.alfred.runtime import agent_status_payload, provider_agent_capability
 from app.services.alfred.streaming import emit_agent_state
+from app.services.alfred.answer_contracts import (
+    ANSWER_DRAFT_RESPONSE_SCHEMA,
+    AnswerDraft,
+    AnswerVerifierResult,
+    answer_artifacts_for_prompt,
+    extract_answer_artifacts,
+    parse_answer_draft,
+    rendered_answer_draft,
+    render_answer_from_artifacts,
+    select_answer_artifacts,
+    verify_answer_draft,
+)
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.chat_routing import ChatRoutingMixin
 from app.services.chat_contracts import (
@@ -40,7 +52,6 @@ from app.services.chat_contracts import (
     REACT_TOOL_PROTOCOL,
     RECENT_HISTORY_LIMIT,
     RELEVANT_HISTORY_SCAN_LIMIT,
-    STATE_CHANGING_TOOL_NAMES,
     SUPPORTED_INTENTS,
     SYSTEM_PROMPT,
     VISITOR_PASS_TOOL_NAMES,
@@ -330,6 +341,9 @@ class ChatService(ChatRoutingMixin):
 
     def _confirmed_tool_finishes_without_resume(self, tool_name: str) -> bool:
         return tool_name in {
+            "open_device",
+            "command_device",
+            "open_gate",
             "create_schedule",
             "update_schedule",
             "delete_schedule",
@@ -536,6 +550,8 @@ class ChatService(ChatRoutingMixin):
                 tools=visible_tools,
                 attachments=attachment_refs,
                 relevant_past_lessons=relevant_past_lessons,
+                model=self._planner_model_for_provider(runtime, provider.name),
+                reasoning_effort=self._alfred_planner_reasoning_effort(runtime),
             )
         except Exception as exc:
             logger.warning(
@@ -582,12 +598,17 @@ class ChatService(ChatRoutingMixin):
             )
 
         selected_tools = tools_for_selection(selection, visible_tools)
-        tool_labels = ", ".join(self._tool_status(tool.name).get("label", tool.name) for tool in selected_tools[:3])
+        planned_read_calls = self._planned_read_tool_calls(
+            selection,
+            selected_tools,
+            actor_context=actor_context,
+        )
+        selected_tool_count = len(planned_read_calls) if planned_read_calls else len(selected_tools)
         await emit_agent_state(
             status_callback,
             "tools_selected",
             "Working with selected IACS tools",
-            detail=tool_labels,
+            detail=f"{selected_tool_count} check{'s' if selected_tool_count != 1 else ''} queued",
         )
         route = IntentRoute(
             intents=tuple(selection.selected_domains or ("General",)),
@@ -609,46 +630,92 @@ class ChatService(ChatRoutingMixin):
                 "reason": selection.reason,
             },
         }
-        messages = await self._build_agent_messages(
-            session_uuid,
-            tool_results,
-            selected_tools,
-            route,
-            actor_context=prompt_context,
-        )
-        try:
-            result = await self._run_provider_agent_loop(
-                provider,
-                session_uuid,
-                messages,
+        result = LlmResult(text="")
+        planned_pending_action: dict[str, Any] | None = None
+        planned_direct_answer = False
+        if planned_read_calls:
+            tool_results.extend(
+                await self._execute_tool_batch(
+                    session_uuid,
+                    planned_read_calls,
+                    selected_tools,
+                    status_callback=status_callback,
+                    force_parallel=True,
+                )
+            )
+            repaired_results = await self._repair_missing_planned_answer_type(
+                selection,
                 tool_results,
+                session_uuid,
+                status_callback=status_callback,
+                actor_context=actor_context,
+            )
+            tool_results.extend(repaired_results)
+            planned_pending_action = await self._pending_confirmation_from_planned_results(
+                session_uuid,
+                tool_results,
+                route,
                 selected_tools,
-                memory,
-                route=route,
+                provider_name=provider.name,
                 user_message=message,
-                attachments=attachment_refs,
-                actor_context=prompt_context,
+                user_id=str(user.get("id") or ""),
+                actor_context=actor_context,
                 status_callback=status_callback,
             )
-            if isinstance(result, ChatTurnResult):
-                return result
-        except ProviderNotConfiguredError as exc:
-            logger.info(
-                "llm_provider_not_configured",
-                extra={"provider": provider.name, "error": str(exc)},
+            if planned_pending_action:
+                result = LlmResult(text=self._fallback_text(tool_results))
+            planned_direct_answer = self._planned_results_can_render_directly(tool_results)
+        if (
+            not planned_pending_action
+            and not planned_direct_answer
+            and not select_answer_artifacts(extract_answer_artifacts(tool_results))
+        ):
+            messages = await self._build_agent_messages(
+                session_uuid,
+                tool_results,
+                selected_tools,
+                route,
+                actor_context=prompt_context,
             )
-            return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
-        except Exception as exc:
-            logger.warning(
-                "llm_provider_failed",
-                extra={"provider": provider.name, "error": str(exc)},
-            )
-            return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
+            try:
+                result = await self._run_provider_agent_loop(
+                    provider,
+                    session_uuid,
+                    messages,
+                    tool_results,
+                    selected_tools,
+                    memory,
+                    route=route,
+                    user_message=message,
+                    attachments=attachment_refs,
+                    actor_context=prompt_context,
+                    status_callback=status_callback,
+                    model=self._interactive_model_for_provider(runtime, provider.name),
+                    reasoning_effort=self._alfred_reasoning_effort(runtime),
+                )
+                if isinstance(result, ChatTurnResult):
+                    return result
+            except ProviderNotConfiguredError as exc:
+                logger.info(
+                    "llm_provider_not_configured",
+                    extra={"provider": provider.name, "error": str(exc)},
+                )
+                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
+            except Exception as exc:
+                logger.warning(
+                    "llm_provider_failed",
+                    extra={"provider": provider.name, "error": str(exc)},
+                )
+                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
 
         await emit_agent_state(status_callback, "composing", "Composing answer")
         response_attachments = self._attachments_from_tool_results(tool_results)
-        raw_text = result.text or self._fallback_text(tool_results)
-        if self._should_replace_with_diagnostic_answer(message, raw_text, tool_results):
+        answer_artifacts = select_answer_artifacts(extract_answer_artifacts(tool_results))
+        if answer_artifacts:
+            raw_text = self._render_verified_artifact_answer(provider, runtime, artifacts=answer_artifacts)
+        else:
+            raw_text = result.text or self._fallback_text(tool_results)
+        if not answer_artifacts and self._should_replace_with_diagnostic_answer(message, raw_text, tool_results):
             raw_text = self._access_diagnostic_direct_text(self._diagnostic_output(tool_results) or {})
         text = self._clean_assistant_text(raw_text, response_attachments)
         assistant_message_id = await self._append_message(
@@ -674,16 +741,19 @@ class ChatService(ChatRoutingMixin):
             user_id=str(user.get("id") or "") or None,
         )
         if not pending_action:
-            await alfred_memory_service.remember_from_turn(
-                provider,
-                user_message=message,
-                assistant_text=text,
-                tool_results=tool_results,
-                actor_context=actor_context,
-                session_id=str(session_uuid),
-            )
+            background_model = self._background_model_for_provider(runtime, provider.name)
+            if bool(getattr(runtime, "alfred_memory_extraction_enabled", False)):
+                self._schedule_memory_remember(
+                    provider,
+                    user_message=message,
+                    assistant_text=text,
+                    tool_results=tool_results,
+                    actor_context=actor_context,
+                    session_id=str(session_uuid),
+                    model_name=background_model,
+                )
             schedule_reflection = getattr(alfred_feedback_service, "schedule_reflection", None)
-            if callable(schedule_reflection):
+            if bool(getattr(runtime, "alfred_reflection_enabled", False)) and callable(schedule_reflection):
                 schedule_reflection(
                     provider,
                     user_message=message,
@@ -692,7 +762,7 @@ class ChatService(ChatRoutingMixin):
                     actor_context=actor_context,
                     session_id=str(session_uuid),
                     provider_name=provider.name,
-                    model_name=self._model_for_provider(runtime, provider.name),
+                    model_name=background_model,
                 )
         await event_bus.publish(
             "chat.message",
@@ -802,6 +872,8 @@ class ChatService(ChatRoutingMixin):
         attachments: list[dict[str, Any]] | None = None,
         actor_context: dict[str, Any] | None = None,
         status_callback: StatusCallback | None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> LlmResult | ChatTurnResult:
         tool_schemas = [tool.as_llm_tool() for tool in selected_tools]
         allowed_tool_names = {tool.name for tool in selected_tools}
@@ -812,7 +884,13 @@ class ChatService(ChatRoutingMixin):
             raise IntentRouterError("Alfred 3.0 ReAct tool routing requires a hosted LLM provider.")
 
         for iteration in range(MAX_AGENT_TOOL_ITERATIONS):
-            result = await provider.complete(messages, tools=tool_schemas)
+            result = await self._provider_complete(
+                provider,
+                messages,
+                tools=tool_schemas,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
             final_text = self._react_final_from_result(result)
             if final_text:
                 return LlmResult(text=final_text, raw=result.raw)
@@ -1056,8 +1134,231 @@ class ChatService(ChatRoutingMixin):
     def _tool_call_fingerprint(self, call: ToolCall) -> str:
         return f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
 
+    def _planned_read_tool_calls(
+        self,
+        selection: PlannerSelection,
+        selected_tools: list[AgentTool],
+        *,
+        actor_context: dict[str, Any] | None,
+    ) -> list[ToolCall]:
+        if not selection.planned_tool_calls:
+            return []
+        selected_by_name = {tool.name: tool for tool in selected_tools}
+        selected_names = set(selected_by_name)
+        calls: list[ToolCall] = []
+        for index, plan in enumerate(selection.planned_tool_calls[:8]):
+            call = self._planned_read_tool_call(
+                plan,
+                index=index,
+                selected_by_name=selected_by_name,
+                selected_names=selected_names,
+                actor_context=actor_context,
+            )
+            if call is None:
+                return []
+            calls.append(call)
+        return calls
+
+    def _planned_read_tool_call(
+        self,
+        plan: ToolCallPlan,
+        *,
+        index: int,
+        selected_by_name: dict[str, AgentTool],
+        selected_names: set[str],
+        actor_context: dict[str, Any] | None,
+    ) -> ToolCall | None:
+        tool = selected_by_name.get(plan.name)
+        if not tool or not tool.read_only or tool.requires_confirmation:
+            if not tool or not tool.requires_confirmation:
+                return None
+        denial = validate_tool_call(
+            plan.name,
+            selected_tool_names=selected_names,
+            tools_by_name=self._tools,
+            actor_context=actor_context,
+        )
+        if denial:
+            return None
+        arguments = self._sanitize_planned_tool_arguments(plan.arguments, tool.parameters)
+        if arguments is None:
+            return None
+        if tool.requires_confirmation:
+            return self._safe_state_changing_call(
+                ToolCall(
+                    f"planned-{index}-{uuid.uuid4().hex[:8]}",
+                    plan.name,
+                    arguments,
+                )
+            )
+        return ToolCall(
+            f"planned-{index}-{uuid.uuid4().hex[:8]}",
+            plan.name,
+            arguments,
+        )
+
+    def _sanitize_planned_tool_arguments(
+        self,
+        arguments: dict[str, Any],
+        parameters: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+        required = parameters.get("required") if isinstance(parameters.get("required"), list) else []
+        additional_allowed = parameters.get("additionalProperties") is not False
+        sanitized: dict[str, Any] = {}
+        for key, value in arguments.items():
+            if key not in properties:
+                if additional_allowed:
+                    sanitized[str(key)] = value
+                    continue
+                continue
+            spec = properties.get(key)
+            if isinstance(spec, dict) and isinstance(spec.get("enum"), list) and value not in spec["enum"]:
+                return None
+            if (
+                isinstance(spec, dict)
+                and spec.get("type") == "array"
+                and isinstance(value, list)
+                and isinstance(spec.get("items"), dict)
+                and isinstance(spec["items"].get("enum"), list)
+                and any(item not in spec["items"]["enum"] for item in value)
+            ):
+                return None
+            sanitized[str(key)] = value
+        if any(str(key) not in sanitized for key in required):
+            return None
+        return sanitized
+
+    async def _repair_missing_planned_answer_type(
+        self,
+        selection: PlannerSelection,
+        tool_results: list[dict[str, Any]],
+        session_id: uuid.UUID,
+        *,
+        status_callback: StatusCallback | None,
+        actor_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        target_tool_name = {
+            "absence_duration": "calculate_absence_duration",
+            "visit_duration": "calculate_visit_duration",
+        }.get(selection.requested_answer_type)
+        if not target_tool_name:
+            return []
+        existing_artifacts = extract_answer_artifacts(tool_results)
+        if any(artifact.answer_type == selection.requested_answer_type for artifact in existing_artifacts):
+            return []
+        if any(result.get("name") == target_tool_name for result in tool_results):
+            return []
+        tool = self._tools.get(target_tool_name)
+        if not tool or not tool.read_only or tool.requires_confirmation:
+            return []
+        denial = validate_tool_call(
+            target_tool_name,
+            selected_tool_names={target_tool_name},
+            tools_by_name=self._tools,
+            actor_context=actor_context,
+        )
+        if denial:
+            return []
+        arguments = self._duration_repair_arguments(selection, tool_results, target_tool_name)
+        sanitized = self._sanitize_planned_tool_arguments(arguments, tool.parameters)
+        if sanitized is None:
+            return []
+        await emit_agent_state(
+            status_callback,
+            "repairing_tool_plan",
+            "Completing answer facts",
+            detail="duration check",
+        )
+        return await self._execute_tool_batch(
+            session_id,
+            [ToolCall(f"repair-{uuid.uuid4().hex[:8]}", target_tool_name, sanitized)],
+            [tool],
+            status_callback=status_callback,
+            force_parallel=True,
+        )
+
+    def _duration_repair_arguments(
+        self,
+        selection: PlannerSelection,
+        tool_results: list[dict[str, Any]],
+        target_tool_name: str,
+    ) -> dict[str, Any]:
+        allowed = {"person", "person_id", "vehicle_id", "group", "day"}
+        if target_tool_name == "calculate_absence_duration":
+            allowed.add("mode")
+        for source in (
+            *(plan.arguments for plan in selection.planned_tool_calls),
+            *(result.get("arguments") for result in tool_results if isinstance(result.get("arguments"), dict)),
+        ):
+            if not isinstance(source, dict):
+                continue
+            arguments = {key: source[key] for key in allowed if source.get(key) not in (None, "", [], {})}
+            if arguments:
+                break
+        else:
+            arguments = {}
+        arguments.setdefault("day", "today")
+        if target_tool_name == "calculate_absence_duration":
+            arguments.setdefault("mode", "latest")
+        return arguments
+
+    async def _pending_confirmation_from_planned_results(
+        self,
+        session_id: uuid.UUID,
+        tool_results: list[dict[str, Any]],
+        route: IntentRoute,
+        selected_tools: list[AgentTool],
+        *,
+        provider_name: str,
+        user_message: str,
+        user_id: str,
+        actor_context: dict[str, Any],
+        status_callback: StatusCallback | None,
+    ) -> dict[str, Any] | None:
+        pending_result = next(
+            (
+                result
+                for result in reversed(tool_results)
+                if isinstance(result.get("output"), dict) and result["output"].get("requires_confirmation")
+            ),
+            None,
+        )
+        if not pending_result:
+            return None
+        pending_action = await self._store_pending_agent_action(
+            session_id,
+            pending_result,
+            tool_results,
+            route,
+            selected_tools,
+            provider_name=provider_name,
+            user_message=user_message,
+            user_id=user_id,
+            actor_context=actor_context,
+            iteration=0,
+        )
+        if status_callback:
+            await status_callback({"event": "chat.confirmation_required", **pending_action})
+        return pending_action
+
+    def _planned_results_can_render_directly(self, tool_results: list[dict[str, Any]]) -> bool:
+        direct_tools = {
+            "open_device",
+            "command_device",
+            "open_gate",
+            "query_device_states",
+            "query_alert_activity",
+            "calculate_absence_duration",
+            "calculate_visit_duration",
+            "query_access_events",
+            "verify_schedule_access",
+        }
+        return bool(tool_results) and all(str(result.get("name") or "") in direct_tools for result in tool_results)
+
     def _safe_state_changing_call(self, call: ToolCall) -> ToolCall:
-        if call.name not in STATE_CHANGING_TOOL_NAMES:
+        tool = self._tools.get(call.name)
+        if not tool or not tool.requires_confirmation:
             return call
         arguments = dict(call.arguments)
         if "confirm" in arguments or call.name != "test_notification_workflow":
@@ -1485,7 +1786,7 @@ class ChatService(ChatRoutingMixin):
         call = ToolCall(
             "guided-update-schedule",
             "update_schedule",
-            {"schedule_name": name, "time_blocks": time_blocks},
+            {"schedule_name": name, "time_blocks": time_blocks, "confirm": True},
         )
         tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
         memory.pop("pending_schedule_create", None)
@@ -1622,13 +1923,252 @@ class ChatService(ChatRoutingMixin):
             "turn_snapshot": sanitized,
         }
 
+    async def _compose_verified_artifact_answer(
+        self,
+        provider: Any,
+        runtime: Any,
+        *,
+        message: str,
+        artifacts: list[Any],
+        status_callback: StatusCallback | None,
+    ) -> str:
+        fallback_text = render_answer_from_artifacts(artifacts)
+        draft = await self._draft_artifact_answer(
+            provider,
+            runtime,
+            message=message,
+            artifacts=artifacts,
+            fallback_text=fallback_text,
+        )
+        verification = verify_answer_draft(draft, artifacts)
+        repair_count = 0
+        if not verification.approved:
+            await emit_agent_state(
+                status_callback,
+                "verifying",
+                "Repairing answer against tool facts",
+                detail="; ".join(verification.reasons[:2]),
+            )
+            repair_count = 1
+            draft = await self._draft_artifact_answer(
+                provider,
+                runtime,
+                message=message,
+                artifacts=artifacts,
+                fallback_text=fallback_text,
+                verifier_reasons=verification.reasons,
+            )
+            verification = verify_answer_draft(draft, artifacts)
+
+        fallback_used = not verification.approved or draft is None
+        text = fallback_text if fallback_used else draft.answer_text.strip()
+        self._audit_answer_contract(
+            artifacts=artifacts,
+            verification=verification,
+            repair_count=repair_count,
+            fallback_used=fallback_used,
+            provider_name=getattr(provider, "name", ""),
+            model_name=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
+        )
+        return text or fallback_text
+
+    def _render_verified_artifact_answer(
+        self,
+        provider: Any,
+        runtime: Any,
+        *,
+        artifacts: list[Any],
+    ) -> str:
+        selected = select_answer_artifacts(artifacts)
+        text = render_answer_from_artifacts(selected)
+        verification = verify_answer_draft(rendered_answer_draft(text, selected), selected)
+        fallback_used = not verification.approved
+        self._audit_answer_contract(
+            artifacts=selected,
+            verification=verification,
+            repair_count=0,
+            fallback_used=fallback_used,
+            provider_name=getattr(provider, "name", ""),
+            model_name=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
+        )
+        return text
+
+    async def _draft_artifact_answer(
+        self,
+        provider: Any,
+        runtime: Any,
+        *,
+        message: str,
+        artifacts: list[Any],
+        fallback_text: str,
+        verifier_reasons: list[str] | None = None,
+    ) -> AnswerDraft | None:
+        system_prompt = (
+            "You are Alfred composing a final IACS answer from validated AnswerArtifact JSON only. "
+            "Use only the facts in the artifacts; do not add extra people, times, durations, statuses, or causes. "
+            "Return JSON only. Keep the answer human, warm, lightly characterful, and concise. "
+            "Simple factual questions usually need one sentence. "
+            "Never mention timezone names, timezone abbreviations, UTC offsets, internal IDs, raw JSON, or full-name parentheses. "
+            "Use the provided display_value strings exactly for required facts."
+        )
+        user_payload: dict[str, Any] = {
+            "user_message": message,
+            "answer_artifacts": answer_artifacts_for_prompt(artifacts),
+            "safe_fallback_text": fallback_text,
+            "voice_profile": {
+                "style": "natural_concise",
+                "personality": "warm and lightly characterful",
+                "accuracy_priority": "accuracy beats clever wording",
+            },
+        }
+        if verifier_reasons:
+            user_payload["repair_required"] = verifier_reasons
+        try:
+            result = await self._provider_complete(
+                provider,
+                [
+                    ChatMessageInput("system", system_prompt),
+                    ChatMessageInput("user", json.dumps(user_payload, separators=(",", ":"), default=str)),
+                ],
+                response_schema=ANSWER_DRAFT_RESPONSE_SCHEMA,
+                model=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
+                reasoning_effort=self._alfred_reasoning_effort(runtime),
+            )
+        except Exception as exc:
+            logger.info(
+                "alfred_answer_composer_failed",
+                extra={"provider": getattr(provider, "name", ""), "error": str(exc)[:180]},
+            )
+            return None
+        return parse_answer_draft(result.text)
+
+    async def _provider_complete(
+        self,
+        provider: Any,
+        messages: list[ChatMessageInput],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_results: list[dict[str, Any]] | None = None,
+        response_schema: dict[str, Any] | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LlmResult:
+        options = {
+            "tools": tools,
+            "tool_results": tool_results,
+            "response_schema": response_schema,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+        }
+        clean_options = {key: value for key, value in options.items() if value is not None and value != ""}
+        try:
+            return await provider.complete(messages, **clean_options)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            legacy_options = {
+                key: value
+                for key, value in {"tools": tools, "tool_results": tool_results}.items()
+                if value is not None
+            }
+            return await provider.complete(messages, **legacy_options)
+
+    def _audit_answer_contract(
+        self,
+        *,
+        artifacts: list[Any],
+        verification: AnswerVerifierResult,
+        repair_count: int,
+        fallback_used: bool,
+        provider_name: str,
+        model_name: str | None,
+    ) -> None:
+        context = get_chat_tool_context()
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_ALFRED,
+            action="alfred.answer_contract.verify",
+            actor="Alfred_AI",
+            actor_user_id=context.get("user_id"),
+            target_entity="AlfredAnswerContract",
+            target_label="; ".join(str(getattr(artifact, "answer_type", "")) for artifact in artifacts[:3]),
+            outcome="fallback" if fallback_used else "success",
+            level="warning" if fallback_used else "info",
+            metadata={
+                "session_id": context.get("session_id"),
+                "provider": provider_name,
+                "model": model_name,
+                "artifact_count": len(artifacts),
+                "artifact_types": [getattr(artifact, "answer_type", "") for artifact in artifacts],
+                "domains": [getattr(artifact, "domain", "") for artifact in artifacts],
+                "verifier_passed": verification.approved,
+                "verifier_reasons": verification.reasons,
+                "repair_count": repair_count,
+                "fallback_used": fallback_used,
+            },
+        )
+
     def _safe_provider_error(self, exc: Exception) -> str:
         detail = str(exc).strip() or exc.__class__.__name__
         detail = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", detail)
         detail = re.sub(r"(?i)(api[_-]?key|x-api-key|key)=([^&\s]+)", r"\1=[redacted]", detail)
         return detail[:300]
 
+    def _interactive_model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
+        configured = str(getattr(runtime, "alfred_interactive_model", "") or "").strip()
+        provider_name = provider_name.lower()
+        if provider_name == "openai":
+            if configured:
+                return configured
+            provider_model = str(getattr(runtime, "openai_model", "") or "").strip()
+            return "gpt-5.4" if "nano" in provider_model.lower() else provider_model or None
+        if provider_name == "gemini" and configured.startswith("gemini"):
+            return configured
+        if provider_name in {"claude", "anthropic"} and configured.startswith("claude"):
+            return configured
+        if provider_name == "ollama" and configured and not configured.startswith(("gpt-", "gemini", "claude")):
+            return configured
+        return None
+
+    def _alfred_reasoning_effort(self, runtime: Any) -> str | None:
+        effort = str(getattr(runtime, "alfred_reasoning_effort", "medium") or "medium").strip().lower()
+        return effort if effort in {"low", "medium", "high", "xhigh"} else "medium"
+
+    def _alfred_planner_reasoning_effort(self, runtime: Any) -> str | None:
+        effort = self._alfred_reasoning_effort(runtime)
+        if effort in {"medium", "high", "xhigh"}:
+            return "low"
+        return effort
+
+    def _planner_model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
+        configured = str(getattr(runtime, "alfred_planner_model", "") or "").strip()
+        provider_name = provider_name.lower()
+        if provider_name == "openai":
+            return configured or self._interactive_model_for_provider(runtime, provider_name)
+        if provider_name == "gemini" and configured.startswith("gemini"):
+            return configured
+        if provider_name in {"claude", "anthropic"} and configured.startswith("claude"):
+            return configured
+        if provider_name == "ollama" and configured and not configured.startswith(("gpt-", "gemini", "claude")):
+            return configured
+        return self._interactive_model_for_provider(runtime, provider_name)
+
+    def _background_model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
+        configured = str(getattr(runtime, "alfred_background_model", "") or "").strip()
+        provider_name = provider_name.lower()
+        if provider_name == "openai":
+            return configured or str(getattr(runtime, "openai_model", "") or "").strip() or None
+        if provider_name == "gemini" and configured.startswith("gemini"):
+            return configured
+        if provider_name in {"claude", "anthropic"} and configured.startswith("claude"):
+            return configured
+        if provider_name == "ollama" and configured and not configured.startswith(("gpt-", "gemini", "claude")):
+            return configured
+        return None
+
     def _model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
+        interactive = self._interactive_model_for_provider(runtime, provider_name)
+        if interactive:
+            return interactive
         return {
             "openai": getattr(runtime, "openai_model", None),
             "gemini": getattr(runtime, "gemini_model", None),
@@ -1664,18 +2204,57 @@ class ChatService(ChatRoutingMixin):
         cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
         cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
         cleaned = cleaned.replace("***", "")
-        cleaned = self._strip_local_time_labels(cleaned)
         cleaned = self._strip_redundant_precise_time(cleaned)
         cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        raw_payload = self._raw_json_response_payload(cleaned)
+        if raw_payload is not None:
+            return self._structured_payload_direct_text(raw_payload)
         if not cleaned and any(attachment.get("kind") == "image" for attachment in attachments):
             return "Here's the latest snapshot."
         return cleaned
 
-    def _strip_local_time_labels(self, text: str) -> str:
-        cleaned = re.sub(r"\s*\((?:Europe/London)\)", "", text)
-        cleaned = re.sub(r"\s+Europe/London\b", "", cleaned)
-        return cleaned
+    def _raw_json_response_payload(self, text: str) -> Any | None:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return None
+        if candidate.startswith('"') and candidate.endswith('"'):
+            try:
+                unwrapped = json.loads(candidate)
+            except json.JSONDecodeError:
+                unwrapped = None
+            if isinstance(unwrapped, str):
+                candidate = unwrapped.strip()
+        if not (
+            (candidate.startswith("[") and candidate.endswith("]"))
+            or (candidate.startswith("{") and candidate.endswith("}"))
+        ):
+            return None
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, (dict, list)) else None
+
+    def _structured_payload_direct_text(self, payload: Any) -> str:
+        if isinstance(payload, list):
+            if len(payload) == 1 and isinstance(payload[0], dict):
+                return self._structured_payload_direct_text(payload[0])
+            return (
+                f"I checked the system and found {len(payload)} structured result"
+                f"{'s' if len(payload) != 1 else ''}, but I need to summarize them before showing them."
+            )
+        if not isinstance(payload, dict):
+            return "I checked the system, but I need to summarize the result before showing it."
+        if payload.get("absence_human") or payload.get("absence_seconds") is not None:
+            return self._absence_duration_direct_text(payload)
+        if payload.get("duration_human") or payload.get("duration_seconds") is not None:
+            return self._visit_duration_direct_text(payload)
+        if payload.get("requires_confirmation"):
+            return str(payload.get("detail") or "That action needs confirmation before I can do it.")
+        if payload.get("error"):
+            return str(payload.get("error"))
+        return "I checked the system, but I need to summarize the result before showing it."
 
     def _strip_redundant_precise_time(self, text: str) -> str:
         return re.sub(r"\b(\d{1,2}:\d{2})\s*\(\1:\d{2}(?:\.\d+)?\)", r"\1", text)
@@ -1991,6 +2570,39 @@ class ChatService(ChatRoutingMixin):
 
         await self._save_memory(session_id, memory)
 
+    def _schedule_memory_remember(
+        self,
+        provider: Any,
+        *,
+        user_message: str,
+        assistant_text: str,
+        tool_results: list[dict[str, Any]],
+        actor_context: dict[str, Any],
+        session_id: str,
+        model_name: str | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            alfred_memory_service.remember_from_turn(
+                provider,
+                user_message=user_message,
+                assistant_text=assistant_text,
+                tool_results=list(tool_results),
+                actor_context=dict(actor_context),
+                session_id=session_id,
+                model_name=model_name,
+            )
+        )
+
+        def _log_failure(done: asyncio.Task[int]) -> None:
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.info("alfred_memory_remember_task_failed", extra={"error": str(exc)[:180]})
+
+        task.add_done_callback(_log_failure)
+
 
 
 
@@ -2271,9 +2883,7 @@ class ChatService(ChatRoutingMixin):
             or tool_name.replace("_", " ")
         ).strip()
         title = self._confirmation_title(tool_name, target, output)
-        description = self._strip_local_time_labels(
-            str(output.get("detail") or "This action needs confirmation before Alfred continues.")
-        )
+        description = str(output.get("detail") or "This action needs confirmation before Alfred continues.")
         return {
             "confirmation_id": pending.get("id"),
             "session_id": pending.get("session_id"),
@@ -2364,7 +2974,8 @@ class ChatService(ChatRoutingMixin):
             output.get("opened") is False and not output.get("requires_confirmation")
         )
         requires_confirmation = bool(output.get("requires_confirmation"))
-        state_changing = call.name in STATE_CHANGING_TOOL_NAMES
+        tool = self._tools.get(call.name)
+        state_changing = bool(tool and tool.requires_confirmation)
         emit_audit_log(
             category=TELEMETRY_CATEGORY_ALFRED,
             action=f"alfred.tool.{call.name}",
@@ -2441,6 +3052,7 @@ class ChatService(ChatRoutingMixin):
             "query_anomalies": "Checking anomaly records...",
             "summarize_access_rhythm": "Summarizing site rhythm...",
             "calculate_visit_duration": "Calculating visit duration...",
+            "calculate_absence_duration": "Calculating absence duration...",
             "query_leaderboard": "Checking Top Charts...",
             "trigger_anomaly_alert": "Preparing alert notification...",
             "get_system_users": "Checking user directory...",
@@ -2556,6 +3168,9 @@ class ChatService(ChatRoutingMixin):
     def _fallback_text(self, tool_results: list[dict[str, Any]]) -> str:
         if not tool_results:
             return "I don't have live system context for that yet. Point me at a person, vehicle, gate, or schedule and I'll take it from there."
+        artifacts = extract_answer_artifacts(tool_results)
+        if artifacts:
+            return render_answer_from_artifacts(artifacts)
         latest = tool_results[-1]
         tool_name = str(latest.get("name") or "")
         output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
@@ -2658,6 +3273,10 @@ class ChatService(ChatRoutingMixin):
             registration_number = output.get("registration_number") or "That vehicle"
             count = output.get("total_count")
             return f"{registration_number} has been detected at the gate {count} time{'s' if count != 1 else ''}."
+        if tool_name == "calculate_visit_duration":
+            return self._visit_duration_direct_text(output)
+        if tool_name == "calculate_absence_duration":
+            return self._absence_duration_direct_text(output)
         if tool_name == "query_device_states":
             devices = output.get("devices") if isinstance(output.get("devices"), list) else []
             if not devices:
@@ -2693,7 +3312,65 @@ class ChatService(ChatRoutingMixin):
             return "I found no leaderboard entries yet. The podium is spotless."
         if tool_name == "delete_schedule":
             return self._schedule_delete_direct_text(output)
-        return json.dumps([result["output"] for result in tool_results], default=str)
+        return "I checked the system, but I need to summarize the result before showing it."
+
+    def _visit_duration_direct_text(self, output: dict[str, Any]) -> str:
+        duration = str(output.get("duration_human") or "").strip()
+        if not duration:
+            seconds = output.get("duration_seconds")
+            if isinstance(seconds, int | float):
+                duration = self._duration_label_from_seconds(float(seconds))
+        intervals = output.get("intervals") if isinstance(output.get("intervals"), list) else []
+        if not duration or duration == "0m":
+            matched = int(output.get("matched_events") or 0)
+            if matched:
+                return "I found matching access events, but not a complete entry/exit interval to time."
+            return "I couldn't find enough matching access events to calculate a visit duration."
+        latest = intervals[-1] if intervals and isinstance(intervals[-1], dict) else {}
+        if latest.get("exit") == "still_present":
+            started = latest.get("entry_display") or self._chat_time_from_iso(str(latest.get("entry") or ""))
+            suffix = f" since {started}" if started else ""
+            return f"The matched visit has lasted {duration}{suffix}, and is still marked open."
+        return f"The matched visit lasted {duration}."
+
+    def _absence_duration_direct_text(self, output: dict[str, Any]) -> str:
+        duration = str(output.get("absence_human") or "").strip()
+        if not duration:
+            seconds = output.get("absence_seconds")
+            if isinstance(seconds, int | float):
+                duration = self._duration_label_from_seconds(float(seconds))
+        intervals = output.get("intervals") if isinstance(output.get("intervals"), list) else []
+        subject = str(output.get("subject") or "The matched subject").strip()
+        if not duration or duration == "0m":
+            matched = int(output.get("matched_events") or 0)
+            if matched:
+                return "I found matching access events, but not a complete exit and re-entry interval to time."
+            return "I couldn't find enough matching access events to calculate an absence duration."
+        primary = output.get("primary_interval") if isinstance(output.get("primary_interval"), dict) else None
+        latest = primary or (intervals[-1] if intervals and isinstance(intervals[-1], dict) else {})
+        if output.get("mode") == "total" and len(intervals) > 1:
+            return f"{subject} was out for {duration} in total across {len(intervals)} matched absences."
+        if latest.get("entry") == "still_away":
+            started = latest.get("exit_display") or self._chat_time_from_iso(str(latest.get("exit") or ""))
+            as_of = self._chat_time_from_iso(str(output.get("as_of") or "")) or output.get("as_of_display")
+            suffix = f" since {started}" if started else ""
+            as_of_suffix = f" as of {as_of}" if as_of else ""
+            return f"{subject} has been out for {duration}{suffix}. Still marked away{as_of_suffix}, so the clock's still running."
+        left_at = latest.get("exit_display") or self._chat_time_from_iso(str(latest.get("exit") or ""))
+        returned_at = latest.get("entry_display") or self._chat_time_from_iso(str(latest.get("entry") or ""))
+        if left_at and returned_at:
+            return f"{subject} was out for {duration}, from {left_at} to {returned_at}. Neat little there-and-back loop."
+        return f"{subject} was out for {duration}."
+
+    def _duration_label_from_seconds(self, seconds: float) -> str:
+        total_seconds = max(0, int(seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes = remainder // 60
+        if hours and minutes:
+            return f"{hours}h {minutes}m"
+        if hours:
+            return f"{hours}h"
+        return f"{minutes}m"
 
     def _entity_resolution_direct_text(self, output: dict[str, Any]) -> str:
         if output.get("status") == "unique" and isinstance(output.get("match"), dict):

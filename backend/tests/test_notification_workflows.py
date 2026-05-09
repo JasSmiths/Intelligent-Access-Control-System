@@ -259,6 +259,24 @@ def test_context_variables_include_vehicle_aliases_and_time() -> None:
     assert variables["Time"] == "18:42"
 
 
+def test_context_variables_include_person_pronoun_aliases() -> None:
+    variables = context_variables(
+        NotificationContext(
+            event_type="authorized_entry",
+            subject="Steph arrived",
+            severity="info",
+            facts={
+                "object_pronoun": "her",
+                "possessive_determiner": "her",
+            },
+        )
+    )
+
+    assert variables["ObjectPronoun"] == "her"
+    assert variables["PossessiveDeterminer"] == "her"
+    assert render_template("I've let @ObjectPronoun in.", variables) == "I've let her in."
+
+
 def test_context_variables_include_visitor_pass_timeframe_request_aliases() -> None:
     variables = context_variables(
         NotificationContext(

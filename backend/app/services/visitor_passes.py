@@ -15,6 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, User, VisitorPass
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.services.domain_events import publish_visitor_pass_status_changed
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
@@ -119,7 +120,7 @@ class VisitorPassService:
 
         if publish:
             for payload in payloads:
-                await event_bus.publish("visitor_pass.status_changed", {"visitor_pass": payload})
+                await publish_visitor_pass_status_changed(payload, bus=event_bus)
         return changed
 
     async def _refresh_statuses_in_session(
@@ -157,10 +158,7 @@ class VisitorPassService:
                 category=TELEMETRY_CATEGORY_ACCESS,
             )
             if publish:
-                await event_bus.publish(
-                    "visitor_pass.status_changed",
-                    {"visitor_pass": serialize_visitor_pass(visitor_pass)},
-                )
+                await publish_visitor_pass_status_changed(serialize_visitor_pass(visitor_pass), bus=event_bus)
         return changed
 
     async def create_pass(

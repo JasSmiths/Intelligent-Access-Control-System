@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.visitor_passes_handlers import (
     cancel_visitor_pass,
     create_visitor_pass,
     get_visitor_pass,
@@ -11,10 +11,31 @@ from app.ai.tools import (
     trigger_icloud_sync,
     update_visitor_pass,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_visitor_passes": ("Visitor_Passes", "Access_Logs", "General"),
+    "get_visitor_pass": ("Visitor_Passes", "Access_Logs"),
+    "create_visitor_pass": ("Visitor_Passes",),
+    "update_visitor_pass": ("Visitor_Passes",),
+    "cancel_visitor_pass": ("Visitor_Passes",),
+    "trigger_icloud_sync": ("Calendar_Integrations", "Visitor_Passes"),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "cancel_visitor_pass",
+    "create_visitor_pass",
+    "trigger_icloud_sync",
+    "update_visitor_pass",
+}
+
+DEFAULT_LIMITS = {"query_visitor_passes": 20}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="query_visitor_passes",
                     description=(
@@ -146,4 +167,8 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=trigger_icloud_sync,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+    )

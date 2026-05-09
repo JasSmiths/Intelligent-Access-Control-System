@@ -1052,10 +1052,11 @@ function App() {
   }, [authStatus, navigateToView, view]);
 
   React.useEffect(() => {
+    if (!authStatus?.authenticated) return;
     if (currentUser?.role !== "admin" && view === "users") {
       navigateToView("settings", { replace: true });
     }
-  }, [currentUser?.role, navigateToView, view]);
+  }, [authStatus?.authenticated, currentUser?.role, navigateToView, view]);
 
   const sidebarCollapsed = profilePreferences.sidebarCollapsed;
   const navigationCollapsed = !isMobileNavigation && sidebarCollapsed;

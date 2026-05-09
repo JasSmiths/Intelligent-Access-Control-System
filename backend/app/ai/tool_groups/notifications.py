@@ -8,6 +8,8 @@ from app.ai.tools import (
     NOTIFICATION_CONDITION_SCHEMA,
     NOTIFICATION_RULE_LOOKUP_PROPERTIES,
     NOTIFICATION_RULE_PAYLOAD_SCHEMA,
+)
+from app.ai.tool_groups.notifications_handlers import (
     create_notification_workflow,
     delete_notification_workflow,
     get_notification_workflow,
@@ -17,10 +19,33 @@ from app.ai.tools import (
     test_notification_workflow,
     update_notification_workflow,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_notification_catalog": ("Notifications",),
+    "query_notification_workflows": ("Notifications",),
+    "get_notification_workflow": ("Notifications",),
+    "create_notification_workflow": ("Notifications",),
+    "update_notification_workflow": ("Notifications",),
+    "delete_notification_workflow": ("Notifications",),
+    "preview_notification_workflow": ("Notifications",),
+    "test_notification_workflow": ("Notifications",),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "create_notification_workflow",
+    "delete_notification_workflow",
+    "test_notification_workflow",
+    "update_notification_workflow",
+}
+
+DEFAULT_LIMITS = {"query_notification_workflows": 20}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="query_notification_catalog",
                     description="Return notification workflow building blocks: trigger events, variables, delivery integrations, endpoints, and mock preview context.",
@@ -150,4 +175,8 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=test_notification_workflow,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+    )

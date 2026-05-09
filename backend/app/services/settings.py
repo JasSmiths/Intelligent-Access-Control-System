@@ -145,14 +145,39 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         True,
         "Enable pgvector-backed semantic memory and lesson retrieval for Alfred.",
     ),
+    "alfred_memory_extraction_enabled": (
+        "llm",
+        False,
+        "Allow background LLM extraction of durable memories from ordinary Alfred turns. Manual feedback and training are unaffected.",
+    ),
     "alfred_reflection_enabled": (
         "llm",
-        True,
-        "Allow Alfred to draft short post-turn reflection lessons through the learning workflow.",
+        False,
+        "Allow Alfred to draft short post-turn reflection lessons through the learning workflow. Disabled by default to avoid background token spend.",
+    ),
+    "alfred_interactive_model": (
+        "llm",
+        "gpt-5.4",
+        "Model Alfred uses for live tool reasoning, answer composition, and answer verification.",
+    ),
+    "alfred_planner_model": (
+        "llm",
+        "gpt-5.4-mini",
+        "Fast structured-output model Alfred uses for live tool planning. Must not be a nano model.",
+    ),
+    "alfred_background_model": (
+        "llm",
+        "gpt-5.4-nano",
+        "Optional cheaper model for background reflection and memory tasks. Blank follows the provider default.",
+    ),
+    "alfred_reasoning_effort": (
+        "llm",
+        "medium",
+        "Reasoning effort for Alfred live planning, answer composition, and answer verification.",
     ),
     "alfred_embedding_provider": (
         "llm",
-        "openai",
+        "local",
         "Embedding provider for Alfred semantic memory. Use openai, ollama, local, or disabled.",
     ),
     "alfred_embedding_model": (
@@ -268,7 +293,12 @@ class RuntimeConfig:
     alfred_agent_mode: str
     alfred_learning_mode: str
     alfred_semantic_memory_enabled: bool
+    alfred_memory_extraction_enabled: bool
     alfred_reflection_enabled: bool
+    alfred_interactive_model: str
+    alfred_planner_model: str
+    alfred_background_model: str
+    alfred_reasoning_effort: str
     alfred_embedding_provider: str
     alfred_embedding_model: str
     alfred_embedding_dimension: int
@@ -510,7 +540,16 @@ async def get_runtime_config() -> RuntimeConfig:
             else "review_then_learn"
         ),
         alfred_semantic_memory_enabled=bool_value(values["alfred_semantic_memory_enabled"]),
+        alfred_memory_extraction_enabled=bool_value(values["alfred_memory_extraction_enabled"]),
         alfred_reflection_enabled=bool_value(values["alfred_reflection_enabled"]),
+        alfred_interactive_model=str(values["alfred_interactive_model"] or "gpt-5.4"),
+        alfred_planner_model=str(values["alfred_planner_model"] or "gpt-5.4-mini"),
+        alfred_background_model=str(values["alfred_background_model"] or "gpt-5.4-nano"),
+        alfred_reasoning_effort=(
+            str(values["alfred_reasoning_effort"]).strip().lower()
+            if str(values["alfred_reasoning_effort"]).strip().lower() in {"low", "medium", "high", "xhigh"}
+            else "medium"
+        ),
         alfred_embedding_provider=(
             str(values["alfred_embedding_provider"]).strip().lower()
             if str(values["alfred_embedding_provider"]).strip().lower() in {"openai", "ollama", "local", "disabled"}

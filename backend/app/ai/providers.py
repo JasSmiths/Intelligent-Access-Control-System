@@ -39,6 +39,10 @@ class LlmProvider(Protocol):
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         """Return model text and optional tool calls."""
 
@@ -88,6 +92,10 @@ class OpenAIResponsesProvider(BaseHttpProvider):
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.openai_api_key:
@@ -105,14 +113,19 @@ class OpenAIResponsesProvider(BaseHttpProvider):
                 if result.get("call_id")
             )
 
+        model_name = model or config.openai_model
         body: dict[str, Any] = {
-            "model": config.openai_model,
+            "model": model_name,
             "instructions": system,
             "input": input_items,
         }
         if tools:
             body["tools"] = [self._to_openai_tool(tool) for tool in tools]
             body["parallel_tool_calls"] = True
+        if response_schema:
+            body["text"] = {"format": self._response_format(response_schema)}
+        if reasoning_effort and _supports_reasoning_effort(model_name):
+            body["reasoning"] = {"effort": reasoning_effort}
 
         data = await self._post(
             f"{config.openai_base_url.rstrip('/')}/responses",
@@ -172,6 +185,15 @@ class OpenAIResponsesProvider(BaseHttpProvider):
             "parameters": tool["parameters"],
         }
 
+    def _response_format(self, response_schema: dict[str, Any]) -> dict[str, Any]:
+        schema = response_schema.get("schema") if isinstance(response_schema.get("schema"), dict) else response_schema
+        return {
+            "type": "json_schema",
+            "name": str(response_schema.get("name") or "alfred_structured_response"),
+            "schema": schema,
+            "strict": True,
+        }
+
     def _extract_text(self, data: dict[str, Any]) -> str:
         if data.get("output_text"):
             return data["output_text"]
@@ -212,14 +234,19 @@ class GeminiProvider(BaseHttpProvider):
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.gemini_api_key:
             raise ProviderNotConfiguredError("Gemini API key is not configured.")
 
-        prompt = self._plain_prompt(messages, tool_results)
+        prompt = self._plain_prompt(messages, tool_results, response_schema=response_schema)
+        model_name = model if model and model.startswith("gemini") else config.gemini_model
         data = await self._post(
-            f"{config.gemini_base_url.rstrip('/')}/models/{config.gemini_model}:generateContent"
+            f"{config.gemini_base_url.rstrip('/')}/models/{model_name}:generateContent"
             f"?key={config.gemini_api_key}",
             json_body={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
         )
@@ -253,11 +280,20 @@ class GeminiProvider(BaseHttpProvider):
         return LlmResult(text=self._extract_text(data), raw=data)
 
     def _plain_prompt(
-        self, messages: list[ChatMessageInput], tool_results: list[dict[str, Any]] | None
+        self,
+        messages: list[ChatMessageInput],
+        tool_results: list[dict[str, Any]] | None,
+        *,
+        response_schema: dict[str, Any] | None = None,
     ) -> str:
         lines = [f"{message.role}: {message.content}" for message in messages]
         if tool_results:
             lines.append(f"tool_results: {json.dumps(tool_results)}")
+        if response_schema:
+            lines.append(
+                "Return only compact JSON matching this schema: "
+                f"{json.dumps(response_schema, separators=(',', ':'))}"
+            )
         return "\n".join(lines)
 
     def _extract_text(self, data: dict[str, Any]) -> str:
@@ -276,6 +312,10 @@ class ClaudeProvider(BaseHttpProvider):
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.anthropic_api_key:
@@ -289,6 +329,17 @@ class ClaudeProvider(BaseHttpProvider):
         ]
         if tool_results:
             body_messages.append({"role": "user", "content": f"Tool results: {json.dumps(tool_results)}"})
+        if response_schema:
+            body_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Return only compact JSON matching this schema: "
+                        f"{json.dumps(response_schema, separators=(',', ':'))}"
+                    ),
+                }
+            )
+        model_name = model if model and model.startswith("claude") else config.anthropic_model
 
         data = await self._post(
             f"{config.anthropic_base_url.rstrip('/')}/messages",
@@ -298,7 +349,7 @@ class ClaudeProvider(BaseHttpProvider):
                 "Content-Type": "application/json",
             },
             json_body={
-                "model": config.anthropic_model,
+                "model": model_name,
                 "max_tokens": 1200,
                 "system": system,
                 "messages": body_messages,
@@ -360,15 +411,29 @@ class OllamaProvider(BaseHttpProvider):
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         body: dict[str, Any] = {
-            "model": config.ollama_model,
+            "model": model or config.ollama_model,
             "messages": [{"role": message.role, "content": message.content} for message in messages],
             "stream": False,
         }
         if tool_results:
             body["messages"].append({"role": "user", "content": f"Tool results: {json.dumps(tool_results)}"})
+        if response_schema:
+            body["messages"].append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Return only compact JSON matching this schema: "
+                        f"{json.dumps(response_schema, separators=(',', ':'))}"
+                    ),
+                }
+            )
 
         data = await self._post(
             f"{config.ollama_base_url.rstrip('/')}/api/chat",
@@ -411,6 +476,10 @@ class LocalProvider:
         messages: list[ChatMessageInput],
         tools: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LlmResult:
         if tool_results:
             return LlmResult(text=self._summarize_tools(tool_results))
@@ -937,6 +1006,11 @@ def _looks_like_ollama_vision_model(model: str) -> bool:
         "granite3.2-vision",
     )
     return any(marker in normalized for marker in markers)
+
+
+def _supports_reasoning_effort(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
 def get_llm_provider(provider_name: str) -> LlmProvider:

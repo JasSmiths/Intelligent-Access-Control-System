@@ -5,25 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from app.ai.tools import AgentTool
-
-ADMIN_ONLY_TOOLS = {
-    "get_system_users",
-    "query_system_settings",
-    "update_system_settings",
-    "query_auth_secret_status",
-    "query_alfred_runtime_events",
-    "rotate_auth_secret",
-    "test_integration_connection",
-    "check_dependency_updates",
-    "analyze_dependency_update",
-    "apply_dependency_update",
-    "query_dependency_backups",
-    "restore_dependency_backup",
-    "query_dependency_update_job",
-    "configure_dependency_backup_storage",
-    "validate_dependency_backup_storage",
-}
+from app.ai.tools import ADMIN_PERMISSION, AgentTool
 
 VISITOR_CONCIERGE_TOOL_NAMES = {
     "get_pass_details",
@@ -42,7 +24,11 @@ def filter_tools_for_actor(tools: Iterable[AgentTool], actor_context: dict[str, 
     role = actor_role(actor_context)
     visible: list[AgentTool] = []
     for tool in tools:
-        if role != "admin" and (tool.requires_confirmation or not tool.read_only or tool.name in ADMIN_ONLY_TOOLS):
+        if role != "admin" and (
+            tool.requires_confirmation
+            or not tool.read_only
+            or ADMIN_PERMISSION in tool.required_permissions
+        ):
             continue
         visible.append(tool)
     return visible

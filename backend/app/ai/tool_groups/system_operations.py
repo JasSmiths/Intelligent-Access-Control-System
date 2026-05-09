@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.system_operations_handlers import (
     analyze_dependency_update,
     apply_dependency_update,
     check_dependency_updates,
@@ -21,10 +21,63 @@ from app.ai.tools import (
     update_system_settings,
     validate_dependency_backup_storage,
 )
+from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_integration_health": ("System_Operations", "Users_Settings", "General"),
+    "test_integration_connection": ("System_Operations", "Users_Settings"),
+    "query_system_settings": ("System_Operations", "Users_Settings"),
+    "update_system_settings": ("System_Operations", "Users_Settings"),
+    "query_auth_secret_status": ("System_Operations", "Users_Settings"),
+    "rotate_auth_secret": ("System_Operations", "Users_Settings"),
+    "query_alfred_runtime_events": ("System_Operations", "Users_Settings"),
+    "query_dependency_updates": ("System_Operations",),
+    "check_dependency_updates": ("System_Operations",),
+    "analyze_dependency_update": ("System_Operations",),
+    "apply_dependency_update": ("System_Operations",),
+    "query_dependency_backups": ("System_Operations",),
+    "restore_dependency_backup": ("System_Operations",),
+    "query_dependency_update_job": ("System_Operations",),
+    "configure_dependency_backup_storage": ("System_Operations",),
+    "validate_dependency_backup_storage": ("System_Operations",),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "analyze_dependency_update",
+    "apply_dependency_update",
+    "check_dependency_updates",
+    "configure_dependency_backup_storage",
+    "restore_dependency_backup",
+    "rotate_auth_secret",
+    "test_integration_connection",
+    "update_system_settings",
+    "validate_dependency_backup_storage",
+}
+
+REQUIRED_PERMISSIONS = admin_permissions(
+    "analyze_dependency_update",
+    "apply_dependency_update",
+    "check_dependency_updates",
+    "configure_dependency_backup_storage",
+    "query_alfred_runtime_events",
+    "query_auth_secret_status",
+    "query_dependency_backups",
+    "query_dependency_update_job",
+    "query_system_settings",
+    "restore_dependency_backup",
+    "rotate_auth_secret",
+    "test_integration_connection",
+    "update_system_settings",
+    "validate_dependency_backup_storage",
+)
+
+DEFAULT_LIMITS = {"query_alfred_runtime_events": 20}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
             name="query_integration_health",
             description="Return redacted health/configuration status for configured IACS integrations and dependency backup storage.",
@@ -227,4 +280,9 @@ def build_tools() -> list[AgentTool]:
             },
             handler=validate_dependency_backup_storage,
         ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+        required_permissions=REQUIRED_PERMISSIONS,
+    )

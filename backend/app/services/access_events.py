@@ -88,6 +88,28 @@ PERSON_NOTIFICATION_PRONOUNS = {
     "he/him": ("him", "his"),
     "she/her": ("her", "her"),
 }
+SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME = {
+    "jason": "he/him",
+    "john": "he/him",
+    "james": "he/him",
+    "david": "he/him",
+    "michael": "he/him",
+    "paul": "he/him",
+    "mark": "he/him",
+    "peter": "he/him",
+    "stephen": "he/him",
+    "steven": "he/him",
+    "sarah": "she/her",
+    "steph": "she/her",
+    "stephanie": "she/her",
+    "sylvia": "she/her",
+    "emma": "she/her",
+    "olivia": "she/her",
+    "amelia": "she/her",
+    "ava": "she/her",
+    "charlotte": "she/her",
+    "grace": "she/her",
+}
 
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
@@ -2654,8 +2676,11 @@ class AccessEventService:
         return str(value)
 
     def _person_notification_pronouns(self, person: Person | None) -> tuple[str, str]:
-        pronouns = getattr(person, "pronouns", None)
-        return PERSON_NOTIFICATION_PRONOUNS.get(pronouns or "", ("them", "their"))
+        pronouns = str(getattr(person, "pronouns", None) or "").strip().casefold()
+        if not pronouns and person:
+            first_name = str(getattr(person, "first_name", "") or "").strip().casefold()
+            pronouns = SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME.get(first_name, "")
+        return PERSON_NOTIFICATION_PRONOUNS.get(pronouns, ("them", "their"))
 
     def _authorized_entry_message(self, person: Person, vehicle: Vehicle | None) -> str:
         first_name = person.first_name or person.display_name.split(" ", 1)[0]

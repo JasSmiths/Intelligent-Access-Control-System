@@ -881,6 +881,12 @@ export function useSettings(category?: string) {
   const [settingsRows, setSettingsRows] = React.useState<SystemSetting[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const values = React.useMemo(() => {
+    return settingsRows.reduce<SettingsMap>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+  }, [settingsRows]);
 
   const load = React.useCallback(async () => {
     setError("");
@@ -906,10 +912,7 @@ export function useSettings(category?: string) {
 
   return {
     rows: settingsRows,
-    values: settingsRows.reduce<SettingsMap>((acc, row) => {
-      acc[row.key] = row.value;
-      return acc;
-    }, {}),
+    values,
     loading,
     error,
     save,

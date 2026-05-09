@@ -716,7 +716,7 @@ tr:last-child td {
 .reports-page {
   display: grid;
   gap: 10px;
-  padding: 20px 28px 30px;
+  padding: 20px 28px calc(30px + var(--alfred-launcher-clearance));
 }
 
 .reports-page-head {
@@ -2079,7 +2079,7 @@ tr:last-child td {
 @media (max-width: 760px) {
   .reports-page {
     overflow-x: hidden;
-    padding: 18px 14px calc(22px + env(safe-area-inset-bottom));
+    padding: 18px 14px calc(22px + env(safe-area-inset-bottom) + var(--alfred-launcher-clearance));
   }
 
   .report-builder-panel,
@@ -2454,6 +2454,41 @@ tr:last-child td {
   gap: 7px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.alfred-training-source {
+  max-width: min(100%, 220px);
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alfred-training-source.user_feedback,
+.alfred-training-source.manual_training {
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 58%, var(--surface));
+  color: var(--blue-strong);
+}
+
+.alfred-training-source.self_learning {
+  border-color: color-mix(in srgb, var(--violet) 28%, var(--line));
+  background: color-mix(in srgb, var(--violet) 12%, var(--surface));
+  color: var(--violet);
+}
+
+.alfred-training-source.seed {
+  border-color: color-mix(in srgb, var(--amber) 32%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 55%, var(--surface));
+  color: var(--amber);
 }
 
 .settings-list {

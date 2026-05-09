@@ -8,6 +8,8 @@ from app.ai.tools import (
     AUTOMATION_RULE_LOOKUP_PROPERTIES,
     AUTOMATION_TRIGGER_SCHEMA,
     AgentTool,
+)
+from app.ai.tool_groups.automations_handlers import (
     create_automation,
     delete_automation,
     disable_automation,
@@ -17,10 +19,34 @@ from app.ai.tools import (
     query_automation_catalog,
     query_automations,
 )
+from app.ai.tool_groups.metadata import apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "query_automation_catalog": ("Automations", "Notifications", "Gate_Hardware", "Maintenance"),
+    "query_automations": ("Automations",),
+    "get_automation": ("Automations",),
+    "create_automation": ("Automations",),
+    "edit_automation": ("Automations",),
+    "delete_automation": ("Automations",),
+    "enable_automation": ("Automations",),
+    "disable_automation": ("Automations",),
+}
+
+CONFIRMATION_REQUIRED_TOOLS = {
+    "create_automation",
+    "delete_automation",
+    "disable_automation",
+    "edit_automation",
+    "enable_automation",
+}
+
+DEFAULT_LIMITS = {"query_automations": 20}
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="query_automation_catalog",
                     description="Return automation building blocks: trigger, condition, action, variable, notification-rule, and garage-door catalogs.",
@@ -143,4 +169,8 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=disable_automation,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
+        default_limits=DEFAULT_LIMITS,
+    )

@@ -1,0 +1,55 @@
+name: Backend Alfred Checks
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/ai/**"
+      - "backend/app/services/alfred/**"
+      - "backend/app/services/chat.py"
+      - "backend/app/services/domain_events.py"
+      - "backend/tests/test_chat_agent.py"
+      - "backend/tests/test_visitor_passes.py"
+      - "backend/pyproject.toml"
+      - ".github/workflows/backend-alfred.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/app/ai/**"
+      - "backend/app/services/alfred/**"
+      - "backend/app/services/chat.py"
+      - "backend/app/services/domain_events.py"
+      - "backend/tests/test_chat_agent.py"
+      - "backend/tests/test_visitor_passes.py"
+      - "backend/pyproject.toml"
+      - ".github/workflows/backend-alfred.yml"
+
+jobs:
+  alfred-targeted:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "backend/pyproject.toml"
+      - name: Install backend
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff targeted Alfred modules
+        run: >
+          python -m ruff check
+          app/ai/tool_groups
+          app/services/alfred
+          app/services/chat.py
+          app/services/domain_events.py
+      - name: Mypy targeted Alfred modules
+        run: >
+          python -m mypy
+          app/ai/tool_groups
+          app/services/alfred/memory.py
+          app/services/domain_events.py
+      - name: Run Alfred critical regressions
+        run: python -m pytest -m alfred_critical -q

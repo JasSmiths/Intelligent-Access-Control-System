@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
+from app.ai.tools import AgentTool
+from app.ai.tool_groups.general_handlers import (
     get_system_users,
     query_presence,
     resolve_human_entity,
 )
+from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
+
+
+TOOL_CATEGORIES = {
+    "resolve_human_entity": ("General",),
+    "query_presence": ("Access_Logs", "General"),
+    "get_system_users": ("Users_Settings",),
+}
+
+REQUIRED_PERMISSIONS = admin_permissions("get_system_users")
 
 
 def build_tools() -> list[AgentTool]:
-    return [
+    return apply_group_metadata(
+        [
         AgentTool(
                     name="resolve_human_entity",
                     description=(
@@ -37,13 +48,17 @@ def build_tools() -> list[AgentTool]:
                 ),
         AgentTool(
                     name="query_presence",
-                    description="Return current presence state for everyone or a named person.",
+                    description="Return current presence state for everyone or a named person. This returns state only, not elapsed duration.",
                     parameters={
                         "type": "object",
                         "properties": {"person": {"type": "string"}},
                         "additionalProperties": False,
                     },
                     handler=query_presence,
+                    return_schema={
+                        "answer_types": ["presence_state"],
+                        "not_sufficient_for": ["absence_duration", "visit_duration"],
+                    },
                 ),
         AgentTool(
                     name="get_system_users",
@@ -55,4 +70,7 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=get_system_users,
                 ),
-    ]
+        ],
+        categories=TOOL_CATEGORIES,
+        required_permissions=REQUIRED_PERMISSIONS,
+    )

@@ -568,6 +568,7 @@ def test_alfred_registers_automation_tool_metadata() -> None:
 
     assert tools["query_automation_catalog"].requires_confirmation is False
     assert tools["create_automation"].requires_confirmation is True
+    assert tools["create_automation"].safety_level == ai_tools.SAFETY_CONFIRMATION_REQUIRED
     assert tools["edit_automation"].requires_confirmation is True
     assert tools["delete_automation"].requires_confirmation is True
     assert "Automations" in tools["create_automation"].categories
