@@ -1057,6 +1057,23 @@ async def _run_simulated_v3_turn(
     async def fake_append_message(_session_id, _role, _content, **_kwargs):
         return uuid.uuid4()
 
+    async def fake_store_pending_agent_action(
+        session_id,
+        pending_result,
+        _tool_results,
+        _route,
+        _selected_tools,
+        **_kwargs,
+    ):
+        pending = {
+            "id": "confirm-test",
+            "session_id": str(session_id),
+            "tool_name": str(pending_result.get("name") or ""),
+            "preview_output": pending_result.get("output") if isinstance(pending_result.get("output"), dict) else {},
+            "expires_at": "2026-05-09T12:10:00+00:00",
+        }
+        return service._pending_action_public_payload(pending)
+
     async def no_schedule_conflict(_session_id, _memory, _tool_results):
         return None
 
@@ -1076,6 +1093,7 @@ async def _run_simulated_v3_turn(
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_build_agent_messages", fake_build_messages)
     monkeypatch.setattr(service, "_append_message", fake_append_message)
+    monkeypatch.setattr(service, "_store_pending_agent_action", fake_store_pending_agent_action)
     monkeypatch.setattr(service, "_update_memory", lambda *_args, **_kwargs: asyncio.sleep(0))
     monkeypatch.setattr(service, "_pending_action_for_response", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
     monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
