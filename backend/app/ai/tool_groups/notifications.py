@@ -55,6 +55,11 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_notification_catalog,
+                    example_inputs=({},),
+                    return_schema={
+                        "answer_types": ["notification_catalog"],
+                        "result_keys": ["triggers", "variables", "channels", "endpoints"],
+                    },
                 ),
         AgentTool(
                     name="query_notification_workflows",
@@ -72,6 +77,14 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_notification_workflows,
+                    example_inputs=(
+                        {"trigger_event": "access.granted", "is_active": True, "limit": 20},
+                        {"search": "gate malfunction", "include_preview": True},
+                    ),
+                    return_schema={
+                        "answer_types": ["notification_workflow_list"],
+                        "records": "workflows",
+                    },
                 ),
         AgentTool(
                     name="get_notification_workflow",
@@ -154,6 +167,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=preview_notification_workflow,
+                    example_inputs=(
+                        {"rule_name": "Gate malfunction alerts"},
+                    ),
+                    return_schema={
+                        "answer_types": ["notification_preview"],
+                        "result_keys": ["previewed", "rendered_actions", "missing_variables"],
+                    },
                 ),
         AgentTool(
                     name="test_notification_workflow",

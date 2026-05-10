@@ -9,6 +9,7 @@ import pytest
 import app.services.dependency_updates as dependency_updates_module
 from app.models import DependencyUpdateBackup, ExternalDependency, SystemSetting, User
 from app.services.dependency_updates import (
+    DependencyCommandError,
     DependencyUpdateError,
     DependencyUpdateService,
     GENERATED_COMPOSE,
@@ -25,6 +26,17 @@ from app.services.dependency_updates import (
     _workspace_root,
 )
 from app.services.settings import SECRET_KEYS, _migrate_secret_record, decrypted_value
+
+
+class _FakeJobLog:
+    async def info(self, message: str) -> None:
+        pass
+
+    async def warning(self, message: str) -> None:
+        pass
+
+    async def stdout(self, message: str) -> None:
+        pass
 
 
 def _storage_runtime(**overrides):
@@ -381,7 +393,7 @@ def test_npm_recovery_plan_pairs_react_and_react_dom(tmp_path) -> None:
     assert plan
     assert plan.strategy == "npm_peer_group"
     assert plan.specs == ["react@19.2.5", "react-dom@19.2.5"]
-    assert plan.use_legacy_peer_deps is False
+    assert plan.regenerate_lockfile is True
 
 
 def test_npm_recovery_plan_repairs_direct_peer_package_to_latest(tmp_path, monkeypatch) -> None:
@@ -420,7 +432,7 @@ def test_npm_recovery_plan_repairs_direct_peer_package_to_latest(tmp_path, monke
     assert plan
     assert "typescript@6.0.3" in plan.specs
     assert "@vitejs/plugin-react@6.0.1" in plan.specs
-    assert plan.use_legacy_peer_deps is False
+    assert plan.regenerate_lockfile is False
 
 
 def test_npm_recovery_plan_keeps_strict_peer_resolution_for_scoped_groups(tmp_path) -> None:
@@ -458,7 +470,7 @@ def test_npm_recovery_plan_keeps_strict_peer_resolution_for_scoped_groups(tmp_pa
     )
 
     assert plan
-    assert plan.use_legacy_peer_deps is False
+    assert plan.regenerate_lockfile is True
     assert set(plan.specs) == {
         "@tiptap/extension-mention@3.22.5",
         "@tiptap/pm@3.22.5",
@@ -466,6 +478,69 @@ def test_npm_recovery_plan_keeps_strict_peer_resolution_for_scoped_groups(tmp_pa
         "@tiptap/starter-kit@3.22.5",
         "@tiptap/suggestion@3.22.5",
     }
+
+
+@pytest.mark.asyncio
+async def test_npm_clean_lock_recovery_updates_only_staged_frontend(tmp_path, monkeypatch) -> None:
+    live = tmp_path / "live"
+    staged = tmp_path / "staged"
+    live.mkdir()
+    staged.mkdir()
+    package_json = {
+        "dependencies": {
+            "@tiptap/extension-mention": "^3.22.5",
+            "@tiptap/pm": "^3.22.5",
+            "@tiptap/react": "^3.22.5",
+            "@tiptap/starter-kit": "^3.22.5",
+            "@tiptap/suggestion": "^3.22.5",
+        }
+    }
+    (live / "package.json").write_text(json.dumps(package_json))
+    (staged / "package.json").write_text(json.dumps(package_json))
+    (staged / "package-lock.json").write_text(
+        json.dumps({"packages": {"node_modules/@tiptap/core": {"version": "3.22.5"}}})
+    )
+    dependency = ExternalDependency(
+        ecosystem="npm",
+        package_name="@tiptap/suggestion",
+        normalized_name="@tiptap/suggestion",
+        current_version="3.22.5",
+        dependant_area="Notification Template Editor",
+        manifest_path="frontend/package.json",
+        manifest_section="dependencies",
+        is_direct=True,
+    )
+    service = DependencyUpdateService()
+    commands: list[list[str]] = []
+
+    async def fake_run_command(command, *, cwd, log, timeout):
+        commands.append(command)
+        assert cwd == staged
+        if command == ["npm", "install", "--package-lock-only", "--no-audit"]:
+            (staged / "package-lock.json").write_text(json.dumps({"packages": {}}))
+        return ""
+
+    monkeypatch.setattr(service, "_run_command", fake_run_command)
+
+    recovered = await service._attempt_npm_recovery(
+        staged,
+        dependency,
+        "3.23.1",
+        DependencyCommandError(
+            ["npm", "install", "@tiptap/suggestion@3.23.1", "--package-lock-only"],
+            1,
+            "npm ERR! ERESOLVE could not resolve\nnpm ERR! peer @tiptap/core@3.23.1",
+        ),
+        _FakeJobLog(),
+    )
+
+    assert recovered is True
+    assert commands[0] == ["npm", "install", "--package-lock-only", "--no-audit"]
+    assert all("--legacy-peer-deps" not in command for command in commands)
+    assert "@tiptap/suggestion@3.23.1" not in commands[0]
+    assert json.loads(live.joinpath("package.json").read_text()) == package_json
+    staged_dependencies = json.loads(staged.joinpath("package.json").read_text())["dependencies"]
+    assert set(staged_dependencies.values()) == {"^3.23.1"}
 
 
 def test_repair_tsconfig_for_typescript_6_migrates_node_resolution(tmp_path) -> None:

@@ -215,7 +215,7 @@ async def _test_home_assistant(values: dict[str, Any]) -> None:
     token = str(values.get("home_assistant_token") or "")
     if not base_url or not token:
         raise ValueError("Home Assistant URL and token are required.")
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(f"{base_url}/api/", headers={"Authorization": f"Bearer {token}"})
     _raise_for_test(response, "Home Assistant")
 
@@ -248,7 +248,7 @@ async def _test_openai(values: dict[str, Any]) -> None:
     api_key = str(values.get("openai_api_key") or "")
     if not api_key:
         raise ValueError("OpenAI API key is required.")
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
     _raise_for_test(response, "OpenAI")
 
@@ -258,7 +258,7 @@ async def _test_gemini(values: dict[str, Any]) -> None:
     api_key = str(values.get("gemini_api_key") or "")
     if not api_key:
         raise ValueError("Gemini API key is required.")
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(f"{base_url}/models?key={api_key}")
     _raise_for_test(response, "Gemini")
 
@@ -268,7 +268,7 @@ async def _test_anthropic(values: dict[str, Any]) -> None:
     api_key = str(values.get("anthropic_api_key") or "")
     if not api_key:
         raise ValueError("Anthropic API key is required.")
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(
             f"{base_url}/models",
             headers={
@@ -281,7 +281,7 @@ async def _test_anthropic(values: dict[str, Any]) -> None:
 
 async def _test_ollama(values: dict[str, Any]) -> None:
     base_url = str(values.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(f"{base_url}/api/tags")
     _raise_for_test(response, "Ollama")
 

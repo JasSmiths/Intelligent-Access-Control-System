@@ -379,8 +379,14 @@ h2 {
 }
 
 .dot.live,
+.dot.realtime,
 .event-dot.granted {
   background: var(--green);
+}
+
+.dot.connecting,
+.dot.reconnecting {
+  background: var(--amber);
 }
 
 .event-dot.denied {
@@ -454,7 +460,7 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 24px 0 14px;
+  padding: 0 24px 0 4px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
@@ -883,6 +889,32 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
+}
+
+.empty-state {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.empty-state svg {
+  width: 22px;
+  height: 22px;
+  color: var(--muted-strong);
+}
+
+.empty-state span {
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
 }
 
 .app-crash-panel {

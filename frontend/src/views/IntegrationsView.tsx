@@ -726,6 +726,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
           protectLoading={protectLoading}
           protectStatus={protectStatus}
           protectUpdateStatus={protectUpdateStatus}
+          homeAssistantStatus={status}
           icloudError={icloudError}
           icloudLoading={icloudLoading}
           icloudPayload={icloudPayload}
@@ -917,6 +918,9 @@ export function integrationDefinitions(
   const protectUpdateAvailable = Boolean(protectStatus?.connected && protectUpdateStatus?.update_available) || hasDependencyUpdate("unifi_protect");
   const activeIcloudAccounts = icloudAccounts.filter((account) => account.is_active);
   const icloudNeedsAttention = activeIcloudAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
+  const homeAssistantConfigured = Boolean(status?.configured || values.home_assistant_url || values.home_assistant_token);
+  const homeAssistantDegraded = Boolean(homeAssistantConfigured && (status?.degraded || status?.connected === false || status?.last_error));
+  const homeAssistantConnected = Boolean(status?.connected);
 
   return [
     {
@@ -925,8 +929,8 @@ export function integrationDefinitions(
       description: "Gate control, mobile app notifications, TTS announcements, and state sync.",
       category: "access",
       icon: Home,
-      statusLabel: status?.configured ? "Connected" : "Not Configured",
-      statusTone: status?.configured ? "green" : "gray",
+      statusLabel: homeAssistantConnected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured",
+      statusTone: homeAssistantConnected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray",
       updateAvailable: hasDependencyUpdate("home_assistant"),
       notificationChannels: ["mobile", "voice"],
       fields: [
@@ -2902,6 +2906,7 @@ export function IntegrationModal({
   protectLoading,
   protectStatus,
   protectUpdateStatus,
+  homeAssistantStatus,
   dependencyPackages,
   dependencyStorage,
   icloudError,
@@ -2935,6 +2940,7 @@ export function IntegrationModal({
   protectLoading?: boolean;
   protectStatus?: UnifiProtectStatus | null;
   protectUpdateStatus?: UnifiProtectUpdateStatus | null;
+  homeAssistantStatus?: IntegrationStatus | null;
   dependencyPackages: DependencyPackage[];
   dependencyStorage: DependencyStorageStatus | null;
   icloudError?: string;
@@ -3276,6 +3282,7 @@ export function IntegrationModal({
             onChange={update}
             onReload={loadHomeAssistantDiscovery}
             schedules={schedules}
+            status={homeAssistantStatus ?? null}
           />
         ) : isApprise ? (
           <AppriseSettingsFields
@@ -4074,7 +4081,8 @@ export function HomeAssistantSettingsFields({
   form,
   onChange,
   onReload,
-  schedules
+  schedules,
+  status
 }: {
   discovery: HomeAssistantDiscovery | null;
   discoveryError: string;
@@ -4083,11 +4091,19 @@ export function HomeAssistantSettingsFields({
   onChange: (key: string, value: string) => void;
   onReload: () => Promise<void>;
   schedules: Schedule[];
+  status: IntegrationStatus | null;
 }) {
   type HomeAssistantTab = "setup" | "gates" | "garages";
   const [activeTab, setActiveTab] = React.useState<HomeAssistantTab>("setup");
   const gateEntities = parseManagedCovers(form.home_assistant_gate_entities);
   const garageDoorEntities = parseManagedCovers(form.home_assistant_garage_door_entities);
+  const configured = Boolean(status?.configured || form.home_assistant_url || form.home_assistant_token);
+  const connected = status?.connected === true;
+  const degraded = Boolean(configured && (status?.degraded || status?.connected === false || status?.last_error));
+  const connectionLabel = connected ? "Connected" : degraded ? "Degraded" : configured ? "Configured" : "Not Configured";
+  const connectionTone: BadgeTone = connected ? "green" : degraded ? "red" : configured ? "blue" : "gray";
+  const connectionDetail = status?.last_error
+    || (status?.state_refreshed_at ? `State refreshed ${formatOptionalDate(status.state_refreshed_at)}` : configured ? "Credentials are saved, but live state has not been verified yet." : "Save credentials to enable Home Assistant state sync.");
   const tabs: Array<{ key: HomeAssistantTab; label: string; meta: string; icon: React.ElementType }> = [
     { key: "setup", label: "Setup", meta: discovery ? "Discovery ready" : "Credentials", icon: Home },
     { key: "gates", label: "Gates", meta: `${gateEntities.length} configured`, icon: DoorOpen },
@@ -4152,6 +4168,10 @@ export function HomeAssistantSettingsFields({
               <button className="secondary-button ha-refresh-button" onClick={onReload} disabled={discoveryLoading} type="button">
                 <RefreshCcw size={15} /> {discoveryLoading ? "Refreshing..." : "Refresh"}
               </button>
+            </div>
+            <div className={`ha-health-strip ${connectionTone}`}>
+              <Badge tone={connectionTone}>{connectionLabel}</Badge>
+              <span>{connectionDetail}</span>
             </div>
 
             <div className="ha-setup-grid">

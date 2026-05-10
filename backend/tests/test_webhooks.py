@@ -60,6 +60,14 @@ class FakeUnifiPayloadRecorder:
         self.calls.append((payload, registration_number))
 
 
+class FailingUnifiPayloadRecorder:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def record_unifi_payload(self, _payload, *, registration_number):
+        raise RuntimeError(f"{self.message} for {registration_number}")
+
+
 class FakeAccessEventService:
     def __init__(self) -> None:
         self.enqueued = []
@@ -109,6 +117,48 @@ async def test_lpr_webhook_with_empty_smart_zone_evidence_is_accepted(webhook_ru
     assert webhook_runtime.visual_recorder.calls
     assert webhook_runtime.presence_tracker.calls
     assert webhook_runtime.published == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_still_enqueues_when_diagnostic_recorders_fail(webhook_runtime, monkeypatch) -> None:
+    service = FakeAccessEventService()
+    monkeypatch.setattr(
+        webhooks,
+        "get_vehicle_visual_detection_recorder",
+        lambda: FailingUnifiPayloadRecorder("visual recorder unavailable"),
+    )
+    monkeypatch.setattr(
+        webhooks,
+        "get_vehicle_presence_tracker",
+        lambda: FailingUnifiPayloadRecorder("presence tracker unavailable"),
+    )
+
+    result = await webhooks.receive_ubiquiti_lpr(make_json_request(alarm_payload("AGS7X", [])), service)
+
+    assert result == {"status": "accepted", "plate": "AGS7X"}
+    assert len(service.enqueued) == 1
+    assert webhook_runtime.published == [
+        (
+            "plate_read.diagnostics_failed",
+            {
+                "registration_number": "AGS7X",
+                "source": "ubiquiti",
+                "category": "lpr_telemetry",
+                "level": "warning",
+                "outcome": "failed",
+                "diagnostics": [
+                    {
+                        "diagnostic": "vehicle_visual_detection",
+                        "error": "RuntimeError: visual recorder unavailable for AGS7X",
+                    },
+                    {
+                        "diagnostic": "vehicle_presence",
+                        "error": "RuntimeError: presence tracker unavailable for AGS7X",
+                    },
+                ],
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

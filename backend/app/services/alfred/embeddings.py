@@ -86,7 +86,7 @@ async def _openai_embedding(runtime: Any, text: str, *, purpose: str) -> list[fl
     base_url = str(getattr(runtime, "openai_base_url", "https://api.openai.com/v1") or "").rstrip("/")
     model = str(getattr(runtime, "alfred_embedding_model", "text-embedding-3-small") or "text-embedding-3-small")
     timeout = min(float(getattr(runtime, "llm_timeout_seconds", 45.0) or 45.0), 15.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(
             f"{base_url}/embeddings",
             headers={
@@ -108,7 +108,7 @@ async def _ollama_embedding(runtime: Any, text: str, *, purpose: str) -> list[fl
         return None
     model = str(getattr(runtime, "alfred_embedding_model", "") or getattr(runtime, "ollama_model", "") or "nomic-embed-text")
     timeout = min(float(getattr(runtime, "llm_timeout_seconds", 45.0) or 45.0), 15.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(f"{base_url}/api/embeddings", json={"model": model, "prompt": text})
     if response.status_code >= 400:
         raise RuntimeError(f"ollama embeddings returned {response.status_code}: {response.text[:240]}")

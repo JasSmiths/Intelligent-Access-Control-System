@@ -238,6 +238,13 @@ export type Group = {
 
 export type IntegrationStatus = {
   configured: boolean;
+  connected?: boolean;
+  degraded?: boolean;
+  last_error?: string | null;
+  last_connected_at?: string | null;
+  last_failure_at?: string | null;
+  state_refreshed_at?: string | null;
+  listener_running?: boolean;
   gate_entity_id: string | null;
   gate_entities?: HomeAssistantManagedCover[];
   garage_door_entities?: HomeAssistantManagedCover[];

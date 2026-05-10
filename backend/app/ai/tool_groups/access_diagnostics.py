@@ -98,9 +98,14 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_access_events,
+                    example_inputs=(
+                        {"person": "Steph", "day": "today", "direction": "exit", "limit": 1},
+                        {"registration_number": "PE70DHX", "day": "recent", "decision": "granted"},
+                    ),
                     return_schema={
                         "answer_types": ["event_time", "access_event_list"],
                         "not_sufficient_for": ["absence_duration", "visit_duration"],
+                        "records": "events",
                     },
                 ),
         AgentTool(
@@ -133,6 +138,15 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=diagnose_access_event,
+                    example_inputs=(
+                        {"person": "Steph", "day": "today", "direction": "entry"},
+                        {"access_event_id": "access-event-uuid", "span_limit": 20},
+                    ),
+                    return_schema={
+                        "answer_types": ["diagnostic"],
+                        "handles": ["gate_open_reason", "schedule_denial", "notification_failure"],
+                        "result_keys": ["found", "answer_hints", "gate", "schedule", "notifications"],
+                    },
                 ),
         AgentTool(
                     name="investigate_access_incident",
@@ -164,6 +178,15 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=investigate_access_incident,
+                    example_inputs=(
+                        {"person": "Steph", "day": "today", "direction": "exit", "incident_type": "missing_event"},
+                        {"registration_number": "PE70DHX", "expected_time": "07:38", "window_minutes": 20},
+                    ),
+                    return_schema={
+                        "answer_types": ["diagnostic", "repair_preview"],
+                        "handles": ["missing_event", "gate_failure", "garage_failure", "notification_failure"],
+                        "result_keys": ["root_cause", "confidence", "recommended_action", "requires_confirmation"],
+                    },
                 ),
         AgentTool(
                     name="query_unifi_protect_events",
@@ -355,6 +378,15 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_anomalies,
+                    example_inputs=(
+                        {"status": "all", "day": "recent", "search": "oil delivery Dove Fuels truck tanker", "suspected_delivery": True, "limit": 25},
+                        {"status": "open", "day": "today", "limit": 10},
+                    ),
+                    return_schema={
+                        "answer_types": ["alert_match", "delivery_alert_match", "alert_activity_empty"],
+                        "handles": ["active_alerts", "resolved_alerts", "delivery_alerts"],
+                        "records": "alerts",
+                    },
                 ),
         AgentTool(
                     name="query_alert_activity",
@@ -379,6 +411,15 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_alert_activity,
+                    example_inputs=(
+                        {"day": "today", "status": "all"},
+                        {"day": "yesterday", "status": "resolved"},
+                    ),
+                    return_schema={
+                        "answer_types": ["alert_activity"],
+                        "handles": ["raised_alerts", "resolved_alerts"],
+                        "records": "raised,resolved",
+                    },
                 ),
         AgentTool(
                     name="analyze_alert_snapshot",
@@ -427,6 +468,10 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=calculate_visit_duration,
+                    example_inputs=(
+                        {"person": "Gardener", "day": "today"},
+                        {"group": "contractor", "day": "recent"},
+                    ),
                     return_schema={"answer_types": ["visit_duration"], "fact_kind": "elapsed_duration"},
                 ),
         AgentTool(
@@ -450,6 +495,10 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=calculate_absence_duration,
+                    example_inputs=(
+                        {"person": "Ash", "day": "today", "mode": "latest"},
+                        {"person_id": "person-uuid", "day": "today", "mode": "total"},
+                    ),
                     return_schema={
                         "answer_types": ["absence_duration"],
                         "fact_kind": "elapsed_duration",
@@ -467,7 +516,7 @@ def build_tools() -> list[AgentTool]:
                             "message": {"type": "string"},
                             "confirm": {"type": "boolean"},
                         },
-                        "required": ["subject", "severity", "message"],
+                        "required": ["subject", "severity", "message", "confirm"],
                         "additionalProperties": False,
                     },
                     handler=trigger_anomaly_alert,

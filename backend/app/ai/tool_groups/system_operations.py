@@ -80,18 +80,32 @@ def build_tools() -> list[AgentTool]:
         [
         AgentTool(
             name="query_integration_health",
-            description="Return redacted health/configuration status for configured IACS integrations and dependency backup storage.",
+            description=(
+                "Return redacted health/configuration status for configured IACS integrations, "
+                "access-event processing, and dependency backup storage."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "integration": {
                         "type": "string",
-                        "description": "Optional integration name, for example home_assistant, unifi_protect, discord, whatsapp, dvla, llm, dependency_updates, or all.",
+                        "description": (
+                            "Optional integration name, for example access_events, home_assistant, "
+                            "unifi_protect, discord, whatsapp, dvla, llm, dependency_updates, or all."
+                        ),
                     }
                 },
                 "additionalProperties": False,
             },
             handler=query_integration_health,
+            example_inputs=(
+                {"integration": "all"},
+                {"integration": "llm"},
+            ),
+            return_schema={
+                "answer_types": ["integration_health"],
+                "result_keys": ["integrations", "health", "configured", "ok"],
+            },
         ),
         AgentTool(
             name="test_integration_connection",
@@ -136,6 +150,11 @@ def build_tools() -> list[AgentTool]:
             description="Return auth-secret source/readiness status without revealing the secret value.",
             parameters={"type": "object", "properties": {}, "additionalProperties": False},
             handler=query_auth_secret_status,
+            example_inputs=({},),
+            return_schema={
+                "answer_types": ["auth_secret_status"],
+                "result_keys": ["source", "ready", "rotation_supported"],
+            },
         ),
         AgentTool(
             name="query_alfred_runtime_events",
@@ -149,6 +168,13 @@ def build_tools() -> list[AgentTool]:
                 "additionalProperties": False,
             },
             handler=query_alfred_runtime_events,
+            example_inputs=(
+                {"hours": 24, "limit": 20},
+            ),
+            return_schema={
+                "answer_types": ["alfred_runtime_events"],
+                "records": "events",
+            },
         ),
         AgentTool(
             name="rotate_auth_secret",

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 import uuid
@@ -17,6 +18,8 @@ from app.services.access_events import (
     GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
+    MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+    PROCESSING_ATTEMPT_PAYLOAD_KEY,
     VEHICLE_SESSION_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     dvla_mot_alert_required,
@@ -316,6 +319,84 @@ def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
         captured_at=read.captured_at,
         raw_payload=raw_payload,
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_iteration_failure_requeues_pulled_read_and_marks_degraded(monkeypatch) -> None:
+    service = AccessEventService()
+    read = plate_read("AGS7X", datetime(2026, 5, 10, 8, 0, tzinfo=UTC))
+    published = []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    monkeypatch.setattr(service, "_sleep_until_retry", no_sleep)
+    service._worker = asyncio.create_task(asyncio.sleep(30))
+
+    try:
+        await service._handle_worker_iteration_failure(
+            RuntimeError("database connection reset"),
+            read_for_retry=read,
+        )
+
+        retried = service._queue.get_nowait()
+        assert retried.registration_number == "AGS7X"
+        assert retried.raw_payload[PROCESSING_ATTEMPT_PAYLOAD_KEY] == 1
+        assert service.status()["status"] == "degraded"
+        assert [event_type for event_type, _payload in published] == [
+            "access_event.worker_degraded",
+            "plate_read.retrying",
+        ]
+        retry_payload = published[1][1]
+        assert retry_payload["attempt"] == 1
+        assert retry_payload["max_attempts"] == MAX_PLATE_READ_PROCESSING_ATTEMPTS
+        assert "database connection reset" in retry_payload["error"]
+    finally:
+        service._worker.cancel()
+        await asyncio.gather(service._worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_retry_gives_up_loudly_after_bounded_attempts(monkeypatch) -> None:
+    service = AccessEventService()
+    raw_payload = {PROCESSING_ATTEMPT_PAYLOAD_KEY: MAX_PLATE_READ_PROCESSING_ATTEMPTS - 1}
+    read = PlateRead(
+        registration_number="AGS7X",
+        confidence=0.9,
+        source="test",
+        captured_at=datetime(2026, 5, 10, 8, 0, tzinfo=UTC),
+        raw_payload=raw_payload,
+    )
+    published = []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    retried = await service._retry_or_fail_read(read, RuntimeError("database unavailable"), stage="finalize")
+
+    assert retried is False
+    assert service._queue.empty()
+    assert published == [
+        (
+            "plate_read.failed",
+            {
+                "registration_number": "AGS7X",
+                "detected_registration_number": "AGS7X",
+                "source": "test",
+                "captured_at": "2026-05-10T08:00:00+00:00",
+                "attempt": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+                "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+                "stage": "finalize",
+                "error": "RuntimeError: database unavailable",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

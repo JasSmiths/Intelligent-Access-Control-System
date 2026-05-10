@@ -75,6 +75,7 @@ PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_preserve_gate_observation"
 GATE_MALFUNCTION_PAYLOAD_KEY = "_iacs_gate_malfunction"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
+PROCESSING_ATTEMPT_PAYLOAD_KEY = "_iacs_processing_attempt"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
 VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
@@ -83,6 +84,9 @@ ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
 MAX_SUPPRESSED_SESSION_READS = 20
+MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
+PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
+WORKER_STALL_QUEUE_SECONDS = 60.0
 CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.85
 PERSON_NOTIFICATION_PRONOUNS = {
     "he/him": ("him", "his"),
@@ -242,12 +246,22 @@ class AccessEventService:
         self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
         self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
         self._active_vehicle_sessions: list[ActiveVehicleSession] = []
+        self._started_at: datetime | None = None
+        self._last_heartbeat_at: datetime | None = None
+        self._last_processed_at: datetime | None = None
+        self._last_error: str | None = None
+        self._last_error_at: datetime | None = None
+        self._consecutive_failures = 0
+        self._total_failures = 0
 
     async def start(self) -> None:
         if self._worker and not self._worker.done():
             return
         self._stop_event.clear()
+        self._started_at = datetime.now(tz=UTC)
+        self._last_heartbeat_at = self._started_at
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
+        self._worker.add_done_callback(self._handle_worker_done)
         event_bus.subscribe(self._handle_realtime_event)
         logger.info("access_event_service_started")
 
@@ -258,6 +272,43 @@ class AccessEventService:
         await self._flush_all_pending()
         event_bus.unsubscribe(self._handle_realtime_event)
         logger.info("access_event_service_stopped")
+
+    def status(self) -> dict[str, Any]:
+        now = datetime.now(tz=UTC)
+        worker_running = bool(self._worker and not self._worker.done())
+        queue_depth = self._queue.qsize()
+        heartbeat_age_seconds = (
+            max(0.0, (now - self._last_heartbeat_at).total_seconds())
+            if self._last_heartbeat_at
+            else None
+        )
+        stalled = bool(
+            worker_running
+            and queue_depth > 0
+            and heartbeat_age_seconds is not None
+            and heartbeat_age_seconds > WORKER_STALL_QUEUE_SECONDS
+        )
+        if not worker_running:
+            state = "down"
+        elif stalled or self._consecutive_failures:
+            state = "degraded"
+        else:
+            state = "ok"
+        return {
+            "status": state,
+            "worker_running": worker_running,
+            "queue_depth": queue_depth,
+            "pending_windows": len(self._pending),
+            "active_vehicle_sessions": len(self._active_vehicle_sessions),
+            "started_at": self._started_at.isoformat() if self._started_at else None,
+            "last_heartbeat_at": self._last_heartbeat_at.isoformat() if self._last_heartbeat_at else None,
+            "last_processed_at": self._last_processed_at.isoformat() if self._last_processed_at else None,
+            "last_error": self._last_error,
+            "last_error_at": self._last_error_at.isoformat() if self._last_error_at else None,
+            "consecutive_failures": self._consecutive_failures,
+            "total_failures": self._total_failures,
+            "stalled": stalled,
+        }
 
     async def enqueue_plate_read(self, read: PlateRead) -> None:
         if await is_maintenance_mode_active():
@@ -333,17 +384,222 @@ class AccessEventService:
 
     async def _process_queue(self) -> None:
         while not self._stop_event.is_set():
-            self._runtime = await get_runtime_config()
-            self._timezone = ZoneInfo(self._runtime.site_timezone)
+            read_for_retry: PlateRead | None = None
             try:
-                read = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-                if await is_maintenance_mode_active():
-                    self._clear_pending_reads()
-                    continue
-                await self._handle_queued_read(read)
-            except asyncio.TimeoutError:
-                pass
-            await self._flush_expired_windows()
+                self._last_heartbeat_at = datetime.now(tz=UTC)
+                self._runtime = await get_runtime_config()
+                self._timezone = ZoneInfo(self._runtime.site_timezone)
+                try:
+                    read = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    read = None
+
+                if read is not None:
+                    read_for_retry = read
+                    if await is_maintenance_mode_active():
+                        self._clear_pending_reads()
+                        await self._publish_terminal_read(
+                            read,
+                            "plate_read.skipped",
+                            reason="maintenance_mode_active",
+                        )
+                        read_for_retry = None
+                        continue
+                    await self._handle_queued_read(read)
+                    self._last_processed_at = datetime.now(tz=UTC)
+                    if self._processing_attempt(read) > 0:
+                        await self._publish_terminal_read(
+                            read,
+                            "plate_read.recovered",
+                            reason="retry_succeeded",
+                        )
+                    read_for_retry = None
+
+                await self._flush_expired_windows()
+                self._consecutive_failures = 0
+            except Exception as exc:
+                await self._handle_worker_iteration_failure(exc, read_for_retry=read_for_retry)
+
+    def _handle_worker_done(self, task: asyncio.Task) -> None:
+        if self._stop_event.is_set() or task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+        self._record_worker_failure(exc)
+        logger.error(
+            "access_event_worker_stopped_unexpectedly",
+            extra={"error": self._safe_exception_detail(exc)},
+        )
+        try:
+            asyncio.create_task(
+                event_bus.publish(
+                    "access_event.worker_failed",
+                    {
+                        "status": "down",
+                        "queue_depth": self._queue.qsize(),
+                        "pending_windows": len(self._pending),
+                        "error": self._safe_exception_detail(exc),
+                    },
+                )
+            )
+        except RuntimeError:
+            logger.warning(
+                "access_event_worker_failure_event_not_published",
+                extra={"error": self._safe_exception_detail(exc)},
+            )
+
+    async def _handle_worker_iteration_failure(
+        self,
+        exc: Exception,
+        *,
+        read_for_retry: PlateRead | None,
+    ) -> None:
+        self._record_worker_failure(exc)
+        payload = {
+            "status": "degraded",
+            "queue_depth": self._queue.qsize(),
+            "pending_windows": len(self._pending),
+            "consecutive_failures": self._consecutive_failures,
+            "error": self._safe_exception_detail(exc),
+        }
+        if read_for_retry is not None:
+            payload.update(self._read_failure_payload(read_for_retry, exc, stage="worker"))
+        logger.error("access_event_worker_iteration_failed", extra=payload)
+        await event_bus.publish("access_event.worker_degraded", payload)
+        if read_for_retry is not None:
+            await self._retry_or_fail_read(read_for_retry, exc, stage="worker")
+            return
+        await self._sleep_until_retry(self._worker_backoff_seconds())
+
+    def _record_worker_failure(self, exc: Exception) -> None:
+        self._total_failures += 1
+        self._consecutive_failures += 1
+        self._last_error = self._safe_exception_detail(exc)
+        self._last_error_at = datetime.now(tz=UTC)
+
+    def _worker_backoff_seconds(self) -> float:
+        index = min(
+            max(self._consecutive_failures - 1, 0),
+            len(PLATE_READ_RETRY_BACKOFF_SECONDS) - 1,
+        )
+        return PLATE_READ_RETRY_BACKOFF_SECONDS[index]
+
+    async def _retry_or_fail_read(
+        self,
+        read: PlateRead,
+        exc: Exception,
+        *,
+        stage: str,
+        reason: str | None = None,
+        candidate_count: int | None = None,
+    ) -> bool:
+        attempt = self._processing_attempt(read) + 1
+        payload = self._read_failure_payload(
+            read,
+            exc,
+            stage=stage,
+            attempt=attempt,
+            reason=reason,
+            candidate_count=candidate_count,
+        )
+        if self._stop_event.is_set() or attempt >= MAX_PLATE_READ_PROCESSING_ATTEMPTS:
+            logger.error("plate_read_processing_failed_permanently", extra=payload)
+            await event_bus.publish("plate_read.failed", payload)
+            return False
+
+        backoff_seconds = PLATE_READ_RETRY_BACKOFF_SECONDS[
+            min(attempt - 1, len(PLATE_READ_RETRY_BACKOFF_SECONDS) - 1)
+        ]
+        await event_bus.publish(
+            "plate_read.retrying",
+            {**payload, "next_retry_seconds": backoff_seconds},
+        )
+        await self._sleep_until_retry(backoff_seconds)
+        if self._stop_event.is_set():
+            return False
+        await self._queue.put(self._read_with_processing_attempt(read, attempt))
+        return True
+
+    async def _publish_terminal_read(
+        self,
+        read: PlateRead,
+        event_type: str,
+        *,
+        reason: str,
+        candidate_count: int | None = None,
+    ) -> None:
+        payload = {
+            "registration_number": read.registration_number,
+            "detected_registration_number": _detected_registration_number(read),
+            "source": read.source,
+            "captured_at": read.captured_at.isoformat(),
+            "attempt": self._processing_attempt(read),
+            "reason": reason,
+        }
+        if candidate_count is not None:
+            payload["candidate_count"] = candidate_count
+        await event_bus.publish(event_type, payload)
+
+    def _read_failure_payload(
+        self,
+        read: PlateRead,
+        exc: Exception,
+        *,
+        stage: str,
+        attempt: int | None = None,
+        reason: str | None = None,
+        candidate_count: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "registration_number": read.registration_number,
+            "detected_registration_number": _detected_registration_number(read),
+            "source": read.source,
+            "captured_at": read.captured_at.isoformat(),
+            "attempt": self._processing_attempt(read) if attempt is None else attempt,
+            "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+            "stage": stage,
+            "error": self._safe_exception_detail(exc),
+        }
+        if reason:
+            payload["reason"] = reason
+        if candidate_count is not None:
+            payload["candidate_count"] = candidate_count
+        return payload
+
+    def _processing_attempt(self, read: PlateRead) -> int:
+        try:
+            return max(0, int((read.raw_payload or {}).get(PROCESSING_ATTEMPT_PAYLOAD_KEY) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _read_with_processing_attempt(self, read: PlateRead, attempt: int) -> PlateRead:
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[PROCESSING_ATTEMPT_PAYLOAD_KEY] = attempt
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+        )
+
+    async def _sleep_until_retry(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            return
+
+    def _safe_exception_detail(self, exc: Exception) -> str:
+        detail = str(exc).replace("\n", " ").strip()
+        if len(detail) > 240:
+            detail = f"{detail[:237]}..."
+        return f"{exc.__class__.__name__}: {detail}" if detail else exc.__class__.__name__
 
     async def _handle_queued_read(self, read: PlateRead) -> None:
         read = await self._read_with_known_vehicle_match(read)
@@ -586,7 +842,7 @@ class AccessEventService:
     async def _finalize_exact_known_plate_window(self, window: DebounceWindow) -> None:
         try:
             finalized = await self._finalize_window(window)
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "access_event_finalize_failed",
                 extra={
@@ -595,14 +851,7 @@ class AccessEventService:
                     "reason": "exact_known_vehicle_plate",
                 },
             )
-            await event_bus.publish(
-                "access_event.finalize_failed",
-                {
-                    "registration_number": window.best_read.registration_number,
-                    "candidate_count": len(window.reads),
-                    "reason": "exact_known_vehicle_plate",
-                },
-            )
+            await self._handle_finalize_failure(window, exc, reason="exact_known_vehicle_plate")
             return
         self._remember_exact_plate_resolution(window, finalized)
 
@@ -664,7 +913,7 @@ class AccessEventService:
     async def _finalize_visitor_pass_window(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
         try:
             await self._finalize_window(window)
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "access_event_finalize_failed",
                 extra={
@@ -673,14 +922,7 @@ class AccessEventService:
                     "reason": "visitor_pass_departure_plate",
                 },
             )
-            await event_bus.publish(
-                "access_event.finalize_failed",
-                {
-                    "registration_number": window.best_read.registration_number,
-                    "candidate_count": len(window.reads),
-                    "reason": "visitor_pass_departure_plate",
-                },
-            )
+            await self._handle_finalize_failure(window, exc, reason="visitor_pass_departure_plate")
             return
         self._remember_visitor_pass_resolution(window, anchor_read)
 
@@ -1300,7 +1542,7 @@ class AccessEventService:
         for window in ready:
             try:
                 await self._finalize_window(window)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "access_event_finalize_failed",
                     extra={
@@ -1308,13 +1550,7 @@ class AccessEventService:
                         "best_registration_number": window.best_read.registration_number,
                     },
                 )
-                await event_bus.publish(
-                    "access_event.finalize_failed",
-                    {
-                        "registration_number": window.best_read.registration_number,
-                        "candidate_count": len(window.reads),
-                    },
-                )
+                await self._handle_finalize_failure(window, exc, reason="debounce_window_expired")
 
     async def _flush_all_pending(self) -> None:
         if await is_maintenance_mode_active():
@@ -1325,7 +1561,7 @@ class AccessEventService:
         for window in pending:
             try:
                 await self._finalize_window(window)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "access_event_finalize_failed",
                     extra={
@@ -1333,6 +1569,43 @@ class AccessEventService:
                         "best_registration_number": window.best_read.registration_number,
                     },
                 )
+                await self._handle_finalize_failure(window, exc, reason="service_stopping")
+
+    async def _handle_finalize_failure(
+        self,
+        window: DebounceWindow,
+        exc: Exception,
+        *,
+        reason: str,
+    ) -> None:
+        payload = {
+            "registration_number": window.best_read.registration_number,
+            "detected_registration_number": _detected_registration_number(window.best_read),
+            "source": window.best_read.source,
+            "candidate_count": len(window.reads),
+            "reason": reason,
+            "error": self._safe_exception_detail(exc),
+        }
+        next_attempt = self._processing_attempt(window.best_read) + 1
+        await event_bus.publish(
+            "access_event.finalize_failed",
+            {
+                **payload,
+                "will_retry": (
+                    not self._stop_event.is_set()
+                    and next_attempt < MAX_PLATE_READ_PROCESSING_ATTEMPTS
+                ),
+                "attempt": next_attempt,
+                "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+            },
+        )
+        await self._retry_or_fail_read(
+            window.best_read,
+            exc,
+            stage="finalize",
+            reason=reason,
+            candidate_count=len(window.reads),
+        )
 
     async def _finalize_window(self, window: DebounceWindow) -> FinalizedPlateEvent | None:
         if await is_maintenance_mode_active():

@@ -196,6 +196,8 @@ type AuthStatus = {
 
 type ThemeMode = "system" | "light" | "dark";
 
+type RealtimeConnectionStatus = "connecting" | "live" | "reconnecting";
+
 const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
   { key: "people", label: "People", icon: UserRound },
@@ -296,6 +298,12 @@ function applyIntegrationRealtimeEvent(
   event: RealtimeMessage,
   setIntegrationStatus: React.Dispatch<React.SetStateAction<IntegrationStatus | null>>
 ) {
+  if (event.type === "home_assistant.status") {
+    const payload = event.payload as Partial<IntegrationStatus>;
+    setIntegrationStatus((current) => current ? { ...current, ...payload } : current);
+    return true;
+  }
+
   if (event.type === "gate.state_changed") {
     const state = stringPayload(event.payload.state);
     const entityId = stringPayload(event.payload.entity_id);
@@ -816,6 +824,7 @@ function App() {
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
+  const [realtimeConnectionStatus, setRealtimeConnectionStatus] = React.useState<RealtimeConnectionStatus>("connecting");
   const [search, setSearch] = React.useState("");
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
@@ -906,7 +915,16 @@ function App() {
   }, []);
 
   const refreshIntegrationStatus = React.useCallback(async () => {
-    setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"));
+    try {
+      setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status?refresh=true"));
+    } catch (error) {
+      setIntegrationStatus((current) => current ? {
+        ...current,
+        connected: false,
+        degraded: true,
+        last_error: error instanceof Error ? error.message : "Unable to refresh Home Assistant status."
+      } : current);
+    }
   }, []);
 
   const refreshDashboard = React.useCallback(async () => {
@@ -983,6 +1001,7 @@ function App() {
 
     const scheduleReconnect = () => {
       if (stopped || reconnectTimer !== null) return;
+      setRealtimeConnectionStatus("reconnecting");
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
         openSocket();
@@ -993,6 +1012,8 @@ function App() {
       if (stopped) return;
       const nextSocket = new WebSocket(wsUrl("/api/v1/realtime/ws"));
       socket = nextSocket;
+      setRealtimeConnectionStatus("connecting");
+      nextSocket.onopen = () => setRealtimeConnectionStatus("live");
       nextSocket.onmessage = handleMessage;
       nextSocket.onclose = scheduleReconnect;
       nextSocket.onerror = () => nextSocket.close();
@@ -1284,8 +1305,8 @@ function App() {
             ) : null}
           </div>
           <div className="sidebar-status">
-            <span className="dot live" />
-            <span>Online</span>
+            <span className={`dot ${realtimeConnectionStatus}`} />
+            <span>{realtimeConnectionStatus === "live" ? "Realtime live" : realtimeConnectionStatus === "reconnecting" ? "Realtime reconnecting" : "Realtime connecting"}</span>
           </div>
         </div>
       </aside>
@@ -1304,7 +1325,7 @@ function App() {
               <Menu size={20} />
             </button>
             <button className="estate-select" type="button" aria-label="Current site">
-              <span>Crest House - Main Gate</span>
+              <span>Crest House</span>
             </button>
           </div>
           <div className="topbar-actions">

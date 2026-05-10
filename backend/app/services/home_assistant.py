@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
+from typing import Any
 
 from sqlalchemy import select
 
@@ -46,6 +47,10 @@ class HomeAssistantIntegrationService:
         self._state_cache: dict[str, dict[str, str]] = {}
         self._last_state_refresh_at = 0.0
         self._last_gate_state = GateState.UNKNOWN
+        self._connected = False
+        self._last_error: str | None = None
+        self._last_connected_at: datetime | None = None
+        self._last_failure_at: datetime | None = None
 
     async def configured(self) -> bool:
         config = await get_runtime_config()
@@ -89,6 +94,12 @@ class HomeAssistantIntegrationService:
         )
         status = {
             "configured": bool(config.home_assistant_url and config.home_assistant_token),
+            "connected": False,
+            "degraded": False,
+            "last_error": None,
+            "last_connected_at": self._last_connected_at.isoformat() if self._last_connected_at else None,
+            "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
+            "listener_running": bool(self._listener and not self._listener.done()),
             "gate_entity_id": gate_entities[0]["entity_id"] if gate_entities else config.home_assistant_gate_entity_id,
             "gate_entities": [cover_entity_state_payload(entity) for entity in gate_entities],
             "garage_door_entities": [cover_entity_state_payload(entity) for entity in garage_door_entities],
@@ -145,69 +156,90 @@ class HomeAssistantIntegrationService:
             refreshed_at = self._latest_cached_state_timestamp(watched_entity_ids)
             if refreshed_at:
                 status["state_refreshed_at"] = refreshed_at
+            status.update(
+                {
+                    "connected": self._connected,
+                    "degraded": bool(self._last_error),
+                    "last_error": self._last_error,
+                    "last_connected_at": self._last_connected_at.isoformat() if self._last_connected_at else None,
+                    "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
+                    "listener_running": bool(self._listener and not self._listener.done()),
+                }
+            )
         return status
 
     async def _listen(self) -> None:
-        async for message in self._client.subscribe_state_changed():
-            if message.get("type") != "event":
-                continue
+        try:
+            async for message in self._client.subscribe_state_changed():
+                previous_status = (self._connected, self._last_error)
+                self._mark_connected()
+                await self._publish_connection_status_if_changed(previous_status)
+                if message.get("type") != "event":
+                    continue
 
-            event = message.get("event", {})
-            event_type = str(event.get("event_type") or "")
-            if event_type == "mobile_app_notification_action":
-                await self._handle_mobile_notification_action(event)
-                continue
-            if event_type and event_type != "state_changed":
-                continue
-            data = event.get("data", {})
-            entity_id = data.get("entity_id")
-            new_state = data.get("new_state") or {}
-            state_value = new_state.get("state")
-            if not entity_id or state_value is None:
-                continue
+                event = message.get("event", {})
+                event_type = str(event.get("event_type") or "")
+                if event_type == "mobile_app_notification_action":
+                    await self._handle_mobile_notification_action(event)
+                    continue
+                if event_type and event_type != "state_changed":
+                    continue
+                data = event.get("data", {})
+                entity_id = data.get("entity_id")
+                new_state = data.get("new_state") or {}
+                state_value = new_state.get("state")
+                if not entity_id or state_value is None:
+                    continue
 
-            previous_gate_state = self._cached_gate_state(str(entity_id))
-            last_changed = str(new_state.get("last_changed") or "") or None
-            last_updated = str(new_state.get("last_updated") or "") or None
-            self._remember_state(
-                str(entity_id),
-                str(state_value),
-                last_changed=last_changed,
-                last_updated=last_updated,
-            )
-            config = await get_runtime_config()
-            gate_entities = normalize_cover_entities(
-                config.home_assistant_gate_entities,
-                default_open_service=config.home_assistant_gate_open_service,
-            ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
-            gate_entity_map = {str(entity["entity_id"]): entity for entity in gate_entities}
-            garage_entity_map = {
-                str(entity["entity_id"]): entity
-                for entity in normalize_cover_entities(
-                    config.home_assistant_garage_door_entities,
-                    default_open_service=config.home_assistant_gate_open_service,
-                )
-            }
-            if entity_id in gate_entity_map:
-                await self._sync_gate_state(
-                    state_value,
-                    entity_id,
-                    str(gate_entity_map[entity_id].get("name") or entity_id),
-                    previous_state=previous_gate_state,
+                previous_gate_state = self._cached_gate_state(str(entity_id))
+                last_changed = str(new_state.get("last_changed") or "") or None
+                last_updated = str(new_state.get("last_updated") or "") or None
+                self._remember_state(
+                    str(entity_id),
+                    str(state_value),
                     last_changed=last_changed,
-                    source="home_assistant_websocket",
+                    last_updated=last_updated,
                 )
-            if entity_id in garage_entity_map:
-                await self._sync_cover_state(
-                    state_value,
-                    entity_id,
-                    "garage_door",
-                    str(garage_entity_map[entity_id].get("name") or entity_id),
-                )
-            if entity_id in DOOR_ENTITY_IDS:
-                await self._sync_door_state(state_value, entity_id)
-            if entity_id == MAINTENANCE_HA_ENTITY_ID:
-                await self._sync_maintenance_mode_state(state_value)
+                config = await get_runtime_config()
+                gate_entities = normalize_cover_entities(
+                    config.home_assistant_gate_entities,
+                    default_open_service=config.home_assistant_gate_open_service,
+                ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+                gate_entity_map = {str(entity["entity_id"]): entity for entity in gate_entities}
+                garage_entity_map = {
+                    str(entity["entity_id"]): entity
+                    for entity in normalize_cover_entities(
+                        config.home_assistant_garage_door_entities,
+                        default_open_service=config.home_assistant_gate_open_service,
+                    )
+                }
+                if entity_id in gate_entity_map:
+                    await self._sync_gate_state(
+                        state_value,
+                        entity_id,
+                        str(gate_entity_map[entity_id].get("name") or entity_id),
+                        previous_state=previous_gate_state,
+                        last_changed=last_changed,
+                        source="home_assistant_websocket",
+                    )
+                if entity_id in garage_entity_map:
+                    await self._sync_cover_state(
+                        state_value,
+                        entity_id,
+                        "garage_door",
+                        str(garage_entity_map[entity_id].get("name") or entity_id),
+                    )
+                if entity_id in DOOR_ENTITY_IDS:
+                    await self._sync_door_state(state_value, entity_id)
+                if entity_id == MAINTENANCE_HA_ENTITY_ID:
+                    await self._sync_maintenance_mode_state(state_value)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            previous_status = (self._connected, self._last_error)
+            self._mark_unhealthy(str(exc))
+            await self._publish_connection_status_if_changed(previous_status)
+            logger.warning("home_assistant_listener_failed", extra={"error": str(exc)})
 
     async def _handle_mobile_notification_action(self, event: dict) -> None:
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -394,7 +426,15 @@ class HomeAssistantIntegrationService:
                 self._last_state_refresh_at = now
                 return
 
-            await asyncio.gather(*(self._refresh_entity_state(entity_id) for entity_id in entity_ids))
+            results = await asyncio.gather(*(self._refresh_entity_state(entity_id) for entity_id in entity_ids))
+            successes = [entity_id for entity_id, ok, _error in results if ok]
+            failures = [(entity_id, error) for entity_id, ok, error in results if not ok and error]
+            previous_status = (self._connected, self._last_error)
+            if successes:
+                self._mark_connected()
+            elif failures:
+                self._mark_unhealthy(failures[0][1])
+            await self._publish_connection_status_if_changed(previous_status)
             if gate_entities:
                 first_gate_state = self._state_cache.get(str(gate_entities[0]["entity_id"]), {}).get("state")
                 if first_gate_state:
@@ -416,18 +456,20 @@ class HomeAssistantIntegrationService:
                 await self._sync_maintenance_mode_state(maintenance_state)
             self._last_state_refresh_at = now
 
-    async def _refresh_entity_state(self, entity_id: str) -> None:
+    async def _refresh_entity_state(self, entity_id: str) -> tuple[str, bool, str | None]:
         try:
             state = await self._client.get_state(entity_id)
         except Exception as exc:
-            logger.warning("home_assistant_state_refresh_failed", extra={"entity_id": entity_id, "error": str(exc)})
-            return
+            error = str(exc)
+            logger.warning("home_assistant_state_refresh_failed", extra={"entity_id": entity_id, "error": error})
+            return entity_id, False, error
         self._remember_state(
             entity_id,
             state.state,
             last_changed=state.last_changed,
             last_updated=state.last_updated,
         )
+        return entity_id, True, None
 
     def _configured_state_entity_ids(
         self,
@@ -474,6 +516,62 @@ class HomeAssistantIntegrationService:
             if (cached := self._state_cache.get(entity_id)) and cached.get("updated_at")
         ]
         return max(timestamps) if timestamps else None
+
+    def _mark_connected(self) -> None:
+        self._connected = True
+        self._last_error = None
+        self._last_connected_at = datetime.now(tz=UTC)
+
+    def _mark_unhealthy(self, error: str) -> None:
+        self._connected = False
+        self._last_error = error[:500]
+        self._last_failure_at = datetime.now(tz=UTC)
+
+    async def _publish_connection_status_if_changed(self, previous_status: tuple[bool, str | None]) -> None:
+        if previous_status == (self._connected, self._last_error):
+            return
+        await event_bus.publish("home_assistant.status", self._connection_status_payload())
+        await self._publish_degraded_notification_if_needed(previous_status)
+
+    def _connection_status_payload(self) -> dict[str, Any]:
+        return {
+            "configured": True,
+            "integration_name": "Home Assistant",
+            "integration_status": "degraded" if self._last_error else "connected",
+            "integration_reason": self._last_error,
+            "connected": self._connected,
+            "degraded": bool(self._last_error),
+            "last_error": self._last_error,
+            "last_connected_at": self._last_connected_at.isoformat() if self._last_connected_at else None,
+            "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
+            "listener_running": bool(self._listener and not self._listener.done()),
+        }
+
+    async def _publish_degraded_notification_if_needed(self, previous_status: tuple[bool, str | None]) -> None:
+        _previous_connected, previous_error = previous_status
+        if not self._last_error or previous_error:
+            return
+        from app.modules.notifications.base import NotificationContext
+        from app.services.notifications import INTEGRATION_DEGRADED_EVENT_TYPE, notification_context_payload
+
+        reason = self._last_error
+        occurred_at = self._last_failure_at or datetime.now(tz=UTC)
+        context = NotificationContext(
+            event_type=INTEGRATION_DEGRADED_EVENT_TYPE,
+            subject="Home Assistant degraded",
+            severity="warning",
+            facts={
+                "integration_name": "Home Assistant",
+                "integration_status": "Degraded",
+                "integration_reason": reason,
+                "integration_last_connected_at": self._last_connected_at.isoformat() if self._last_connected_at else "",
+                "integration_last_failure_at": occurred_at.isoformat(),
+                "message": f"Home Assistant is degraded: {reason}",
+                "occurred_at": occurred_at.isoformat(),
+                "source": "home_assistant",
+            },
+        )
+        await event_bus.publish("notification.trigger", notification_context_payload(context))
 
     async def _record_gate_state_observation(
         self,

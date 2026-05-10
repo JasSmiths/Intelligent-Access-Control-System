@@ -65,6 +65,14 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_device_states,
+                    example_inputs=(
+                        {"target": "Top Gate", "kind": "gate"},
+                        {"kind": "garage_door"},
+                    ),
+                    return_schema={
+                        "answer_types": ["device_state"],
+                        "records": "devices",
+                    },
                 ),
         AgentTool(
                     name="get_maintenance_status",
@@ -75,6 +83,11 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=get_maintenance_status,
+                    example_inputs=({},),
+                    return_schema={
+                        "answer_types": ["maintenance_status"],
+                        "result_keys": ["is_active", "started_at", "reason", "duration_seconds"],
+                    },
                 ),
         AgentTool(
                     name="get_active_malfunctions",
@@ -178,6 +191,10 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=open_device,
+                    example_inputs=(
+                        {"target": "Top Gate", "kind": "gate", "action": "open", "confirm": False},
+                        {"target": "Main Garage Door", "kind": "garage_door", "action": "close", "confirm": False},
+                    ),
                 ),
         AgentTool(
                     name="command_device",

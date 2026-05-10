@@ -18,7 +18,7 @@ from app.services.access_events import AccessEventService, get_access_event_serv
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
-from app.services.telemetry import TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
+from app.services.telemetry import TELEMETRY_CATEGORY_LPR, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
@@ -285,14 +285,7 @@ async def receive_ubiquiti_lpr(
     )
     read = _read_with_smart_zone_evidence_metadata(read, zone_evidence_detail)
 
-    await get_vehicle_visual_detection_recorder().record_unifi_payload(
-        raw_payload,
-        registration_number=read.registration_number,
-    )
-    await get_vehicle_presence_tracker().record_unifi_payload(
-        raw_payload,
-        registration_number=read.registration_number,
-    )
+    await _record_lpr_diagnostic_payloads(raw_payload, read)
     telemetry.record_span(
         "Webhook payload normalized to PlateRead",
         category=TELEMETRY_CATEGORY_WEBHOOKS_API,
@@ -363,6 +356,66 @@ def _read_with_smart_zone_evidence_metadata(
         captured_at=read.captured_at,
         raw_payload=raw_payload,
     )
+
+
+async def _record_lpr_diagnostic_payloads(raw_payload: Any, read: PlateRead) -> None:
+    failures: list[dict[str, str]] = []
+    recorders = (
+        ("vehicle_visual_detection", get_vehicle_visual_detection_recorder),
+        ("vehicle_presence", get_vehicle_presence_tracker),
+    )
+    for name, recorder_factory in recorders:
+        try:
+            recorder = recorder_factory()
+            await recorder.record_unifi_payload(
+                raw_payload,
+                registration_number=read.registration_number,
+            )
+        except Exception as exc:
+            detail = _safe_error_detail(exc)
+            failures.append({"diagnostic": name, "error": detail})
+            logger.warning(
+                "lpr_diagnostic_recording_failed",
+                extra={
+                    "registration_number": read.registration_number,
+                    "source": read.source,
+                    "diagnostic": name,
+                    "error": detail,
+                },
+            )
+            telemetry.record_span(
+                "LPR diagnostic recording failed",
+                category=TELEMETRY_CATEGORY_LPR,
+                status="error",
+                attributes={
+                    "source": read.source,
+                    "diagnostic": name,
+                },
+                output_payload={
+                    "registration_number": read.registration_number,
+                    "error": detail,
+                },
+            )
+    if not failures:
+        return
+    await event_bus.publish(
+        "plate_read.diagnostics_failed",
+        {
+            "registration_number": read.registration_number,
+            "source": read.source,
+            "category": TELEMETRY_CATEGORY_LPR,
+            "level": "warning",
+            "outcome": "failed",
+            "diagnostics": failures,
+        },
+    )
+
+
+def _safe_error_detail(exc: Exception) -> str:
+    detail = str(exc).replace("\n", " ").strip()
+    if len(detail) > 240:
+        detail = f"{detail[:237]}..."
+    return f"{exc.__class__.__name__}: {detail}" if detail else exc.__class__.__name__
 
 
 def _payload_shape(value: Any, depth: int = 0) -> Any:

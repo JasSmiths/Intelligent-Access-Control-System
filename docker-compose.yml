@@ -65,7 +65,7 @@ services:
     restart: unless-stopped
 
   updater:
-    image: docker:27-cli
+    image: docker:29.4.3-cli
     container_name: iacs-updater
     working_dir: /workspace
     command: ["sh", "-c", "while sleep 3600; do :; done"]

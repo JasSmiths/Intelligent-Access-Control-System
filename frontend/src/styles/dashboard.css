@@ -122,6 +122,10 @@
   color: var(--amber);
 }
 
+.site-status-main.degraded {
+  color: var(--red);
+}
+
 .maintenance-status-icon {
   width: 62px;
   height: 62px;
@@ -553,6 +557,11 @@
   overflow: visible;
 }
 
+.anomaly-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
 .event-feed {
   display: grid;
   gap: 0;
@@ -720,6 +729,32 @@
 
 .anomaly-feed {
   display: grid;
+  align-content: start;
+}
+
+.anomaly-feed.empty {
+  place-content: center;
+  place-items: center;
+}
+
+.anomaly-feed.empty .empty-state {
+  min-height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.anomaly-feed.empty .empty-state svg {
+  width: 18px;
+  height: 18px;
+  color: var(--muted-strong);
 }
 
 .anomaly-feed-row {

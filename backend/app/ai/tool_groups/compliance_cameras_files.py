@@ -42,6 +42,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=lookup_dvla_vehicle,
+                    example_inputs=(
+                        {"registration_number": "PE70DHX"},
+                    ),
+                    return_schema={
+                        "answer_types": ["vehicle_compliance"],
+                        "result_keys": ["registration_number", "display_vehicle", "tax_status", "mot_status"],
+                    },
                 ),
         AgentTool(
                     name="analyze_camera_snapshot",
@@ -61,6 +68,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=analyze_camera_snapshot,
+                    example_inputs=(
+                        {"camera_name": "Gate", "prompt": "Is there a vehicle at the gate?"},
+                    ),
+                    return_schema={
+                        "answer_types": ["camera_observation"],
+                        "result_keys": ["camera", "analysis", "error"],
+                    },
                 ),
         AgentTool(
                     name="read_chat_attachment",

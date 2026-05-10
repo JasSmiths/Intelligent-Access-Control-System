@@ -69,7 +69,10 @@ class BaseHttpProvider:
         json_body: dict[str, Any],
     ) -> dict[str, Any]:
         runtime = await get_runtime_config()
-        async with httpx.AsyncClient(timeout=self._timeout or runtime.llm_timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout or runtime.llm_timeout_seconds,
+            trust_env=False,
+        ) as client:
             response = await client.post(url, headers=headers, json=json_body)
 
         if response.status_code >= 400:

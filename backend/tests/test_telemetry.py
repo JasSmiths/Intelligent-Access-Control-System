@@ -1,8 +1,11 @@
 from datetime import UTC, datetime, timedelta
+import uuid
 
+from app.api.v1 import telemetry as telemetry_api
 from app.ai.providers import ToolCall
 from app.ai.tools import set_chat_tool_context
 from app.models import AuditLog, TelemetrySpan, TelemetryTrace
+from app.models.enums import UserRole
 from app.services.chat import ChatService
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_ALFRED,
@@ -85,6 +88,74 @@ def test_redaction_and_audit_diff_hide_secrets_and_media() -> None:
 
     diff = audit_diff({"schedule": "Mon-Fri", "name": "Steph"}, {"schedule": "24/7", "name": "Steph"})
     assert diff == {"old": {"schedule": "Mon-Fri"}, "new": {"schedule": "24/7"}}
+
+
+def test_telemetry_summary_helpers_count_rows_and_storage() -> None:
+    counts = telemetry_api._count_rows_to_map([("info", 2), ("error", 1), (None, 3)])
+    storage = telemetry_api._telemetry_storage_payload(
+        database_size_bytes=128,
+        log_file_size_bytes=64,
+        artifact_size_bytes=32,
+        file_count=4,
+    )
+
+    assert counts == {"info": 2, "error": 1, "unknown": 3}
+    assert storage["total_size_bytes"] == 224
+    assert storage["file_count"] == 4
+    assert storage["updated_at"]
+
+
+class FakeScalarResult:
+    def __init__(self, rows) -> None:
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class CapturingAuditSession:
+    def __init__(self) -> None:
+        self.statement = None
+
+    async def scalars(self, statement):
+        self.statement = statement
+        return FakeScalarResult([])
+
+
+def make_admin_user():
+    now = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
+    return type(
+        "TelemetryTestUser",
+        (),
+        {
+            "id": uuid.uuid4(),
+            "username": "admin",
+            "full_name": "Admin User",
+            "role": UserRole.ADMIN,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )()
+
+
+async def test_audit_log_endpoint_applies_level_and_outcome_filters() -> None:
+    session = CapturingAuditSession()
+
+    response = await telemetry_api.list_audit_logs(
+        level="warning",
+        outcome="failed",
+        from_at=None,
+        to_at=None,
+        limit=50,
+        _=make_admin_user(),
+        session=session,
+    )
+
+    compiled = str(session.statement.compile(compile_kwargs={"literal_binds": True}))
+    assert response == {"items": [], "next_cursor": None}
+    assert "audit_logs.level = 'warning'" in compiled
+    assert "audit_logs.outcome = 'failed'" in compiled
 
 
 def test_lpr_trace_captures_ordered_spans(monkeypatch) -> None:

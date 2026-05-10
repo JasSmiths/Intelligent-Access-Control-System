@@ -25,7 +25,13 @@ from app.services.alfred.feedback import (
 from app.services.alfred import feedback as feedback_module
 from app.services.alfred import embeddings as embeddings_module
 from app.services.alfred import memory as alfred_memory_module
-from app.services.alfred.planner import PLANNER_PROMPT, ToolCallPlan, domain_cards, parse_planner_selection
+from app.services.alfred.planner import (
+    PLANNER_PROMPT,
+    ToolCallPlan,
+    domain_cards,
+    parse_planner_selection,
+    tools_for_selection,
+)
 from app.services.alfred.permissions import filter_tools_for_actor
 from app.services.alfred.answer_contracts import (
     AnswerDraft,
@@ -489,6 +495,13 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
     assert planner_payload["actor_context"]["vehicles"][0]["registration_number"] == "VIP123"
     assert planner_payload["actor_context"]["alfred_lessons"][0]["title"] == "Short answers"
     assert planner_payload["actor_context"]["relevant_past_lessons"][0]["title"] == "Presence phrasing"
+    assert planner_payload["actor_context"]["tool_access"] == {
+        "role": "admin",
+        "visible_tool_count": len(service._tools),
+        "can_prepare_state_changes": True,
+        "state_changes_require_admin_confirmation": True,
+        "visible_tools_are_permission_filtered": True,
+    }
     assert planner_payload["relevant_past_lessons"][0]["source_type"] == "lesson"
     assert planner_payload["memory"][0]["title"] == "Call me Jas"
     assert lesson_recall_kwargs["message"] == "Check my presence"
@@ -499,9 +512,13 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
 @pytest.mark.asyncio
 async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
     service = ChatService()
+    statuses: list[dict[str, object]] = []
 
     async def fake_direct_response(session_id, text, **kwargs):
         return ChatTurnResult(str(session_id), kwargs.get("provider", "provider_error"), text, [], [])
+
+    async def status_callback(status):
+        statuses.append(status)
 
     monkeypatch.setattr(service, "_direct_response", fake_direct_response)
 
@@ -513,12 +530,15 @@ async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
         {},
         [],
         {"user": {"id": "user-1", "role": "admin"}},
-        status_callback=None,
+        status_callback=status_callback,
     )
 
     assert result.provider == "provider_error"
     assert "requires a configured hosted LLM provider" in result.text
     assert "I did not run any system action" in result.text
+    assert statuses[-1]["event"] == "chat.agent_state"
+    assert statuses[-1]["phase"] == "provider_error"
+    assert statuses[-1]["agents_running"] == 0
 
 
 @pytest.mark.asyncio
@@ -2512,6 +2532,7 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
     } == state_changing_tools
     assert tools["update_schedule"].parameters["required"] == ["confirm"]
     assert tools["assign_schedule_to_entity"].parameters["required"] == ["entity_type", "confirm"]
+    assert "confirm" in tools["trigger_anomaly_alert"].parameters["required"]
 
 
 def test_alfred_registry_metadata_drives_permissions_and_planner_cards() -> None:
@@ -2537,8 +2558,69 @@ def test_alfred_registry_metadata_drives_permissions_and_planner_cards() -> None
     assert system_tools["get_system_users"]["permissions"] == ["admin"]
     access_tools = {tool["name"]: tool for tool in cards["Access_Logs"]["tools"]}
     assert any(field.startswith("mode:") for field in access_tools["calculate_absence_duration"]["args"]["fields"])
+    assert access_tools["query_access_events"]["examples"][0]["direction"] == "exit"
     assert access_tools["calculate_absence_duration"]["returns"]["answer_types"] == ["absence_duration"]
     assert "absence_duration" in access_tools["query_access_events"]["returns"]["not_sufficient_for"]
+    assert access_tools["query_anomalies"]["returns"]["records"] == "alerts"
+    diagnostic_tools = {tool["name"]: tool for tool in cards["Access_Diagnostics"]["tools"]}
+    assert "missing_event" in diagnostic_tools["investigate_access_incident"]["returns"]["handles"]
+    visitor_tools = {tool["name"]: tool for tool in cards["Visitor_Passes"]["tools"]}
+    assert "visitor_departure" in visitor_tools["query_visitor_passes"]["returns"]["answer_types"]
+    gate_tools = {tool["name"]: tool for tool in cards["Gate_Hardware"]["tools"]}
+    assert gate_tools["query_device_states"]["returns"]["answer_types"] == ["device_state"]
+    assert gate_tools["open_device"]["examples"][0]["confirm"] is False
+
+
+@pytest.mark.asyncio
+async def test_query_integration_health_includes_access_event_worker_status(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            dvla_api_key="",
+            dvla_vehicle_enquiry_url="https://dvla.example.test",
+            llm_provider="local",
+            openai_api_key="",
+            gemini_api_key="",
+            anthropic_api_key="",
+            ollama_base_url="",
+        )
+
+    class AsyncStatusService:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def status(self, **_kwargs):
+            return self.payload
+
+    class FakeDependencyUpdateService:
+        async def storage_status(self):
+            return {"status": "ok"}
+
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        ai_tools,
+        "get_access_event_service",
+        lambda: SimpleNamespace(
+            status=lambda: {
+                "status": "degraded",
+                "worker_running": True,
+                "queue_depth": 2,
+                "pending_windows": 1,
+                "last_error": "RuntimeError: database connection reset",
+            }
+        ),
+    )
+    monkeypatch.setattr(ai_tools, "get_home_assistant_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(ai_tools, "get_unifi_protect_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(ai_tools, "get_discord_messaging_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(ai_tools, "get_whatsapp_messaging_service", lambda: AsyncStatusService({"enabled": False}))
+    monkeypatch.setattr(ai_tools, "get_dependency_update_service", lambda: FakeDependencyUpdateService())
+
+    result = await ai_tools.query_integration_health({"integration": "access_events"})
+
+    assert result["integration"] == "access_events"
+    assert result["health"]["status"] == "degraded"
+    assert result["health"]["queue_depth"] == 2
+    assert "database connection reset" in result["health"]["last_error"]
 
 
 def test_planner_selection_parses_direct_read_tool_calls() -> None:
@@ -2567,6 +2649,68 @@ def test_planner_selection_parses_direct_read_tool_calls() -> None:
     assert selection.planned_tool_calls == (
         ToolCallPlan("calculate_absence_duration", {"person": "Ash", "day": "today", "mode": "latest"}),
     )
+
+
+def test_tools_for_selection_uses_planned_calls_when_selected_names_are_missing() -> None:
+    tools = ai_tools.build_agent_tools()
+    selection = parse_planner_selection(
+        {
+            "selected_domains": ["Access_Logs"],
+            "selected_tool_names": [],
+            "requested_answer_type": "absence_duration",
+            "planned_tool_calls": [
+                {
+                    "name": "calculate_absence_duration",
+                    "arguments_json": '{"person":"Ash","day":"today","mode":"latest"}',
+                }
+            ],
+            "needs_clarification": False,
+            "clarification_question": "",
+            "safety_posture": "read_only",
+            "confidence": 0.9,
+            "reason": "planner supplied executable call but omitted the redundant name list",
+        },
+        tools.values(),
+    )
+
+    selected = tools_for_selection(selection, list(tools.values()))
+
+    assert [tool.name for tool in selected] == ["calculate_absence_duration"]
+
+
+def test_tools_for_selection_falls_back_to_non_general_domains_only() -> None:
+    tools = ai_tools.build_agent_tools()
+    access_selection = parse_planner_selection(
+        {
+            "selected_domains": ["Access_Logs"],
+            "selected_tool_names": [],
+            "requested_answer_type": "general",
+            "planned_tool_calls": [],
+            "needs_clarification": False,
+            "clarification_question": "",
+            "safety_posture": "read_only",
+            "confidence": 0.72,
+            "reason": "partial planner output still identified the operational domain",
+        },
+        tools.values(),
+    )
+    general_selection = parse_planner_selection(
+        {
+            "selected_domains": ["General"],
+            "selected_tool_names": [],
+            "requested_answer_type": "general",
+            "planned_tool_calls": [],
+            "needs_clarification": False,
+            "clarification_question": "",
+            "safety_posture": "read_only",
+            "confidence": 0.72,
+            "reason": "chit-chat does not need tools",
+        },
+        tools.values(),
+    )
+
+    assert "query_access_events" in {tool.name for tool in tools_for_selection(access_selection, list(tools.values()))}
+    assert tools_for_selection(general_selection, list(tools.values())) == []
 
 
 def test_planned_read_tool_calls_are_safe_and_sanitized() -> None:
@@ -2791,6 +2935,21 @@ async def test_react_loop_executes_read_tools_in_parallel(monkeypatch) -> None:
     assert abs(started[0] - started[1]) < 0.03
     assert elapsed < 0.09
     assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
+    started_batch = next(
+        status
+        for status in statuses
+        if status.get("event") == "chat.tool_batch" and status.get("status") == "started"
+    )
+    completed_batch = next(
+        status
+        for status in statuses
+        if status.get("event") == "chat.tool_batch" and status.get("status") == "completed"
+    )
+    assert started_batch["phase"] == "using_tools"
+    assert started_batch["agents_running"] == 1
+    assert started_batch["active_tool_calls"] == 2
+    assert completed_batch["active_tool_calls"] == 0
+    assert completed_batch["completed_tool_steps"] == 2
 
 
 @pytest.mark.asyncio
@@ -2854,6 +3013,12 @@ async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monke
     assert memory["pending_agent_action"]["tool_name"] in {"create_schedule", "create_visitor_pass"}
     assert "Confirm" in result.text
     assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
+    assert any(
+        status.get("event") == "chat.confirmation_required"
+        and status.get("phase") == "awaiting_confirmation"
+        and status.get("agents_running") == 0
+        for status in statuses
+    )
 
 
 @pytest.mark.asyncio

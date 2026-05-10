@@ -18,6 +18,7 @@ from app.services.notifications import (
     ACTIONABLE_NOTIFICATION_CATALOG,
     GATE_MALFUNCTION_EVENT_TYPE,
     HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID,
+    INTEGRATION_DEGRADED_EVENT_TYPE,
     NotificationSnapshotAttachment,
     NotificationWorkflowResult,
     NotificationService,
@@ -194,6 +195,7 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "Compliance",
         "Gate Actions",
         "Gate Malfunctions",
+        "Integrations",
         "Leaderboard",
         "Maintenance Mode",
         "Vehicle Detections",
@@ -216,6 +218,7 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "garage_door_open_failed",
         "gate_malfunction",
         "gate_open_failed",
+        "integration_degraded",
         "leaderboard_overtake",
         "maintenance_mode_disabled",
         "maintenance_mode_enabled",
@@ -257,6 +260,31 @@ def test_context_variables_include_vehicle_aliases_and_time() -> None:
     assert variables["VehicleName"] == "Tesla Model Y"
     assert variables["Registration"] == "STEPH26"
     assert variables["Time"] == "18:42"
+
+
+def test_context_variables_include_integration_degraded_aliases() -> None:
+    variables = context_variables(
+        NotificationContext(
+            event_type=INTEGRATION_DEGRADED_EVENT_TYPE,
+            subject="Home Assistant degraded",
+            severity="warning",
+            facts={
+                "integration_name": "Home Assistant",
+                "integration_status": "Degraded",
+                "integration_reason": "Unable to reach Home Assistant.",
+                "integration_last_connected_at": "2026-05-10T18:42:00+00:00",
+                "integration_last_failure_at": "2026-05-10T18:55:35+00:00",
+                "message": "Home Assistant is degraded: Unable to reach Home Assistant.",
+            },
+        )
+    )
+
+    assert variables["IntegrationName"] == "Home Assistant"
+    assert variables["IntegrationStatus"] == "Degraded"
+    assert variables["IntegrationReason"] == "Unable to reach Home Assistant."
+    assert variables["IntegrationLastConnectedAt"] == "2026-05-10T18:42:00+00:00"
+    assert variables["IntegrationLastFailureAt"] == "2026-05-10T18:55:35+00:00"
+    assert render_template("@IntegrationName: @IntegrationReason", variables) == "Home Assistant: Unable to reach Home Assistant."
 
 
 def test_context_variables_include_person_pronoun_aliases() -> None:
@@ -972,6 +1000,43 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
             [],
         )
     ]
+
+
+async def test_mobile_workflow_reports_partial_success_when_fallback_delivers(monkeypatch) -> None:
+    service = NotificationService()
+    context = NotificationContext(
+        event_type="authorized_entry",
+        subject="Steph arrived",
+        severity="info",
+        facts={"message": "Steph arrived."},
+    )
+
+    async def fake_apprise(_action, _context, _urls, _attachments, failures):
+        failures.append("Apprise: temporary outage")
+        return False
+
+    async def fake_home_assistant(_action, _context, _targets, _snapshot, _failures):
+        return True
+
+    monkeypatch.setattr(service, "_send_mobile_apprise", fake_apprise)
+    monkeypatch.setattr(service, "_send_mobile_home_assistant", fake_home_assistant)
+
+    outcome = await service._send_mobile(
+        {
+            "type": "mobile",
+            "title": "Steph arrived",
+            "message": "Steph arrived.",
+            "target_mode": "selected",
+            "target_ids": ["apprise:0", "home_assistant_mobile:notify.mobile_app_jason"],
+        },
+        context,
+        SimpleNamespace(apprise_urls="pover://user-token@app-token"),
+    )
+
+    assert outcome.delivered is True
+    assert outcome.reason == "delivered_with_failures"
+    assert outcome.metadata["partial_failure"] is True
+    assert outcome.metadata["failures"] == ["Apprise: temporary outage"]
 
 
 async def test_mobile_workflow_adds_configured_home_assistant_gate_action(monkeypatch) -> None:

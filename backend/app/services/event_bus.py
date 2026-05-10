@@ -62,6 +62,13 @@ class EventBus:
     def unsubscribe(self, listener: EventListener) -> None:
         self._listeners.discard(listener)
 
+    def status(self) -> dict[str, Any]:
+        return {
+            "started": self._started,
+            "connections": len(self._connections),
+            "listeners": len(self._listeners),
+        }
+
     async def publish(self, event_type: str, payload: dict[str, Any]) -> None:
         event = RealtimeEvent(
             type=event_type,
@@ -75,8 +82,15 @@ class EventBus:
         for websocket in connections:
             try:
                 await websocket.send_json(event.__dict__)
-            except RuntimeError:
+            except Exception as exc:
                 self.disconnect(websocket)
+                logger.warning(
+                    "event_bus_websocket_send_failed",
+                    extra={
+                        "event_type": event_type,
+                        "error": str(exc),
+                    },
+                )
 
         for listener in listeners:
             task = asyncio.create_task(listener(event), name=f"event-listener:{event_type}")

@@ -116,7 +116,11 @@ class HomeAssistantClient:
         while True:
             try:
                 config = await self.config()
-                async with websockets.connect(self._websocket_url(config.home_assistant_url), ping_interval=30) as websocket:
+                async with websockets.connect(
+                    self._websocket_url(config.home_assistant_url),
+                    ping_interval=30,
+                    proxy=None,
+                ) as websocket:
                     auth_required = await websocket.recv()
                     logger.debug("home_assistant_ws_auth_required", extra={"payload": auth_required})
                     await websocket.send(json.dumps({"type": "auth", "access_token": config.home_assistant_token}))
@@ -153,16 +157,19 @@ class HomeAssistantClient:
         if not (base_url and token):
             raise HomeAssistantError("Home Assistant URL/token are not configured.")
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.request(
-                method,
-                f"{base_url}{path}",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                json=json,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+                response = await client.request(
+                    method,
+                    f"{base_url}{path}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=json,
+                )
+        except httpx.RequestError as exc:
+            raise HomeAssistantError(f"Unable to reach Home Assistant: {exc}") from exc
 
         if response.status_code >= 400:
             raise HomeAssistantError(

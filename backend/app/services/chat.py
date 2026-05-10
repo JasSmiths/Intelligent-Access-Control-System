@@ -499,6 +499,14 @@ class ChatService(ChatRoutingMixin):
         capability = provider_agent_capability(runtime, provider.name)
         if not capability["agent_capable"]:
             reason = capability.get("reason") or "provider_not_agent_capable"
+            await emit_agent_state(
+                status_callback,
+                "provider_error",
+                "Provider error",
+                detail=str(reason),
+                agents_running=0,
+                active_tool_calls=0,
+            )
             return await self._provider_error_response(
                 session_uuid,
                 provider.name,
@@ -532,12 +540,13 @@ class ChatService(ChatRoutingMixin):
             except Exception as exc:
                 logger.info("alfred_semantic_context_failed", extra={"error": str(exc)[:180]})
                 relevant_past_lessons = []
+        visible_tools = filter_tools_for_actor(self._tools.values(), actor_context)
         planning_context = {
             **actor_context,
             "alfred_lessons": active_lessons,
             "relevant_past_lessons": relevant_past_lessons,
+            "tool_access": self._tool_access_context(actor_context, visible_tools),
         }
-        visible_tools = filter_tools_for_actor(self._tools.values(), actor_context)
 
         await emit_agent_state(status_callback, "selecting_tools", "Selecting tools")
         try:
@@ -557,6 +566,14 @@ class ChatService(ChatRoutingMixin):
             logger.warning(
                 "alfred_v3_planner_failed_closed",
                 extra={"provider": provider.name, "error": str(exc)[:240]},
+            )
+            await emit_agent_state(
+                status_callback,
+                "provider_error",
+                "Provider error",
+                detail="Planner failed closed",
+                agents_running=0,
+                active_tool_calls=0,
             )
             return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
 
@@ -700,11 +717,27 @@ class ChatService(ChatRoutingMixin):
                     "llm_provider_not_configured",
                     extra={"provider": provider.name, "error": str(exc)},
                 )
+                await emit_agent_state(
+                    status_callback,
+                    "provider_error",
+                    "Provider error",
+                    detail="Provider is not configured",
+                    agents_running=0,
+                    active_tool_calls=0,
+                )
                 return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
             except Exception as exc:
                 logger.warning(
                     "llm_provider_failed",
                     extra={"provider": provider.name, "error": str(exc)},
+                )
+                await emit_agent_state(
+                    status_callback,
+                    "provider_error",
+                    "Provider error",
+                    detail="Provider request failed",
+                    agents_running=0,
+                    active_tool_calls=0,
                 )
                 return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
 
@@ -792,6 +825,21 @@ class ChatService(ChatRoutingMixin):
         if "resolve_human_entity" in {tool.name for tool in selected_tools}:
             return True
         return bool(selection.raw.get("requires_entity_resolution"))
+
+    def _tool_access_context(
+        self,
+        actor_context: dict[str, Any],
+        visible_tools: list[AgentTool],
+    ) -> dict[str, Any]:
+        user = actor_context.get("user") if isinstance(actor_context.get("user"), dict) else {}
+        role = str((user or {}).get("role") or "standard").lower()
+        return {
+            "role": "admin" if role == "admin" else "standard",
+            "visible_tool_count": len(visible_tools),
+            "can_prepare_state_changes": any(tool.requires_confirmation for tool in visible_tools),
+            "state_changes_require_admin_confirmation": True,
+            "visible_tools_are_permission_filtered": True,
+        }
 
     async def _classify_intent(
         self,
@@ -988,7 +1036,15 @@ class ChatService(ChatRoutingMixin):
                     iteration=iteration,
                 )
                 if status_callback:
-                    await status_callback({"event": "chat.confirmation_required", **pending_action})
+                    await status_callback(
+                        {
+                            "event": "chat.confirmation_required",
+                            "phase": "awaiting_confirmation",
+                            "agents_running": 0,
+                            "active_tool_calls": 0,
+                            **pending_action,
+                        }
+                    )
                 return LlmResult(text=self._fallback_text(tool_results), raw=result.raw)
             messages = await self._build_agent_messages(
                 session_id,
@@ -1339,7 +1395,15 @@ class ChatService(ChatRoutingMixin):
             iteration=0,
         )
         if status_callback:
-            await status_callback({"event": "chat.confirmation_required", **pending_action})
+            await status_callback(
+                {
+                    "event": "chat.confirmation_required",
+                    "phase": "awaiting_confirmation",
+                    "agents_running": 0,
+                    "active_tool_calls": 0,
+                    **pending_action,
+                }
+            )
         return pending_action
 
     def _planned_results_can_render_directly(self, tool_results: list[dict[str, Any]]) -> bool:
@@ -1559,7 +1623,15 @@ class ChatService(ChatRoutingMixin):
             iteration=0,
         )
         if status_callback:
-            await status_callback({"event": "chat.confirmation_required", **pending_action})
+            await status_callback(
+                {
+                    "event": "chat.confirmation_required",
+                    "phase": "awaiting_confirmation",
+                    "agents_running": 0,
+                    "active_tool_calls": 0,
+                    **pending_action,
+                }
+            )
         return await self._direct_response(
             session_id,
             str(output.get("detail") or f"Create a Visitor Pass for {visitor_name}?"),
@@ -2659,12 +2731,24 @@ class ChatService(ChatRoutingMixin):
                     "event": "chat.tool_batch",
                     "batch_id": batch_id,
                     "status": "started",
+                    "phase": "using_tools",
+                    "agents_running": 1,
+                    "active_tool_calls": len(calls),
                     "parallel": parallel,
                     "tools": tools_payload,
                 }
             )
             for item in tools_payload:
-                await status_callback({**item, "batch_id": batch_id, "status": "queued"})
+                await status_callback(
+                    {
+                        **item,
+                        "batch_id": batch_id,
+                        "status": "queued",
+                        "phase": "using_tools",
+                        "agents_running": 1,
+                        "active_tool_calls": len(calls),
+                    }
+                )
 
         async def run(call: ToolCall) -> dict[str, Any]:
             try:
@@ -2688,6 +2772,8 @@ class ChatService(ChatRoutingMixin):
                             "tool": call.name,
                             "label": self._tool_status(call.name).get("label"),
                             "status": "failed",
+                            "phase": "using_tools",
+                            "agents_running": 1,
                             "error": message,
                         }
                     )
@@ -2707,6 +2793,8 @@ class ChatService(ChatRoutingMixin):
                             "tool": call.name,
                             "label": self._tool_status(call.name).get("label"),
                             "status": "failed",
+                            "phase": "using_tools",
+                            "agents_running": 1,
                             "error": str(exc)[:240],
                         }
                     )
@@ -2730,6 +2818,10 @@ class ChatService(ChatRoutingMixin):
                     "event": "chat.tool_batch",
                     "batch_id": batch_id,
                     "status": "completed",
+                    "phase": "using_tools",
+                    "agents_running": 1,
+                    "active_tool_calls": 0,
+                    "completed_tool_steps": len(results),
                     "parallel": parallel,
                     "tools": tools_payload,
                 }
@@ -2758,6 +2850,8 @@ class ChatService(ChatRoutingMixin):
                     "batch_id": batch_id,
                     "call_id": call.id,
                     "status": "running",
+                    "phase": "using_tools",
+                    "agents_running": 1,
                 }
             )
         output = await tool.handler(call.arguments)
@@ -2770,6 +2864,8 @@ class ChatService(ChatRoutingMixin):
                     "batch_id": batch_id,
                     "call_id": call.id,
                     "status": "requires_confirmation" if output.get("requires_confirmation") else "succeeded",
+                    "phase": "awaiting_confirmation" if output.get("requires_confirmation") else "using_tools",
+                    "agents_running": 0 if output.get("requires_confirmation") else 1,
                 }
             )
         return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output}

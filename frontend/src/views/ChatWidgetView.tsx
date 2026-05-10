@@ -28,6 +28,7 @@ import {
   DoorClosed,
   DoorOpen,
   Download,
+  Eye,
   File as FileIcon,
   FileImage,
   FileText,
@@ -78,6 +79,7 @@ import {
   Users,
   Volume2,
   Warehouse,
+  WifiOff,
   X,
   Zap
 } from "lucide-react";
@@ -96,6 +98,7 @@ import {
   SettingsMap,
   UserAccount,
   useSettings,
+  userInitials,
   wsUrl
 } from "../shared";
 
@@ -134,6 +137,7 @@ export type ChatConfirmationAction = {
   statusLabel: string;
   userEcho: string;
   sent?: boolean;
+  decision?: "confirm" | "cancel";
 };
 
 export type ChatToolActivity = {
@@ -144,13 +148,41 @@ export type ChatToolActivity = {
   status: "queued" | "running" | "succeeded" | "failed" | "requires_confirmation";
 };
 
+export type ChatRunActivity = {
+  phase: string;
+  label: string;
+  detail: string;
+  agentsRunning: number;
+  activeToolCalls: number;
+  completedToolSteps: number;
+  awaitingConfirmation: boolean;
+  providerError: boolean;
+};
+
+export type ChatRetryAction = {
+  text: string;
+  attachments: ChatAttachment[];
+};
+
+export type ChatMessageStatus =
+  | "sent_local"
+  | "streaming"
+  | "completed"
+  | "failed"
+  | "awaiting_confirmation"
+  | "cancelled";
+
 export type ChatMessageItem = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  createdAt?: number;
   attachments?: ChatAttachment[];
   confirmationAction?: ChatConfirmationAction | null;
   streaming?: boolean;
+  status?: ChatMessageStatus;
+  localSeenAt?: number | null;
+  retryAction?: ChatRetryAction | null;
   userMessageId?: string | null;
   assistantMessageId?: string | null;
   responseDurationMs?: number | null;
@@ -158,6 +190,24 @@ export type ChatMessageItem = {
     rating?: "up" | "down";
     status?: "saving" | "saved" | "error";
     error?: string;
+  };
+};
+
+type AlfredAgentStatus = {
+  active_mode?: string;
+  provider?: string;
+  v3_ready?: boolean;
+  local_provider_limitation?: string;
+  provider_capability?: {
+    provider?: string;
+    configured?: boolean;
+    agent_capable?: boolean;
+    local_provider_limited?: boolean;
+    reason?: string;
+  };
+  memory?: {
+    enabled?: boolean;
+    backend?: string;
   };
 };
 
@@ -183,6 +233,61 @@ type AlfredFeedbackResponse = {
     id: string;
   };
 };
+
+export function chatRunActivityFromPayload(
+  payload: Record<string, unknown>,
+  previous: ChatRunActivity | null = null
+): ChatRunActivity {
+  const rawPhase = String(payload.phase || payload.state || previous?.phase || "working").trim();
+  const phase = rawPhase || "working";
+  const status = String(payload.status || "").trim();
+  const awaitingConfirmation = phase === "awaiting_confirmation" || status === "requires_confirmation";
+  const providerError = phase === "provider_error" || status === "provider_error";
+  const label = typeof payload.label === "string" && payload.label.trim()
+    ? payload.label.trim()
+    : chatPhaseLabel(phase);
+  const detail = typeof payload.detail === "string" ? payload.detail.trim() : previous?.detail ?? "";
+  return {
+    phase,
+    label,
+    detail,
+    agentsRunning: nonNegativeNumber(payload.agents_running, previous?.agentsRunning ?? 0),
+    activeToolCalls: nonNegativeNumber(payload.active_tool_calls, previous?.activeToolCalls ?? 0),
+    completedToolSteps: nonNegativeNumber(payload.completed_tool_steps, previous?.completedToolSteps ?? 0),
+    awaitingConfirmation,
+    providerError
+  };
+}
+
+export function chatPhaseLabel(phase: string) {
+  const labels: Record<string, string> = {
+    awaiting_confirmation: "Awaiting confirmation",
+    composing: "Composing answer",
+    provider_error: "Provider error",
+    repairing_tool_plan: "Completing answer facts",
+    selecting_tools: "Planning",
+    starting: "Starting",
+    tools_selected: "Tools selected",
+    understanding: "Planning",
+    using_tools: "Using tools"
+  };
+  return labels[phase] ?? "Working";
+}
+
+export function chatAgentRunningLabel(count: number) {
+  if (count <= 0) return "";
+  return `${count} Agent${count === 1 ? "" : "s"} Running`;
+}
+
+export function chatToolStepsLabel(count: number) {
+  if (count <= 0) return "";
+  return `${count} tool step${count === 1 ? "" : "s"} completed`;
+}
+
+function nonNegativeNumber(value: unknown, fallback: number) {
+  const numberValue = typeof value === "number" ? value : Number.NaN;
+  return Number.isFinite(numberValue) ? Math.max(0, Math.round(numberValue)) : fallback;
+}
 
 export async function uploadChatAttachment(file: File, sessionId: string | null): Promise<ChatAttachment> {
   const body = new FormData();
@@ -249,6 +354,55 @@ export function formatChatResponseDuration(durationMs: number | null | undefined
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+export function formatChatMessageTime(timestamp: number | null | undefined) {
+  if (!timestamp) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(timestamp));
+}
+
+export function chatProviderLabel(provider: string | null | undefined) {
+  const normalized = normalizeLlmProvider(provider);
+  return llmProviderDefinitions.find((item) => item.key === normalized)?.label ?? normalized;
+}
+
+export function chatProviderReasonLabel(reason: string | null | undefined) {
+  if (reason === "local_provider_non_agent") return "Diagnostic provider only";
+  if (reason === "provider_not_configured") return "Provider not configured";
+  if (reason === "provider_missing") return "Provider missing";
+  return reason ? reason.replace(/_/g, " ") : "Provider unavailable";
+}
+
+export function chatProviderStatusLabel(
+  status: AlfredAgentStatus | null,
+  connected: boolean,
+  fallbackProvider: LlmProviderKey
+) {
+  if (!connected) return "Connecting";
+  if (!status) return "Online";
+  const provider = chatProviderLabel(status.provider || fallbackProvider);
+  const capability = status.provider_capability;
+  if (status.v3_ready) return `${provider} · Agent ready`;
+  return `${provider} · ${chatProviderReasonLabel(capability?.reason)}`;
+}
+
+export function chatMessageStateLabel(message: ChatMessageItem) {
+  if (message.streaming || message.status === "streaming") return "Streaming";
+  if (message.status === "awaiting_confirmation") return "Awaiting confirmation";
+  if (message.status === "failed") return "Failed closed";
+  if (message.status === "cancelled") return "Cancelled";
+  if (message.role === "user") return "Sent locally";
+  return "Completed";
+}
+
+export function chatDaypart() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
 }
 
 export async function copyToClipboard(text: string) {
@@ -428,8 +582,12 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   const [connected, setConnected] = React.useState(false);
   const [connectionNonce, setConnectionNonce] = React.useState(0);
   const [thinking, setThinking] = React.useState(false);
+  const [slowResponse, setSlowResponse] = React.useState(false);
   const [toolStatus, setToolStatus] = React.useState("");
   const [toolActivities, setToolActivities] = React.useState<ChatToolActivity[]>([]);
+  const [runActivity, setRunActivity] = React.useState<ChatRunActivity | null>(null);
+  const [agentStatus, setAgentStatus] = React.useState<AlfredAgentStatus | null>(null);
+  const [agentStatusError, setAgentStatusError] = React.useState("");
   const [dragActive, setDragActive] = React.useState(false);
   const [copyMenu, setCopyMenu] = React.useState<ChatCopyMenuState | null>(null);
   const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
@@ -443,14 +601,16 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   const activeAssistantMessageRef = React.useRef<string | null>(null);
   const awaitingResponseRef = React.useRef(false);
   const activeTurnStartedAtRef = React.useRef<number | null>(null);
+  const activeTurnPhaseRef = React.useRef<string>("idle");
+  const lastUserRequestRef = React.useRef<ChatRetryAction | null>(null);
   const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
-  const greetingInsertedRef = React.useRef(false);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
   const activeLlmProvider = normalizeLlmProvider(llmSettings.values.llm_provider);
+  const headerStatusLabel = chatProviderStatusLabel(agentStatus, connected, activeLlmProvider);
   const maintenanceActive = maintenanceStatus?.is_active === true;
   const uploading = pendingAttachments.some((attachment) => attachment.uploadState === "uploading");
   const readyAttachments = pendingAttachments.filter((attachment) => attachment.uploadState === "ready");
-  const canSend = Boolean((draft.trim() || readyAttachments.length) && connected && !uploading);
+  const canSend = Boolean((draft.trim() || readyAttachments.length) && connected && !uploading && !thinking);
   const widgetStyle = {
     "--chat-vvh": `${Math.round(viewportHeight)}px`,
     "--chat-vv-top": `${Math.round(viewportTop)}px`
@@ -466,6 +626,24 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     return startedAt === null ? null : Math.max(0, performance.now() - startedAt);
   }, []);
 
+  const applyRunActivityPayload = React.useCallback((payload: Record<string, unknown>) => {
+    setRunActivity((current) => {
+      const next = chatRunActivityFromPayload(payload, current);
+      activeTurnPhaseRef.current = next.phase;
+      return next;
+    });
+  }, []);
+
+  const markAssistantDisplayed = React.useCallback((messageId: string) => {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === messageId && message.role === "assistant" && !message.localSeenAt
+          ? { ...message, localSeenAt: Date.now() }
+          : message
+      )
+    );
+  }, []);
+
   React.useEffect(() => {
     setShowTeaser(sessionStorage.getItem(teaserStorageKey) !== "true");
   }, [teaserStorageKey]);
@@ -475,22 +653,38 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
   }, [pendingAttachments]);
 
   React.useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setAgentStatusError("");
+    api.get<AlfredAgentStatus>("/api/v1/ai/agent/status")
+      .then((status) => {
+        if (!cancelled) setAgentStatus(status);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setAgentStatusError(error instanceof Error ? error.message : "Unable to load Alfred status.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, connectionNonce, llmSettings.values.llm_provider]);
+
+  React.useEffect(() => {
+    if (!thinking) {
+      setSlowResponse(false);
+      return undefined;
+    }
+    setSlowResponse(false);
+    const timer = window.setTimeout(() => setSlowResponse(true), 12000);
+    return () => window.clearTimeout(timer);
+  }, [thinking]);
+
+  React.useEffect(() => {
     return () => {
       pendingAttachmentsRef.current.forEach((attachment) => {
         if (attachment.preview_url) URL.revokeObjectURL(attachment.preview_url);
       });
     };
   }, []);
-
-  React.useEffect(() => {
-    if (!open) return;
-    if (greetingInsertedRef.current) return;
-    setMessages((current) => {
-      greetingInsertedRef.current = true;
-      if (current.length) return current;
-      return [{ id: clientId("alfred"), role: "assistant", text: `Hi ${firstName}, how can I help?` }];
-    });
-  }, [firstName, open]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -598,8 +792,9 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         awaitingResponseRef.current = true;
         if (activeTurnStartedAtRef.current === null) markTurnStarted();
         setThinking(true);
-        setToolStatus("Thinking...");
+        setToolStatus("Starting...");
         setToolActivities([]);
+        applyRunActivityPayload(payload);
         return;
       }
       if (data.type === "chat.agent_state") {
@@ -608,12 +803,14 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         const label = typeof payload.label === "string" ? payload.label : "Working...";
         const detail = typeof payload.detail === "string" ? payload.detail : "";
         setToolStatus(detail ? `${label} - ${detail}` : label);
+        applyRunActivityPayload(payload);
         return;
       }
       if (data.type === "chat.tool_batch") {
         const batchId = typeof payload.batch_id === "string" ? payload.batch_id : clientId("tool-batch");
         const status = typeof payload.status === "string" ? payload.status : "";
         const tools = Array.isArray(payload.tools) ? payload.tools : [];
+        applyRunActivityPayload(payload);
         if (status === "completed") {
           setToolActivities((current) => current.filter((item) => item.batchId !== batchId));
         } else {
@@ -645,6 +842,22 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
           ? String(payload.status) as ChatToolActivity["status"]
           : "running";
         const id = typeof payload.call_id === "string" ? payload.call_id : `${tool}:${String(payload.batch_id || "single")}`;
+        const terminalToolStatus = ["succeeded", "failed", "requires_confirmation"].includes(status);
+        setRunActivity((current) => {
+          const base = chatRunActivityFromPayload(payload, current);
+          const next = {
+            ...base,
+            completedToolSteps: terminalToolStatus
+              ? (current?.completedToolSteps ?? 0) + 1
+              : base.completedToolSteps,
+            awaitingConfirmation: base.awaitingConfirmation || status === "requires_confirmation",
+            activeToolCalls: terminalToolStatus
+              ? Math.max(0, (current?.activeToolCalls ?? base.activeToolCalls) - 1)
+              : base.activeToolCalls
+          };
+          activeTurnPhaseRef.current = next.phase;
+          return next;
+        });
         setToolActivities((current) => {
           const existing = current.find((item) => item.id === id);
           if (status === "succeeded") return current.filter((item) => item.id !== id);
@@ -668,6 +881,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         awaitingResponseRef.current = true;
         setThinking(true);
         setToolStatus("Waiting for confirmation...");
+        applyRunActivityPayload(payload);
         return;
       }
       if (data.type === "chat.response.delta") {
@@ -680,9 +894,9 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
           activeAssistantMessageRef.current = activeId;
           const existing = current.find((message) => message.id === activeId);
           if (existing) {
-            return current.map((message) => message.id === activeId ? { ...message, text: message.text + chunk, streaming: true } : message);
+            return current.map((message) => message.id === activeId ? { ...message, text: message.text + chunk, streaming: true, status: "streaming" } : message);
           }
-          return [...current, { id: activeId, role: "assistant", text: chunk, streaming: true }];
+          return [...current, { id: activeId, role: "assistant", text: chunk, createdAt: Date.now(), streaming: true, status: "streaming" }];
         });
         return;
       }
@@ -694,6 +908,15 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         const confirmationAction = chatPendingAction(payload.pending_action) ?? chatConfirmationAction(payload.tool_results);
         const userMessageId = typeof payload.user_message_id === "string" ? payload.user_message_id : null;
         const assistantMessageId = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id : null;
+        const turnPhase = activeTurnPhaseRef.current;
+        const responseStatus: ChatMessageStatus = confirmationAction
+          ? "awaiting_confirmation"
+          : turnPhase === "provider_error"
+            ? "failed"
+            : "completed";
+        const retryAction = responseStatus === "failed" && lastUserRequestRef.current
+          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+          : null;
         if (typeof payload.session_id === "string") setSessionId(payload.session_id);
         setMessages((current) => {
           const activeId = activeAssistantMessageRef.current ?? clientId("alfred");
@@ -705,50 +928,68 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                 ? {
                   ...message,
                   text,
-	                  attachments: responseAttachments,
-	                  confirmationAction,
-	                  streaming: false,
+                  createdAt: message.createdAt ?? Date.now(),
+                  attachments: responseAttachments,
+                  confirmationAction,
+                  streaming: false,
+                  status: responseStatus,
+                  retryAction,
                     userMessageId,
                     assistantMessageId,
                     responseDurationMs
-	                }
-	                : message
-	            );
+                }
+                : message
+            );
           }
           return [
             ...current,
             {
               id: activeId,
               role: "assistant",
-	              text,
-	              attachments: responseAttachments,
-	              confirmationAction,
+              text,
+              createdAt: Date.now(),
+              attachments: responseAttachments,
+              confirmationAction,
+              status: responseStatus,
+              retryAction,
                 userMessageId,
                 assistantMessageId,
                 responseDurationMs
-	            }
-	          ];
+            }
+          ];
         });
+        activeTurnPhaseRef.current = "idle";
+        lastUserRequestRef.current = null;
         setThinking(false);
         setToolStatus("");
         setToolActivities([]);
+        setRunActivity(null);
         return;
       }
       if (data.type === "chat.error") {
         awaitingResponseRef.current = false;
         const responseDurationMs = finishTurnDuration();
+        const retryAction = lastUserRequestRef.current
+          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+          : null;
         setMessages((current) => [
           ...current,
           {
             id: clientId("alfred-error"),
             role: "assistant",
             text: typeof payload.message === "string" ? payload.message : "Alfred could not complete that request.",
+            createdAt: Date.now(),
+            status: "failed",
+            retryAction,
             responseDurationMs
           }
         ]);
+        activeTurnPhaseRef.current = "idle";
+        lastUserRequestRef.current = null;
         setThinking(false);
         setToolStatus("");
         setToolActivities([]);
+        setRunActivity(null);
       }
     };
     socket.onerror = () => {
@@ -764,17 +1005,26 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       setThinking(false);
       setToolStatus("");
       setToolActivities([]);
+      setRunActivity(null);
       if (!cancelled && interruptedTurn) {
+        const retryAction = lastUserRequestRef.current
+          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+          : null;
         activeAssistantMessageRef.current = null;
         setMessages((current) => [
           ...current,
           {
             id: clientId("alfred-disconnect"),
             role: "assistant",
-            text: "Alfred disconnected while answering. I logged the failure for review; please try again."
+            text: "Alfred disconnected while answering. I logged the failure for review; please try again.",
+            createdAt: Date.now(),
+            status: "failed",
+            retryAction
           }
         ]);
       }
+      activeTurnPhaseRef.current = "idle";
+      lastUserRequestRef.current = null;
       if (!cancelled) {
         const delay = Math.min(8000, 700 + connectionNonce * 600);
         reconnectTimerId = window.setTimeout(() => {
@@ -790,7 +1040,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [connectionNonce, finishTurnDuration, markTurnStarted, open]);
+  }, [applyRunActivityPayload, connectionNonce, finishTurnDuration, markTurnStarted, open]);
 
   React.useEffect(() => {
     if (!feedRef.current) return;
@@ -799,7 +1049,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
         feedRef.current.scrollTop = feedRef.current.scrollHeight;
       }
     });
-  }, [messages, thinking, toolStatus, toolActivities]);
+  }, [messages, thinking, toolStatus, toolActivities, runActivity]);
 
   const dismissTeaser = React.useCallback(() => {
     sessionStorage.setItem(teaserStorageKey, "true");
@@ -863,13 +1113,19 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     setMessages((current) => [
       ...current.map((message) =>
         message.id === messageId && message.confirmationAction
-          ? { ...message, confirmationAction: { ...message.confirmationAction, sent: true } }
+          ? {
+            ...message,
+            status: decision === "cancel" ? "cancelled" : message.status,
+            confirmationAction: { ...message.confirmationAction, sent: true, decision }
+          }
           : message
       ),
       {
         id: clientId("user"),
         role: "user",
-        text: userEcho
+        text: userEcho,
+        createdAt: Date.now(),
+        status: "sent_local"
       }
     ]);
     socket.send(JSON.stringify({
@@ -884,9 +1140,12 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
       }
     }));
     awaitingResponseRef.current = true;
+    activeTurnPhaseRef.current = decision === "confirm" ? "using_tools" : "cancelled";
+    lastUserRequestRef.current = null;
     markTurnStarted();
     setThinking(true);
     setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
+    setRunActivity(null);
   }, [connected, markTurnStarted, sessionId, thinking]);
 
   const submitFeedback = React.useCallback(async (
@@ -1005,31 +1264,37 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     setDraft(value);
   }, []);
 
-  const sendMessage = React.useCallback(() => {
+  const sendMessage = React.useCallback((overrideText?: string, overrideAttachments?: ChatAttachment[]) => {
     const socket = socketRef.current;
-    if (draft.trim().toLowerCase() === "/llm") {
+    const sourceText = typeof overrideText === "string" ? overrideText : draft;
+    if (typeof overrideText !== "string" && sourceText.trim().toLowerCase() === "/llm") {
       setDraft("");
       setLlmFeedback("");
       setLlmPickerOpen(true);
       return;
     }
-    if (!canSend || !socket || socket.readyState !== WebSocket.OPEN) return;
-    const text = draft.trim() || "Please inspect the attached file.";
-    const attachments = readyAttachments.map(publicChatAttachment);
+    const attachments = overrideAttachments ?? readyAttachments.map(publicChatAttachment);
+    if ((!sourceText.trim() && !attachments.length) || !connected || uploading || thinking || !socket || socket.readyState !== WebSocket.OPEN) return;
+    const text = sourceText.trim() || "Please inspect the attached file.";
     setMessages((current) => [
       ...current,
-      { id: clientId("user"), role: "user", text, attachments }
+      { id: clientId("user"), role: "user", text, createdAt: Date.now(), attachments, status: "sent_local" }
     ]);
+    lastUserRequestRef.current = { text, attachments: attachments.map((attachment) => ({ ...attachment })) };
+    activeTurnPhaseRef.current = "starting";
     markTurnStarted();
     socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
     awaitingResponseRef.current = true;
     setDraft("");
     setLlmPickerOpen(false);
     setLlmFeedback("");
-    setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
+    if (!overrideAttachments) {
+      setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
+    }
     setThinking(true);
-    setToolStatus("Thinking...");
-  }, [canSend, draft, markTurnStarted, readyAttachments, sessionId]);
+    setToolStatus("Starting...");
+    setRunActivity(null);
+  }, [connected, draft, markTurnStarted, readyAttachments, sessionId, thinking, uploading]);
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Escape" && llmPickerOpen) {
@@ -1057,6 +1322,10 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
     }
   };
 
+  const retryMessage = React.useCallback((retryAction: ChatRetryAction) => {
+    sendMessage(retryAction.text, retryAction.attachments);
+  }, [sendMessage]);
+
   return (
     <div className={open ? "chat-widget open" : "chat-widget"} style={widgetStyle}>
       <AnimatePresence>
@@ -1082,7 +1351,10 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                 </span>
                 <span>
                   <strong>Alfred {maintenanceActive ? <HardHat className="alfred-header-maintenance" size={15} strokeWidth={1} aria-label="Maintenance Mode active" /> : null}</strong>
-                  <small><span className={connected ? "alfred-status online" : "alfred-status"} />{connected ? "Online" : "Connecting"}</small>
+                  <small title={agentStatusError || headerStatusLabel}>
+                    <span className={connected ? agentStatus && !agentStatus.v3_ready ? "alfred-status issue" : "alfred-status online" : "alfred-status"} />
+                    {agentStatusError ? "Status unavailable" : headerStatusLabel}
+                  </small>
                 </span>
               </div>
               <button className="icon-button chat-close" onClick={() => setOpen(false)} type="button" aria-label="Close Alfred">
@@ -1091,30 +1363,41 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
             </div>
 
             <div className="chat-feed" ref={feedRef}>
+              {messages.length === 0 ? (
+                <ChatEmptyState
+                  disabled={!connected || thinking || uploading}
+                  firstName={firstName}
+                  maintenanceActive={maintenanceActive}
+                  onPrompt={(prompt) => sendMessage(prompt, [])}
+                />
+              ) : null}
               <AnimatePresence initial={false}>
                 {messages.map((message, index) => (
                   <ChatMessageBubble
                     index={index}
                     key={message.id}
                     message={message}
-	                    onConfirm={sendConfirmationAction}
-                      onFeedback={(targetMessage, rating) => {
-                        if (rating === "up") {
-                          void submitFeedback(targetMessage, "up");
-                        } else {
-                          openNegativeFeedback(targetMessage);
-                        }
-                      }}
-                      feedbackDraft={feedbackDraft?.messageId === message.id ? feedbackDraft : null}
-                      onFeedbackDraftChange={setFeedbackDraft}
-                      onFeedbackDraftClose={() => setFeedbackDraft(null)}
-                      onFeedbackDraftSubmit={submitFeedbackDraft}
-	                    onOpenCopyMenu={setCopyMenu}
-	                    senderName={message.role === "assistant" ? "Alfred" : firstName}
-	                  />
+                    onConfirm={sendConfirmationAction}
+                    onFeedback={(targetMessage, rating) => {
+                      if (rating === "up") {
+                        void submitFeedback(targetMessage, "up");
+                      } else {
+                        openNegativeFeedback(targetMessage);
+                      }
+                    }}
+                    feedbackDraft={feedbackDraft?.messageId === message.id ? feedbackDraft : null}
+                    onFeedbackDraftChange={setFeedbackDraft}
+                    onFeedbackDraftClose={() => setFeedbackDraft(null)}
+                    onFeedbackDraftSubmit={submitFeedbackDraft}
+                    onDisplayed={markAssistantDisplayed}
+                    onOpenCopyMenu={setCopyMenu}
+                    onRetry={retryMessage}
+                    retryDisabled={!connected || thinking || uploading}
+                    senderName={message.role === "assistant" ? "Alfred" : firstName}
+                  />
                 ))}
               </AnimatePresence>
-              {thinking ? <TypingIndicator activities={toolActivities} status={toolStatus} /> : null}
+              {thinking ? <TypingIndicator activities={toolActivities} runActivity={runActivity} slow={slowResponse} status={toolStatus} /> : null}
             </div>
 
             <div className="chat-composer">
@@ -1164,7 +1447,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                   ref={composerRef}
                   rows={1}
                 />
-                <button className="icon-button send" disabled={!canSend} onClick={sendMessage} type="button" aria-label="Send message">
+                <button className="icon-button send" disabled={!canSend} onClick={() => sendMessage()} type="button" aria-label="Send message">
                   <Send size={17} />
                 </button>
               </div>
@@ -1218,6 +1501,41 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
           }}
         />
       ) : null}
+    </div>
+  );
+}
+
+export function ChatEmptyState({
+  disabled,
+  firstName,
+  maintenanceActive,
+  onPrompt
+}: {
+  disabled: boolean;
+  firstName: string;
+  maintenanceActive: boolean;
+  onPrompt: (prompt: string) => void;
+}) {
+  const prompts = maintenanceActive
+    ? ["What is maintenance mode blocking?", "Show recent gate activity", "Check top gate status", "Review open anomalies"]
+    : ["Who is currently on site?", "Show recent gate anomalies", "Check top gate status", "Any outside-schedule access today?"];
+  return (
+    <div className="chat-empty-state">
+      <span className="chat-empty-mark">
+        <Bot size={18} />
+      </span>
+      <div className="chat-empty-copy">
+        <strong>{chatDaypart()}, {firstName}</strong>
+        <small>{maintenanceActive ? "Maintenance Mode active" : "Operational chat ready"}</small>
+      </div>
+      <div className="chat-empty-prompts" aria-label="Alfred starter prompts">
+        {prompts.map((prompt) => (
+          <button disabled={disabled} key={prompt} onClick={() => onPrompt(prompt)} type="button">
+            <Sparkles size={13} />
+            <span>{prompt}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1300,7 +1618,10 @@ export function ChatMessageBubble({
   onFeedbackDraftChange,
   onFeedbackDraftClose,
   onFeedbackDraftSubmit,
+  onDisplayed,
   onOpenCopyMenu,
+  onRetry,
+  retryDisabled,
   onConfirm
 }: {
   message: ChatMessageItem;
@@ -1311,11 +1632,20 @@ export function ChatMessageBubble({
   onFeedbackDraftChange: (draft: ChatFeedbackDraft | null) => void;
   onFeedbackDraftClose: () => void;
   onFeedbackDraftSubmit: (message: ChatMessageItem) => void;
+  onDisplayed: (messageId: string) => void;
   onOpenCopyMenu: (menu: ChatCopyMenuState) => void;
+  onRetry: (retryAction: ChatRetryAction) => void;
+  retryDisabled: boolean;
   onConfirm: (messageId: string, action: ChatConfirmationAction, decision?: "confirm" | "cancel") => void;
 }) {
   const longPressTimerRef = React.useRef<number | null>(null);
+  const messageRef = React.useRef<HTMLDivElement | null>(null);
   const displayText = cleanChatText(message.text, message.attachments ?? []);
+  const createdTime = formatChatMessageTime(message.createdAt);
+  const displayedTime = formatChatMessageTime(message.localSeenAt);
+  const stateLabel = chatMessageStateLabel(message);
+  const isAssistant = message.role === "assistant";
+  const isFailed = message.status === "failed";
   const clearLongPress = React.useCallback(() => {
     if (!longPressTimerRef.current) return;
     window.clearTimeout(longPressTimerRef.current);
@@ -1325,9 +1655,28 @@ export function ChatMessageBubble({
     if (!displayText) return;
     onOpenCopyMenu({ messageId: message.id, text: displayText, x, y });
   }, [displayText, message.id, onOpenCopyMenu]);
+
+  React.useEffect(() => {
+    if (!isAssistant || message.localSeenAt) return undefined;
+    const node = messageRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      onDisplayed(message.id);
+      return undefined;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting && entry.intersectionRatio >= 0.6)) {
+        onDisplayed(message.id);
+        observer.disconnect();
+      }
+    }, { threshold: [0.6] });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isAssistant, message.id, message.localSeenAt, onDisplayed]);
+
   return (
     <motion.div
-      className={`chat-message ${message.role}`}
+      className={`chat-message ${message.role} ${message.status || ""}`}
+      ref={messageRef}
       variants={chatMessageVariants}
       initial="hidden"
       animate="visible"
@@ -1335,41 +1684,75 @@ export function ChatMessageBubble({
       transition={{ type: "spring", stiffness: 420, damping: 34, delay: Math.min(index * 0.025, 0.18) }}
       layout
     >
+      {isAssistant ? (
+        <span className={isFailed ? "chat-message-avatar failed" : "chat-message-avatar assistant"}>
+          {isFailed ? <AlertTriangle size={15} /> : <Bot size={15} />}
+        </span>
+      ) : null}
       <div className="chat-message-stack">
-        <span className="chat-sender-label">{senderName}</span>
-        <div
-          className={`chat-bubble ${message.role}`}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            openCopyMenu(event.clientX, event.clientY);
-          }}
-          onPointerCancel={clearLongPress}
-          onPointerDown={(event) => {
-            if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-            clearLongPress();
-            const { clientX, clientY } = event;
-            longPressTimerRef.current = window.setTimeout(() => openCopyMenu(clientX, clientY), 560);
-          }}
-          onPointerLeave={clearLongPress}
-          onPointerMove={clearLongPress}
-          onPointerUp={clearLongPress}
-        >
-          {displayText ? <p>{displayText}</p> : null}
-          {message.confirmationAction ? (
-            <ChatConfirmationCard
-              action={message.confirmationAction}
-              onConfirm={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction)}
-              onCancel={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction, "cancel")}
-            />
+        <span className="chat-message-head">
+          <span className="chat-sender-label">{senderName}</span>
+          {createdTime ? <time>{createdTime}</time> : null}
+        </span>
+        {displayText ? (
+          <div
+            className={`chat-bubble ${message.role}`}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              openCopyMenu(event.clientX, event.clientY);
+            }}
+            onPointerCancel={clearLongPress}
+            onPointerDown={(event) => {
+              if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+              clearLongPress();
+              const { clientX, clientY } = event;
+              longPressTimerRef.current = window.setTimeout(() => openCopyMenu(clientX, clientY), 560);
+            }}
+            onPointerLeave={clearLongPress}
+            onPointerMove={clearLongPress}
+            onPointerUp={clearLongPress}
+          >
+            <p>{displayText}</p>
+          </div>
+        ) : null}
+        {message.attachments?.length ? (
+          <div className="chat-bubble-attachments">
+            {message.attachments.map((attachment) => (
+              <ChatAttachmentCard attachment={attachment} key={attachment.id} />
+            ))}
+          </div>
+        ) : null}
+        {message.confirmationAction ? (
+          <ChatConfirmationCard
+            action={message.confirmationAction}
+            onConfirm={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction)}
+            onCancel={() => onConfirm(message.id, message.confirmationAction as ChatConfirmationAction, "cancel")}
+          />
+        ) : null}
+        <div className="chat-message-footer">
+          <span className={`chat-message-state ${message.status || "completed"}`}>
+            {message.streaming || message.status === "streaming" ? <Loader2 className="spin" size={12} /> : isFailed ? <WifiOff size={12} /> : <CheckCircle2 size={12} />}
+            <span>{stateLabel}</span>
+          </span>
+          {isAssistant && displayedTime ? (
+            <span className="chat-local-seen" title="Rendered in this browser viewport">
+              <Eye size={12} />
+              <span>Displayed locally {displayedTime}</span>
+            </span>
           ) : null}
-	          {message.attachments?.length ? (
-	            <div className="chat-bubble-attachments">
-	              {message.attachments.map((attachment) => (
-	                <ChatAttachmentCard attachment={attachment} key={attachment.id} />
-	              ))}
-	            </div>
-	          ) : null}
-	        </div>
+          {message.responseDurationMs !== null && message.responseDurationMs !== undefined ? (
+            <span className="chat-response-duration" title="Response time">
+              <Clock3 size={12} />
+              <span>{formatChatResponseDuration(message.responseDurationMs)}</span>
+            </span>
+          ) : null}
+          {message.retryAction ? (
+            <button className="chat-retry-button" disabled={retryDisabled} onClick={() => message.retryAction ? onRetry(message.retryAction) : undefined} type="button">
+              <RefreshCcw size={12} />
+              <span>Retry</span>
+            </button>
+          ) : null}
+        </div>
         {message.role === "assistant" && message.assistantMessageId && !message.streaming ? (
           <div className="chat-feedback-row" aria-label="Rate Alfred response">
             <button
@@ -1390,11 +1773,6 @@ export function ChatMessageBubble({
             >
               <ThumbsDown size={13} />
             </button>
-            {message.responseDurationMs !== null && message.responseDurationMs !== undefined ? (
-              <small className="chat-response-duration" title="Response time">
-                {formatChatResponseDuration(message.responseDurationMs)}
-              </small>
-            ) : null}
             {message.feedback?.status === "saved" ? <small>Saved</small> : null}
             {message.feedback?.status === "error" ? <small className="error">{message.feedback.error}</small> : null}
           </div>
@@ -1407,9 +1785,14 @@ export function ChatMessageBubble({
             onSubmit={() => onFeedbackDraftSubmit(message)}
           />
         ) : null}
-	      </div>
-	    </motion.div>
-	  );
+      </div>
+      {!isAssistant ? (
+        <span className="chat-message-avatar user" aria-label={senderName}>
+          {senderName ? userInitials({ first_name: senderName, last_name: "", full_name: senderName }) : <UserRound size={15} />}
+        </span>
+      ) : null}
+    </motion.div>
+  );
 }
 
 export function ChatFeedbackPanel({
@@ -1490,23 +1873,26 @@ export function ChatConfirmationCard({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const actionSent = action.sent === true;
+  const sentLabel = action.decision === "cancel" ? "Cancellation sent" : action.pendingLabel;
   return (
-    <div className="chat-confirm-card">
+    <div className={actionSent ? "chat-confirm-card sent" : "chat-confirm-card"} role="group" aria-label={action.title}>
       <span className="chat-confirm-icon">
-        {action.type === "update_schedule" ? <Clock3 size={17} /> : action.type === "delete_schedule" ? <Trash2 size={17} /> : <DoorOpen size={17} />}
+        {action.type === "update_schedule" ? <Clock3 size={17} /> : action.type === "delete_schedule" ? <Trash2 size={17} /> : <ShieldCheck size={17} />}
       </span>
       <span>
+        <small className="chat-confirm-kicker">Confirmation Required</small>
         <strong>{action.title}</strong>
         <small>{action.description}</small>
       </span>
       <span className="chat-confirm-actions">
-        <button className="chat-confirm-button secondary" disabled={action.sent} onClick={onCancel} type="button">
+        <button className="chat-confirm-button secondary" disabled={actionSent} onClick={onCancel} type="button">
           <X size={14} />
           <span>Cancel</span>
         </button>
-        <button className="chat-confirm-button" disabled={action.sent} onClick={onConfirm} type="button">
+        <button className="chat-confirm-button" disabled={actionSent} onClick={onConfirm} type="button">
           <ShieldCheck size={14} />
-          <span>{action.sent ? action.pendingLabel : action.buttonLabel}</span>
+          <span>{actionSent ? sentLabel : action.buttonLabel}</span>
         </button>
       </span>
     </div>
@@ -1565,10 +1951,36 @@ export function ChatAttachmentPreview({
   );
 }
 
-export function TypingIndicator({ activities, status }: { activities: ChatToolActivity[]; status: string }) {
+export function TypingIndicator({
+  activities,
+  runActivity,
+  slow,
+  status
+}: {
+  activities: ChatToolActivity[];
+  runActivity: ChatRunActivity | null;
+  slow: boolean;
+  status: string;
+}) {
   const activeActivity = activities.find((activity) => activity.status === "running" || activity.status === "requires_confirmation")
     ?? activities[0];
   const extraActivityCount = activeActivity ? Math.max(0, activities.length - 1) : 0;
+  const agentLabel = runActivity ? chatAgentRunningLabel(runActivity.agentsRunning) : "";
+  const phaseLabel = runActivity?.providerError
+    ? "Provider error"
+    : runActivity?.awaitingConfirmation
+      ? "Awaiting confirmation"
+      : runActivity
+        ? chatPhaseLabel(runActivity.phase)
+        : "";
+  const toolCountLabel = runActivity?.activeToolCalls
+    ? `${runActivity.activeToolCalls} tool call${runActivity.activeToolCalls === 1 ? "" : "s"} active`
+    : chatToolStepsLabel(runActivity?.completedToolSteps ?? 0);
+  const liveActivityClass = [
+    "typing-live-activity",
+    runActivity?.providerError ? "error" : "",
+    runActivity?.awaitingConfirmation ? "warning" : ""
+  ].filter(Boolean).join(" ");
   return (
     <motion.div
       className="typing-row"
@@ -1576,14 +1988,33 @@ export function TypingIndicator({ activities, status }: { activities: ChatToolAc
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
     >
+      {runActivity ? (
+        <span className={liveActivityClass}>
+          <span className="typing-live-icon">
+            {runActivity.providerError ? <AlertTriangle size={14} /> : runActivity.awaitingConfirmation ? <ShieldCheck size={14} /> : <Loader2 className="spin" size={14} />}
+          </span>
+          <span className="typing-live-copy">
+            {phaseLabel ? <strong>{phaseLabel}</strong> : null}
+            {runActivity.detail ? <small>{runActivity.detail}</small> : slow ? <small>Still waiting on Alfred's provider or IACS tools.</small> : null}
+          </span>
+          {agentLabel || toolCountLabel ? (
+            <span className="typing-live-metrics">
+              {agentLabel ? <span>{agentLabel}</span> : null}
+              {toolCountLabel ? <span>{toolCountLabel}</span> : null}
+            </span>
+          ) : null}
+        </span>
+      ) : null}
       {activeActivity ? (
         <span className="typing-activities">
+          <Activity size={12} />
           <span className={`typing-activity ${activeActivity.status}`}>
             {activeActivity.label}
           </span>
           {extraActivityCount ? <span className="typing-activity-count">+{extraActivityCount}</span> : null}
         </span>
       ) : status ? <span className="typing-status">{status}</span> : null}
+      {slow && !runActivity ? <span className="typing-slow-note">Still waiting on Alfred's provider or IACS tools.</span> : null}
       <span className="typing-bubble" aria-label="Alfred is typing">
         <i />
         <i />

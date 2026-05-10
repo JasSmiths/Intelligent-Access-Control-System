@@ -45,6 +45,14 @@ def build_tools() -> list[AgentTool]:
                     },
                     handler=resolve_human_entity,
                     categories=("General",),
+                    example_inputs=(
+                        {"query": "the missus", "entity_types": ["person", "vehicle"]},
+                        {"query": "main garage", "entity_types": ["device"]},
+                    ),
+                    return_schema={
+                        "answer_types": ["entity_resolution"],
+                        "result_keys": ["status", "match", "matches"],
+                    },
                 ),
         AgentTool(
                     name="query_presence",
@@ -55,9 +63,14 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_presence,
+                    example_inputs=(
+                        {"person": "Steph"},
+                        {},
+                    ),
                     return_schema={
                         "answer_types": ["presence_state"],
                         "not_sufficient_for": ["absence_duration", "visit_duration"],
+                        "records": "presence",
                     },
                 ),
         AgentTool(

@@ -29,6 +29,47 @@ async def telemetry_categories(_: User = Depends(admin_user)) -> dict[str, Any]:
     return {"categories": TELEMETRY_CATEGORIES}
 
 
+@router.get("/summary")
+async def telemetry_summary(
+    from_at: datetime | None = Query(default=None, alias="from"),
+    to_at: datetime | None = Query(default=None, alias="to"),
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await telemetry.flush()
+    trace_filters = _time_filters(TelemetryTrace.started_at, from_at, to_at)
+    audit_filters = _time_filters(AuditLog.timestamp, from_at, to_at)
+
+    trace_total = await _filtered_row_count(session, TelemetryTrace, trace_filters)
+    audit_total = await _filtered_row_count(session, AuditLog, audit_filters)
+    database_size_bytes = await _telemetry_database_size(session)
+    log_file_size_bytes, log_file_count = _log_directory_size()
+    artifact_size_bytes, artifact_file_count = _directory_size([settings.data_dir / "telemetry-artifacts"])
+    storage = _telemetry_storage_payload(
+        database_size_bytes=database_size_bytes,
+        log_file_size_bytes=log_file_size_bytes,
+        artifact_size_bytes=artifact_size_bytes,
+        file_count=log_file_count + artifact_file_count,
+    )
+
+    return {
+        "traces": {
+            "total": trace_total,
+            "by_category": await _group_counts(session, TelemetryTrace.category, trace_filters),
+            "by_level": await _group_counts(session, TelemetryTrace.level, trace_filters),
+            "by_status": await _group_counts(session, TelemetryTrace.status, trace_filters),
+        },
+        "audit": {
+            "total": audit_total,
+            "by_category": await _group_counts(session, AuditLog.category, audit_filters),
+            "by_level": await _group_counts(session, AuditLog.level, audit_filters),
+            "by_outcome": await _group_counts(session, AuditLog.outcome, audit_filters),
+        },
+        "storage": storage,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
 @router.get("/traces")
 async def list_traces(
     category: str | None = None,
@@ -114,6 +155,8 @@ async def list_audit_logs(
     action_prefix: str | None = None,
     actor: str | None = None,
     target_entity: str | None = None,
+    level: str | None = None,
+    outcome: str | None = None,
     q: str | None = None,
     from_at: datetime | None = Query(default=None, alias="from"),
     to_at: datetime | None = Query(default=None, alias="to"),
@@ -131,6 +174,10 @@ async def list_audit_logs(
         query = query.where(AuditLog.actor.ilike(f"%{actor.strip()}%"))
     if target_entity:
         query = query.where(AuditLog.target_entity == target_entity)
+    if level:
+        query = query.where(AuditLog.level == level)
+    if outcome:
+        query = query.where(AuditLog.outcome == outcome)
     if from_at:
         query = query.where(AuditLog.timestamp >= from_at)
     if to_at:
@@ -174,15 +221,12 @@ async def telemetry_storage(
     database_size_bytes = await _telemetry_database_size(session)
     log_file_size_bytes, log_file_count = _log_directory_size()
     artifact_size_bytes, artifact_file_count = _directory_size([settings.data_dir / "telemetry-artifacts"])
-    total_size_bytes = database_size_bytes + log_file_size_bytes + artifact_size_bytes
-    return {
-        "total_size_bytes": total_size_bytes,
-        "database_size_bytes": database_size_bytes,
-        "log_file_size_bytes": log_file_size_bytes,
-        "artifact_size_bytes": artifact_size_bytes,
-        "file_count": log_file_count + artifact_file_count,
-        "updated_at": datetime.now().isoformat(),
-    }
+    return _telemetry_storage_payload(
+        database_size_bytes=database_size_bytes,
+        log_file_size_bytes=log_file_size_bytes,
+        artifact_size_bytes=artifact_size_bytes,
+        file_count=log_file_count + artifact_file_count,
+    )
 
 
 @router.delete("/purge")
@@ -313,6 +357,55 @@ def serialize_audit_log(row: AuditLog) -> dict[str, Any]:
 
 async def _row_count(session: AsyncSession, model: type) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+def _time_filters(timestamp_column: Any, from_at: datetime | None, to_at: datetime | None) -> list[Any]:
+    filters: list[Any] = []
+    if from_at:
+        filters.append(timestamp_column >= from_at)
+    if to_at:
+        filters.append(timestamp_column <= to_at)
+    return filters
+
+
+async def _filtered_row_count(session: AsyncSession, model: type, filters: list[Any]) -> int:
+    query = select(func.count()).select_from(model)
+    if filters:
+        query = query.where(*filters)
+    return int(await session.scalar(query) or 0)
+
+
+async def _group_counts(session: AsyncSession, column: Any, filters: list[Any]) -> dict[str, int]:
+    query = select(column, func.count()).group_by(column)
+    if filters:
+        query = query.where(*filters)
+    rows = (await session.execute(query)).all()
+    return _count_rows_to_map(rows)
+
+
+def _count_rows_to_map(rows: list[tuple[Any, int]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, count in rows:
+        counts[str(key or "unknown")] = int(count or 0)
+    return counts
+
+
+def _telemetry_storage_payload(
+    *,
+    database_size_bytes: int,
+    log_file_size_bytes: int,
+    artifact_size_bytes: int,
+    file_count: int,
+) -> dict[str, Any]:
+    total_size_bytes = database_size_bytes + log_file_size_bytes + artifact_size_bytes
+    return {
+        "total_size_bytes": total_size_bytes,
+        "database_size_bytes": database_size_bytes,
+        "log_file_size_bytes": log_file_size_bytes,
+        "artifact_size_bytes": artifact_size_bytes,
+        "file_count": file_count,
+        "updated_at": datetime.now().isoformat(),
+    }
 
 
 async def _telemetry_database_size(session: AsyncSession) -> int:

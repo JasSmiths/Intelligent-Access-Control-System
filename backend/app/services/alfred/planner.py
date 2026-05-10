@@ -162,6 +162,8 @@ def domain_cards(tools: Iterable[AgentTool]) -> list[dict[str, Any]]:
                         tool_card["args"] = required_args
                 if tool.return_schema:
                     tool_card["returns"] = _compact_return_schema(tool.return_schema)
+                if tool.example_inputs:
+                    tool_card["examples"] = _compact_examples(tool.example_inputs)
                 if tool.required_permissions:
                     tool_card["permissions"] = list(tool.required_permissions)
                 if tool.default_limit is not None:
@@ -273,8 +275,19 @@ def parse_planner_selection(payload: dict[str, Any], tools: Iterable[AgentTool])
 
 
 def tools_for_selection(selection: PlannerSelection, tools: list[AgentTool]) -> list[AgentTool]:
-    if selection.selected_tool_names:
-        selected = [tool for tool in tools if tool.name in set(selection.selected_tool_names)]
+    requested_names = [
+        *selection.selected_tool_names,
+        *(call.name for call in selection.planned_tool_calls),
+    ]
+    if requested_names:
+        selected = [tool for tool in tools if tool.name in set(requested_names)]
+    elif any(domain != "General" for domain in selection.selected_domains):
+        selected_domains = set(selection.selected_domains)
+        selected = [
+            tool
+            for tool in tools
+            if tool.categories and tool.categories[0] in selected_domains
+        ]
     else:
         selected = []
     deduped: list[AgentTool] = []
@@ -335,18 +348,40 @@ def _compact_required_parameter_card(parameters: dict[str, Any]) -> dict[str, An
 
 
 def _compact_description(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:96]
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:72]
 
 
 def _compact_return_schema(schema: dict[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    for key in ("answer_types", "not_sufficient_for", "fact_kind", "handles"):
+    for key in ("answer_types", "not_sufficient_for", "fact_kind", "handles", "result_keys", "records"):
         value = schema.get(key)
         if isinstance(value, list):
-            compact[key] = [str(item) for item in value[:8]]
+            compact[key] = [str(item) for item in value[:5]]
         elif value not in (None, "", [], {}):
             compact[key] = value
     return compact
+
+
+def _compact_examples(examples: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            str(key): _compact_example_value(value)
+            for key, value in list(example.items())[:6]
+            if value not in (None, "", [], {})
+        }
+        for example in examples[:1]
+        if isinstance(example, dict)
+    ]
+
+
+def _compact_example_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:64]
+    if isinstance(value, list):
+        return [_compact_example_value(item) for item in value[:3]]
+    if isinstance(value, dict):
+        return {str(key): _compact_example_value(item) for key, item in list(value.items())[:4]}
+    return value
 
 
 def _first_json_object(text: str) -> dict[str, Any] | None:

@@ -42,6 +42,7 @@ from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.auth_secret_management import AuthSecretRotationError, auth_secret_security_status, rotate_auth_secret
+from app.services.access_events import get_access_event_service
 from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.automations import (
     AutomationError,
@@ -386,6 +387,7 @@ async def query_integration_health(arguments: dict[str, Any]) -> dict[str, Any]:
     requested = str(arguments.get("integration") or "all").strip().lower()
     health = {
         "home_assistant": await get_home_assistant_service().status(refresh=False),
+        "access_events": get_access_event_service().status(),
         "unifi_protect": await get_unifi_protect_service().status(refresh=False),
         "discord": await get_discord_messaging_service().status(),
         "whatsapp": await get_whatsapp_messaging_service().status(),

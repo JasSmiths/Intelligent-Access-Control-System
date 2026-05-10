@@ -11,23 +11,27 @@
   "dependencies": {
     "@floating-ui/dom": "^1.7.6",
     "@monaco-editor/react": "^4.7.0",
+    "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.24",
-    "@tiptap/extension-mention": "^3.22.5",
-    "@tiptap/pm": "^3.22.5",
-    "@tiptap/react": "^3.22.5",
-    "@tiptap/starter-kit": "^3.22.5",
-    "@tiptap/suggestion": "^3.22.5",
+    "@tiptap/extension-mention": "^3.23.1",
+    "@tiptap/pm": "^3.23.1",
+    "@tiptap/react": "^3.23.1",
+    "@tiptap/starter-kit": "^3.23.1",
+    "@tiptap/suggestion": "^3.23.1",
     "jsondiffpatch": "^0.7.3",
     "lucide-react": "^1.14.0",
     "motion": "^12.38.0",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10"
+    "vite": "^8.0.11"
+  },
+  "overrides": {
+    "dompurify": "3.4.2"
   }
 }

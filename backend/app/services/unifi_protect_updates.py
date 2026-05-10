@@ -236,7 +236,7 @@ class UnifiProtectUpdateService:
         return path
 
     async def _latest_pypi_version(self) -> tuple[str, dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=12, trust_env=False) as client:
             response = await client.get(PYPI_PACKAGE_URL)
         if response.status_code >= 400:
             raise UnifiProtectUpdateError(f"PyPI returned HTTP {response.status_code}.")
@@ -255,7 +255,7 @@ class UnifiProtectUpdateService:
         return version, summary
 
     async def _release_notes(self, version: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True, trust_env=False) as client:
             for url_template in GITHUB_RELEASE_URLS:
                 url = url_template.format(version=version)
                 response = await client.get(url, headers={"Accept": "application/vnd.github+json"})

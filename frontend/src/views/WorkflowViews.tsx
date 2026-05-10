@@ -379,6 +379,13 @@ export const fallbackNotificationTriggers: NotificationTriggerGroup[] = [
     ]
   },
   {
+    id: "integrations",
+    label: "Integrations",
+    events: [
+      { value: "integration_degraded", label: "Integration Degraded", severity: "warning", description: "A configured integration moved into a degraded or unreachable state." }
+    ]
+  },
+  {
     id: "leaderboard",
     label: "Leaderboard",
     events: [
@@ -471,6 +478,16 @@ export const fallbackNotificationVariables: NotificationVariableGroup[] = [
     ]
   },
   {
+    group: "Integration",
+    items: [
+      { name: "IntegrationName", token: "@IntegrationName", label: "Integration name" },
+      { name: "IntegrationStatus", token: "@IntegrationStatus", label: "Integration status" },
+      { name: "IntegrationReason", token: "@IntegrationReason", label: "Degraded reason" },
+      { name: "IntegrationLastConnectedAt", token: "@IntegrationLastConnectedAt", label: "Last connected at" },
+      { name: "IntegrationLastFailureAt", token: "@IntegrationLastFailureAt", label: "Last failure at" }
+    ]
+  },
+  {
     group: "Visitor Pass",
     items: [
       { name: "VisitorName", token: "@VisitorName", label: "Visitor name" },
@@ -537,6 +554,11 @@ export const mockNotificationContext: Record<string, string> = {
   Subject: "Steph arrived at the gate",
   Message: "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
   MaintenanceModeReason: "Enabled by Jason from UI",
+  IntegrationName: "Home Assistant",
+  IntegrationStatus: "Degraded",
+  IntegrationReason: "Unable to reach Home Assistant.",
+  IntegrationLastConnectedAt: "2026-05-10T18:42:00+00:00",
+  IntegrationLastFailureAt: "2026-05-10T18:55:35+00:00",
   VisitorName: "Sarah",
   VisitorPassName: "Sarah",
   VisitorPassRegistration: "PE70DHX",
@@ -2927,17 +2949,29 @@ export type TemplateEditorProps = {
 };
 
 export class TemplateEditorBoundary extends React.Component<
-  { children: React.ReactNode; fallback: React.ReactNode },
-  { hasError: boolean }
+  { children: React.ReactNode; fallback: React.ReactNode; resetKey: string },
+  { hasError: boolean; retryCount: number }
 > {
-  state = { hasError: false };
+  state = { hasError: false, retryCount: 0 };
 
   static getDerivedStateFromError() {
     return { hasError: true };
   }
 
+  componentDidUpdate(previousProps: { resetKey: string }) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false, retryCount: 0 });
+    }
+  }
+
   componentDidCatch(error: unknown) {
     console.error("Notification template editor failed to render", error);
+    if (this.state.retryCount > 0) return;
+    window.requestAnimationFrame(() => {
+      this.setState((current) => current.hasError
+        ? { hasError: false, retryCount: current.retryCount + 1 }
+        : null);
+    });
   }
 
   render() {
@@ -2947,12 +2981,13 @@ export class TemplateEditorBoundary extends React.Component<
 }
 
 export function SafeVariableRichTextEditor(props: TemplateEditorProps) {
+  const variableResetKey = React.useMemo(() => props.variables.map((variable) => variable.name).join("\u0000"), [props.variables]);
   const safeProps = {
     ...props,
     value: stringifyTemplateValue(props.value),
   };
   return (
-    <TemplateEditorBoundary fallback={<PlainTemplateEditor {...safeProps} />}>
+    <TemplateEditorBoundary fallback={<PlainTemplateEditor {...safeProps} />} resetKey={variableResetKey}>
       <React.Suspense fallback={<div className="loading-panel compact">Loading template editor</div>}>
         <VariableRichTextEditor {...safeProps} />
       </React.Suspense>
@@ -3721,6 +3756,7 @@ export function notificationTriggerGroupIcon(groupId: string) {
   if (groupId === "compliance") return ShieldCheck;
   if (groupId === "gate_actions") return DoorOpen;
   if (groupId === "gate_malfunctions") return AlertTriangle;
+  if (groupId === "integrations") return PlugZap;
   if (groupId === "leaderboard") return Trophy;
   if (groupId === "maintenance_mode") return Construction;
   if (groupId === "vehicle_detections") return Car;

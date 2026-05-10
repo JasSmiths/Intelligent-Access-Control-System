@@ -73,7 +73,7 @@ class NpmRecoveryPlan:
     strategy: str
     summary: str
     specs: list[str]
-    use_legacy_peer_deps: bool = False
+    regenerate_lockfile: bool = False
 
 
 @dataclass(frozen=True)
@@ -1099,13 +1099,17 @@ class DependencyUpdateService:
             seen.add(key)
             await log.warning(plan.summary)
             await log.info("Recovery retry: " + ", ".join(plan.specs))
-            command = ["npm", "install", *plan.specs, "--package-lock-only"]
-            if plan.use_legacy_peer_deps:
-                command.append("--legacy-peer-deps")
+            if plan.regenerate_lockfile:
+                await asyncio.to_thread(_apply_npm_recovery_specs, staged_frontend, plan.specs)
+                lockfile = staged_frontend / "package-lock.json"
+                if lockfile.exists():
+                    lockfile.unlink()
+                await log.info("Regenerating npm lockfile from the repaired package.json peer group.")
+                command = ["npm", "install", "--package-lock-only", "--no-audit"]
+            else:
+                command = ["npm", "install", *plan.specs, "--package-lock-only"]
             try:
                 await self._run_command(command, cwd=staged_frontend, log=log, timeout=700)
-                if plan.use_legacy_peer_deps:
-                    await self._normalize_npm_lockfile_for_ci(staged_frontend, log)
                 await self._run_command(["npm", "install", "--package-lock-only", "--dry-run"], cwd=staged_frontend, log=log, timeout=300)
                 return True
             except DependencyCommandError as next_failure:
@@ -1401,7 +1405,7 @@ class DependencyUpdateService:
     async def _latest_version(self, dependency: ExternalDependency) -> tuple[str | None, dict[str, Any]]:
         if dependency.ecosystem == "python":
             url = f"https://pypi.org/pypi/{quote(dependency.package_name)}/json"
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True, trust_env=False) as client:
                 response = await client.get(url)
             if response.status_code >= 400:
                 return dependency.current_version, {"source": url, "error": f"HTTP {response.status_code}"}
@@ -1413,7 +1417,7 @@ class DependencyUpdateService:
             }
         if dependency.ecosystem == "npm":
             url = f"https://registry.npmjs.org/{quote(dependency.package_name, safe='@/')}"
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True, trust_env=False) as client:
                 response = await client.get(url)
             if response.status_code >= 400:
                 return dependency.current_version, {"source": url, "error": f"HTTP {response.status_code}"}
@@ -1429,7 +1433,7 @@ class DependencyUpdateService:
     async def _release_notes(self, dependency: ExternalDependency, target_version: str) -> dict[str, Any]:
         if dependency.ecosystem == "python":
             url = f"https://pypi.org/pypi/{quote(dependency.package_name)}/{quote(target_version)}/json"
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True, trust_env=False) as client:
                 response = await client.get(url)
             if response.status_code < 400:
                 payload = response.json()
@@ -1441,7 +1445,7 @@ class DependencyUpdateService:
                 }
         if dependency.ecosystem == "npm":
             url = f"https://registry.npmjs.org/{quote(dependency.package_name, safe='@/')}"
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True, trust_env=False) as client:
                 response = await client.get(url)
             if response.status_code < 400:
                 payload = response.json()
@@ -2099,17 +2103,19 @@ def _npm_recovery_plan(frontend: Path, dependency: ExternalDependency, target_ve
         return None
 
     specs: dict[str, str] = {}
-    use_legacy = False
+    regenerate_lockfile = False
     if dependency.package_name in direct:
         specs[dependency.package_name] = target_version
 
     scoped_group = _npm_peer_update_group(frontend, dependency, target_version, command_output)
     if scoped_group:
+        regenerate_lockfile = True
         for spec in scoped_group:
             name, version = _split_npm_spec(spec)
             specs[name] = version
 
     if dependency.package_name in {"react", "react-dom"}:
+        regenerate_lockfile = True
         for name in ("react", "react-dom"):
             if name in direct:
                 specs[name] = target_version
@@ -2140,7 +2146,7 @@ def _npm_recovery_plan(frontend: Path, dependency: ExternalDependency, target_ve
         strategy="npm_peer_group",
         summary=summary,
         specs=formatted,
-        use_legacy_peer_deps=use_legacy,
+        regenerate_lockfile=regenerate_lockfile,
     )
 
 
@@ -2223,6 +2229,24 @@ def _update_npm_package_specs(frontend: Path, package_names: list[str], target_v
     package_json.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _apply_npm_recovery_specs(frontend: Path, specs: list[str]) -> None:
+    package_json = frontend / "package.json"
+    data = json.loads(package_json.read_text())
+    changed = False
+    for spec in specs:
+        name, version = _split_npm_spec(spec)
+        for section in ("dependencies", "devDependencies"):
+            dependencies = data.get(section) or {}
+            if not isinstance(dependencies, dict):
+                continue
+            if name in dependencies:
+                dependencies[name] = f"^{version}"
+                changed = True
+    if not changed:
+        raise DependencyUpdateError("No npm package.json entries matched the peer dependency recovery plan.")
+    package_json.write_text(json.dumps(data, indent=2) + "\n")
+
+
 def _repair_tsconfig_for_typescript_6(frontend: Path, command_output: str) -> bool:
     output = command_output.lower()
     if "ts5107" not in output and "moduleresolution=node10" not in output:
@@ -2268,6 +2292,9 @@ def _copy_frontend_build_context(source: Path, destination: Path) -> None:
         source_path = source / filename
         if source_path.exists():
             shutil.copy2(source_path, destination / filename)
+    public = source / "public"
+    if public.exists():
+        shutil.copytree(public, destination / "public")
     shutil.copytree(source / "src", destination / "src")
 
 

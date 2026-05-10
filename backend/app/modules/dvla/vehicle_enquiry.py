@@ -64,7 +64,11 @@ class DvlaVehicleEnquiryClient:
             "x-api-key": self.api_key,
         }
         payload = {"registrationNumber": vrn}
-        async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
             try:
                 response = await client.post(self.endpoint_url, headers=headers, json=payload)
             except httpx.HTTPError as exc:

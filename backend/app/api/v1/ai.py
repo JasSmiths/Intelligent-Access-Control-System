@@ -219,7 +219,10 @@ async def chat_stream(
                 await queue.put({"type": "stream.done", "payload": {}})
 
         task = asyncio.create_task(run_turn())
-        yield _sse_event("chat.thinking", {})
+        yield _sse_event(
+            "chat.thinking",
+            {"phase": "starting", "agents_running": 1, "active_tool_calls": 0},
+        )
         try:
             while True:
                 event = await queue.get()
@@ -405,7 +408,16 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     )
                     continue
 
-                await websocket.send_json({"type": "chat.thinking", "payload": {}})
+                await websocket.send_json(
+                    {
+                        "type": "chat.thinking",
+                        "payload": {
+                            "phase": "starting",
+                            "agents_running": 1,
+                            "active_tool_calls": 0,
+                        },
+                    }
+                )
                 thinking_started_at = time.monotonic()
 
                 async def publish_status(status: dict[str, Any]) -> None:

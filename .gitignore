@@ -9,6 +9,7 @@ __pycache__/
 node_modules/
 dist/
 build/
+frontend/test-results/
 docker-compose.update-backups.generated.yml
 auth-secret.key
 auth-secret.key.previous

@@ -62,6 +62,7 @@ VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE = (
     "Voice Notification suppressed: `input_boolean.announcements` is disabled."
 )
 GATE_MALFUNCTION_EVENT_TYPE = "gate_malfunction"
+INTEGRATION_DEGRADED_EVENT_TYPE = "integration_degraded"
 LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES = {
     "gate_malfunction_initial": "initial",
     "gate_malfunction_30m": "30m",
@@ -185,6 +186,18 @@ TRIGGER_CATALOG: list[dict[str, Any]] = [
                 "label": "Gate Malfunction",
                 "severity": "critical",
                 "description": "The primary gate malfunction lifecycle changed stage.",
+            },
+        ],
+    },
+    {
+        "id": "integrations",
+        "label": "Integrations",
+        "events": [
+            {
+                "value": INTEGRATION_DEGRADED_EVENT_TYPE,
+                "label": "Integration Degraded",
+                "severity": "warning",
+                "description": "A configured integration moved into a degraded or unreachable state.",
             },
         ],
     },
@@ -374,6 +387,11 @@ VARIABLE_GROUPS: list[dict[str, Any]] = [
     {
         "group": "Integration",
         "items": [
+            {"name": "IntegrationName", "token": "@IntegrationName", "label": "Integration name"},
+            {"name": "IntegrationStatus", "token": "@IntegrationStatus", "label": "Integration status"},
+            {"name": "IntegrationReason", "token": "@IntegrationReason", "label": "Degraded reason"},
+            {"name": "IntegrationLastConnectedAt", "token": "@IntegrationLastConnectedAt", "label": "Last connected at"},
+            {"name": "IntegrationLastFailureAt", "token": "@IntegrationLastFailureAt", "label": "Last failure at"},
             {"name": "GarageDoor", "token": "@GarageDoor", "label": "Garage door"},
             {"name": "EntityId", "token": "@EntityId", "label": "Entity ID"},
         ],
@@ -926,12 +944,19 @@ class NotificationService:
                 context,
                 output_payload={
                     **self._event_payload(rendered, action, context, True, ""),
-                    "reason": "delivered",
+                    **outcome.metadata,
+                    "reason": outcome.reason or "delivered",
+                    "message": outcome.message,
                 },
             )
             await event_bus.publish(
                 "notification.sent",
-                self._event_payload(rendered, action, context, True, ""),
+                {
+                    **self._event_payload(rendered, action, context, True, ""),
+                    **outcome.metadata,
+                    "reason": outcome.reason or "delivered",
+                    "message": outcome.message,
+                },
             )
             delivered_count += 1
 
@@ -1217,8 +1242,7 @@ class NotificationService:
     ) -> NotificationActionOutcome:
         action_type = str(action.get("type") or "")
         if action_type == "mobile":
-            await self._send_mobile(action, context, config)
-            return NotificationActionOutcome(delivered=True)
+            return await self._send_mobile(action, context, config)
         if action_type == "in_app":
             await event_bus.publish(
                 "notification.in_app",
@@ -1243,7 +1267,12 @@ class NotificationService:
             return NotificationActionOutcome(delivered=True)
         raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
 
-    async def _send_mobile(self, action: dict[str, Any], context: NotificationContext, config) -> None:
+    async def _send_mobile(
+        self,
+        action: dict[str, Any],
+        context: NotificationContext,
+        config,
+    ) -> NotificationActionOutcome:
         urls = self._select_apprise_urls(config.apprise_urls, action)
         home_assistant_targets = await self._select_home_assistant_mobile_targets(config, action)
         if not urls and not home_assistant_targets:
@@ -1267,9 +1296,28 @@ class NotificationService:
         finally:
             self._cleanup_mobile_snapshot(snapshot, home_assistant_targets)
         if failures:
+            if delivered_any:
+                logger.warning(
+                    "mobile_notification_partially_delivered",
+                    extra={
+                        "event_type": context.event_type,
+                        "failure_count": len(failures),
+                    },
+                )
+                return NotificationActionOutcome(
+                    delivered=True,
+                    reason="delivered_with_failures",
+                    message="At least one mobile endpoint accepted the notification; other endpoints failed.",
+                    metadata={
+                        "partial_failure": True,
+                        "failures": failures,
+                        "failure_count": len(failures),
+                    },
+                )
             raise NotificationDeliveryError("; ".join(failures))
         if not delivered_any:
             raise NotificationDeliveryError("No mobile notification endpoints were delivered.")
+        return NotificationActionOutcome(delivered=True, reason="delivered")
 
     async def _send_mobile_apprise(
         self,
@@ -2029,6 +2077,19 @@ def sample_notification_context(trigger_event: str | None = None) -> Notificatio
                 "entity_id": "cover.top_gate",
             }
         )
+    elif event_type == INTEGRATION_DEGRADED_EVENT_TYPE:
+        facts.update(
+            {
+                "message": "Home Assistant is degraded: Unable to reach Home Assistant.",
+                "subject": "Home Assistant degraded",
+                "integration_name": "Home Assistant",
+                "integration_status": "Degraded",
+                "integration_reason": "Unable to reach Home Assistant.",
+                "integration_last_connected_at": "2026-05-10T18:42:00+00:00",
+                "integration_last_failure_at": "2026-05-10T18:55:35+00:00",
+                "source": "home_assistant",
+            }
+        )
     return NotificationContext(
         event_type=event_type,
         subject=(
@@ -2036,6 +2097,8 @@ def sample_notification_context(trigger_event: str | None = None) -> Notificatio
             if event_type == "unauthorized_plate"
             else "Gate malfunction detected"
             if event_type == GATE_MALFUNCTION_EVENT_TYPE
+            else "Home Assistant degraded"
+            if event_type == INTEGRATION_DEGRADED_EVENT_TYPE
             else "Steph arrived at the gate"
         ),
         severity=trigger_severity(event_type),
@@ -2180,6 +2243,11 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "OccurredAt": occurred_at,
         "Time": _time_label(occurred_at),
         "GateStatus": pick("gate_status", "gate_state"),
+        "IntegrationName": pick("integration_name", "integration", "provider_name"),
+        "IntegrationStatus": pick("integration_status", "status"),
+        "IntegrationReason": pick("integration_reason", "degraded_reason", "failure_reason", "reason"),
+        "IntegrationLastConnectedAt": pick("integration_last_connected_at", "last_connected_at"),
+        "IntegrationLastFailureAt": pick("integration_last_failure_at", "last_failure_at"),
         "GarageDoor": pick("garage_door"),
         "EntityId": pick("entity_id"),
         "VisitorName": pick("visitor_name", "visitor_pass_name", default=display_name or context.subject),

@@ -56,6 +56,11 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_automation_catalog,
+                    example_inputs=({},),
+                    return_schema={
+                        "answer_types": ["automation_catalog"],
+                        "result_keys": ["triggers", "conditions", "actions", "variables"],
+                    },
                 ),
         AgentTool(
                     name="query_automations",
@@ -71,6 +76,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_automations,
+                    example_inputs=(
+                        {"trigger_key": "vehicle.outside_schedule", "is_active": True, "limit": 20},
+                    ),
+                    return_schema={
+                        "answer_types": ["automation_list"],
+                        "records": "automations",
+                    },
                 ),
         AgentTool(
                     name="get_automation",
@@ -84,6 +96,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=get_automation,
+                    example_inputs=(
+                        {"automation_name": "Open gate for Steph", "include_dry_run": True},
+                    ),
+                    return_schema={
+                        "answer_types": ["automation_detail"],
+                        "records": "automation",
+                    },
                 ),
         AgentTool(
                     name="create_automation",

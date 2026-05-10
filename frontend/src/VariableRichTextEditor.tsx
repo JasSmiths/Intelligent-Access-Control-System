@@ -52,6 +52,7 @@ export function VariableRichTextEditor({
   const onChangeRef = React.useRef(onChange);
   const suggestionRef = React.useRef<SuggestionState | null>(null);
   const valueRef = React.useRef(value);
+  const variableSignatureRef = React.useRef("");
   const variablesRef = React.useRef(variables);
 
   onChangeRef.current = onChange;
@@ -153,11 +154,19 @@ export function VariableRichTextEditor({
   }, []);
   editorRef.current = editor;
 
+  const variableSignature = React.useMemo(() => variables.map((variable) => variable.name).join("\u0000"), [variables]);
+
   React.useEffect(() => {
-    if (!editor || value === valueRef.current) return;
-    valueRef.current = value;
-    editor.commands.setContent(templateToTiptapDoc(value, variablesRef.current), { emitUpdate: false });
-  }, [editor, value]);
+    if (!editor) return;
+    const valueChanged = value !== valueRef.current;
+    const variablesChanged = variableSignature !== variableSignatureRef.current;
+    if (!valueChanged && !variablesChanged) return;
+
+    const nextValue = valueChanged ? value : tiptapDocToTemplate(editor.getJSON());
+    valueRef.current = nextValue;
+    variableSignatureRef.current = variableSignature;
+    editor.commands.setContent(templateToTiptapDoc(nextValue, variablesRef.current), { emitUpdate: false });
+  }, [editor, value, variableSignature]);
 
   React.useEffect(() => {
     if (!editor) return undefined;

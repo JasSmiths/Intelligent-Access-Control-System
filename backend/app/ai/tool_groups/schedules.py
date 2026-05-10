@@ -79,6 +79,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_schedules,
+                    example_inputs=(
+                        {"search": "weekday", "include_dependencies": True},
+                    ),
+                    return_schema={
+                        "answer_types": ["schedule_list"],
+                        "records": "schedules",
+                    },
                 ),
         AgentTool(
                     name="get_schedule",
@@ -89,6 +96,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=get_schedule,
+                    example_inputs=(
+                        {"schedule_name": "Weekdays"},
+                    ),
+                    return_schema={
+                        "answer_types": ["schedule_detail"],
+                        "records": "schedule",
+                    },
                 ),
         AgentTool(
                     name="create_schedule",
@@ -164,6 +178,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_schedule_targets,
+                    example_inputs=(
+                        {"entity_type": "vehicle", "search": "Tesla", "limit": 25},
+                    ),
+                    return_schema={
+                        "answer_types": ["schedule_assignments"],
+                        "records": "targets",
+                    },
                 ),
         AgentTool(
                     name="assign_schedule_to_entity",
@@ -208,6 +229,15 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=verify_schedule_access,
+                    example_inputs=(
+                        {"entity_type": "person", "entity_name": "Steph", "at": "today 18:30"},
+                        {"entity_type": "vehicle", "registration_number": "PE70DHX"},
+                    ),
+                    return_schema={
+                        "answer_types": ["schedule_access"],
+                        "handles": ["schedule_allowed_now", "schedule_allowed_at_time", "vehicle_owner_inheritance"],
+                        "result_keys": ["verified", "allowed", "policy", "schedule"],
+                    },
                 ),
         ],
         categories=TOOL_CATEGORIES,

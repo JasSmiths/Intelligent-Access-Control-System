@@ -61,6 +61,14 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=query_visitor_passes,
+                    example_inputs=(
+                        {"visitor_name": "Chris", "limit": 5},
+                        {"search": "blue van", "statuses": ["used"], "limit": 10},
+                    ),
+                    return_schema={
+                        "answer_types": ["visitor_pass", "visitor_arrival", "visitor_departure", "visitor_duration"],
+                        "records": "visitor_passes",
+                    },
                 ),
         AgentTool(
                     name="get_visitor_pass",
@@ -74,6 +82,13 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=get_visitor_pass,
+                    example_inputs=(
+                        {"visitor_name": "Chris"},
+                    ),
+                    return_schema={
+                        "answer_types": ["visitor_pass", "visitor_arrival", "visitor_departure", "visitor_duration"],
+                        "records": "visitor_pass",
+                    },
                 ),
         AgentTool(
                     name="create_visitor_pass",
@@ -112,6 +127,10 @@ def build_tools() -> list[AgentTool]:
                         "additionalProperties": False,
                     },
                     handler=create_visitor_pass,
+                    example_inputs=(
+                        {"visitor_name": "Chris", "expected_time": "today 14:00", "window_minutes": 30, "confirm": False},
+                        {"visitor_name": "Boiler engineer", "valid_from": "today 09:00", "valid_until": "today 12:00", "pass_type": "duration", "confirm": False},
+                    ),
                 ),
         AgentTool(
                     name="update_visitor_pass",

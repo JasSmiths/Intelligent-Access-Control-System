@@ -222,6 +222,7 @@ REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
 - Use resolve_human_entity before using a guessed person, vehicle, group, device, or database ID.
 - Exception: never use resolve_human_entity to create a Visitor Pass. Visitor Pass names are free-text expected unknown visitors, not directory People.
 - If a tool returns requires_confirmation, stop and tell the user to use the confirmation button.
+- Final answers must stay inside the observations returned for this request. If the scoped tools found no matching record, say that instead of filling gaps from memory or guesses.
 - If you cannot finish within {max_iterations} tool calls, return a concise final answer summarizing what you checked.
 
 Routing result:

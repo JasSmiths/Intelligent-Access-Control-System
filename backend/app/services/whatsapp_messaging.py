@@ -236,7 +236,7 @@ class WhatsAppMessagingService:
             raise ValueError("WhatsApp access token and phone number ID are required.")
         url = self._graph_url(config, config.phone_number_id)
         headers = {"Authorization": f"Bearer {config.access_token}"}
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             response = await client.get(
                 url,
                 headers=headers,
@@ -3092,7 +3092,7 @@ class WhatsAppMessagingService:
             "Authorization": f"Bearer {config.access_token}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             response = await client.post(url, headers=headers, json=payload)
         if response.status_code >= 400:
             self._last_error = f"HTTP {response.status_code}: {response.text[:240]}"
