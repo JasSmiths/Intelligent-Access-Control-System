@@ -21,6 +21,7 @@ from app.api.v1 import (
     realtime,
     reports,
     schedules,
+    search,
     settings,
     telemetry,
     unifi_protect,
@@ -55,6 +56,7 @@ api_router.include_router(unifi_protect.router, prefix="/integrations/unifi-prot
 api_router.include_router(realtime.router, prefix="/realtime", tags=["Realtime"])
 api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(settings.router, prefix="/settings", tags=["Settings"])
+api_router.include_router(search.router, prefix="/search", tags=["Search"])
 api_router.include_router(telemetry.router, prefix="/telemetry", tags=["Telemetry"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(visitor_passes.router, prefix="/visitor-passes", tags=["Visitor Passes"])

@@ -1,6 +1,7 @@
 @import "./styles/base.css";
 @import "./styles/dashboard.css";
 @import "./styles/data-views.css";
+@import "./styles/search-palette.css";
 @import "./styles/integrations.css";
 @import "./styles/passes-schedules.css";
 @import "./styles/workflows.css";

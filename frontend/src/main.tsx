@@ -88,6 +88,7 @@ import {
   alertSeverityTone,
   Anomaly,
   api,
+  apiError,
   Badge,
   displayUserName,
   EmptyState,
@@ -197,6 +198,40 @@ type AuthStatus = {
 type ThemeMode = "system" | "light" | "dark";
 
 type RealtimeConnectionStatus = "connecting" | "live" | "reconnecting";
+
+type GlobalSearchResultType =
+  | "person"
+  | "vehicle"
+  | "group"
+  | "schedule"
+  | "visitor_pass"
+  | "access_event"
+  | "alert"
+  | "user"
+  | "automation_rule"
+  | "notification_rule";
+
+type GlobalSearchResult = {
+  id: string;
+  type: GlobalSearchResultType;
+  label: string;
+  subtitle: string;
+  filter_value: string;
+  target: {
+    view: ViewKey;
+    route_search?: string;
+  };
+  preview: {
+    title: string;
+    body?: string | null;
+    badges: string[];
+    facts: Array<{ label: string; value: string }>;
+  };
+};
+
+type SearchPaletteItem = Omit<GlobalSearchResult, "type"> & {
+  type: GlobalSearchResultType | "shortcut";
+};
 
 const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
@@ -489,6 +524,357 @@ const AlertTray = React.forwardRef<HTMLDivElement, {
     </div>
   );
 });
+
+function SearchPalette({
+  currentUser,
+  initialQuery,
+  open,
+  onClose,
+  onOpenResult
+}: {
+  currentUser: UserAccount;
+  initialQuery: string;
+  open: boolean;
+  onClose: () => void;
+  onOpenResult: (result: SearchPaletteItem) => void;
+}) {
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const [query, setQuery] = React.useState(initialQuery);
+  const [results, setResults] = React.useState<GlobalSearchResult[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [previewItem, setPreviewItem] = React.useState<SearchPaletteItem | null>(null);
+  const shortcuts = React.useMemo(() => searchShortcuts(currentUser), [currentUser]);
+  const trimmedQuery = query.trim();
+  const items: SearchPaletteItem[] = trimmedQuery ? results : shortcuts;
+  const activeItem = items[Math.min(activeIndex, Math.max(0, items.length - 1))] ?? null;
+  const preview = previewItem ?? activeItem;
+  const completion = searchCompletion(query, results);
+
+  React.useEffect(() => {
+    if (!open) return;
+    setQuery(initialQuery);
+    setResults([]);
+    setError("");
+    setLoading(false);
+    setActiveIndex(0);
+    setPreviewItem(null);
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  }, [initialQuery, open]);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, open]);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    if (!trimmedQuery) {
+      setResults([]);
+      setLoading(false);
+      setError("");
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const params = new URLSearchParams({ q: trimmedQuery, limit: "12" });
+        const response = await fetch(`/api/v1/search?${params}`, {
+          credentials: "include",
+          signal: controller.signal
+        });
+        if (!response.ok) throw await apiError(response);
+        setResults(await response.json() as GlobalSearchResult[]);
+      } catch (searchError) {
+        if (controller.signal.aborted) return;
+        setError(searchError instanceof Error ? searchError.message : "Search failed");
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, trimmedQuery]);
+
+  React.useEffect(() => {
+    setActiveIndex(0);
+    setPreviewItem(null);
+  }, [trimmedQuery]);
+
+  React.useEffect(() => {
+    if (activeIndex >= items.length) {
+      setActiveIndex(Math.max(0, items.length - 1));
+    }
+  }, [activeIndex, items.length]);
+
+  if (!open) return null;
+
+  const moveActive = (delta: number) => {
+    if (!items.length) return;
+    setActiveIndex((current) => (current + delta + items.length) % items.length);
+    setPreviewItem(null);
+  };
+
+  const selectActive = () => {
+    if (activeItem) setPreviewItem(activeItem);
+  };
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActive(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActive(-1);
+      return;
+    }
+    if (event.key === "Tab" && completion) {
+      event.preventDefault();
+      setQuery(completion);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (!activeItem) return;
+      if (event.metaKey || event.ctrlKey) {
+        onOpenResult(activeItem);
+        return;
+      }
+      selectActive();
+    }
+  };
+
+  return createPortal(
+    <div className="search-palette-backdrop" onMouseDown={onClose} role="presentation">
+      <section
+        aria-label="Global search"
+        aria-modal="true"
+        className="search-palette"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="search-palette-input-shell">
+          <Search size={20} />
+          <div className="search-palette-input-stack">
+            <input
+              aria-activedescendant={activeItem ? `global-search-result-${activeItem.type}-${activeItem.id}` : undefined}
+              aria-autocomplete="list"
+              aria-controls="global-search-results"
+              autoComplete="off"
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={handleInputKeyDown}
+              placeholder="Search Anything..."
+              ref={inputRef}
+              role="combobox"
+              spellCheck={false}
+              value={query}
+            />
+            {completion ? <span className="search-palette-completion">{completion}</span> : null}
+          </div>
+          {loading ? <Loader2 className="spin" size={18} /> : null}
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close search">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="search-palette-body">
+          <div className="search-palette-results" id="global-search-results" role="listbox">
+            {error ? <div className="search-palette-state">{error}</div> : null}
+            {!error && items.length ? items.map((item, index) => (
+              <SearchPaletteRow
+                active={index === activeIndex}
+                item={item}
+                key={`${item.type}-${item.id}`}
+                onClick={() => {
+                  setActiveIndex(index);
+                  setPreviewItem(item);
+                }}
+                onMouseEnter={() => setActiveIndex(index)}
+              />
+            )) : null}
+            {!error && !items.length && !loading ? (
+              <div className="search-palette-state">No results</div>
+            ) : null}
+          </div>
+
+          <SearchPalettePreview item={preview} onOpen={onOpenResult} />
+        </div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+function SearchPaletteRow({
+  active,
+  item,
+  onClick,
+  onMouseEnter
+}: {
+  active: boolean;
+  item: SearchPaletteItem;
+  onClick: () => void;
+  onMouseEnter: () => void;
+}) {
+  const Icon = searchResultIcon(item.type);
+  return (
+    <button
+      aria-selected={active}
+      className={active ? "search-palette-row active" : "search-palette-row"}
+      id={`global-search-result-${item.type}-${item.id}`}
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      role="option"
+      type="button"
+    >
+      <span className={`search-palette-row-icon ${item.type}`}>
+        <Icon size={17} />
+      </span>
+      <span className="search-palette-row-main">
+        <strong>{item.label}</strong>
+        <small>{item.subtitle}</small>
+      </span>
+      <span className="search-palette-row-type">{searchTypeLabel(item.type)}</span>
+    </button>
+  );
+}
+
+function SearchPalettePreview({
+  item,
+  onOpen
+}: {
+  item: SearchPaletteItem | null;
+  onOpen: (item: SearchPaletteItem) => void;
+}) {
+  if (!item) {
+    return (
+      <aside className="search-palette-preview empty">
+        <Search size={22} />
+      </aside>
+    );
+  }
+  const Icon = searchResultIcon(item.type);
+  return (
+    <aside className="search-palette-preview">
+      <div className="search-palette-preview-title">
+        <span className={`search-palette-row-icon ${item.type}`}>
+          <Icon size={18} />
+        </span>
+        <div>
+          <span>{searchTypeLabel(item.type)}</span>
+          <h2>{item.preview.title}</h2>
+        </div>
+      </div>
+      {item.preview.body ? <p>{item.preview.body}</p> : null}
+      {item.preview.badges.length ? (
+        <div className="search-palette-badges">
+          {item.preview.badges.map((badge) => <Badge key={badge} tone="gray">{badge}</Badge>)}
+        </div>
+      ) : null}
+      {item.preview.facts.length ? (
+        <dl className="search-palette-facts">
+          {item.preview.facts.map((fact) => (
+            <div key={`${fact.label}-${fact.value}`}>
+              <dt>{fact.label}</dt>
+              <dd>{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      <button className="primary-button search-palette-open" onClick={() => onOpen(item)} type="button">
+        Open
+        <ArrowRight size={16} />
+      </button>
+    </aside>
+  );
+}
+
+function searchShortcuts(currentUser: UserAccount): SearchPaletteItem[] {
+  const primary = primaryNavItems.map((item) => searchShortcut(item.key, item.label));
+  const settings = settingsNavItems
+    .filter((item) => !item.adminOnly || currentUser.role === "admin")
+    .map((item) => searchShortcut(item.key, item.label, "Settings"));
+  return [...primary, ...settings];
+}
+
+function searchShortcut(view: ViewKey, label: string, subtitle = "Open view"): SearchPaletteItem {
+  return {
+    id: view,
+    type: "shortcut",
+    label,
+    subtitle,
+    filter_value: "",
+    target: { view },
+    preview: {
+      title: label,
+      body: null,
+      badges: ["Shortcut"],
+      facts: []
+    }
+  };
+}
+
+function searchCompletion(query: string, results: GlobalSearchResult[]) {
+  const trimmed = query.trim();
+  const first = results[0];
+  if (!trimmed || !first) return "";
+  const candidates = [first.filter_value, first.label].filter(Boolean);
+  const normalizedQuery = trimmed.toLowerCase();
+  return candidates.find((candidate) =>
+    candidate.toLowerCase().startsWith(normalizedQuery) && candidate.length > trimmed.length
+  ) ?? "";
+}
+
+function searchResultIcon(type: SearchPaletteItem["type"]) {
+  const icons: Record<SearchPaletteItem["type"], React.ElementType> = {
+    access_event: CalendarDays,
+    alert: Bell,
+    automation_rule: GitBranch,
+    group: Users,
+    notification_rule: Bell,
+    person: UserRound,
+    schedule: Clock3,
+    shortcut: Command,
+    user: Users,
+    vehicle: Car,
+    visitor_pass: ClipboardPaste
+  };
+  return icons[type] ?? Search;
+}
+
+function searchTypeLabel(type: SearchPaletteItem["type"]) {
+  const labels: Record<SearchPaletteItem["type"], string> = {
+    access_event: "Event",
+    alert: "Alert",
+    automation_rule: "Automation",
+    group: "Group",
+    notification_rule: "Notification",
+    person: "Person",
+    schedule: "Schedule",
+    shortcut: "Shortcut",
+    user: "User",
+    vehicle: "Vehicle",
+    visitor_pass: "Pass"
+  };
+  return labels[type];
+}
 
 function NotificationToastStack({
   notifications,
@@ -826,6 +1212,7 @@ function App() {
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
   const [realtimeConnectionStatus, setRealtimeConnectionStatus] = React.useState<RealtimeConnectionStatus>("connecting");
   const [search, setSearch] = React.useState("");
+  const [searchPaletteOpen, setSearchPaletteOpen] = React.useState(false);
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = React.useState(false);
@@ -1108,6 +1495,7 @@ function App() {
     if (loggingOut) return;
     setLoggingOut(true);
     setProfileMenuOpen(false);
+    setSearchPaletteOpen(false);
     try {
       await api.post<{ status: string }>("/api/v1/auth/logout");
       setAuthStatus({ setup_required: false, authenticated: false, user: null });
@@ -1132,6 +1520,26 @@ function App() {
       setLoggingOut(false);
     }
   }, [loggingOut]);
+
+  const openSearchResult = React.useCallback((result: SearchPaletteItem) => {
+    setSearch(result.filter_value);
+    setSearchPaletteOpen(false);
+    navigateToView(result.target.view, { search: result.target.route_search ?? "" });
+    if (isMobileNavigation) {
+      setMobileNavOpen(false);
+    }
+  }, [isMobileNavigation, navigateToView]);
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      if (!authStatus?.authenticated) return;
+      event.preventDefault();
+      setSearchPaletteOpen(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [authStatus?.authenticated]);
 
   React.useEffect(() => {
     if (settingsActive && !navigationCollapsed) {
@@ -1329,10 +1737,14 @@ function App() {
             </button>
           </div>
           <div className="topbar-actions">
-            <label className="search">
+            <button
+              className={search ? "search global-search-trigger has-value" : "search global-search-trigger"}
+              onClick={() => setSearchPaletteOpen(true)}
+              type="button"
+            >
               <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Anything..." />
-            </label>
+              <span>{search || "Search Anything..."}</span>
+            </button>
             <div className="alert-tray-shell">
               <button
                 aria-controls="alert-tray"
@@ -1395,6 +1807,13 @@ function App() {
           />
         )}
       </main>
+      <SearchPalette
+        currentUser={currentUser}
+        initialQuery={search}
+        onClose={() => setSearchPaletteOpen(false)}
+        onOpenResult={openSearchResult}
+        open={searchPaletteOpen}
+      />
       <NotificationToastStack
         notifications={notificationToasts}
         onAction={handleNotificationAction}
