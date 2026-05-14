@@ -115,6 +115,12 @@ export type DashboardCommand = {
   action: DoorCommandAction;
 };
 
+const INLINE_EVENT_SNAPSHOT_QUERY = "(max-width: 768px), (hover: none) and (pointer: coarse) and (orientation: landscape)";
+
+function isInlineEventSnapshotLayout() {
+  return typeof window !== "undefined" && window.matchMedia(INLINE_EVENT_SNAPSHOT_QUERY).matches;
+}
+
 export function Dashboard({
   presence,
   expectedPresence,
@@ -149,6 +155,8 @@ export function Dashboard({
   const [maintenanceError, setMaintenanceError] = React.useState("");
   const [commandLoading, setCommandLoading] = React.useState(false);
   const [commandError, setCommandError] = React.useState("");
+  const [openSnapshotEventId, setOpenSnapshotEventId] = React.useState<string | null>(null);
+  const [inlineEventSnapshotLayout, setInlineEventSnapshotLayout] = React.useState(isInlineEventSnapshotLayout);
   const maintenanceActive = maintenanceStatus?.is_active === true;
   const isAdmin = currentUser.role === "admin";
   const present = presence.filter((item) => item.state === "present").length;
@@ -176,6 +184,27 @@ export function Dashboard({
   const deniedToday = todayEvents.filter((event) => event.decision === "denied").length;
   const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
   const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
+
+  React.useEffect(() => {
+    if (openSnapshotEventId && !displayEvents.some((event) => event.id === openSnapshotEventId)) {
+      setOpenSnapshotEventId(null);
+    }
+  }, [displayEvents, openSnapshotEventId]);
+
+  React.useEffect(() => {
+    const query = window.matchMedia(INLINE_EVENT_SNAPSHOT_QUERY);
+    const updateInlineLayout = () => {
+      setInlineEventSnapshotLayout(query.matches);
+      if (!query.matches) {
+        setOpenSnapshotEventId(null);
+      }
+    };
+
+    updateInlineLayout();
+    query.addEventListener("change", updateInlineLayout);
+    return () => query.removeEventListener("change", updateInlineLayout);
+  }, []);
+
   const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
   const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
@@ -388,11 +417,27 @@ export function Dashboard({
           <div className="event-feed">
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
+              const snapshotInteractive = Boolean(event.snapshot_url && inlineEventSnapshotLayout);
+              const snapshotOpen = snapshotInteractive && openSnapshotEventId === event.id;
+              const toggleSnapshot = () => setOpenSnapshotEventId((current) => current === event.id ? null : event.id);
               return (
                 <div
-                  className={event.snapshot_url ? "event-feed-row has-snapshot" : "event-feed-row"}
+                  aria-expanded={snapshotInteractive ? snapshotOpen : undefined}
+                  aria-label={snapshotInteractive ? `Toggle ${event.snapshotLabel}` : undefined}
+                  className={`${event.snapshot_url ? "event-feed-row has-snapshot" : "event-feed-row"}${snapshotOpen ? " snapshot-open" : ""}`}
                   key={event.id}
-                  tabIndex={event.snapshot_url ? 0 : undefined}
+                  onBlur={snapshotInteractive ? () => setOpenSnapshotEventId(null) : undefined}
+                  onClick={snapshotInteractive ? toggleSnapshot : undefined}
+                  onKeyDown={snapshotInteractive ? (keyboardEvent) => {
+                    if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
+                      keyboardEvent.preventDefault();
+                      toggleSnapshot();
+                    } else if (keyboardEvent.key === "Escape") {
+                      setOpenSnapshotEventId(null);
+                    }
+                  } : undefined}
+                  role={snapshotInteractive ? "button" : undefined}
+                  tabIndex={snapshotInteractive ? 0 : undefined}
                 >
                   <time>{event.time}</time>
                   <span className={`feed-line ${event.tone}`} />

@@ -2441,8 +2441,40 @@
     grid-template-columns: 54px 28px minmax(0, 1fr) auto;
   }
 
-  .dashboard-event-snapshot-preview {
-    display: none;
+  .event-feed-row.has-snapshot .dashboard-event-snapshot-preview,
+  .event-feed-row.has-snapshot:not(.snapshot-open):hover .dashboard-event-snapshot-preview,
+  .event-feed-row.has-snapshot:not(.snapshot-open) .dashboard-event-snapshot-preview {
+    width: min(100%, 320px);
+    max-height: 0;
+    display: block;
+    grid-column: 1 / -1;
+    justify-self: center;
+    position: static;
+    left: auto;
+    top: auto;
+    margin: 0 auto;
+    padding: 0 4px;
+    overflow: hidden;
+    border-width: 0;
+    box-shadow: none;
+    opacity: 0;
+    transform: none;
+    transition: opacity 140ms ease, max-height 140ms ease, margin 140ms ease, padding 140ms ease;
+  }
+
+  .event-feed-row.has-snapshot.snapshot-open .dashboard-event-snapshot-preview {
+    position: static;
+    left: auto;
+    top: auto;
+    max-height: 196px;
+    grid-column: 1 / -1;
+    justify-self: center;
+    margin-top: 8px;
+    padding: 4px;
+    border-width: 1px;
+    box-shadow: var(--shadow-strong);
+    opacity: 1;
+    transform: none;
   }
 
   .feed-line {

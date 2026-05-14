@@ -232,7 +232,7 @@ export type WorkflowRuleMenuState = {
 export type WorkflowRuleStatusFeedback = {
   nonce: number;
   ruleId: string;
-  status: "paused" | "resumed";
+  status: "paused" | "resumed" | "saved";
 };
 
 export type AutomationNode = {
@@ -240,6 +240,12 @@ export type AutomationNode = {
   type: string;
   config: Record<string, unknown>;
 };
+
+function workflowRuleStatusFeedbackLabel(status: WorkflowRuleStatusFeedback["status"]) {
+  if (status === "paused") return "Paused";
+  if (status === "saved") return "Saved";
+  return "Resumed";
+}
 
 export type AutomationAction = AutomationNode & {
   reason_template?: string;
@@ -1171,7 +1177,7 @@ export function AutomationWorkflowList({
                                         key={statusFeedback.nonce}
                                         role="status"
                                       >
-                                        {statusFeedback.status === "paused" ? "Paused" : "Resumed"}
+                                        {workflowRuleStatusFeedbackLabel(statusFeedback.status)}
                                       </span>
                                     ) : null}
                                   </span>
@@ -2147,7 +2153,11 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
       setSelectedRuleId("");
       setModal(null);
       await load();
-      setFeedback({ tone: "success", text: "Notification workflow saved." });
+      setRuleStatusFeedback({
+        nonce: Date.now(),
+        ruleId: saved.id,
+        status: "saved",
+      });
     } catch (saveError) {
       setFeedback({ tone: "error", text: saveError instanceof Error ? saveError.message : "Unable to save notification workflow." });
     } finally {
@@ -2483,7 +2493,7 @@ export function NotificationWorkflowList({
                                         key={statusFeedback.nonce}
                                         role="status"
                                       >
-                                        {statusFeedback.status === "paused" ? "Paused" : "Resumed"}
+                                        {workflowRuleStatusFeedbackLabel(statusFeedback.status)}
                                       </span>
                                     ) : null}
                                   </span>

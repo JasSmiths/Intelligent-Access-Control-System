@@ -587,9 +587,7 @@
   outline-offset: 2px;
 }
 
-.event-feed-row.has-snapshot:hover,
-.event-feed-row.has-snapshot:focus,
-.event-feed-row.has-snapshot:focus-visible {
+.event-feed-row.has-snapshot:hover {
   z-index: 30;
 }
 
@@ -690,9 +688,7 @@
   border-radius: 7px;
 }
 
-.event-feed-row.has-snapshot:hover .dashboard-event-snapshot-preview,
-.event-feed-row.has-snapshot:focus .dashboard-event-snapshot-preview,
-.event-feed-row.has-snapshot:focus-visible .dashboard-event-snapshot-preview {
+.event-feed-row.has-snapshot:hover .dashboard-event-snapshot-preview {
   opacity: 1;
   transform: translateY(-50%);
 }
