@@ -13,7 +13,6 @@ from app.models import Person, User
 from app.models.enums import UserRole
 from app.services.auth import (
     compose_full_name,
-    count_active_admins,
     create_user,
     generate_temporary_password,
     hash_password,
@@ -189,7 +188,7 @@ async def update_user(
     before = user_audit_snapshot(user)
 
     if request.role is not None and request.role != user.role:
-        if user.role == UserRole.ADMIN and await count_active_admins(session, exclude_user_id=user.id) == 0:
+        if user.role == UserRole.ADMIN and await _remaining_active_admins_after_change(session, user.id) == 0:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Cannot remove the last active admin account.",
@@ -197,7 +196,7 @@ async def update_user(
         user.role = request.role
 
     if request.is_active is not None and request.is_active != user.is_active:
-        if user.is_active and user.role == UserRole.ADMIN and await count_active_admins(session, exclude_user_id=user.id) == 0:
+        if user.is_active and user.role == UserRole.ADMIN and await _remaining_active_admins_after_change(session, user.id) == 0:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Cannot deactivate the last active admin account.",
@@ -288,7 +287,7 @@ async def delete_user(
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if user.role == UserRole.ADMIN and user.is_active and await count_active_admins(session, exclude_user_id=user.id) == 0:
+    if user.role == UserRole.ADMIN and user.is_active and await _remaining_active_admins_after_change(session, user.id) == 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete the last active admin account.",
@@ -306,3 +305,15 @@ async def delete_user(
     )
     await session.delete(user)
     await session.commit()
+
+
+async def _remaining_active_admins_after_change(session: AsyncSession, user_id: uuid.UUID) -> int:
+    """Lock active admins so concurrent demotions/deletes cannot bypass the invariant."""
+
+    rows = await session.scalars(
+        select(User.id)
+        .where(User.role == UserRole.ADMIN)
+        .where(User.is_active.is_(True))
+        .with_for_update()
+    )
+    return len([admin_id for admin_id in rows.all() if str(admin_id) != str(user_id)])

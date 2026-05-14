@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -650,7 +650,8 @@ async def calendar_visitor_name_for_event(event: ICloudCalendarEvent) -> Calenda
         if not provider_name:
             return CalendarVisitorName(visitor_name=fallback, source="fallback")
         provider = get_llm_provider(provider_name)
-        result = await provider.complete(
+        result = await complete_with_provider_options(
+            provider,
             [
                 ChatMessageInput(
                     role="system",
@@ -665,7 +666,9 @@ async def calendar_visitor_name_for_event(event: ICloudCalendarEvent) -> Calenda
                     role="user",
                     content=f"Calendar event title: {event.title!r}",
                 ),
-            ]
+            ],
+            max_output_tokens=120,
+            request_purpose="icloud_calendar.visitor_name",
         )
         visitor_name = _clean_calendar_visitor_name(_visitor_name_from_llm_text(result.text))
         if visitor_name:

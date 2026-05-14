@@ -791,12 +791,35 @@ async def test_duplicate_arrival_uses_camera_tiebreaker_as_source_of_truth(monke
 
 
 @pytest.mark.asyncio
+async def test_duplicate_arrival_accepts_moderate_exit_tiebreaker(monkeypatch) -> None:
+    service = AccessEventService()
+    person = SimpleNamespace(id=uuid.uuid4(), display_name="Jason")
+
+    async def fake_camera_tiebreaker(_read, _person):
+        return {"direction": "exit", "confidence": 0.60, "reason": "Rear of vehicle is more visible."}
+
+    monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
+
+    direction, resolution = await service._resolve_direction(
+        FakePresenceSession(PresenceState.PRESENT),
+        plate_read_with_gate_state("closed"),
+        person,
+        allowed=True,
+    )
+
+    assert direction == AccessDirection.EXIT
+    assert resolution["source"] == "camera_tiebreaker"
+    assert resolution["camera_tiebreaker"]["confidence"] == 0.60
+    assert "camera_tiebreaker_ignored_reason" not in resolution
+
+
+@pytest.mark.asyncio
 async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_is_uncertain(monkeypatch) -> None:
     service = AccessEventService()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Ash")
 
     async def fake_camera_tiebreaker(_read, _person):
-        return {"direction": "exit", "confidence": 0.74, "reason": "Vehicle might be facing away."}
+        return {"direction": "exit", "confidence": 0.54, "reason": "Vehicle might be facing away."}
 
     monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
 
@@ -809,7 +832,7 @@ async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_
 
     assert direction == AccessDirection.ENTRY
     assert resolution["source"] == "gate_state"
-    assert resolution["camera_tiebreaker"]["confidence"] == 0.74
+    assert resolution["camera_tiebreaker"]["confidence"] == 0.54
     assert resolution["camera_tiebreaker_ignored_reason"] == "low_confidence"
     assert service._automatic_open_allowed(resolution)
 
@@ -900,6 +923,64 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     await service._handle_queued_read(plate_read("ND25VN0", first_seen + timedelta(seconds=4)))
 
     assert len(finalized) == 1
+    assert service._pending == []
+
+
+@pytest.mark.asyncio
+async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=10.0,
+    )
+    finalized = []
+
+    async def fake_active_vehicle_registrations():
+        return ["MD25VNO"]
+
+    async def fake_finalize_window(window):
+        best_match = window.best_read.raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY]
+        finalized.append(
+            {
+                "candidate_count": len(window.reads),
+                "best_registration_number": window.best_read.registration_number,
+                "best_detected_registration_number": best_match["detected_registration_number"],
+                "best_exact": best_match["exact"],
+            }
+        )
+
+    async def fake_no_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+
+    captured_at = datetime(2026, 5, 12, 13, 31, 31, tzinfo=UTC)
+    await service._handle_queued_read(
+        PlateRead(
+            registration_number="DX66TUA",
+            confidence=1.0,
+            source="ubiquiti",
+            captured_at=captured_at,
+            raw_payload={},
+            candidate_registration_numbers=("DX66TUA", "MD25VNO"),
+        )
+    )
+
+    assert finalized == [
+        {
+            "candidate_count": 1,
+            "best_registration_number": "MD25VNO",
+            "best_detected_registration_number": "MD25VNO",
+            "best_exact": True,
+        }
+    ]
     assert service._pending == []
 
 

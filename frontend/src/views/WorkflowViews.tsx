@@ -721,9 +721,16 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
     setFeedback(null);
     try {
       const payload = automationRulePayload(draft);
+      const isCreate = draft.id.startsWith("draft-");
+      const confirmation = await createActionConfirmation(isCreate ? "automation_rule.create" : "automation_rule.update", payload, {
+        target_entity: "AutomationRule",
+        target_id: isCreate ? undefined : draft.id,
+        target_label: payload.name,
+        reason: isCreate ? "Create automation rule" : "Update automation rule"
+      });
       const saved = draft.id.startsWith("draft-")
-        ? await api.post<AutomationRule>("/api/v1/automations/rules", payload)
-        : await api.patch<AutomationRule>(`/api/v1/automations/rules/${draft.id}`, payload);
+        ? await api.post<AutomationRule>("/api/v1/automations/rules", { ...payload, confirmation_token: confirmation.confirmation_token })
+        : await api.patch<AutomationRule>(`/api/v1/automations/rules/${draft.id}`, { ...payload, confirmation_token: confirmation.confirmation_token });
       await load();
       setRules((current) => current.map((item) => item.id === saved.id ? saved : item));
       setDraft(null);
@@ -744,7 +751,16 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
     }
     if (!window.confirm(`Delete ${rule.name}?`)) return;
     try {
-      await api.delete(`/api/v1/automations/rules/${rule.id}`);
+      const payload = { rule_id: rule.id };
+      const confirmation = await createActionConfirmation("automation_rule.delete", payload, {
+        target_entity: "AutomationRule",
+        target_id: rule.id,
+        target_label: rule.name,
+        reason: "Delete automation rule"
+      });
+      await api.delete(`/api/v1/automations/rules/${rule.id}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       setDraft(null);
       await load();
       setFeedback({ tone: "success", text: "Automation deleted." });
@@ -762,7 +778,17 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
       return next;
     });
     try {
-      const updated = await api.patch<AutomationRule>(`/api/v1/automations/rules/${rule.id}`, { is_active: isActive });
+      const payload = { is_active: isActive };
+      const confirmation = await createActionConfirmation("automation_rule.update", payload, {
+        target_entity: "AutomationRule",
+        target_id: rule.id,
+        target_label: rule.name,
+        reason: isActive ? "Resume automation rule" : "Pause automation rule"
+      });
+      const updated = await api.patch<AutomationRule>(`/api/v1/automations/rules/${rule.id}`, {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
+      });
       setRules((current) => current.map((item) => item.id === updated.id ? updated : item));
       setDraft((current) => current?.id === updated.id ? updated : current);
       setRuleStatusFeedback({
@@ -2006,7 +2032,16 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     if (!window.confirm(`Delete ${rule.name}?`)) return;
     setFeedback(null);
     try {
-      await api.delete(`/api/v1/notifications/rules/${rule.id}`);
+      const payload = { rule_id: rule.id };
+      const confirmation = await createActionConfirmation("notification_rule.delete", payload, {
+        target_entity: "NotificationRule",
+        target_id: rule.id,
+        target_label: rule.name,
+        reason: "Delete notification workflow"
+      });
+      await api.delete(`/api/v1/notifications/rules/${rule.id}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await load();
       setDraft(null);
       setSelectedRuleId("");
@@ -2026,7 +2061,17 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
       return next;
     });
     try {
-      const updated = await api.patch<NotificationRule>(`/api/v1/notifications/rules/${rule.id}`, { is_active: isActive });
+      const payload = { is_active: isActive };
+      const confirmation = await createActionConfirmation("notification_rule.update", payload, {
+        target_entity: "NotificationRule",
+        target_id: rule.id,
+        target_label: rule.name,
+        reason: isActive ? "Resume notification workflow" : "Pause notification workflow"
+      });
+      const updated = await api.patch<NotificationRule>(`/api/v1/notifications/rules/${rule.id}`, {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
+      });
       setRules((current) => current.map((item) => item.id === updated.id ? updated : item));
       setDraft((current) => current?.id === updated.id ? cloneNotificationRule(updated) : current);
       setRuleStatusFeedback({
@@ -2055,7 +2100,15 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
       is_active: false,
     });
     try {
-      const created = await api.post<NotificationRule>("/api/v1/notifications/rules", payload);
+      const confirmation = await createActionConfirmation("notification_rule.create", payload, {
+        target_entity: "NotificationRule",
+        target_label: payload.name,
+        reason: "Duplicate notification workflow"
+      });
+      const created = await api.post<NotificationRule>("/api/v1/notifications/rules", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
+      });
       await load();
       setDraft(cloneNotificationRule(created));
       setSelectedRuleId(created.id);
@@ -2080,9 +2133,16 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     setFeedback(null);
     const payload = workflowRulePayload(activeDraft);
     try {
+      const isCreate = activeDraft.id.startsWith("draft-");
+      const confirmation = await createActionConfirmation(isCreate ? "notification_rule.create" : "notification_rule.update", payload, {
+        target_entity: "NotificationRule",
+        target_id: isCreate ? undefined : activeDraft.id,
+        target_label: payload.name,
+        reason: isCreate ? "Create notification workflow" : "Update notification workflow"
+      });
       const saved = activeDraft.id.startsWith("draft-")
-        ? await api.post<NotificationRule>("/api/v1/notifications/rules", payload)
-        : await api.patch<NotificationRule>(`/api/v1/notifications/rules/${activeDraft.id}`, payload);
+        ? await api.post<NotificationRule>("/api/v1/notifications/rules", { ...payload, confirmation_token: confirmation.confirmation_token })
+        : await api.patch<NotificationRule>(`/api/v1/notifications/rules/${activeDraft.id}`, { ...payload, confirmation_token: confirmation.confirmation_token });
       setDraft(null);
       setSelectedRuleId("");
       setModal(null);

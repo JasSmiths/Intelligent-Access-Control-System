@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 from app.ai.providers import ChatMessageInput
@@ -118,6 +118,7 @@ class PlannerSelection:
     confidence: float = 0.5
     reason: str = "LLM v3 planner"
     raw: dict[str, Any] = field(default_factory=dict)
+    llm_usage_summary: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -188,9 +189,15 @@ async def plan_with_llm(
     relevant_past_lessons: list[dict[str, Any]] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    max_output_tokens: int | None = None,
+    prompt_cache_key: str | None = None,
+    prompt_cache_retention: str | None = None,
+    request_purpose: str | None = None,
 ) -> PlannerSelection:
+    domains_payload = json.dumps(domain_cards(tools), separators=(",", ":"), default=str)
     messages = [
         ChatMessageInput("system", PLANNER_PROMPT),
+        ChatMessageInput("system", f"Planner domain cards JSON:\n{domains_payload}"),
         ChatMessageInput(
             "user",
             json.dumps(
@@ -201,7 +208,6 @@ async def plan_with_llm(
                     "relevant_past_lessons": relevant_past_lessons or [],
                     "session_memory": session_memory,
                     "has_attachments": bool(attachments),
-                    "domains": domain_cards(tools),
                 },
                 separators=(",", ":"),
                 default=str,
@@ -214,11 +220,18 @@ async def plan_with_llm(
         response_schema=PLANNER_RESPONSE_SCHEMA,
         model=model,
         reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+        prompt_cache_key=prompt_cache_key,
+        prompt_cache_retention=prompt_cache_retention,
+        request_purpose=request_purpose,
     )
     payload = _first_json_object(result.text)
     if not isinstance(payload, dict):
         raise ValueError("Alfred v3 planner returned invalid JSON.")
-    return parse_planner_selection(payload, tools)
+    selection = parse_planner_selection(payload, tools)
+    if result.usage_summary:
+        return replace(selection, llm_usage_summary=result.usage_summary)
+    return selection
 
 
 async def _provider_complete(

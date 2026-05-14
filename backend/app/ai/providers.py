@@ -1,5 +1,6 @@
 import base64
 import json
+from time import monotonic
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -29,6 +30,7 @@ class LlmResult:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: dict[str, Any] | None = None
+    usage_summary: dict[str, Any] | None = None
 
 
 class LlmProvider(Protocol):
@@ -43,6 +45,11 @@ class LlmProvider(Protocol):
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         """Return model text and optional tool calls."""
 
@@ -79,6 +86,26 @@ class BaseHttpProvider:
             raise RuntimeError(f"{self.name} returned {response.status_code}: {response.text[:400]}")
         return response.json()
 
+    async def _post_with_response_metadata(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, str], float]:
+        runtime = await get_runtime_config()
+        started = monotonic()
+        async with httpx.AsyncClient(
+            timeout=self._timeout or runtime.llm_timeout_seconds,
+            trust_env=False,
+        ) as client:
+            response = await client.post(url, headers=headers, json=json_body)
+        elapsed_ms = (monotonic() - started) * 1000.0
+
+        if response.status_code >= 400:
+            raise RuntimeError(f"{self.name} returned {response.status_code}: {response.text[:400]}")
+        return response.json(), dict(response.headers), elapsed_ms
+
 
 class OpenAIResponsesProvider(BaseHttpProvider):
     """OpenAI Responses API provider.
@@ -99,6 +126,11 @@ class OpenAIResponsesProvider(BaseHttpProvider):
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.openai_api_key:
@@ -129,8 +161,19 @@ class OpenAIResponsesProvider(BaseHttpProvider):
             body["text"] = {"format": self._response_format(response_schema)}
         if reasoning_effort and _supports_reasoning_effort(model_name):
             body["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            body["max_output_tokens"] = max(1, int(max_output_tokens))
+        if prompt_cache_key:
+            body["prompt_cache_key"] = _compact_cache_key(prompt_cache_key)
+        if prompt_cache_retention:
+            body["prompt_cache_retention"] = str(prompt_cache_retention)
+        metadata_payload = _compact_metadata(metadata or {})
+        if request_purpose:
+            metadata_payload.setdefault("purpose", str(request_purpose)[:80])
+        if metadata_payload:
+            body["metadata"] = metadata_payload
 
-        data = await self._post(
+        data, response_headers, elapsed_ms = await self._post_with_response_metadata(
             f"{config.openai_base_url.rstrip('/')}/responses",
             headers={
                 "Authorization": f"Bearer {config.openai_api_key}",
@@ -138,10 +181,21 @@ class OpenAIResponsesProvider(BaseHttpProvider):
             },
             json_body=body,
         )
+        usage_summary = _openai_usage_summary(
+            data.get("usage") if isinstance(data.get("usage"), dict) else {},
+            model=model_name,
+            request_id=response_headers.get("x-request-id") or response_headers.get("openai-request-id"),
+            elapsed_ms=elapsed_ms,
+            request_purpose=request_purpose,
+            prompt_cache_key=body.get("prompt_cache_key"),
+            prompt_cache_retention=body.get("prompt_cache_retention"),
+        )
+        _emit_provider_usage_audit(usage_summary)
         return LlmResult(
             text=self._extract_text(data),
             tool_calls=self._extract_tool_calls(data),
             raw=data,
+            usage_summary=usage_summary,
         )
 
     async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> LlmResult:
@@ -241,6 +295,11 @@ class GeminiProvider(BaseHttpProvider):
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.gemini_api_key:
@@ -251,7 +310,10 @@ class GeminiProvider(BaseHttpProvider):
         data = await self._post(
             f"{config.gemini_base_url.rstrip('/')}/models/{model_name}:generateContent"
             f"?key={config.gemini_api_key}",
-            json_body={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+            json_body={
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                **({"generationConfig": {"maxOutputTokens": max(1, int(max_output_tokens))}} if max_output_tokens else {}),
+            },
         )
         return LlmResult(text=self._extract_text(data), raw=data)
 
@@ -319,6 +381,11 @@ class ClaudeProvider(BaseHttpProvider):
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         if not config.anthropic_api_key:
@@ -353,7 +420,7 @@ class ClaudeProvider(BaseHttpProvider):
             },
             json_body={
                 "model": model_name,
-                "max_tokens": 1200,
+                "max_tokens": max(1, int(max_output_tokens)) if max_output_tokens else 1200,
                 "system": system,
                 "messages": body_messages,
             },
@@ -418,6 +485,11 @@ class OllamaProvider(BaseHttpProvider):
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         config = await get_runtime_config()
         body: dict[str, Any] = {
@@ -437,6 +509,8 @@ class OllamaProvider(BaseHttpProvider):
                     ),
                 }
             )
+        if max_output_tokens:
+            body["options"] = {"num_predict": max(1, int(max_output_tokens))}
 
         data = await self._post(
             f"{config.ollama_base_url.rstrip('/')}/api/chat",
@@ -483,6 +557,11 @@ class LocalProvider:
         response_schema: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
         if tool_results:
             return LlmResult(text=self._summarize_tools(tool_results))
@@ -991,6 +1070,113 @@ def _image_base64(image_bytes: bytes) -> str:
 
 def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64,{_image_base64(image_bytes)}"
+
+
+async def complete_with_provider_options(
+    provider: Any,
+    messages: list[ChatMessageInput],
+    **options: Any,
+) -> LlmResult:
+    """Call a provider with optional efficiency controls and tolerate older fakes."""
+
+    clean_options = {key: value for key, value in options.items() if value is not None and value != ""}
+    try:
+        return await provider.complete(messages, **clean_options)
+    except TypeError as exc:
+        if "unexpected keyword" not in str(exc):
+            raise
+        fallback_options = {
+            key: value
+            for key, value in clean_options.items()
+            if key in {"tools", "tool_results", "response_schema", "reasoning_effort", "model"}
+        }
+        try:
+            return await provider.complete(messages, **fallback_options)
+        except TypeError as fallback_exc:
+            if "unexpected keyword" not in str(fallback_exc):
+                raise
+            return await provider.complete(messages)
+
+
+def _compact_cache_key(value: str) -> str:
+    compact = "".join(char if char.isalnum() or char in {"-", "_", ".", ":"} else "-" for char in str(value).strip())
+    return compact[:120] or "iacs-alfred"
+
+
+def _compact_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    compact: dict[str, str] = {}
+    for key, value in metadata.items():
+        key_text = str(key).strip()[:64]
+        if not key_text or value in (None, "", [], {}):
+            continue
+        value_text = str(value)
+        if any(secret in key_text.lower() for secret in ("api_key", "password", "secret", "token", "cookie")):
+            value_text = "[redacted]"
+        compact[key_text] = value_text[:512]
+        if len(compact) >= 16:
+            break
+    return compact
+
+
+def _openai_usage_summary(
+    usage: dict[str, Any],
+    *,
+    model: str,
+    request_id: str | None,
+    elapsed_ms: float,
+    request_purpose: str | None,
+    prompt_cache_key: str | None,
+    prompt_cache_retention: str | None,
+) -> dict[str, Any]:
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+    input_tokens = _int_usage_value(usage.get("input_tokens"))
+    output_tokens = _int_usage_value(usage.get("output_tokens"))
+    cached_tokens = _int_usage_value(input_details.get("cached_tokens"))
+    reasoning_tokens = _int_usage_value(output_details.get("reasoning_tokens"))
+    total_tokens = _int_usage_value(usage.get("total_tokens")) or input_tokens + output_tokens
+    cache_hit_ratio = round(cached_tokens / input_tokens, 4) if input_tokens else 0.0
+    return {
+        "provider": "openai",
+        "model": model,
+        "request_id": request_id or "",
+        "purpose": request_purpose or "",
+        "latency_ms": round(elapsed_ms, 1),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": cached_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "cache_hit_ratio": cache_hit_ratio,
+        "prompt_cache_key": prompt_cache_key or "",
+        "prompt_cache_retention": prompt_cache_retention or "",
+    }
+
+
+def _int_usage_value(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _emit_provider_usage_audit(usage_summary: dict[str, Any]) -> None:
+    try:
+        from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log
+
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_ALFRED,
+            action="alfred.provider.openai.usage",
+            actor="Alfred_AI",
+            target_entity="OpenAIResponse",
+            target_id=str(usage_summary.get("request_id") or "") or None,
+            target_label=str(usage_summary.get("purpose") or "openai"),
+            outcome="success",
+            level="info",
+            metadata=usage_summary,
+        )
+    except Exception as exc:
+        logger.debug("openai_usage_audit_failed", extra={"error": str(exc)[:180]})
 
 
 def _looks_like_ollama_vision_model(model: str) -> bool:

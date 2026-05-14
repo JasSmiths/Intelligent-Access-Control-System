@@ -14,6 +14,7 @@ from app.ai.providers import (
     LlmResult,
     ProviderNotConfiguredError,
     ToolCall,
+    complete_with_provider_options,
     get_llm_provider,
 )
 from app.ai.tools import AgentTool, build_agent_tools, get_chat_tool_context, set_chat_tool_context
@@ -547,6 +548,7 @@ class ChatService(ChatRoutingMixin):
             "relevant_past_lessons": relevant_past_lessons,
             "tool_access": self._tool_access_context(actor_context, visible_tools),
         }
+        llm_usage_summaries: list[dict[str, Any]] = []
 
         await emit_agent_state(status_callback, "selecting_tools", "Selecting tools")
         try:
@@ -561,7 +563,12 @@ class ChatService(ChatRoutingMixin):
                 relevant_past_lessons=relevant_past_lessons,
                 model=self._planner_model_for_provider(runtime, provider.name),
                 reasoning_effort=self._alfred_planner_reasoning_effort(runtime),
+                max_output_tokens=self._alfred_planner_max_output_tokens(runtime),
+                request_purpose="alfred.planner",
+                **self._alfred_openai_prompt_cache_options(runtime, provider.name, "planner"),
             )
+            if selection.llm_usage_summary:
+                llm_usage_summaries.append(selection.llm_usage_summary)
         except Exception as exc:
             logger.warning(
                 "alfred_v3_planner_failed_closed",
@@ -594,11 +601,12 @@ class ChatService(ChatRoutingMixin):
                     provider=provider.name,
                     model=self._model_for_provider(runtime, provider.name),
                     tool_results=[],
-                    attachments=[],
-                    actor_context=actor_context,
-                    route=None,
-                ),
-            )
+                        attachments=[],
+                        actor_context=actor_context,
+                        route=None,
+                        llm_usage=llm_usage_summaries,
+                    ),
+                )
             await event_bus.publish(
                 "chat.message",
                 {"session_id": str(session_uuid), "provider": provider.name, "text": text, "attachments": []},
@@ -709,7 +717,11 @@ class ChatService(ChatRoutingMixin):
                     status_callback=status_callback,
                     model=self._interactive_model_for_provider(runtime, provider.name),
                     reasoning_effort=self._alfred_reasoning_effort(runtime),
+                    request_purpose="alfred.react",
+                    **self._alfred_openai_prompt_cache_options(runtime, provider.name, "react"),
                 )
+                if isinstance(result, LlmResult) and result.usage_summary:
+                    llm_usage_summaries.append(result.usage_summary)
                 if isinstance(result, ChatTurnResult):
                     return result
             except ProviderNotConfiguredError as exc:
@@ -766,6 +778,7 @@ class ChatService(ChatRoutingMixin):
                 attachments=response_attachments,
                 actor_context=actor_context,
                 route=route,
+                llm_usage=llm_usage_summaries,
             ),
         )
         await self._update_memory(session_uuid, message, tool_results)
@@ -922,6 +935,10 @@ class ChatService(ChatRoutingMixin):
         status_callback: StatusCallback | None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult | ChatTurnResult:
         tool_schemas = [tool.as_llm_tool() for tool in selected_tools]
         allowed_tool_names = {tool.name for tool in selected_tools}
@@ -938,6 +955,10 @@ class ChatService(ChatRoutingMixin):
                 tools=tool_schemas,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_retention=prompt_cache_retention,
+                request_purpose=request_purpose,
             )
             final_text = self._react_final_from_result(result)
             if final_text:
@@ -1407,18 +1428,36 @@ class ChatService(ChatRoutingMixin):
         return pending_action
 
     def _planned_results_can_render_directly(self, tool_results: list[dict[str, Any]]) -> bool:
-        direct_tools = {
-            "open_device",
-            "command_device",
-            "open_gate",
-            "query_device_states",
-            "query_alert_activity",
-            "calculate_absence_duration",
-            "calculate_visit_duration",
-            "query_access_events",
-            "verify_schedule_access",
+        if not tool_results:
+            return False
+        if select_answer_artifacts(extract_answer_artifacts(tool_results)):
+            return True
+        return all(self._tool_result_has_direct_render_contract(result) for result in tool_results)
+
+    def _tool_result_has_direct_render_contract(self, result: dict[str, Any]) -> bool:
+        tool_name = str(result.get("name") or "")
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        if not output:
+            return False
+        if output.get("requires_confirmation") or output.get("error"):
+            return True
+        contract_keys_by_tool = {
+            "open_device": {"device", "opened", "closed", "accepted", "target"},
+            "command_device": {"device", "opened", "closed", "accepted", "target"},
+            "open_gate": {"device", "opened", "accepted", "target"},
+            "query_device_states": {"devices"},
+            "query_alert_activity": {"raised", "resolved", "alerts"},
+            "query_presence": {"presence"},
+            "query_visitor_passes": {"visitor_passes"},
+            "get_visitor_pass": {"visitor_pass"},
+            "calculate_absence_duration": {"absence_seconds", "absence_human", "intervals"},
+            "calculate_visit_duration": {"duration_seconds", "duration_human", "intervals"},
+            "query_access_events": {"events"},
+            "verify_schedule_access": {"allowed", "decision", "subject"},
+            "get_maintenance_status": {"enabled", "state"},
         }
-        return bool(tool_results) and all(str(result.get("name") or "") in direct_tools for result in tool_results)
+        expected_keys = contract_keys_by_tool.get(tool_name)
+        return bool(expected_keys and any(key in output for key in expected_keys))
 
     def _safe_state_changing_call(self, call: ToolCall) -> ToolCall:
         tool = self._tools.get(call.name)
@@ -1964,6 +2003,7 @@ class ChatService(ChatRoutingMixin):
         attachments: list[dict[str, Any]],
         actor_context: dict[str, Any],
         route: IntentRoute | None,
+        llm_usage: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         route_payload: dict[str, Any] | None = None
         if route:
@@ -1985,6 +2025,7 @@ class ChatService(ChatRoutingMixin):
             "attachments": attachments,
             "actor_context": actor_context,
             "route": route_payload,
+            "llm_usage": llm_usage or [],
             "captured_at": datetime.now(tz=UTC).isoformat(),
         }
         sanitized = sanitize_payload(snapshot)
@@ -1992,6 +2033,7 @@ class ChatService(ChatRoutingMixin):
             "provider": provider,
             "model": model,
             "user_message_id": str(user_message_id) if user_message_id else None,
+            "llm_usage": sanitized.get("llm_usage") or [],
             "turn_snapshot": sanitized,
         }
 
@@ -2105,6 +2147,8 @@ class ChatService(ChatRoutingMixin):
                 response_schema=ANSWER_DRAFT_RESPONSE_SCHEMA,
                 model=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
                 reasoning_effort=self._alfred_reasoning_effort(runtime),
+                max_output_tokens=350,
+                request_purpose="alfred.answer_draft",
             )
         except Exception as exc:
             logger.info(
@@ -2124,26 +2168,26 @@ class ChatService(ChatRoutingMixin):
         response_schema: dict[str, Any] | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_purpose: str | None = None,
     ) -> LlmResult:
-        options = {
-            "tools": tools,
-            "tool_results": tool_results,
-            "response_schema": response_schema,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-        }
-        clean_options = {key: value for key, value in options.items() if value is not None and value != ""}
-        try:
-            return await provider.complete(messages, **clean_options)
-        except TypeError as exc:
-            if "unexpected keyword" not in str(exc):
-                raise
-            legacy_options = {
-                key: value
-                for key, value in {"tools": tools, "tool_results": tool_results}.items()
-                if value is not None
-            }
-            return await provider.complete(messages, **legacy_options)
+        return await complete_with_provider_options(
+            provider,
+            messages,
+            tools=tools,
+            tool_results=tool_results,
+            response_schema=response_schema,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            metadata=metadata,
+            request_purpose=request_purpose,
+        )
 
     def _audit_answer_contract(
         self,
@@ -2210,6 +2254,30 @@ class ChatService(ChatRoutingMixin):
         if effort in {"medium", "high", "xhigh"}:
             return "low"
         return effort
+
+    def _alfred_planner_max_output_tokens(self, runtime: Any) -> int:
+        mode = str(getattr(runtime, "alfred_efficiency_mode", "balanced") or "balanced").strip().lower()
+        if mode == "conservative":
+            return 1200
+        if mode == "maximum_savings":
+            return 700
+        return 900
+
+    def _alfred_openai_prompt_cache_options(
+        self,
+        runtime: Any,
+        provider_name: str,
+        surface: str,
+    ) -> dict[str, str]:
+        if str(provider_name or "").strip().lower() != "openai":
+            return {}
+        policy = str(getattr(runtime, "alfred_openai_prompt_cache_policy", "static_24h") or "static_24h").strip().lower()
+        if policy not in {"in_memory", "static_24h", "all_live_24h"}:
+            policy = "static_24h"
+        options = {"prompt_cache_key": f"iacs:alfred:{surface}:v1"}
+        if policy == "all_live_24h" or (policy == "static_24h" and surface in {"planner", "react"}):
+            options["prompt_cache_retention"] = "24h"
+        return options
 
     def _planner_model_for_provider(self, runtime: Any, provider_name: str) -> str | None:
         configured = str(getattr(runtime, "alfred_planner_model", "") or "").strip()
@@ -2518,9 +2586,10 @@ class ChatService(ChatRoutingMixin):
                 (
                     f"{SYSTEM_PROMPT}\n"
                     "All user-facing dates and times must use local site time; "
-                    "never mention local-time names, local-time labels, UTC offsets, or UTC timestamps unless the user explicitly asks for UTC.\n"
+                    "never mention local-time names, local-time labels, UTC offsets, or UTC timestamps unless the user explicitly asks for UTC.\n\n"
+                    f"{tool_protocol}\n\n"
                     f"Current authenticated user context: {json.dumps(prompt_actor_context, default=str, separators=(',', ':'))}\n"
-                    f"Session memory: {json.dumps(memory, default=str)}\n\n{tool_protocol}"
+                    f"Session memory: {json.dumps(memory, default=str)}"
                 ),
             )
         ]
@@ -3267,6 +3336,14 @@ class ChatService(ChatRoutingMixin):
         artifacts = extract_answer_artifacts(tool_results)
         if artifacts:
             return render_answer_from_artifacts(artifacts)
+        if len(tool_results) > 1 and all(self._tool_result_has_direct_render_contract(result) for result in tool_results):
+            parts: list[str] = []
+            for result in tool_results:
+                text = self._fallback_text([result]).strip()
+                if text and text not in parts:
+                    parts.append(text)
+            if parts:
+                return " ".join(part.rstrip(".") + "." for part in parts)
         latest = tool_results[-1]
         tool_name = str(latest.get("name") or "")
         output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
@@ -3333,6 +3410,42 @@ class ChatService(ChatRoutingMixin):
             verb = "left" if event.get("direction") == "exit" else "arrived"
             occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
             return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
+        if tool_name == "query_presence":
+            presence = output.get("presence") if isinstance(output.get("presence"), list) else []
+            if not presence:
+                return "I couldn't find any matching presence records."
+            records = [item for item in presence if isinstance(item, dict)]
+            if len(records) == 1:
+                item = records[0]
+                return f"{item.get('person') or item.get('display_name') or 'Someone'} is {item.get('state') or 'unknown'}"
+            present = [item for item in records if str(item.get("state") or "").lower() == "present"]
+            exited = [item for item in records if str(item.get("state") or "").lower() == "exited"]
+            unknown = [
+                item
+                for item in records
+                if str(item.get("state") or "").lower() not in {"present", "exited"}
+            ]
+            if not records:
+                return "I checked presence, but there was nothing useful to report."
+            if present:
+                names = [
+                    str(item.get("person") or item.get("display_name") or "").strip()
+                    for item in present[:5]
+                    if str(item.get("person") or item.get("display_name") or "").strip()
+                ]
+                subject = "person is" if len(present) == 1 else "people are"
+                suffix = f": {', '.join(names)}" if names else ""
+                summary = f"{len(present)} {subject} on site{suffix}"
+            else:
+                summary = "No one is currently marked present"
+            context: list[str] = []
+            if exited:
+                context.append(f"{len(exited)} exited")
+            if unknown:
+                context.append(f"{len(unknown)} unknown")
+            if context:
+                summary = f"{summary}; {'; '.join(context)}"
+            return summary
         if tool_name == "query_anomalies":
             alerts = output.get("alerts") if isinstance(output.get("alerts"), list) else []
             if not alerts and isinstance(output.get("anomalies"), list):

@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, MessagingIdentity, User, Vehicle, VisitorPass
@@ -1540,7 +1540,8 @@ class WhatsAppMessagingService:
             }
         try:
             provider = get_llm_provider(runtime.llm_provider)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput("system", VISITOR_CONCIERGE_PROMPT),
                     ChatMessageInput(
@@ -1559,7 +1560,9 @@ class WhatsAppMessagingService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=450,
+                request_purpose="whatsapp.visitor_concierge",
             )
             payload = first_json_object(result.text)
             if isinstance(payload, dict):
@@ -1608,7 +1611,8 @@ class WhatsAppMessagingService:
             return ""
         try:
             provider = get_llm_provider(runtime.llm_provider)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         "system",
@@ -1634,7 +1638,9 @@ class WhatsAppMessagingService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=120,
+                request_purpose="whatsapp.visitor_alfred_nod",
             )
             payload = first_json_object(result.text)
             nod = str(payload.get("nod") if isinstance(payload, dict) else result.text or "").strip()
@@ -1653,7 +1659,8 @@ class WhatsAppMessagingService:
             return fallback
         try:
             provider = get_llm_provider(runtime.llm_provider)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         "system",
@@ -1681,7 +1688,9 @@ class WhatsAppMessagingService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=180,
+                request_purpose="whatsapp.visitor_privileged_plate_reply",
             )
             payload = first_json_object(result.text)
             message = str(payload.get("message") if isinstance(payload, dict) else result.text or "").strip()
@@ -1702,7 +1711,8 @@ class WhatsAppMessagingService:
             return fallback
         try:
             provider = get_llm_provider(runtime.llm_provider)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         "system",
@@ -1729,7 +1739,9 @@ class WhatsAppMessagingService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=180,
+                request_purpose="whatsapp.visitor_abuse_stop_reply",
             )
             payload = first_json_object(result.text)
             message = str(payload.get("message") if isinstance(payload, dict) else result.text or "").strip()
@@ -1749,7 +1761,8 @@ class WhatsAppMessagingService:
             return fallback
         try:
             provider = get_llm_provider(runtime.llm_provider)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         "system",
@@ -1775,7 +1788,9 @@ class WhatsAppMessagingService:
                             default=str,
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=180,
+                request_purpose="whatsapp.visitor_pending_timeframe_reply",
             )
             payload = first_json_object(result.text)
             message = str(payload.get("message") if isinstance(payload, dict) else result.text or "").strip()

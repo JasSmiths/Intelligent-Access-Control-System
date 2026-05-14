@@ -1,4 +1,9 @@
-from app.modules.lpr.ubiquiti import UbiquitiLprPayload, extract_plate_smart_zone_evidence, extract_smart_zone_names
+from app.modules.lpr.ubiquiti import (
+    UbiquitiLprAdapter,
+    UbiquitiLprPayload,
+    extract_plate_smart_zone_evidence,
+    extract_smart_zone_names,
+)
 
 
 def test_alarm_manager_payload_prefers_complete_plate_when_triggers_include_partial_read() -> None:
@@ -25,6 +30,34 @@ def test_alarm_manager_payload_prefers_complete_plate_when_triggers_include_part
     )
 
     assert payload.registration_number == "LG73DNR"
+
+
+def test_alarm_manager_payload_keeps_all_lpr_plate_candidates() -> None:
+    raw_payload = {
+        "alarm": {
+            "triggers": [
+                {
+                    "key": "license_plate_unknown",
+                    "value": "DX66TUA",
+                    "group": {"name": "DX66TUA"},
+                    "eventId": "event-1",
+                },
+                {
+                    "key": "license_plate_unknown",
+                    "value": "MD25VNO",
+                    "group": {"name": "MD25VNO"},
+                    "eventId": "event-1",
+                },
+            ]
+        },
+        "timestamp": 1778592691865,
+    }
+
+    payload = UbiquitiLprPayload.model_validate(raw_payload)
+    read = UbiquitiLprAdapter().to_plate_read(payload)
+
+    assert payload.registration_number == "DX66TUA"
+    assert read.candidate_registration_numbers == ("DX66TUA", "MD25VNO")
 
 
 def test_extracts_smart_zone_from_direct_lpr_payload() -> None:

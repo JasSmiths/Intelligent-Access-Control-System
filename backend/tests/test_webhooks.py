@@ -47,6 +47,22 @@ def alarm_payload(plate: str, zones: list[int] | list[str]) -> dict:
     }
 
 
+def multi_plate_alarm_payload(first_plate: str, second_plate: str, zones: list[int] | list[str]) -> dict:
+    payload = alarm_payload(first_plate, zones)
+    payload["alarm"]["triggers"].append(
+        {
+            "key": "license_plate_unknown",
+            "group": {"name": second_plate},
+            "value": second_plate,
+            "zones": {"line": [], "zone": zones, "loiter": []},
+            "device": "942A6FD09D64",
+            "eventId": "event-1",
+            "timestamp": 1777813142520,
+        }
+    )
+    return payload
+
+
 class FakeLprTimingRecorder:
     async def record_webhook_plate(self, _read):
         return None
@@ -117,6 +133,20 @@ async def test_lpr_webhook_with_empty_smart_zone_evidence_is_accepted(webhook_ru
     assert webhook_runtime.visual_recorder.calls
     assert webhook_runtime.presence_tracker.calls
     assert webhook_runtime.published == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_preserves_secondary_plate_candidate(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    result = await webhooks.receive_ubiquiti_lpr(
+        make_json_request(multi_plate_alarm_payload("DX66TUA", "MD25VNO", [2])),
+        service,
+    )
+
+    assert result == {"status": "accepted", "plate": "DX66TUA"}
+    assert len(service.enqueued) == 1
+    assert service.enqueued[0].candidate_registration_numbers == ("DX66TUA", "MD25VNO")
 
 
 @pytest.mark.asyncio

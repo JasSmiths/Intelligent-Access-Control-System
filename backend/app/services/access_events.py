@@ -87,7 +87,7 @@ MAX_SUPPRESSED_SESSION_READS = 20
 MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
 PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
 WORKER_STALL_QUEUE_SECONDS = 60.0
-CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.85
+CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.60
 PERSON_NOTIFICATION_PRONOUNS = {
     "he/him": ("him", "his"),
     "she/her": ("her", "her"),
@@ -152,6 +152,19 @@ def _is_visitor_pass_plate_match(read: PlateRead) -> bool:
 def _detected_registration_number(read: PlateRead) -> str:
     match = _known_vehicle_plate_match_from_read(read)
     return str(match.get("detected_registration_number") or read.registration_number) if match else read.registration_number
+
+
+def _candidate_registration_numbers(read: PlateRead) -> tuple[str, ...]:
+    candidates = [read.registration_number, *getattr(read, "candidate_registration_numbers", ())]
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for candidate in candidates:
+        plate = re.sub(r"[^A-Za-z0-9]", "", str(candidate or "")).upper()
+        if not plate or plate in seen:
+            continue
+        seen.add(plate)
+        normalized.append(plate)
+    return tuple(normalized)
 
 
 @dataclass
@@ -372,6 +385,7 @@ class AccessEventService:
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
         )
 
     def _should_preserve_supplied_gate_observation(self, read: PlateRead) -> bool:
@@ -585,6 +599,7 @@ class AccessEventService:
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
         )
 
     async def _sleep_until_retry(self, seconds: float) -> None:
@@ -663,18 +678,34 @@ class AccessEventService:
     async def _read_with_known_vehicle_match(self, read: PlateRead) -> PlateRead:
         registrations = await self._active_vehicle_registrations()
         threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
-        match = self._known_vehicle_plate_match(read.registration_number, registrations, threshold)
-        if not match:
+        best_match: dict[str, Any] | None = None
+        best_rank: tuple[bool, float, int, str] | None = None
+        for index, candidate in enumerate(_candidate_registration_numbers(read)):
+            match = self._known_vehicle_plate_match(candidate, registrations, threshold)
+            if not match:
+                continue
+            rank = (
+                bool(match["exact"]),
+                float(match["similarity"]),
+                -index,
+                str(match["registration_number"]),
+            )
+            if best_rank is None or rank > best_rank:
+                best_match = match
+                best_rank = rank
+
+        if not best_match:
             return read
 
         raw_payload = dict(read.raw_payload or {})
-        raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY] = match
+        raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY] = best_match
         return PlateRead(
-            registration_number=str(match["registration_number"]),
+            registration_number=str(best_match["registration_number"]),
             confidence=read.confidence,
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
         )
 
     async def _active_vehicle_registrations(self) -> list[str]:
@@ -710,6 +741,7 @@ class AccessEventService:
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
         )
 
     async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
@@ -794,6 +826,7 @@ class AccessEventService:
             source=read.source,
             captured_at=read.captured_at,
             raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
         )
 
     def _known_vehicle_plate_match(
@@ -1280,6 +1313,7 @@ class AccessEventService:
             ocr_variants = set(self._string_list(vehicle_session.get("ocr_variants")))
             ocr_variants.add(_detected_registration_number(read))
             ocr_variants.add(read.registration_number)
+            ocr_variants.update(_candidate_registration_numbers(read))
             vehicle_session["ocr_variants"] = sorted(value for value in ocr_variants if value)
 
             suppressed_reads = vehicle_session.get("suppressed_reads")
@@ -1304,6 +1338,8 @@ class AccessEventService:
             if _detected_registration_number(item)
         }
         variants.update(item.registration_number for item in window.reads if item.registration_number)
+        for item in window.reads:
+            variants.update(_candidate_registration_numbers(item))
         return {
             "id": str(event.id),
             "source": read.source,
@@ -1654,6 +1690,7 @@ class AccessEventService:
                         "detected_registration_number": _detected_registration_number(item),
                         "confidence": item.confidence,
                         "captured_at": item.captured_at.isoformat(),
+                        "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
                     }
                     for item in window.reads
                 ],
@@ -2049,6 +2086,7 @@ class AccessEventService:
                         "detected_registration_number": _detected_registration_number(item),
                         "confidence": item.confidence,
                         "captured_at": item.captured_at.isoformat(),
+                        "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
                         "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(item),
                         "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(item),
                     }

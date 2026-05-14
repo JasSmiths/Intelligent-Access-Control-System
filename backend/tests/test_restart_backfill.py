@@ -5,10 +5,13 @@ import pytest
 
 from app.services.restart_backfill import (
     MISSED_EVENT_BACKFILL_OVERLAP,
+    MISSED_EVENT_RECONCILIATION_SOURCE,
     MissedAccessEventBackfillService,
+    _direction_from_gate_observation,
     backfill_window_start,
     protect_event_ids_from_payload,
 )
+from app.models.enums import AccessDirection
 from app.services.snapshot_recovery import protect_event_id_from_access_event
 
 
@@ -48,6 +51,20 @@ def test_protect_event_id_extraction_includes_backfill_payloads() -> None:
     assert protect_event_id_from_access_event(
         SimpleNamespace(raw_payload={"protect_evidence": {"event_id": "backfill-event"}})
     ) == "backfill-event"
+
+
+def test_gate_observation_direction_for_backfill() -> None:
+    assert _direction_from_gate_observation(SimpleNamespace(state="closed")) == AccessDirection.ENTRY
+    assert _direction_from_gate_observation(SimpleNamespace(state="open")) == AccessDirection.EXIT
+    assert _direction_from_gate_observation(SimpleNamespace(state="opening")) == AccessDirection.EXIT
+    assert _direction_from_gate_observation(SimpleNamespace(state="unknown")) is None
+
+
+def test_reconciliation_service_uses_reconciliation_labels() -> None:
+    service = MissedAccessEventBackfillService(source=MISSED_EVENT_RECONCILIATION_SOURCE)
+
+    assert service._audit_backfill_action() == "access_event.reconciled"
+    assert service._backfill_payload_source() == "protect_reconciliation"
 
 
 @pytest.mark.asyncio

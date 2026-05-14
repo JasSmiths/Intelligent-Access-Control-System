@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -233,6 +234,18 @@ def sanitize_payload(value: Any, *, depth: int = 0, key: str | None = None) -> A
             sanitized_list.append(f"[{len(items) - MAX_LIST_ITEMS} items truncated]")
         return sanitized_list
     return _truncate_string(str(value))
+
+
+def sanitize_query_string(query: str | bytes | None) -> str:
+    if not query:
+        return ""
+    query_text = query.decode("utf-8", errors="replace") if isinstance(query, bytes) else str(query)
+    pairs = parse_qsl(query_text, keep_blank_values=True)
+    sanitized = [
+        (key, "[redacted]" if _is_secret_key(key.lower()) else value)
+        for key, value in pairs
+    ]
+    return urlencode(sanitized, doseq=True)
 
 
 async def write_audit_log(

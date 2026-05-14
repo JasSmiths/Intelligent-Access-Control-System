@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, get_llm_provider
+from app.ai.providers import ChatMessageInput, complete_with_provider_options, get_llm_provider
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -819,25 +819,29 @@ class AutomationService:
             )
             await session.commit()
             await session.refresh(run)
+            await session.refresh(rule)
+            run_payload = serialize_run(run)
+            rule_payload = serialize_rule(rule)
+            rule_name = str(rule_payload["name"])
 
         event_payload = {
-            "run": serialize_run(run),
-            "rule": serialize_rule(rule),
+            "run": run_payload,
+            "rule": rule_payload,
         }
         await event_bus.publish(f"automation.run.{status}", event_payload)
         trace.finish(
             status="error" if status == "failed" else "ok",
             level="error" if status == "failed" else "info",
-            summary=f"{rule.name} {status} for {trigger_key}",
+            summary=f"{rule_name} {status} for {trigger_key}",
             context={
-                "run_id": str(run.id),
+                "run_id": str(run_payload["id"]),
                 "status": status,
                 "condition_count": len(condition_results),
                 "action_count": len(action_results),
             },
             error=error,
         )
-        return {"executed": status == "success", "status": status, "run": serialize_run(run)}
+        return {"executed": status == "success", "status": status, "run": run_payload}
 
     async def _evaluate_rule_conditions(
         self,
@@ -903,7 +907,8 @@ class AutomationService:
         provider = get_llm_provider(runtime.llm_provider)
         raw_text = ""
         try:
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput("system", prompt),
                     ChatMessageInput(
@@ -916,7 +921,9 @@ class AutomationService:
                             }
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=500,
+                request_purpose="automations.parse_schedule",
             )
             raw_text = result.text
             parsed = json_object_from_text(raw_text)

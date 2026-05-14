@@ -155,6 +155,16 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         False,
         "Allow Alfred to draft short post-turn reflection lessons through the learning workflow. Disabled by default to avoid background token spend.",
     ),
+    "alfred_efficiency_mode": (
+        "llm",
+        "balanced",
+        "Token-efficiency posture for Alfred live chat. Use conservative, balanced, or maximum_savings.",
+    ),
+    "alfred_openai_prompt_cache_policy": (
+        "llm",
+        "static_24h",
+        "OpenAI prompt-cache retention policy for Alfred. Use in_memory, static_24h, or all_live_24h.",
+    ),
     "alfred_interactive_model": (
         "llm",
         "gpt-5.4",
@@ -295,6 +305,8 @@ class RuntimeConfig:
     alfred_semantic_memory_enabled: bool
     alfred_memory_extraction_enabled: bool
     alfred_reflection_enabled: bool
+    alfred_efficiency_mode: str
+    alfred_openai_prompt_cache_policy: str
     alfred_interactive_model: str
     alfred_planner_model: str
     alfred_background_model: str
@@ -542,6 +554,16 @@ async def get_runtime_config() -> RuntimeConfig:
         alfred_semantic_memory_enabled=bool_value(values["alfred_semantic_memory_enabled"]),
         alfred_memory_extraction_enabled=bool_value(values["alfred_memory_extraction_enabled"]),
         alfred_reflection_enabled=bool_value(values["alfred_reflection_enabled"]),
+        alfred_efficiency_mode=(
+            str(values["alfred_efficiency_mode"]).strip().lower()
+            if str(values["alfred_efficiency_mode"]).strip().lower() in {"conservative", "balanced", "maximum_savings"}
+            else "balanced"
+        ),
+        alfred_openai_prompt_cache_policy=(
+            str(values["alfred_openai_prompt_cache_policy"]).strip().lower()
+            if str(values["alfred_openai_prompt_cache_policy"]).strip().lower() in {"in_memory", "static_24h", "all_live_24h"}
+            else "static_24h"
+        ),
         alfred_interactive_model=str(values["alfred_interactive_model"] or "gpt-5.4"),
         alfred_planner_model=str(values["alfred_planner_model"] or "gpt-5.4-mini"),
         alfred_background_model=str(values["alfred_background_model"] or "gpt-5.4-nano"),

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from datetime import UTC, datetime
 import time
@@ -8,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai import tools as ai_tools
-from app.ai.providers import ChatMessageInput, LlmResult, LocalProvider, ToolCall
+from app.ai import providers as providers_module
+from app.ai.providers import ChatMessageInput, LlmResult, LocalProvider, OpenAIResponsesProvider, ToolCall
 from app.api.v1 import ai as ai_api
 from app.services.alfred.feedback import (
     AlfredFeedbackError,
@@ -168,6 +170,75 @@ def test_alfred_interactive_model_does_not_follow_openai_nano_default() -> None:
     assert service._interactive_model_for_provider(runtime, "openai") == "gpt-5.4"
     assert service._planner_model_for_provider(runtime, "openai") == "gpt-5.4-mini"
     assert service._background_model_for_provider(runtime, "openai") == "gpt-5.4-nano"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_records_usage_and_cache_options(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    emitted: list[dict[str, object]] = []
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            openai_api_key="key",
+            openai_model="gpt-5.4-mini",
+            openai_base_url="https://api.openai.com/v1",
+            llm_timeout_seconds=30,
+        )
+
+    async def fake_post_with_response_metadata(self, url, *, headers=None, json_body=None):
+        captured["url"] = url
+        captured["body"] = json_body
+        return (
+            {
+                "output_text": '{"selected_domains":["General"]}',
+                "usage": {
+                    "input_tokens": 2000,
+                    "input_tokens_details": {"cached_tokens": 1500},
+                    "output_tokens": 80,
+                    "output_tokens_details": {"reasoning_tokens": 20},
+                    "total_tokens": 2080,
+                },
+            },
+            {"x-request-id": "req_usage_1"},
+            42.25,
+        )
+
+    monkeypatch.setattr(providers_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(OpenAIResponsesProvider, "_post_with_response_metadata", fake_post_with_response_metadata)
+    monkeypatch.setattr(providers_module, "_emit_provider_usage_audit", lambda summary: emitted.append(summary))
+
+    result = await OpenAIResponsesProvider().complete(
+        [ChatMessageInput("system", "static"), ChatMessageInput("user", "dynamic")],
+        model="gpt-5.4-mini",
+        max_output_tokens=900,
+        prompt_cache_key="iacs:alfred:planner:v1",
+        prompt_cache_retention="24h",
+        metadata={"surface": "planner"},
+        request_purpose="alfred.planner",
+    )
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["max_output_tokens"] == 900
+    assert body["prompt_cache_key"] == "iacs:alfred:planner:v1"
+    assert body["prompt_cache_retention"] == "24h"
+    assert body["metadata"] == {"surface": "planner", "purpose": "alfred.planner"}
+    assert result.usage_summary == {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "request_id": "req_usage_1",
+        "purpose": "alfred.planner",
+        "latency_ms": 42.2,
+        "input_tokens": 2000,
+        "output_tokens": 80,
+        "total_tokens": 2080,
+        "cached_tokens": 1500,
+        "reasoning_tokens": 20,
+        "cache_hit_ratio": 0.75,
+        "prompt_cache_key": "iacs:alfred:planner:v1",
+        "prompt_cache_retention": "24h",
+    }
+    assert emitted == [result.usage_summary]
 
 
 def test_planner_catalog_payload_stays_compact() -> None:
@@ -490,7 +561,10 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
         status_callback=None,
     )
 
-    planner_payload = json.loads(provider.messages[0][1].content)
+    assert provider.messages[0][1].role == "system"
+    assert provider.messages[0][1].content.startswith("Planner domain cards JSON:")
+    planner_payload = json.loads(provider.messages[0][2].content)
+    assert "domains" not in planner_payload
     assert planner_payload["actor_context"]["user"]["username"] == "jas"
     assert planner_payload["actor_context"]["vehicles"][0]["registration_number"] == "VIP123"
     assert planner_payload["actor_context"]["alfred_lessons"][0]["title"] == "Short answers"
@@ -920,6 +994,123 @@ async def test_alfred_v3_planned_confirmation_action_skips_react_loop(monkeypatc
     assert "Please confirm before I open Main Garage" in result.text
 
 
+def test_planned_direct_render_depends_on_tool_contract_not_chat_text() -> None:
+    service = ChatService()
+    signature = inspect.signature(service._planned_results_can_render_directly)
+
+    assert list(signature.parameters) == ["tool_results"]
+    assert service._planned_results_can_render_directly(
+        [
+            {
+                "name": "query_presence",
+                "output": {"presence": [{"person": "Jas", "state": "present"}]},
+            }
+        ]
+    )
+    assert service._planned_results_can_render_directly(
+        [
+            {
+                "name": "query_access_events",
+                "output": {
+                    "answer_artifacts": [
+                        {
+                            "domain": "access_logs",
+                            "answer_type": "latest_arrival",
+                            "subject_label": "Jas",
+                            "primary_fact": {
+                                "id": "access.latest_entry",
+                                "label": "Latest arrival",
+                                "display_value": "08:10",
+                                "must_appear": True,
+                            },
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+    assert not service._planned_results_can_render_directly(
+        [{"name": "query_presence", "output": {"unexpected": "shape"}}]
+    )
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_simple_planned_read_renders_without_interactive_model(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["Access_Logs"],'
+            '"selected_tool_names":["query_presence"],'
+            '"requested_answer_type":"presence_state",'
+            '"planned_tool_calls":[{"name":"query_presence","arguments_json":"{\\"person\\":\\"Jas\\"}"}],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.91,'
+            '"reason":"presence state"}'
+        ),
+        agent_steps=[],
+    )
+
+    result, executed, selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="Could you check whether Jas is on site?",
+        tool_outputs={"query_presence": {"presence": [{"person": "Jas", "state": "present"}]}},
+    )
+
+    assert [(call.name, call.arguments) for call in executed] == [("query_presence", {"person": "Jas"})]
+    assert provider.agent_tool_catalogs == []
+    assert selected_tool_history == []
+    assert result.text == "Jas is present"
+
+
+@pytest.mark.asyncio
+async def test_alfred_v3_multi_planned_read_renders_all_tool_results_without_interactive_model(monkeypatch) -> None:
+    provider = V3SimulatedSemanticProvider(
+        planner_json=(
+            '{"selected_domains":["Access_Logs","Gate_Hardware"],'
+            '"selected_tool_names":["query_presence","query_device_states"],'
+            '"requested_answer_type":"presence_state",'
+            '"planned_tool_calls":['
+            '{"name":"query_presence","arguments_json":"{}"},'
+            '{"name":"query_device_states","arguments_json":"{\\"target\\":\\"Top Gate\\",\\"kind\\":\\"gate\\"}"}'
+            '],'
+            '"needs_clarification":false,'
+            '"safety_posture":"read_only",'
+            '"confidence":0.93,'
+            '"reason":"presence and gate state"}'
+        ),
+        agent_steps=[],
+    )
+
+    result, executed, selected_tool_history = await _run_simulated_v3_turn(
+        monkeypatch,
+        provider=provider,
+        message="How many people are on site and is the top gate open or closed?",
+        tool_outputs={
+            "query_presence": {
+                "presence": [
+                    {"person": "Jas", "state": "present"},
+                    {"person": "Steph", "state": "present"},
+                    {"person": "Alex", "state": "exited"},
+                ]
+            },
+            "query_device_states": {
+                "devices": [{"name": "Top Gate", "kind": "gate", "state": "closed"}],
+                "count": 1,
+            },
+        },
+    )
+
+    assert [(call.name, call.arguments) for call in executed] == [
+        ("query_presence", {}),
+        ("query_device_states", {"target": "Top Gate", "kind": "gate"}),
+    ]
+    assert provider.agent_tool_catalogs == []
+    assert selected_tool_history == []
+    assert "2 people are on site: Jas, Steph" in result.text
+    assert "Top Gate is closed" in result.text
+
+
 def test_standard_users_do_not_see_mutation_or_admin_tools() -> None:
     service = ChatService()
 
@@ -1006,7 +1197,8 @@ class V3SimulatedSemanticProvider:
 
     async def complete(self, messages, tools=None, tool_results=None):
         if tools is None and messages and messages[0].content.startswith("You are Alfred's v3 planning brain"):
-            self.planner_requests.append(json.loads(messages[1].content))
+            user_message = next(message for message in messages if message.role == "user")
+            self.planner_requests.append(json.loads(user_message.content))
             return LlmResult(text=self.planner_json)
 
         self.agent_tool_catalogs.append([tool["name"] for tool in tools or []])

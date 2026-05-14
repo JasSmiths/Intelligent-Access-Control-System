@@ -124,12 +124,16 @@ class UbiquitiLprAdapter:
 
     def to_plate_read(self, payload: UbiquitiLprPayload) -> PlateRead:
         raw_payload: dict[str, Any] = payload.model_dump(by_alias=True, mode="json")
+        candidates = extract_plate_candidates(raw_payload)
+        if payload.registration_number not in candidates:
+            candidates = [payload.registration_number, *candidates]
         return PlateRead(
             registration_number=payload.registration_number,
             confidence=payload.confidence,
             source=self.source_name,
             captured_at=payload.captured_at or now_utc(),
             raw_payload=raw_payload,
+            candidate_registration_numbers=tuple(candidates),
         )
 
 
@@ -139,6 +143,30 @@ def extract_smart_zone_names(payload: Any) -> list[str]:
     zones: list[str] = []
     _collect_smart_zone_names(payload, zones)
     return _dedupe_preserving_order(zones)
+
+
+def extract_plate_candidates(payload: Any) -> list[str]:
+    """Return all plausible normalized plate values carried by a UniFi payload."""
+
+    if not isinstance(payload, dict):
+        return []
+
+    candidates: list[Any] = []
+    direct = _first_present(payload, PLATE_KEYS)
+    if direct:
+        candidates.append(direct)
+
+    for trigger in _alarm_triggers(payload):
+        trigger_text = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name"))
+        if _looks_like_lpr_trigger(trigger_text):
+            candidates.extend(_trigger_plate_candidates(trigger))
+
+    if not candidates:
+        nested = _find_nested_value(payload, PLATE_KEYS)
+        if nested:
+            candidates.append(nested)
+
+    return _rank_plate_candidates(candidates)
 
 
 def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) -> PlateSmartZoneEvidence:
@@ -191,27 +219,8 @@ def _first_present(payload: dict[str, Any], keys: set[str]) -> Any | None:
 
 
 def _extract_plate(payload: dict[str, Any]) -> str | None:
-    direct = _first_present(payload, PLATE_KEYS)
-    if direct:
-        return str(direct)
-
-    alarm = payload.get("alarm")
-    if isinstance(alarm, dict):
-        triggers = alarm.get("triggers")
-        if isinstance(triggers, list):
-            candidates: list[Any] = []
-            for trigger in triggers:
-                if not isinstance(trigger, dict):
-                    continue
-                trigger_text = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name"))
-                if _looks_like_lpr_trigger(trigger_text):
-                    candidates.extend(_trigger_plate_candidates(trigger))
-            best = _best_plate_candidate(candidates)
-            if best:
-                return best
-
-    nested = _find_nested_value(payload, PLATE_KEYS)
-    return str(nested) if nested else None
+    candidates = extract_plate_candidates(payload)
+    return candidates[0] if candidates else None
 
 
 def _trigger_plate_candidates(trigger: dict[str, Any]) -> list[Any]:
@@ -228,15 +237,23 @@ def _trigger_plate_candidates(trigger: dict[str, Any]) -> list[Any]:
 
 
 def _best_plate_candidate(candidates: list[Any]) -> str | None:
+    ranked = _rank_plate_candidates(candidates)
+    return ranked[0] if ranked else None
+
+
+def _rank_plate_candidates(candidates: list[Any]) -> list[str]:
     ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
     for index, candidate in enumerate(candidates):
         plate = _normalize_plate(candidate)
-        if not plate:
+        if not plate or plate in seen:
             continue
+        seen.add(plate)
         ranked.append((len(plate), -index, plate))
     if not ranked:
-        return None
-    return max(ranked)[2]
+        return []
+    ranked.sort(reverse=True)
+    return [plate for _length, _index, plate in ranked]
 
 
 def _collect_smart_zone_names(value: Any, zones: list[str]) -> None:

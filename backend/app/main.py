@@ -26,6 +26,7 @@ from app.services.restart_backfill import (
     backfill_missed_access_events_safely,
     read_backend_runtime_state,
     run_backend_runtime_heartbeat,
+    run_missed_access_event_reconciliation,
 )
 from app.services.settings import get_runtime_config
 from app.services.snapshot_recovery import recover_missing_access_event_snapshots_safely
@@ -33,6 +34,7 @@ from app.services.telemetry import (
     CURRENT_REQUEST_ID,
     TELEMETRY_CATEGORY_WEBHOOKS_API,
     actor_from_user,
+    sanitize_query_string,
     telemetry,
     telemetry_request_id,
 )
@@ -79,6 +81,10 @@ async def lifespan(app: FastAPI):
         ),
         name="missed-access-event-backfill",
     )
+    missed_event_reconciliation_task = asyncio.create_task(
+        run_missed_access_event_reconciliation(),
+        name="missed-access-event-reconciliation",
+    )
     snapshot_recovery_task = asyncio.create_task(
         recover_missing_access_event_snapshots_safely(),
         name="access-event-snapshot-recovery",
@@ -89,6 +95,11 @@ async def lifespan(app: FastAPI):
         missed_event_backfill_task.cancel()
         try:
             await missed_event_backfill_task
+        except asyncio.CancelledError:
+            pass
+        missed_event_reconciliation_task.cancel()
+        try:
+            await missed_event_reconciliation_task
         except asyncio.CancelledError:
             pass
         snapshot_recovery_task.cancel()
@@ -257,7 +268,7 @@ async def telemetry_http_middleware(request: Request, call_next):
         context={
             "method": request.method,
             "path": path,
-            "query": str(request.url.query or ""),
+            "query": sanitize_query_string(request.url.query),
             "client": client_host,
             "user_agent": request.headers.get("user-agent"),
             "request_id": request_id,

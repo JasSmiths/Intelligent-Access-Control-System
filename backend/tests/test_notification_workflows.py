@@ -1180,7 +1180,11 @@ def test_legacy_notification_setting_is_not_seeded() -> None:
     assert "notification_rules" not in DEFAULT_DYNAMIC_SETTINGS
 
 
-async def test_notification_rule_crud_endpoints_use_db_workflow_shape() -> None:
+async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatch) -> None:
+    async def confirmed(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(notification_api, "require_confirmation", confirmed)
     session = FakeRuleSession()
     created = await notification_api.create_notification_rule(
         notification_api.NotificationRuleRequest(
@@ -1236,10 +1240,29 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape() -> None:
 
     await notification_api.delete_notification_rule(
         uuid.UUID(created["id"]),
+        request=notification_api.NotificationRuleDeleteRequest(confirmation_token="confirmed"),
         _=SimpleNamespace(),
         session=session,
     )
     assert session.deleted is not None
+
+
+async def test_notification_rule_create_requires_confirmation_before_write() -> None:
+    session = FakeRuleSession()
+
+    with pytest.raises(HTTPException) as exc:
+        await notification_api.create_notification_rule(
+            notification_api.NotificationRuleRequest(
+                name="Gate arrivals",
+                trigger_event="authorized_entry",
+                actions=[{"type": "in_app", "title_template": "@Subject", "message_template": "@Message"}],
+            ),
+            _=SimpleNamespace(),
+            session=session,
+        )
+
+    assert exc.value.status_code == 428
+    assert session.rule is None
 
 
 def test_notification_rule_serialization_normalizes_legacy_gate_malfunction_trigger() -> None:

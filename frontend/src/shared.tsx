@@ -495,8 +495,13 @@ export const api = {
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async delete<T = void>(path: string): Promise<T> {
-    const response = await fetch(path, { method: "DELETE", credentials: "include" });
+  async delete<T = void>(path: string, body?: unknown): Promise<T> {
+    const response = await fetch(path, {
+      method: "DELETE",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      credentials: "include",
+      body: body ? JSON.stringify(body) : undefined
+    });
     if (!response.ok) throw await apiError(response);
     if (response.status === 204) return undefined as T;
     const text = await response.text();

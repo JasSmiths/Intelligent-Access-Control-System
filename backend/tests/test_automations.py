@@ -103,6 +103,22 @@ def test_automation_registries_expose_required_keys() -> None:
     }.issubset(action_keys)
 
 
+@pytest.mark.asyncio
+async def test_automation_rule_create_requires_confirmation_before_write() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await automations_api.create_automation_rule(
+            automations_api.AutomationRuleRequest(
+                name="Open gate",
+                triggers=[{"type": "vehicle.known_plate", "config": {}}],
+                actions=[{"type": "gate.open", "config": {}, "reason_template": "@Subject"}],
+            ),
+            user=SimpleNamespace(id=uuid.uuid4()),
+            session=SimpleNamespace(),
+        )
+
+    assert exc.value.status_code == 428
+
+
 def test_automation_schema_normalization_shapes_payloads() -> None:
     triggers = normalize_triggers(
         [
@@ -678,3 +694,99 @@ async def test_process_due_rules_executes_claimed_runs(monkeypatch) -> None:
             "claimed_run_id": claim.run_id,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_rule_serializes_payloads_before_session_closes(monkeypatch) -> None:
+    rule = AutomationRule(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        name="Skip when maintenance is off",
+        is_active=True,
+        triggers=[{"type": "time.every_x", "config": {"interval": 15, "unit": "minutes"}}],
+        trigger_keys=["time.every_x"],
+        conditions=[{"id": "condition-1", "type": "maintenance_mode.enabled", "config": {}}],
+        actions=[{"id": "action-1", "type": "gate.open", "config": {}, "reason_template": ""}],
+        next_run_at=datetime(2026, 5, 3, 12, 15, tzinfo=UTC),
+        last_fired_at=datetime(2026, 5, 3, 12, 0, tzinfo=UTC),
+        run_count=0,
+    )
+
+    class FakeTrace:
+        trace_id = "trace-1"
+
+        def finish(self, **_kwargs):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+            self.added = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            self.closed = True
+            return None
+
+        async def get(self, model, _row_id):
+            if model is AutomationRule:
+                return rule
+            return None
+
+        def add(self, row):
+            self.added.append(row)
+
+        async def flush(self):
+            for row in self.added:
+                if isinstance(row, AutomationRun) and row.id is None:
+                    row.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, _row):
+            return None
+
+    fake_session = FakeSession()
+    published = []
+    original_serialize_rule = automations.serialize_rule
+    original_serialize_run = automations.serialize_run
+
+    def guarded_serialize_rule(row):
+        assert fake_session.closed is False
+        return original_serialize_rule(row)
+
+    def guarded_serialize_run(row):
+        assert fake_session.closed is False
+        return original_serialize_run(row)
+
+    async def fake_write_audit_log(*_args, **_kwargs):
+        return None
+
+    async def fake_is_maintenance_mode_active():
+        return False
+
+    async def fake_publish(event_name, payload):
+        published.append((event_name, payload))
+
+    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: fake_session)
+    monkeypatch.setattr(automations, "serialize_rule", guarded_serialize_rule)
+    monkeypatch.setattr(automations, "serialize_run", guarded_serialize_run)
+    monkeypatch.setattr(automations, "write_audit_log", fake_write_audit_log)
+    monkeypatch.setattr(automations, "is_maintenance_mode_active", fake_is_maintenance_mode_active)
+    monkeypatch.setattr(automations.event_bus, "publish", fake_publish)
+    monkeypatch.setattr(automations.telemetry, "start_trace", lambda *_args, **_kwargs: FakeTrace())
+
+    result = await AutomationService().execute_rule(
+        str(rule.id),
+        trigger_key="time.every_x",
+        trigger_payload={"scheduled_for": "2026-05-03T12:00:00+00:00"},
+        actor="Automation Scheduler",
+        source="scheduler",
+    )
+
+    assert result["status"] == "skipped"
+    assert result["run"]["id"] == "22222222-2222-2222-2222-222222222222"
+    assert published[0][0] == "automation.run.skipped"
+    assert published[0][1]["rule"]["id"] == str(rule.id)

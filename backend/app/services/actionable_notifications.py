@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.auth_secret import get_auth_secret
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -522,7 +522,8 @@ class ActionableNotificationService:
             if not provider_name or provider_name == "local":
                 return fallback
             provider = get_llm_provider(provider_name)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         role="system",
@@ -548,7 +549,9 @@ class ActionableNotificationService:
                             "active/FUBAR/status labels, blocking, retrying, or trying again."
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=120,
+                request_purpose="notifications.actionable_malfunction_failure",
             )
             message = _clean_llm_notification_text(result.text)
             if not _valid_malfunction_message(
@@ -592,7 +595,8 @@ class ActionableNotificationService:
         bound: BoundActionContext,
         malfunction: ActiveGateMalfunctionContext,
     ) -> str:
-        result = await provider.complete(
+        result = await complete_with_provider_options(
+            provider,
             [
                 ChatMessageInput(
                     role="system",
@@ -612,7 +616,9 @@ class ActionableNotificationService:
                         "unresolved malfunction state, request, IACS, Home Assistant, force-open, or status labels."
                     ),
                 ),
-            ]
+            ],
+            max_output_tokens=120,
+            request_purpose="notifications.actionable_malfunction_repair",
         )
         return _clean_llm_notification_text(result.text)
 

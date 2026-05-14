@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRule, Person, Presence, Schedule
@@ -1130,7 +1130,8 @@ class NotificationService:
                 )
                 return fallback
             provider = get_llm_provider(provider_name)
-            result = await provider.complete(
+            result = await complete_with_provider_options(
+                provider,
                 [
                     ChatMessageInput(
                         role="system",
@@ -1158,7 +1159,9 @@ class NotificationService:
                             f"Suggested tone and meaning: {gate_malfunction_plain_body(normalize_gate_malfunction_stage(context.facts.get('malfunction_stage')))}"
                         ),
                     ),
-                ]
+                ],
+                max_output_tokens=260,
+                request_purpose="notifications.gate_malfunction_content",
             )
             parsed = parse_gate_malfunction_llm_content(result.text)
             if not parsed:

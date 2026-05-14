@@ -12,7 +12,7 @@ from typing import Any
 import redis.asyncio as redis_asyncio
 from sqlalchemy import func, or_, select, text
 
-from app.ai.providers import ChatMessageInput
+from app.ai.providers import ChatMessageInput, complete_with_provider_options
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -624,13 +624,13 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
 
 
 async def _provider_complete(provider: Any, messages: list[ChatMessageInput], *, model_name: str | None) -> Any:
-    if model_name:
-        try:
-            return await provider.complete(messages, model=model_name)
-        except TypeError as exc:
-            if "unexpected keyword" not in str(exc):
-                raise
-    return await provider.complete(messages)
+    return await complete_with_provider_options(
+        provider,
+        messages,
+        model=model_name,
+        max_output_tokens=500,
+        request_purpose="alfred.memory_extract",
+    )
 
 
 alfred_memory_service = AlfredMemoryService()

@@ -17,6 +17,7 @@ from app.services.automations import (
     normalize_triggers,
     serialize_rule,
 )
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 
 router = APIRouter()
 
@@ -28,6 +29,7 @@ class AutomationRuleRequest(BaseModel):
     conditions: list[dict[str, Any]] = Field(default_factory=list)
     actions: list[dict[str, Any]] = Field(default_factory=list)
     is_active: bool = True
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class AutomationRuleUpdateRequest(BaseModel):
@@ -37,6 +39,7 @@ class AutomationRuleUpdateRequest(BaseModel):
     conditions: list[dict[str, Any]] | None = None
     actions: list[dict[str, Any]] | None = None
     is_active: bool | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class AutomationDryRunRequest(BaseModel):
@@ -46,6 +49,10 @@ class AutomationDryRunRequest(BaseModel):
 
 class AutomationScheduleParseRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
+
+
+class AutomationRuleDeleteRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 @router.get("/catalog")
@@ -68,6 +75,14 @@ async def create_automation_rule(
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_confirmation(
+        session,
+        user=user,
+        action="automation_rule.create",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
         rule = await get_automation_service().create_rule(
             session,
@@ -103,6 +118,14 @@ async def update_automation_rule(
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_confirmation(
+        session,
+        user=user,
+        action="automation_rule.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     rule = await get_rule_or_404(session, rule_id)
     try:
         await get_automation_service().update_rule(
@@ -127,9 +150,17 @@ async def update_automation_rule(
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_automation_rule(
     rule_id: uuid.UUID,
+    request: AutomationRuleDeleteRequest | None = None,
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
+    await require_confirmation(
+        session,
+        user=user,
+        action="automation_rule.delete",
+        payload={"rule_id": str(rule_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     rule = await get_rule_or_404(session, rule_id)
     await get_automation_service().delete_rule(session, rule, actor=user)
     await session.commit()
@@ -207,3 +238,23 @@ async def get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> Automati
     if not rule:
         raise HTTPException(status_code=404, detail="Automation rule not found.")
     return rule
+
+
+async def require_confirmation(
+    session: AsyncSession,
+    *,
+    user: User,
+    action: str,
+    payload: dict[str, Any],
+    confirmation_token: str | None,
+) -> None:
+    try:
+        await consume_action_confirmation(
+            session,
+            user=user,
+            action=action,
+            payload=payload,
+            confirmation_token=confirmation_token,
+        )
+    except ActionConfirmationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

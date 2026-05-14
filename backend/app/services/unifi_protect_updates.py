@@ -13,7 +13,7 @@ import httpx
 from packaging.version import InvalidVersion, Version
 from sqlalchemy import select
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -314,7 +314,8 @@ class UnifiProtectUpdateService:
             return _heuristic_analysis(current_version, target_version, release_notes), "local"
         try:
             llm = get_llm_provider(provider_name)
-            result = await llm.complete(
+            result = await complete_with_provider_options(
+                llm,
                 [
                     ChatMessageInput(
                         role="system",
@@ -324,7 +325,9 @@ class UnifiProtectUpdateService:
                         ),
                     ),
                     ChatMessageInput(role="user", content=prompt),
-                ]
+                ],
+                max_output_tokens=1200,
+                request_purpose="unifi_protect.update_analysis",
             )
             return result.text or _heuristic_analysis(current_version, target_version, release_notes), provider_name
         except (ProviderNotConfiguredError, Exception) as exc:

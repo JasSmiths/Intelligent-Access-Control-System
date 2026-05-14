@@ -225,11 +225,11 @@ REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
 - Final answers must stay inside the observations returned for this request. If the scoped tools found no matching record, say that instead of filling gaps from memory or guesses.
 - If you cannot finish within {max_iterations} tool calls, return a concise final answer summarizing what you checked.
 
-Routing result:
-{routing}
-
 Scoped tools JSON:
-{tool_catalog}"""
+{tool_catalog}
+
+Routing result:
+{routing}"""
 
 SUPPORTED_INTENTS = {
     "Gate_Hardware",

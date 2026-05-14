@@ -14,6 +14,7 @@ from app.services.telemetry import (
     TelemetryService,
     audit_diff,
     sanitize_payload,
+    sanitize_query_string,
     span_id,
     trace_id,
 )
@@ -88,6 +89,18 @@ def test_redaction_and_audit_diff_hide_secrets_and_media() -> None:
 
     diff = audit_diff({"schedule": "Mon-Fri", "name": "Steph"}, {"schedule": "24/7", "name": "Steph"})
     assert diff == {"old": {"schedule": "Mon-Fri"}, "new": {"schedule": "24/7"}}
+
+
+def test_query_string_redaction_hides_secret_values() -> None:
+    sanitized = sanitize_query_string(
+        "hub.mode=subscribe&hub.verify_token=secret-token&hub.challenge=123&confirmation_token=abc"
+    )
+
+    assert "secret-token" not in sanitized
+    assert "abc" not in sanitized
+    assert "hub.verify_token=%5Bredacted%5D" in sanitized
+    assert "confirmation_token=%5Bredacted%5D" in sanitized
+    assert "hub.challenge=123" in sanitized
 
 
 def test_telemetry_summary_helpers_count_rows_and_storage() -> None:

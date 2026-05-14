@@ -22,7 +22,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 from sqlalchemy import select
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, get_llm_provider
+from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -1165,14 +1165,17 @@ class DependencyUpdateService:
         )
         try:
             llm = get_llm_provider(provider_name)
-            result = await llm.complete(
+            result = await complete_with_provider_options(
+                llm,
                 [
                     ChatMessageInput(
                         role="system",
                         content="You are a dependency update recovery advisor. Prefer safe, reversible, minimal changes.",
                     ),
                     ChatMessageInput(role="user", content=prompt),
-                ]
+                ],
+                max_output_tokens=900,
+                request_purpose="dependency_updates.recovery_plan",
             )
             return _parse_recovery_json(result.text)
         except Exception as exc:
@@ -1529,14 +1532,17 @@ class DependencyUpdateService:
         if provider_name != "local":
             try:
                 llm = get_llm_provider(provider_name)
-                result = await llm.complete(
+                result = await complete_with_provider_options(
+                    llm,
                     [
                         ChatMessageInput(
                             role="system",
                             content="You are a careful dependency update reviewer for a private access-control system.",
                         ),
                         ChatMessageInput(role="user", content=prompt),
-                    ]
+                    ],
+                    max_output_tokens=1200,
+                    request_purpose="dependency_updates.analysis",
                 )
                 parsed = _parse_analysis_json(result.text)
                 parsed["provider"] = provider_name

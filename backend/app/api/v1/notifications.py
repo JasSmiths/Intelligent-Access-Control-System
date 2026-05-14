@@ -39,6 +39,7 @@ class NotificationRuleRequest(BaseModel):
     conditions: list[dict[str, Any]] = Field(default_factory=list)
     actions: list[dict[str, Any]] = Field(default_factory=list)
     is_active: bool = True
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class NotificationRuleUpdateRequest(BaseModel):
@@ -47,6 +48,7 @@ class NotificationRuleUpdateRequest(BaseModel):
     conditions: list[dict[str, Any]] | None = None
     actions: list[dict[str, Any]] | None = None
     is_active: bool | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class NotificationPreviewRequest(BaseModel):
@@ -61,6 +63,10 @@ class NotificationRuleTestRequest(BaseModel):
 
 
 class StoredNotificationRuleTestRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class NotificationRuleDeleteRequest(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
@@ -89,7 +95,15 @@ async def create_notification_rule(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     user = _
-    normalized = normalize_rule_payload(request.model_dump())
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_confirmation(
+        session,
+        user=user,
+        action="notification_rule.create",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
+    normalized = normalize_rule_payload(confirmation_payload)
     actions = normalized["actions"]
     if not actions:
         raise HTTPException(status_code=400, detail="At least one notification action is required.")
@@ -138,6 +152,14 @@ async def update_notification_rule(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     user = _
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_confirmation(
+        session,
+        user=user,
+        action="notification_rule.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     rule = await get_rule_or_404(session, rule_id)
     before = rule_audit_snapshot(rule)
     legacy_stage = legacy_gate_malfunction_stage(request.trigger_event) if request.trigger_event is not None else ""
@@ -189,10 +211,18 @@ async def update_notification_rule(
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_notification_rule(
     rule_id: uuid.UUID,
+    request: NotificationRuleDeleteRequest | None = None,
     _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     user = _
+    await require_confirmation(
+        session,
+        user=user,
+        action="notification_rule.delete",
+        payload={"rule_id": str(rule_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     rule = await get_rule_or_404(session, rule_id)
     await write_audit_log(
         session,

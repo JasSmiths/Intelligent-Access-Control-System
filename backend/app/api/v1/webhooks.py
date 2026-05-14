@@ -355,6 +355,7 @@ def _read_with_smart_zone_evidence_metadata(
         source=read.source,
         captured_at=read.captured_at,
         raw_payload=raw_payload,
+        candidate_registration_numbers=read.candidate_registration_numbers,
     )
 
 

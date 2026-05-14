@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, Anomaly, Person, Presence, Vehicle, VisitorPass
+from app.models import AccessEvent, Anomaly, GateStateObservation, Person, Presence, Vehicle, VisitorPass
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
@@ -52,6 +52,12 @@ MISSED_EVENT_BACKFILL_OVERLAP = timedelta(minutes=2)
 MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW = timedelta(seconds=90)
 MISSED_EVENT_BACKFILL_PROTECT_LIMIT = 250
 MISSED_EVENT_BACKFILL_SOURCE = "unifi_protect_restart_backfill"
+MISSED_EVENT_RECONCILIATION_SOURCE = "unifi_protect_lpr_reconciliation"
+MISSED_EVENT_RECONCILIATION_INTERVAL_SECONDS = 120.0
+MISSED_EVENT_RECONCILIATION_INITIAL_LOOKBACK = timedelta(minutes=15)
+MISSED_EVENT_RECONCILIATION_REASON = (
+    "UniFi Protect retained an LPR event that did not arrive through the webhook while the backend was running."
+)
 
 
 @dataclass(frozen=True)
@@ -144,12 +150,61 @@ async def backfill_missed_access_events_safely(
         return result
 
 
+async def run_missed_access_event_reconciliation(
+    *,
+    interval_seconds: float = MISSED_EVENT_RECONCILIATION_INTERVAL_SECONDS,
+    initial_lookback: timedelta = MISSED_EVENT_RECONCILIATION_INITIAL_LOOKBACK,
+) -> None:
+    """Continuously reconcile retained Protect LPR events that webhooks missed."""
+
+    service = MissedAccessEventBackfillService(
+        source=MISSED_EVENT_RECONCILIATION_SOURCE,
+        backfill_reason=MISSED_EVENT_RECONCILIATION_REASON,
+    )
+    window_start = datetime.now(tz=UTC) - initial_lookback
+    while True:
+        window_end = datetime.now(tz=UTC)
+        try:
+            result = await service.run(
+                startup_at=window_end,
+                window_start_override=window_start - MISSED_EVENT_BACKFILL_OVERLAP,
+            )
+            await _audit_backfill_result(
+                result,
+                action="access_event.reconciliation_checked",
+                target_label="Protect LPR reconciliation",
+            )
+            logger.info("missed_access_event_reconciliation_finished", extra=asdict(result))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("missed_access_event_reconciliation_failed", extra={"error": str(exc)})
+            result = MissedAccessEventBackfillResult(errors=1, reason=str(exc))
+            await _audit_backfill_result(
+                result,
+                action="access_event.reconciliation_checked",
+                target_label="Protect LPR reconciliation",
+            )
+        window_start = window_end
+        await asyncio.sleep(interval_seconds)
+
+
 class MissedAccessEventBackfillService:
+    def __init__(
+        self,
+        *,
+        source: str = MISSED_EVENT_BACKFILL_SOURCE,
+        backfill_reason: str = "UniFi Protect retained an LPR event during a backend/container restart window.",
+    ) -> None:
+        self.source = source
+        self.backfill_reason = backfill_reason
+
     async def run(
         self,
         *,
         previous_runtime_state: dict[str, Any] | None = None,
         startup_at: datetime | None = None,
+        window_start_override: datetime | None = None,
     ) -> MissedAccessEventBackfillResult:
         startup = _aware_utc(startup_at or datetime.now(tz=UTC))
         protect = get_unifi_protect_service()
@@ -162,15 +217,20 @@ class MissedAccessEventBackfillService:
         async with AsyncSessionLocal() as session:
             latest_event_at = await session.scalar(select(func.max(AccessEvent.occurred_at)))
 
-        window_start = backfill_window_start(
-            previous_runtime_state or {},
-            startup,
-            latest_event_at=latest_event_at,
+        window_start = (
+            _aware_utc(window_start_override)
+            if window_start_override
+            else backfill_window_start(
+                previous_runtime_state or {},
+                startup,
+                latest_event_at=latest_event_at,
+            )
         )
         result.window_start = window_start.isoformat()
 
         events = await protect.list_events(
             limit=MISSED_EVENT_BACKFILL_PROTECT_LIMIT,
+            event_type="smartDetectZone",
             since=window_start,
             until=startup,
         )
@@ -290,6 +350,7 @@ class MissedAccessEventBackfillService:
             direction, direction_resolution = await self._direction_for_backfill(
                 session,
                 person,
+                captured_at=candidate.captured_at,
                 allowed=allowed,
                 visitor_pass_mode=visitor_pass_mode,
             )
@@ -297,7 +358,7 @@ class MissedAccessEventBackfillService:
                 "Missed Access Event Backfill",
                 category=TELEMETRY_CATEGORY_ACCESS,
                 actor="System",
-                source=MISSED_EVENT_BACKFILL_SOURCE,
+                source=self.source,
                 registration_number=candidate.registration_number,
                 context={
                     "protect_event_id": candidate.protect_event_id,
@@ -325,13 +386,13 @@ class MissedAccessEventBackfillService:
                 direction=direction,
                 decision=decision,
                 confidence=candidate.confidence,
-                source=MISSED_EVENT_BACKFILL_SOURCE,
+                source=self.source,
                 occurred_at=candidate.captured_at,
                 timing_classification=TimingClassification.UNKNOWN,
                 raw_payload={
                     "backfill": {
-                        "source": "startup_reconciliation",
-                        "reason": "UniFi Protect retained an LPR event during a backend/container restart window.",
+                        "source": self._backfill_payload_source(),
+                        "reason": self.backfill_reason,
                         "created_by": "System",
                         "created_at": datetime.now(tz=UTC).isoformat(),
                         "hardware_actions_suppressed": True,
@@ -375,7 +436,7 @@ class MissedAccessEventBackfillService:
             await write_audit_log(
                 session,
                 category=TELEMETRY_CATEGORY_ACCESS,
-                action="access_event.restart_backfilled",
+                action=self._audit_backfill_action(),
                 actor="System",
                 target_entity="AccessEvent",
                 target_id=event.id,
@@ -423,7 +484,7 @@ class MissedAccessEventBackfillService:
         trace.finish(
             status="ok",
             level="warning" if anomalies or decision == AccessDecision.DENIED else "info",
-            summary=f"Restart backfilled {event.direction.value} for plate {event.registration_number}",
+            summary=f"Backfilled {event.direction.value} for plate {event.registration_number}",
             access_event_id=event.id,
             context={
                 "event_id": str(event.id),
@@ -450,7 +511,7 @@ class MissedAccessEventBackfillService:
                 "timing_classification": event.timing_classification.value,
                 "anomaly_count": len(anomalies),
                 "backfilled": True,
-                "backfill_source": "startup_reconciliation",
+                "backfill_source": self._backfill_payload_source(),
             },
         )
         return True
@@ -520,6 +581,7 @@ class MissedAccessEventBackfillService:
         session: AsyncSession,
         person: Person | None,
         *,
+        captured_at: datetime,
         allowed: bool,
         visitor_pass_mode: str | None = None,
     ) -> tuple[AccessDirection, dict[str, Any]]:
@@ -541,6 +603,16 @@ class MissedAccessEventBackfillService:
                 "direction": AccessDirection.ENTRY.value,
                 "restart_backfill": True,
             }
+        gate_observation, closed_at = await _gate_observation_for_backfill(session, captured_at)
+        gate_direction = _direction_from_gate_observation(gate_observation)
+        if gate_direction:
+            return gate_direction, {
+                "source": "protect_event_backfill_with_gate_state",
+                "direction": gate_direction.value,
+                "gate_observation": _gate_observation_payload(gate_observation, closed_at=closed_at),
+                "restart_backfill": self.source == MISSED_EVENT_BACKFILL_SOURCE,
+                "reconciliation": self.source == MISSED_EVENT_RECONCILIATION_SOURCE,
+            }
         if not person:
             return AccessDirection.ENTRY, {
                 "source": "restart_backfill_default",
@@ -561,6 +633,16 @@ class MissedAccessEventBackfillService:
             "previous_presence_state": presence.state.value if presence else None,
             "restart_backfill": True,
         }
+
+    def _audit_backfill_action(self) -> str:
+        if self.source == MISSED_EVENT_RECONCILIATION_SOURCE:
+            return "access_event.reconciled"
+        return "access_event.restart_backfilled"
+
+    def _backfill_payload_source(self) -> str:
+        if self.source == MISSED_EVENT_RECONCILIATION_SOURCE:
+            return "protect_reconciliation"
+        return "startup_reconciliation"
 
     async def _attach_protect_thumbnail(
         self,
@@ -715,6 +797,77 @@ def _build_backfill_anomalies(
     return []
 
 
+async def _gate_observation_for_backfill(
+    session: AsyncSession,
+    captured_at: datetime,
+) -> tuple[GateStateObservation | None, datetime | None]:
+    captured = _aware_utc(captured_at)
+    observations = (
+        await session.scalars(
+            select(GateStateObservation)
+            .where(
+                GateStateObservation.observed_at >= captured - timedelta(minutes=5),
+                GateStateObservation.observed_at <= captured + timedelta(minutes=5),
+            )
+            .order_by(GateStateObservation.observed_at)
+        )
+    ).all()
+    if not observations:
+        return None, None
+
+    open_states = {"open", "opening", "closing"}
+    open_observations = [
+        row for row in observations if str(row.state or "").lower() in open_states
+    ]
+    nearest = min(
+        open_observations or observations,
+        key=lambda row: abs((_aware_utc(row.observed_at) - captured).total_seconds()),
+    )
+    closed_at = next(
+        (
+            row.observed_at
+            for row in observations
+            if str(row.state or "").lower() == "closed" and _aware_utc(row.observed_at) >= captured
+        ),
+        None,
+    )
+    return nearest, closed_at
+
+
+def _direction_from_gate_observation(observation: GateStateObservation | None) -> AccessDirection | None:
+    if not observation:
+        return None
+    state = str(observation.state or "").lower()
+    if state == "closed":
+        return AccessDirection.ENTRY
+    if state in {"open", "opening", "closing"}:
+        return AccessDirection.EXIT
+    return None
+
+
+def _gate_observation_payload(
+    observation: GateStateObservation | None,
+    *,
+    closed_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    if not observation:
+        return None
+    payload = {
+        "state": observation.state,
+        "raw_state": observation.raw_state,
+        "previous_state": observation.previous_state,
+        "source": observation.source,
+        "gate_name": observation.gate_name,
+        "gate_entity_id": observation.gate_entity_id,
+        "observed_at": _aware_utc(observation.observed_at).isoformat(),
+        "state_changed_at": _aware_utc(observation.state_changed_at).isoformat()
+        if observation.state_changed_at
+        else None,
+        "closed_at": _aware_utc(closed_at).isoformat() if closed_at else None,
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
 def _visitor_pass_payload(visitor_pass: VisitorPass | None, mode: str | None) -> dict[str, Any] | None:
     if not visitor_pass:
         return None
@@ -728,13 +881,24 @@ def _visitor_pass_payload(visitor_pass: VisitorPass | None, mode: str | None) ->
 
 
 async def _update_presence(session: AsyncSession, person: Person, event: AccessEvent) -> None:
+    latest_event = await session.scalar(
+        select(AccessEvent)
+        .where(
+            AccessEvent.person_id == person.id,
+            AccessEvent.decision == AccessDecision.GRANTED,
+            AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
+        )
+        .order_by(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc())
+        .limit(1)
+    )
+    target_event = latest_event or event
     presence = await session.get(Presence, person.id)
     if not presence:
         presence = Presence(person_id=person.id)
         session.add(presence)
-    presence.state = PresenceState.PRESENT if event.direction == AccessDirection.ENTRY else PresenceState.EXITED
-    presence.last_event_id = event.id
-    presence.last_changed_at = event.occurred_at
+    presence.state = PresenceState.PRESENT if target_event.direction == AccessDirection.ENTRY else PresenceState.EXITED
+    presence.last_event_id = target_event.id
+    presence.last_changed_at = target_event.occurred_at
 
 
 def _schedule_evaluation_payload(schedule_evaluation: ScheduleEvaluation | None) -> dict[str, Any]:
@@ -840,16 +1004,22 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-async def _audit_backfill_result(result: MissedAccessEventBackfillResult) -> None:
+async def _audit_backfill_result(
+    result: MissedAccessEventBackfillResult,
+    *,
+    action: str = "access_event.restart_backfill_checked",
+    actor: str = "System",
+    target_label: str = "Startup restart reconciliation",
+) -> None:
     try:
         async with AsyncSessionLocal() as session:
             await write_audit_log(
                 session,
                 category=TELEMETRY_CATEGORY_ACCESS,
-                action="access_event.restart_backfill_checked",
-                actor="System",
+                action=action,
+                actor=actor,
                 target_entity="AccessEvent",
-                target_label="Startup restart reconciliation",
+                target_label=target_label,
                 metadata=asdict(result),
                 outcome="success" if result.errors == 0 else "warning",
                 level="info" if result.errors == 0 else "warning",

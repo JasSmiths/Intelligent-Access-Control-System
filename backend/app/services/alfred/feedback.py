@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
-from app.ai.providers import ChatMessageInput, get_llm_provider
+from app.ai.providers import ChatMessageInput, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AlfredEvalExample, AlfredFeedback, AlfredLesson, ChatMessage, User
@@ -1578,13 +1578,13 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
 
 
 async def _provider_complete(provider: Any, messages: list[ChatMessageInput], *, model_name: str | None) -> Any:
-    if model_name:
-        try:
-            return await provider.complete(messages, model=model_name)
-        except TypeError as exc:
-            if "unexpected keyword" not in str(exc):
-                raise
-    return await provider.complete(messages)
+    return await complete_with_provider_options(
+        provider,
+        messages,
+        model=model_name,
+        max_output_tokens=700,
+        request_purpose="alfred.feedback_reflection",
+    )
 
 
 alfred_feedback_service = AlfredFeedbackService()

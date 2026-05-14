@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -12,6 +12,7 @@ class PlateRead:
     source: str
     captured_at: datetime
     raw_payload: dict
+    candidate_registration_numbers: tuple[str, ...] = field(default_factory=tuple)
 
 
 class LprAdapter(Protocol):
