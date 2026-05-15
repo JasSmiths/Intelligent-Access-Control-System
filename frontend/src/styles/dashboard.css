@@ -597,6 +597,16 @@
   text-align: right;
 }
 
+.event-feed-row > .badge {
+  justify-self: end;
+  max-width: 170px;
+}
+
+.event-feed-row > .badge .badge-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .feed-line {
   width: 2px;
   height: 48px;

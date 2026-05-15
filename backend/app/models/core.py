@@ -26,8 +26,10 @@ from app.models.enums import (
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
+    GateCommandState,
     GateMalfunctionStatus,
     GroupCategory,
+    MovementSagaState,
     PresenceState,
     TimingClassification,
     UserRole,
@@ -748,6 +750,7 @@ class AccessEvent(Base, TimestampMixin):
 
     vehicle: Mapped[Vehicle | None] = relationship(back_populates="events")
     anomalies: Mapped[list["Anomaly"]] = relationship(back_populates="event")
+    movement_sagas: Mapped[list["MovementSagaRecord"]] = relationship(back_populates="access_event")
 
 
 Index("ix_access_events_created_at", AccessEvent.created_at)
@@ -763,6 +766,93 @@ Index(
     AccessEvent.created_at,
     postgresql_where=AccessEvent.snapshot_path.is_not(None),
 )
+
+
+class MovementSagaRecord(Base, TimestampMixin):
+    __tablename__ = "movement_sagas"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    state: Mapped[MovementSagaState] = mapped_column(
+        Enum(MovementSagaState),
+        default=MovementSagaState.OBSERVED,
+        nullable=False,
+        index=True,
+    )
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"), index=True)
+    registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
+    direction: Mapped[AccessDirection | None] = mapped_column(Enum(AccessDirection), index=True)
+    decision: Mapped[AccessDecision | None] = mapped_column(Enum(AccessDecision), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    gate_command_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    presence_committed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reconciliation_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    failure_detail: Mapped[str | None] = mapped_column(Text)
+    intent_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    decision_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    state_history: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+
+    access_event: Mapped[AccessEvent | None] = relationship(back_populates="movement_sagas")
+    gate_commands: Mapped[list["GateCommandRecord"]] = relationship(back_populates="movement_saga")
+
+
+class GateCommandRecord(Base, TimestampMixin):
+    __tablename__ = "gate_command_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False, index=True)
+    movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("movement_sagas.id", ondelete="SET NULL"),
+        index=True,
+    )
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    state: Mapped[GateCommandState] = mapped_column(
+        Enum(GateCommandState),
+        default=GateCommandState.PENDING,
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(40), default="open", nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    gate_key: Mapped[str] = mapped_column(String(120), default="default", nullable=False, index=True)
+    controller: Mapped[str] = mapped_column(String(80), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str | None] = mapped_column(String(160))
+    registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
+    bypass_schedule: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(80), index=True)
+    leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    accepted: Mapped[bool | None] = mapped_column(Boolean)
+    gate_state: Mapped[str | None] = mapped_column(String(40))
+    detail: Mapped[str | None] = mapped_column(Text)
+    mechanically_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    requires_reconciliation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    exception_class: Mapped[str | None] = mapped_column(String(120))
+    command_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    movement_saga: Mapped[MovementSagaRecord | None] = relationship(back_populates="gate_commands")
+
+
+Index("ix_movement_sagas_state_updated_at", MovementSagaRecord.state, MovementSagaRecord.updated_at)
+Index(
+    "ix_movement_sagas_reconciliation_updated_at",
+    MovementSagaRecord.reconciliation_required,
+    MovementSagaRecord.updated_at,
+)
+Index("ix_gate_command_records_gate_state_lease", GateCommandRecord.gate_key, GateCommandRecord.state, GateCommandRecord.lease_expires_at)
+Index("ix_gate_command_records_reconciliation_updated", GateCommandRecord.requires_reconciliation, GateCommandRecord.updated_at)
 
 
 class ReportExport(Base, TimestampMixin):

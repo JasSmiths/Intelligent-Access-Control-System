@@ -64,6 +64,28 @@ class GateMalfunctionStatus(StrEnum):
     FUBAR = "fubar"
 
 
+class MovementSagaState(StrEnum):
+    OBSERVED = "observed"
+    DIRECTION_RESOLVED = "direction_resolved"
+    PHYSICAL_COMMAND_PENDING = "physical_command_pending"
+    PHYSICAL_COMMAND_ACCEPTED = "physical_command_accepted"
+    PRESENCE_COMMITTED = "presence_committed"
+    COMPLETED = "completed"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+    FAILED = "failed"
+    SUPPRESSED = "suppressed"
+
+
+class GateCommandState(StrEnum):
+    PENDING = "pending"
+    LEASED = "leased"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+    RECONCILED = "reconciled"
+
+
 class UserRole(StrEnum):
     ADMIN = "admin"
     STANDARD = "standard"

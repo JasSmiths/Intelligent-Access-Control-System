@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    access,
     action_confirmations,
     ai,
     automations,
@@ -34,6 +35,7 @@ from app.simulation.router import router as simulation_router
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["Health"])
+api_router.include_router(access.router, prefix="/access", tags=["Access Events"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(action_confirmations.router, prefix="/action-confirmations", tags=["Integrations"])
 api_router.include_router(dependency_updates.router, prefix="/dependency-updates", tags=["Dependency Updates"])

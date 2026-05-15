@@ -84,6 +84,15 @@ class FailingUnifiPayloadRecorder:
         raise RuntimeError(f"{self.message} for {registration_number}")
 
 
+class FakeUnifiProtectService:
+    async def resolve_lpr_smart_zone_names(self, zones, *, camera_identifier=None):
+        return {
+            "camera_identifier": camera_identifier,
+            "raw_smart_zones": [str(zone) for zone in zones],
+            "smart_zones": ["default" for _zone in zones],
+        }
+
+
 class FakeAccessEventService:
     def __init__(self) -> None:
         self.enqueued = []
@@ -106,6 +115,7 @@ def webhook_runtime(monkeypatch):
 
     monkeypatch.setattr(webhooks, "get_runtime_config", runtime_config)
     monkeypatch.setattr(webhooks, "get_lpr_timing_recorder", lambda: FakeLprTimingRecorder())
+    monkeypatch.setattr(webhooks, "get_unifi_protect_service", lambda: FakeUnifiProtectService())
     monkeypatch.setattr(webhooks, "get_vehicle_visual_detection_recorder", lambda: visual_recorder)
     monkeypatch.setattr(webhooks, "get_vehicle_presence_tracker", lambda: presence_tracker)
     monkeypatch.setattr(webhooks.event_bus, "publish", publish)

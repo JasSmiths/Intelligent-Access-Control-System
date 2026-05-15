@@ -100,6 +100,7 @@ import {
   isActionableAlert,
   isRecord,
   MaintenanceStatus,
+  MovementSagaSummary,
   NavigateToView,
   notificationEventLabel,
   nullableString,
@@ -400,7 +401,33 @@ function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
     snapshot_bytes: nullableNumber(event.payload.snapshot_bytes),
     snapshot_width: nullableNumber(event.payload.snapshot_width),
     snapshot_height: nullableNumber(event.payload.snapshot_height),
-    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null
+    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null,
+    movement_saga: movementSagaFromPayload(event.payload.movement_saga)
+  };
+}
+
+function movementSagaFromPayload(value: unknown): MovementSagaSummary | null {
+  if (!isRecord(value)) return null;
+  const state = stringPayload(value.state);
+  if (!state) return null;
+  const gate = isRecord(value.gate) ? value.gate : null;
+  return {
+    id: stringPayload(value.id) || null,
+    state,
+    reconciliation_required: value.reconciliation_required === true,
+    gate_command_required: value.gate_command_required === true,
+    presence_committed: value.presence_committed === true,
+    failure_detail: stringPayload(value.failure_detail) || null,
+    updated_at: stringPayload(value.updated_at) || null,
+    detail: stringPayload(value.detail) || null,
+    gate: gate ? {
+      command_id: stringPayload(gate.command_id) || null,
+      accepted: typeof gate.accepted === "boolean" ? gate.accepted : null,
+      state: stringPayload(gate.state) || null,
+      detail: stringPayload(gate.detail) || null,
+      mechanically_confirmed: gate.mechanically_confirmed === true,
+      requires_reconciliation: gate.requires_reconciliation === true
+    } : null
   };
 }
 

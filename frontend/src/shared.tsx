@@ -149,6 +149,26 @@ export type AccessEvent = {
   snapshot_width: number | null;
   snapshot_height: number | null;
   snapshot_camera: string | null;
+  movement_saga: MovementSagaSummary | null;
+};
+
+export type MovementSagaSummary = {
+  id?: string | null;
+  state: string;
+  reconciliation_required?: boolean;
+  gate_command_required?: boolean;
+  presence_committed?: boolean;
+  failure_detail?: string | null;
+  updated_at?: string | null;
+  detail?: string | null;
+  gate?: {
+    command_id?: string | null;
+    accepted?: boolean | null;
+    state?: string | null;
+    detail?: string | null;
+    mechanically_confirmed?: boolean;
+    requires_reconciliation?: boolean;
+  } | null;
 };
 
 export type AlertSeverity = "info" | "warning" | "critical";
@@ -803,6 +823,23 @@ export function EmptyState({ icon: Icon, label }: { icon: React.ElementType; lab
 }
 
 export type BadgeTone = "green" | "gray" | "amber" | "red" | "blue" | "purple";
+
+export function movementSagaDisplay(summary: MovementSagaSummary | null | undefined): { label: string; tone: BadgeTone } | null {
+  if (!summary) return null;
+  const state = summary.state || "";
+  if (summary.reconciliation_required || state === "reconciliation_required") {
+    return { label: "Needs Reconciliation", tone: "amber" };
+  }
+  if (state === "failed") return { label: "Failed", tone: "red" };
+  if (state === "suppressed") return { label: "Suppressed", tone: "gray" };
+  if (["observed", "direction_resolved", "physical_command_pending", "physical_command_accepted"].includes(state)) {
+    return { label: "Pending", tone: "blue" };
+  }
+  if (state === "completed" || state === "presence_committed" || summary.presence_committed) {
+    return { label: "Confirmed", tone: "green" };
+  }
+  return { label: titleCase(state), tone: "gray" };
+}
 
 export type SettingFieldDefinition = {
   key: string;

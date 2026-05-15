@@ -24,9 +24,11 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.modules.gate.base import GateState
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
 from app.services.event_bus import event_bus
+from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
 from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
@@ -198,6 +200,7 @@ class MissedAccessEventBackfillService:
     ) -> None:
         self.source = source
         self.backfill_reason = backfill_reason
+        self._movement_direction_fsm = MovementDirectionFSM()
 
     async def run(
         self,
@@ -604,35 +607,34 @@ class MissedAccessEventBackfillService:
                 "restart_backfill": True,
             }
         gate_observation, closed_at = await _gate_observation_for_backfill(session, captured_at)
-        gate_direction = _direction_from_gate_observation(gate_observation)
-        if gate_direction:
-            return gate_direction, {
-                "source": "protect_event_backfill_with_gate_state",
-                "direction": gate_direction.value,
-                "gate_observation": _gate_observation_payload(gate_observation, closed_at=closed_at),
-                "restart_backfill": self.source == MISSED_EVENT_BACKFILL_SOURCE,
-                "reconciliation": self.source == MISSED_EVENT_RECONCILIATION_SOURCE,
-            }
-        if not person:
-            return AccessDirection.ENTRY, {
-                "source": "restart_backfill_default",
-                "direction": AccessDirection.ENTRY.value,
-                "restart_backfill": True,
-            }
-        presence = await session.get(Presence, person.id)
-        if presence and presence.state == PresenceState.PRESENT:
-            return AccessDirection.EXIT, {
-                "source": "presence_state_at_backfill",
-                "direction": AccessDirection.EXIT.value,
-                "previous_presence_state": presence.state.value,
-                "restart_backfill": True,
-            }
-        return AccessDirection.ENTRY, {
-            "source": "presence_state_at_backfill",
-            "direction": AccessDirection.ENTRY.value,
-            "previous_presence_state": presence.state.value if presence else None,
-            "restart_backfill": True,
+        gate_observation_payload = _gate_observation_payload(gate_observation, closed_at=closed_at)
+        presence = await session.get(Presence, person.id) if person else None
+        decision = self._movement_direction_fsm.resolve(
+            MovementIntent(
+                source=self.source,
+                captured_at=captured_at,
+                registration_number="",
+                allowed=allowed,
+                person_known=person is not None,
+                gate_state=_gate_state_from_observation(gate_observation),
+                gate_observation=gate_observation_payload,
+                presence_state=presence.state if presence else None,
+            )
+        )
+        resolution = {
+            **decision.resolution,
+            "direction": decision.direction.value,
+            "restart_backfill": self.source == MISSED_EVENT_BACKFILL_SOURCE,
+            "reconciliation": self.source == MISSED_EVENT_RECONCILIATION_SOURCE,
         }
+        if gate_observation and resolution.get("source") == "gate_state":
+            resolution["source"] = "protect_event_backfill_with_gate_state"
+        elif not person and resolution.get("source") == "default_entry_no_person":
+            resolution["source"] = "restart_backfill_default"
+        elif person and resolution.get("source") == "presence":
+            resolution["source"] = "presence_state_at_backfill"
+            resolution["previous_presence_state"] = presence.state.value if presence else None
+        return decision.direction, resolution
 
     def _audit_backfill_action(self) -> str:
         if self.source == MISSED_EVENT_RECONCILIATION_SOURCE:
@@ -843,6 +845,15 @@ def _direction_from_gate_observation(observation: GateStateObservation | None) -
     if state in {"open", "opening", "closing"}:
         return AccessDirection.EXIT
     return None
+
+
+def _gate_state_from_observation(observation: GateStateObservation | None) -> GateState:
+    if not observation:
+        return GateState.UNKNOWN
+    try:
+        return GateState(str(observation.state or "").lower())
+    except ValueError:
+        return GateState.UNKNOWN
 
 
 def _gate_observation_payload(

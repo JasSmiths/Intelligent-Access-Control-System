@@ -29,6 +29,7 @@ from app.models.enums import (
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
+    MovementSagaState,
     PresenceState,
     TimingClassification,
     VisitorPassStatus,
@@ -38,9 +39,19 @@ from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
+from app.services.movement_fsm import (
+    CameraTieBreakerEvidence,
+    MovementDirectionFSM,
+    MovementIntent,
+    MovementSuppressionFSM,
+    PlateReadMovementEvidence,
+    ResolvedMovementWindow,
+)
 from app.services.notifications import get_notification_service
 from app.services.schedules import ScheduleEvaluation, evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
@@ -259,6 +270,9 @@ class AccessEventService:
         self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
         self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
         self._active_vehicle_sessions: list[ActiveVehicleSession] = []
+        self._movement_direction_fsm = MovementDirectionFSM()
+        self._movement_suppression_fsm = MovementSuppressionFSM()
+        self._movement_ledger = get_movement_ledger_repository()
         self._started_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
         self._last_processed_at: datetime | None = None
@@ -997,26 +1011,29 @@ class AccessEventService:
     def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
         self._prune_recent_exact_resolutions(read.captured_at)
         match = _known_vehicle_plate_match_from_read(read)
-        read_gate_state = self._coerce_gate_state(self._gate_observation_from_read(read).get("state"))
-        for resolution in self._recent_exact_resolutions:
-            if read.source != resolution.source:
-                continue
-            if resolution.first_seen <= read.captured_at <= resolution.debounce_expires_at:
-                if match and read.registration_number != resolution.registration_number:
-                    continue
-                return "exact_known_vehicle_plate_already_resolved_in_debounce_window"
-            if not (
-                resolution.decision == AccessDecision.GRANTED
-                and resolution.direction in {AccessDirection.ENTRY, AccessDirection.EXIT}
-                and match
-                and read.registration_number == resolution.registration_number
-                and read_gate_state != GateState.CLOSED
-                and not self._read_direction_conflicts_with_resolution(read, resolution.direction)
-                and resolution.first_seen <= read.captured_at <= resolution.gate_cycle_expires_at
-            ):
-                continue
-            return "exact_known_vehicle_plate_already_resolved_in_gate_cycle"
-        return None
+        decision = self._movement_suppression_fsm.classify_exact_plate_read(
+            PlateReadMovementEvidence(
+                source=read.source,
+                registration_number=read.registration_number,
+                captured_at=read.captured_at,
+                gate_state=self._coerce_gate_state(self._gate_observation_from_read(read).get("state")),
+                direction_hint=self._read_direction_hint(read),
+                has_known_vehicle_match=bool(match),
+            ),
+            (
+                ResolvedMovementWindow(
+                    source=resolution.source,
+                    registration_number=resolution.registration_number,
+                    first_seen=resolution.first_seen,
+                    debounce_expires_at=resolution.debounce_expires_at,
+                    gate_cycle_expires_at=resolution.gate_cycle_expires_at,
+                    direction=resolution.direction,
+                    decision=resolution.decision,
+                )
+                for resolution in self._recent_exact_resolutions
+            ),
+        )
+        return decision.reason
 
     def _read_direction_hint(self, read: PlateRead) -> AccessDirection | None:
         gate_state = self._coerce_gate_state(self._gate_observation_from_read(read).get("state"))
@@ -1079,6 +1096,7 @@ class AccessEventService:
 
     async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
         match = _known_vehicle_plate_match_from_read(read) or {}
+        await self._record_suppressed_movement_read(read, reason=reason)
         await event_bus.publish(
             "plate_read.suppressed",
             {
@@ -1088,6 +1106,36 @@ class AccessEventService:
                 "reason": reason,
             },
         )
+
+    async def _record_suppressed_movement_read(self, read: PlateRead, *, reason: str) -> None:
+        try:
+            async with AsyncSessionLocal() as session:
+                saga = await self._movement_ledger.create_movement_saga(
+                    session,
+                    idempotency_key=f"movement-suppressed:{self._movement_saga_idempotency_key(read)}:{reason}",
+                    source=read.source,
+                    occurred_at=read.captured_at,
+                    registration_number=_detected_registration_number(read),
+                    state=MovementSagaState.SUPPRESSED,
+                    intent_payload={
+                        "source": read.source,
+                        "captured_at": read.captured_at.isoformat(),
+                        "registration_number": read.registration_number,
+                        "detected_registration_number": _detected_registration_number(read),
+                        "confidence": read.confidence,
+                    },
+                    decision_payload={"suppression_reason": reason},
+                )
+                await self._movement_ledger.transition_movement_saga(
+                    session,
+                    saga,
+                    MovementSagaState.SUPPRESSED,
+                    detail=reason,
+                    reconciliation_required=False,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("Failed to persist suppressed movement saga for %s.", read.registration_number)
 
     async def _vehicle_session_suppression(self, read: PlateRead) -> VehicleSessionSuppression | None:
         context = self._vehicle_session_context_from_read(read)
@@ -1253,7 +1301,15 @@ class AccessEventService:
         read: PlateRead,
         session: ActiveVehicleSession,
     ) -> bool:
-        return session.direction == AccessDirection.ENTRY and self._read_direction_hint(read) == AccessDirection.EXIT
+        if not (
+            session.direction == AccessDirection.ENTRY
+            and self._read_direction_hint(read) == AccessDirection.EXIT
+        ):
+            return False
+        gate_cycle_expires_at = session.last_seen_at + timedelta(
+            seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS
+        )
+        return read.captured_at > gate_cycle_expires_at
 
     def _read_is_entry_after_exit_idle_expired(
         self,
@@ -1696,6 +1752,11 @@ class AccessEventService:
                 ],
             },
         )
+        presence_updated = False
+        gate_command_required = False
+        gate_open_skipped = False
+        gate_outcome: GateCommandOutcome | None = None
+        movement_saga = None
         async with AsyncSessionLocal() as session:
             vehicle = await self._lookup_active_vehicle(session, read, trace)
             person = vehicle.owner if vehicle else None
@@ -1739,6 +1800,20 @@ class AccessEventService:
                 }
             )
             decision = AccessDecision.GRANTED if allowed else AccessDecision.DENIED
+            movement_saga = await self._movement_ledger.create_movement_saga(
+                session,
+                idempotency_key=self._movement_saga_idempotency_key(read),
+                source=read.source,
+                occurred_at=read.captured_at,
+                registration_number=read.registration_number,
+                person_id=person.id if person else None,
+                vehicle_id=vehicle.id if vehicle else None,
+                direction=direction,
+                decision=decision,
+                state=MovementSagaState.DIRECTION_RESOLVED,
+                intent_payload=self._movement_intent_payload(read, person, vehicle, allowed),
+                decision_payload=direction_resolution,
+            )
             timing_span = trace.start_span(
                 "Presence Timing Classification",
                 attributes={
@@ -1795,6 +1870,24 @@ class AccessEventService:
             )
             session.add(event)
             await session.flush()
+            await self._movement_ledger.transition_movement_saga(
+                session,
+                movement_saga,
+                MovementSagaState.PHYSICAL_COMMAND_PENDING
+                if decision == AccessDecision.GRANTED
+                and direction == AccessDirection.ENTRY
+                and self._automatic_open_allowed(direction_resolution)
+                else MovementSagaState.COMPLETED,
+                detail="access_event_persisted",
+                access_event_id=event.id,
+                gate_command_required=(
+                    decision == AccessDecision.GRANTED
+                    and direction == AccessDirection.ENTRY
+                    and self._automatic_open_allowed(direction_resolution)
+                ),
+                presence_committed=False,
+                decision_payload=direction_resolution,
+            )
             event.raw_payload = {
                 **(event.raw_payload or {}),
                 VEHICLE_SESSION_PAYLOAD_KEY: self._initial_vehicle_session_payload(window, read, event),
@@ -1825,8 +1918,39 @@ class AccessEventService:
             )
             session.add_all(anomalies)
 
-            if allowed and person:
-                await self._update_presence(session, person, event)
+            automatic_entry = (
+                decision == AccessDecision.GRANTED
+                and direction == AccessDirection.ENTRY
+            )
+            gate_command_required = automatic_entry and self._automatic_open_allowed(direction_resolution)
+            gate_open_skipped = automatic_entry and not gate_command_required
+
+            if allowed and person and not gate_command_required:
+                presence_updated = await self._update_presence(session, person, event)
+
+            event.raw_payload = self._raw_payload_with_movement_saga(
+                event.raw_payload,
+                state=(
+                    "physical_command_pending"
+                    if gate_command_required
+                    else "completed"
+                    if not (allowed and person) or presence_updated
+                    else "presence_stale_skipped"
+                ),
+                gate_command_required=gate_command_required,
+                presence_committed=presence_updated,
+                movement_saga=movement_saga,
+                detail=None if gate_command_required else "No blocking physical gate command is pending.",
+            )
+            if not gate_command_required:
+                await self._movement_ledger.transition_movement_saga(
+                    session,
+                    movement_saga,
+                    MovementSagaState.COMPLETED,
+                    detail="no_blocking_gate_command",
+                    presence_committed=presence_updated,
+                    gate_command_required=False,
+                )
 
             if visitor_pass:
                 await session.flush()
@@ -1842,16 +1966,85 @@ class AccessEventService:
             )
 
             await session.commit()
-            self._remember_vehicle_session(event, window, read)
-            persistence_span.finish(
-                output_payload={
-                    "event_id": str(event.id),
-                    "anomaly_count": len(anomalies),
-                    "presence_updated": bool(allowed and person),
-                    "snapshot_path": event.snapshot_path,
-                    "snapshot_bytes": event.snapshot_bytes,
-                }
+
+        if gate_command_required:
+            gate_outcome = await self._open_gate_for_event(
+                event,
+                person,
+                open_garage_doors=True,
+                trace=trace,
+                dvla_enrichment=dvla_enrichment,
+                movement_saga_id=str(movement_saga.id) if movement_saga else None,
             )
+            saga_state = (
+                "physical_command_accepted"
+                if gate_outcome.accepted
+                else "physical_command_failed"
+            )
+            async with AsyncSessionLocal() as session:
+                persisted_event = await session.get(AccessEvent, event.id)
+                if persisted_event:
+                    persisted_saga = await session.merge(movement_saga) if movement_saga else None
+                    if gate_outcome.accepted and gate_outcome.requires_reconciliation:
+                        saga_state = "physical_command_accepted_pending_reconciliation"
+                    elif (
+                        gate_outcome.accepted
+                        and allowed
+                        and person
+                    ):
+                        presence_updated = await self._update_presence(session, person, persisted_event)
+                        saga_state = "presence_committed"
+                        if not presence_updated:
+                            saga_state = "physical_command_accepted_presence_stale_skipped"
+                    if persisted_saga:
+                        await self._movement_ledger.transition_movement_saga(
+                            session,
+                            persisted_saga,
+                            MovementSagaState.RECONCILIATION_REQUIRED
+                            if gate_outcome.requires_reconciliation
+                            else MovementSagaState.COMPLETED
+                            if gate_outcome.accepted
+                            else MovementSagaState.FAILED,
+                            detail=gate_outcome.detail,
+                            presence_committed=presence_updated,
+                            reconciliation_required=gate_outcome.requires_reconciliation,
+                            failure_detail=None if gate_outcome.accepted else gate_outcome.detail,
+                        )
+                    persisted_event.raw_payload = self._raw_payload_with_movement_saga(
+                        persisted_event.raw_payload,
+                        state=saga_state,
+                        gate_command_required=True,
+                        presence_committed=presence_updated,
+                        gate_outcome=gate_outcome,
+                        movement_saga=persisted_saga or movement_saga,
+                        detail=gate_outcome.detail,
+                    )
+                    await session.commit()
+                    event.raw_payload = persisted_event.raw_payload
+                else:
+                    logger.error(
+                        "access_event_missing_for_movement_saga_update",
+                        extra={"event_id": str(event.id), "registration_number": event.registration_number},
+                    )
+        elif gate_open_skipped:
+            await self._publish_gate_open_skipped(event, direction_resolution, person)
+
+        if not (gate_command_required and gate_outcome and not gate_outcome.accepted):
+            self._remember_vehicle_session(event, window, read)
+        persistence_span.finish(
+            output_payload={
+                "event_id": str(event.id),
+                "anomaly_count": len(anomalies),
+                "presence_updated": presence_updated,
+                "gate_command_required": gate_command_required,
+                "gate_command_accepted": gate_outcome.accepted if gate_outcome else None,
+                "snapshot_path": event.snapshot_path,
+                "snapshot_bytes": event.snapshot_bytes,
+            }
+        )
+        saga_payload = (event.raw_payload or {}).get("movement_saga")
+        if isinstance(saga_payload, dict):
+            access_event_realtime_payload["movement_saga"] = saga_payload
 
         await event_bus.publish(
             "access_event.finalized",
@@ -1872,33 +2065,27 @@ class AccessEventService:
                     "leaderboard_overtake_evaluation_failed",
                     extra={"event_id": str(event.id), "registration_number": event.registration_number, "error": str(exc)},
                 )
-        if decision == AccessDecision.GRANTED and direction == AccessDirection.ENTRY:
-            if not self._automatic_open_allowed(direction_resolution):
-                await self._publish_gate_open_skipped(event, direction_resolution, person)
-                gate_opened = False
-            else:
-                gate_opened = await self._open_gate_for_event(
-                    event,
-                    person,
-                    open_garage_doors=True,
-                    trace=trace,
-                    dvla_enrichment=dvla_enrichment,
+        if (
+            decision == AccessDecision.GRANTED
+            and direction == AccessDirection.ENTRY
+            and gate_outcome
+            and gate_outcome.accepted
+            and person
+        ):
+            await get_notification_service().notify(
+                NotificationContext(
+                    event_type="authorized_entry",
+                    subject=f"{person.display_name} arrived at the gate",
+                    severity=AnomalySeverity.INFO.value,
+                    facts=self._notification_facts(
+                        event,
+                        person,
+                        vehicle,
+                        self._authorized_entry_message(person, vehicle),
+                        dvla_enrichment=dvla_enrichment,
+                    ),
                 )
-            if gate_opened and person:
-                await get_notification_service().notify(
-                    NotificationContext(
-                        event_type="authorized_entry",
-                        subject=f"{person.display_name} arrived at the gate",
-                        severity=AnomalySeverity.INFO.value,
-                        facts=self._notification_facts(
-                            event,
-                            person,
-                            vehicle,
-                            self._authorized_entry_message(person, vehicle),
-                            dvla_enrichment=dvla_enrichment,
-                        ),
-                    )
-                )
+            )
 
         for anomaly in anomalies:
             await get_notification_service().notify(
@@ -2098,6 +2285,55 @@ class AccessEventService:
             VISITOR_PASS_PAYLOAD_KEY: self._visitor_pass_payload(visitor_pass, visitor_pass_mode),
             "telemetry": {"trace_id": trace_id},
         }
+
+    def _movement_saga_idempotency_key(self, read: PlateRead) -> str:
+        return f"movement:{read.source}:{read.registration_number}:{read.captured_at.isoformat()}"
+
+    def _movement_intent_payload(
+        self,
+        read: PlateRead,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        allowed: bool,
+    ) -> dict[str, Any]:
+        return {
+            "source": read.source,
+            "captured_at": read.captured_at.isoformat(),
+            "registration_number": read.registration_number,
+            "allowed": allowed,
+            "person_id": str(person.id) if person else None,
+            "vehicle_id": str(vehicle.id) if vehicle else None,
+            "gate_observation": self._gate_observation_from_read(read),
+            "explicit_direction": self._explicit_direction_from_read(read).value
+            if self._explicit_direction_from_read(read)
+            else None,
+            "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
+            "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(read),
+            "gate_malfunction": _gate_malfunction_from_read(read),
+        }
+
+    def _raw_payload_with_movement_saga(
+        self,
+        raw_payload: dict[str, Any] | None,
+        *,
+        state: str,
+        gate_command_required: bool,
+        presence_committed: bool,
+        gate_outcome: GateCommandOutcome | None = None,
+        movement_saga: Any | None = None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(raw_payload or {})
+        summary = movement_saga_summary(movement_saga)
+        payload["movement_saga"] = {
+            **(summary or {}),
+            "state": state,
+            "gate_command_required": gate_command_required,
+            "presence_committed": presence_committed,
+            "detail": detail,
+            "gate": gate_outcome.as_payload() if gate_outcome else None,
+        }
+        return payload
 
     async def _capture_event_snapshot(
         self,
@@ -2423,7 +2659,8 @@ class AccessEventService:
         open_garage_doors: bool,
         trace: Any | None = None,
         dvla_enrichment: dict[str, str | None] | None = None,
-    ) -> bool:
+        movement_saga_id: str | None = None,
+    ) -> GateCommandOutcome:
         reason = (
             f"Automatic LPR grant for {event.registration_number}"
             f"{f' ({person.display_name})' if person else ''}"
@@ -2431,7 +2668,7 @@ class AccessEventService:
         gate_opened = False
         gate_span = (
             trace.start_span(
-                "Home Assistant Gate Open Command Sent",
+                "Gate Command Saga - Open",
                 category=TELEMETRY_CATEGORY_INTEGRATIONS,
                 attributes={
                     "event_id": str(event.id),
@@ -2443,43 +2680,104 @@ class AccessEventService:
             if trace
             else None
         )
-        try:
-            gate = get_gate_controller(settings.gate_controller)
-            result = await gate.open_gate(reason)
-        except UnsupportedModuleError as exc:
-            if gate_span:
-                gate_span.finish(status="error", error=exc)
+        outcome = await get_gate_command_coordinator().execute_open(
+            GateCommandIntent(
+                reason=reason,
+                source="automatic_lpr_grant",
+                controller_name=settings.gate_controller,
+                event_id=str(event.id),
+                movement_saga_id=movement_saga_id,
+                registration_number=event.registration_number,
+                actor="Access Event Automation",
+                idempotency_key=f"gate-command:open:default:event:{event.id}",
+                metadata={
+                    "movement_saga_id": movement_saga_id,
+                    "person_id": str(getattr(person, "id", "")) if person else None,
+                    "vehicle_id": str(getattr(event, "vehicle_id", "")) if getattr(event, "vehicle_id", None) else None,
+                },
+            )
+        )
+        if gate_span:
+            gate_span.finish(
+                status="ok" if outcome.accepted else "error",
+                output_payload=outcome.as_payload(),
+                error=None if outcome.accepted else outcome.detail,
+            )
+        event_type = "gate.open_requested" if outcome.accepted else "gate.open_failed"
+        audit_outcome = "accepted" if outcome.accepted else "rejected"
+        audit_level = "info" if outcome.accepted else "warning"
+        if outcome.exception_class == "UnsupportedModuleError":
+            audit_outcome = "failed"
+            audit_level = "error"
             logger.error(
                 "gate_controller_unavailable",
                 extra={
                     "registration_number": event.registration_number,
                     "event_id": str(event.id),
-                    "error": str(exc),
+                    "error": outcome.detail,
                 },
             )
-            await event_bus.publish(
-                "gate.open_failed",
-                {
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "detail": str(exc),
-                },
-            )
-            await self._audit_automatic_hardware_command(
-                action="gate.open.automatic",
-                event=event,
-                person=person,
-                target_entity="Gate",
-                target_label="Automatic Gate",
-                outcome="failed",
-                level="error",
-                metadata={
-                    "controller": settings.gate_controller,
-                    "reason": reason,
-                    "detail": str(exc),
-                    "state": GateState.UNKNOWN.value,
-                },
-            )
+        else:
+            if outcome.accepted:
+                if outcome.requires_reconciliation:
+                    logger.warning(
+                        "gate_open_requested_pending_reconciliation",
+                        extra={
+                            "registration_number": event.registration_number,
+                            "event_id": str(event.id),
+                            "state": outcome.state.value,
+                            "intent_id": outcome.intent.intent_id,
+                        },
+                    )
+                else:
+                    logger.info(
+                        "gate_open_requested_for_access_event",
+                        extra={
+                            "registration_number": event.registration_number,
+                            "event_id": str(event.id),
+                            "state": outcome.state.value,
+                        },
+                    )
+            else:
+                logger.error(
+                    "gate_open_failed_for_access_event",
+                    extra={
+                        "registration_number": event.registration_number,
+                        "event_id": str(event.id),
+                        "state": outcome.state.value,
+                        "detail": outcome.detail,
+                    },
+                )
+
+        await self._audit_automatic_hardware_command(
+            action="gate.open.automatic",
+            event=event,
+            person=person,
+            target_entity="Gate",
+            target_label="Automatic Gate",
+            outcome=audit_outcome,
+            level=audit_level,
+            metadata={
+                "controller": settings.gate_controller,
+                "reason": reason,
+                **outcome.as_payload(),
+            },
+        )
+        await event_bus.publish(
+            event_type,
+            {
+                "event_id": str(event.id),
+                "registration_number": event.registration_number,
+                "accepted": outcome.accepted,
+                "state": outcome.state.value,
+                "detail": outcome.detail,
+                "intent_id": outcome.intent.intent_id,
+                "mechanically_confirmed": outcome.mechanically_confirmed,
+                "requires_reconciliation": outcome.requires_reconciliation,
+            },
+        )
+        gate_opened = outcome.accepted
+        if not outcome.accepted:
             await get_notification_service().notify(
                 NotificationContext(
                     event_type="gate_open_failed",
@@ -2489,83 +2787,11 @@ class AccessEventService:
                         event,
                         person,
                         event.vehicle,
-                        str(exc),
+                        outcome.detail or "Automatic gate open command failed.",
                         dvla_enrichment=dvla_enrichment,
                     ),
                 )
             )
-        else:
-            if gate_span:
-                gate_span.finish(
-                    status="ok" if result.accepted else "error",
-                    output_payload={
-                        "accepted": result.accepted,
-                        "state": result.state.value,
-                        "detail": result.detail,
-                    },
-                    error=None if result.accepted else result.detail,
-                )
-            event_type = "gate.open_requested" if result.accepted else "gate.open_failed"
-            await self._audit_automatic_hardware_command(
-                action="gate.open.automatic",
-                event=event,
-                person=person,
-                target_entity="Gate",
-                target_label="Automatic Gate",
-                outcome="accepted" if result.accepted else "rejected",
-                level="info" if result.accepted else "warning",
-                metadata={
-                    "controller": settings.gate_controller,
-                    "reason": reason,
-                    "accepted": result.accepted,
-                    "state": result.state.value,
-                    "detail": result.detail,
-                },
-            )
-            await event_bus.publish(
-                event_type,
-                {
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "accepted": result.accepted,
-                    "state": result.state.value,
-                    "detail": result.detail,
-                },
-            )
-            if result.accepted:
-                logger.info(
-                    "gate_open_requested_for_access_event",
-                    extra={
-                        "registration_number": event.registration_number,
-                        "event_id": str(event.id),
-                        "state": result.state.value,
-                    },
-                )
-                gate_opened = True
-            else:
-                logger.error(
-                    "gate_open_failed_for_access_event",
-                    extra={
-                        "registration_number": event.registration_number,
-                        "event_id": str(event.id),
-                        "state": result.state.value,
-                        "detail": result.detail,
-                    },
-                )
-                await get_notification_service().notify(
-                    NotificationContext(
-                        event_type="gate_open_failed",
-                        subject=event.registration_number,
-                        severity=AnomalySeverity.CRITICAL.value,
-                        facts=self._notification_facts(
-                            event,
-                            person,
-                            event.vehicle,
-                            result.detail or "Automatic gate open command failed.",
-                            dvla_enrichment=dvla_enrichment,
-                        ),
-                    )
-                )
 
         if gate_opened and open_garage_doors:
             await self._open_garage_doors_for_event(
@@ -2575,7 +2801,7 @@ class AccessEventService:
                 trace=trace,
                 dvla_enrichment=dvla_enrichment,
             )
-        return gate_opened
+        return outcome
 
     async def _publish_gate_open_skipped(
         self, event: AccessEvent, direction_resolution: dict[str, Any], person: Person | None = None
@@ -3023,25 +3249,12 @@ class AccessEventService:
         trace: Any | None = None,
     ) -> tuple[AccessDirection, dict[str, Any]]:
         gate_observation = self._gate_observation_from_read(read)
-        gate_state = self._coerce_gate_state(gate_observation.get("state"))
-        resolution: dict[str, Any] = {
-            "source": "unknown",
-            "gate_observation": gate_observation,
-        }
-
-        if not allowed:
-            resolution["source"] = "access_denied"
-            resolution["direction"] = AccessDirection.DENIED.value
-            return AccessDirection.DENIED, resolution
-
+        gate_state = self._coerce_gate_state(gate_observation.get("state")) or GateState.UNKNOWN
         visitor_pass_match = _visitor_pass_plate_match_from_read(read)
-        if isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure":
-            resolution["source"] = "visitor_pass_presence"
-            resolution["direction"] = AccessDirection.EXIT.value
-            resolution["visitor_pass_id"] = visitor_pass_match.get("visitor_pass_id")
-            return AccessDirection.EXIT, resolution
-
+        visitor_pass_departure = isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure"
         gate_malfunction = _gate_malfunction_from_read(read)
+        previous_event: AccessEvent | None = None
+        previous_event_payload: dict[str, Any] = {}
         if gate_malfunction and (person or vehicle):
             previous_event = await self._latest_live_person_or_vehicle_event(
                 session,
@@ -3049,83 +3262,79 @@ class AccessEventService:
                 vehicle=vehicle,
                 before=read.captured_at,
             )
-            direction = (
-                AccessDirection.EXIT
-                if previous_event and previous_event.direction == AccessDirection.ENTRY
-                else AccessDirection.ENTRY
-            )
             match_scope = self._previous_event_match_scope(previous_event, person=person, vehicle=vehicle)
-            resolution.update(
-                {
-                    "source": "gate_malfunction_vehicle_history",
-                    "direction": direction.value,
-                    "gate_malfunction": gate_malfunction,
-                    "history_lookup": "person_or_vehicle",
-                    "previous_live_match_scope": match_scope,
-                    "previous_live_event_id": str(previous_event.id) if previous_event else None,
-                    "previous_live_direction": previous_event.direction.value if previous_event else None,
-                    "previous_live_event_at": previous_event.occurred_at.isoformat() if previous_event else None,
-                }
-            )
-            return direction, resolution
+            previous_event_payload = {
+                "previous_live_match_scope": match_scope,
+                "previous_live_event_id": str(previous_event.id) if previous_event else None,
+                "previous_live_direction": previous_event.direction.value if previous_event else None,
+                "previous_live_event_at": previous_event.occurred_at.isoformat() if previous_event else None,
+            }
 
-        if gate_state in ARRIVAL_GATE_STATES:
-            direction = AccessDirection.ENTRY
-            resolution["source"] = "gate_state"
-            resolution["direction"] = direction.value
-            if person and await self._person_is_present(session, person):
-                camera_decision = (
-                    await self._resolve_duplicate_arrival_with_camera(read, person, trace=trace)
-                    if trace
-                    else await self._resolve_duplicate_arrival_with_camera(read, person)
+        presence_state = await self._presence_state_for_person(session, person) if person else None
+        camera_tiebreaker: CameraTieBreakerEvidence | None = None
+        while True:
+            decision = self._movement_direction_fsm.resolve(
+                MovementIntent(
+                    source=read.source,
+                    captured_at=read.captured_at,
+                    registration_number=read.registration_number,
+                    allowed=allowed,
+                    person_known=person is not None,
+                    vehicle_known=vehicle is not None,
+                    gate_state=gate_state,
+                    gate_observation=gate_observation,
+                    presence_state=presence_state,
+                    explicit_direction=self._explicit_direction_from_read(read),
+                    visitor_pass_departure=visitor_pass_departure,
+                    gate_malfunction=gate_malfunction,
+                    previous_live_direction=previous_event.direction if previous_event else None,
+                    previous_live_event_payload=previous_event_payload,
+                    camera_tiebreaker=camera_tiebreaker,
                 )
-                resolution["camera_tiebreaker"] = camera_decision
-                camera_direction = camera_decision.get("direction")
-                if camera_direction in {AccessDirection.ENTRY.value, AccessDirection.EXIT.value}:
-                    if self._camera_tiebreaker_is_clear(camera_decision):
-                        direction = AccessDirection(camera_direction)
-                        resolution["source"] = "camera_tiebreaker"
-                        resolution["direction"] = direction.value
-                    else:
-                        resolution["camera_tiebreaker_ignored_reason"] = "low_confidence"
-            return direction, resolution
+            )
+            if decision.requires_external_evidence != "camera_tiebreaker" or not person:
+                if visitor_pass_departure and isinstance(visitor_pass_match, dict):
+                    decision.resolution["visitor_pass_id"] = visitor_pass_match.get("visitor_pass_id")
+                return decision.direction, decision.resolution
 
-        if gate_state in DEPARTURE_GATE_STATES:
-            if person and not await self._person_is_present(session, person):
-                resolution["source"] = "presence_over_gate_state"
-                resolution["direction"] = AccessDirection.ENTRY.value
-                resolution["gate_state_direction"] = AccessDirection.EXIT.value
-                resolution["presence_state"] = PresenceState.EXITED.value
-                return AccessDirection.ENTRY, resolution
-            resolution["source"] = "gate_state"
-            resolution["direction"] = AccessDirection.EXIT.value
-            return AccessDirection.EXIT, resolution
+            camera_decision = (
+                await self._resolve_duplicate_arrival_with_camera(read, person, trace=trace)
+                if trace
+                else await self._resolve_duplicate_arrival_with_camera(read, person)
+            )
+            camera_tiebreaker = CameraTieBreakerEvidence(
+                direction=self._coerce_access_direction(camera_decision.get("direction")),
+                confidence=self._coerce_confidence(camera_decision.get("confidence")),
+                clear=self._camera_tiebreaker_is_clear(camera_decision),
+                payload=camera_decision,
+            )
 
-        explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
-        if explicit in {"entry", "enter", "arrival", "in"}:
-            resolution["source"] = "payload"
-            resolution["direction"] = AccessDirection.ENTRY.value
-            return AccessDirection.ENTRY, resolution
-        if explicit in {"exit", "leave", "departure", "out"}:
-            resolution["source"] = "payload"
-            resolution["direction"] = AccessDirection.EXIT.value
-            return AccessDirection.EXIT, resolution
-        if not person:
-            resolution["source"] = "default_entry_no_person"
-            resolution["direction"] = AccessDirection.ENTRY.value
-            return AccessDirection.ENTRY, resolution
-
-        if await self._person_is_present(session, person):
-            resolution["source"] = "presence"
-            resolution["direction"] = AccessDirection.EXIT.value
-            return AccessDirection.EXIT, resolution
-        resolution["source"] = "presence"
-        resolution["direction"] = AccessDirection.ENTRY.value
-        return AccessDirection.ENTRY, resolution
+    async def _presence_state_for_person(
+        self,
+        session: AsyncSession,
+        person: Person,
+    ) -> PresenceState | None:
+        presence = await session.get(Presence, person.id)
+        return presence.state if presence else None
 
     async def _person_is_present(self, session: AsyncSession, person: Person) -> bool:
-        presence = await session.get(Presence, person.id)
-        return bool(presence and presence.state == PresenceState.PRESENT)
+        return (await self._presence_state_for_person(session, person)) == PresenceState.PRESENT
+
+    def _explicit_direction_from_read(self, read: PlateRead) -> AccessDirection | None:
+        explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
+        if explicit in {"entry", "enter", "arrival", "in"}:
+            return AccessDirection.ENTRY
+        if explicit in {"exit", "leave", "departure", "out"}:
+            return AccessDirection.EXIT
+        return None
+
+    def _coerce_access_direction(self, value: Any) -> AccessDirection | None:
+        try:
+            direction = AccessDirection(str(value or "").lower())
+        except ValueError:
+            return None
+        return direction if direction in {AccessDirection.ENTRY, AccessDirection.EXIT} else None
+
 
     def _camera_tiebreaker_is_clear(self, camera_decision: dict[str, Any]) -> bool:
         confidence = self._coerce_confidence(camera_decision.get("confidence"))
@@ -3563,11 +3772,23 @@ class AccessEventService:
 
     async def _update_presence(
         self, session: AsyncSession, person: Person, event: AccessEvent
-    ) -> None:
+    ) -> bool:
         presence = await session.get(Presence, person.id)
         if not presence:
             presence = Presence(person_id=person.id)
             session.add(presence)
+
+        if presence.last_changed_at and event.occurred_at < presence.last_changed_at:
+            logger.info(
+                "presence_update_skipped_for_stale_access_event",
+                extra={
+                    "person_id": str(person.id),
+                    "event_id": str(event.id),
+                    "event_occurred_at": event.occurred_at.isoformat(),
+                    "presence_last_changed_at": presence.last_changed_at.isoformat(),
+                },
+            )
+            return False
 
         presence.state = (
             PresenceState.PRESENT
@@ -3576,6 +3797,7 @@ class AccessEventService:
         )
         presence.last_event_id = event.id
         presence.last_changed_at = event.occurred_at
+        return True
 
 
 @lru_cache

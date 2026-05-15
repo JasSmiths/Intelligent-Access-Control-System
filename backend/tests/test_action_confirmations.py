@@ -11,8 +11,9 @@ from app.api.v1 import integrations, maintenance
 from app.db.session import get_db_session
 from app.models import ActionConfirmation, User
 from app.models.enums import UserRole
-from app.modules.gate.base import GateCommandResult, GateState
+from app.modules.gate.base import GateState
 from app.services import action_confirmations
+from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 
 
 def user_with_role(role: UserRole) -> User:
@@ -25,6 +26,19 @@ def user_with_role(role: UserRole) -> User:
         password_hash="not-used",
         role=role,
         is_active=True,
+    )
+
+
+def accepted_gate_outcome(intent: GateCommandIntent) -> GateCommandOutcome:
+    occurred_at = datetime(2026, 5, 3, 9, 15, tzinfo=UTC)
+    return GateCommandOutcome(
+        intent=intent,
+        accepted=True,
+        state=GateState.OPEN,
+        detail=intent.reason,
+        mechanically_confirmed=True,
+        started_at=occurred_at,
+        completed_at=occurred_at,
     )
 
 
@@ -190,12 +204,12 @@ async def test_gate_open_requires_server_confirmation_for_admin(monkeypatch) -> 
     async def inactive_maintenance() -> bool:
         return False
 
-    class FailingGate:
-        async def open_gate(self, _reason: str):
+    class FailingCoordinator:
+        async def execute_open(self, _intent):
             raise AssertionError("Gate must not open without server confirmation.")
 
     monkeypatch.setattr(integrations, "is_maintenance_mode_active", inactive_maintenance)
-    monkeypatch.setattr(integrations, "HomeAssistantGateController", lambda: FailingGate())
+    monkeypatch.setattr(integrations, "get_gate_command_coordinator", lambda: FailingCoordinator())
     transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/api/v1/integrations/gate/open", json={"reason": "test"})
@@ -213,13 +227,13 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
     async def consume(_session, **kwargs) -> None:
         consumed.update(kwargs)
 
-    class FakeGate:
-        async def open_gate(self, reason: str):
-            return GateCommandResult(True, GateState.OPEN, reason)
+    class FakeCoordinator:
+        async def execute_open(self, intent):
+            return accepted_gate_outcome(intent)
 
     monkeypatch.setattr(integrations, "is_maintenance_mode_active", inactive_maintenance)
     monkeypatch.setattr(integrations, "consume_action_confirmation", consume)
-    monkeypatch.setattr(integrations, "HomeAssistantGateController", lambda: FakeGate())
+    monkeypatch.setattr(integrations, "get_gate_command_coordinator", lambda: FakeCoordinator())
     monkeypatch.setattr(integrations, "emit_audit_log", lambda **_kwargs: None)
     transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
