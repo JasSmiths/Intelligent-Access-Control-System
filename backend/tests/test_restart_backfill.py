@@ -94,7 +94,7 @@ async def test_candidate_from_protect_track_normalizes_plate_and_confidence() ->
         {
             "id": "protect-1",
             "type": "smartDetectZone",
-            "smart_detect_types": ["vehicle"],
+            "smart_detect_types": ["licensePlate", "vehicle"],
         },
     )
 
@@ -103,3 +103,22 @@ async def test_candidate_from_protect_track_normalizes_plate_and_confidence() ->
     assert candidate.captured_at == datetime(2026, 5, 2, 9, 59, 1, tzinfo=UTC)
     assert candidate.confidence == 0.92
     assert candidate.camera_name == "Gate"
+
+
+@pytest.mark.asyncio
+async def test_candidate_from_protect_event_ignores_generic_vehicle_or_face_tracks() -> None:
+    class FakeProtect:
+        async def event_lpr_track(self, event_id):
+            raise AssertionError("Generic non-LPR smart-detect events should not be probed for plates.")
+
+    candidate = await MissedAccessEventBackfillService()._candidate_from_protect_event(
+        FakeProtect(),
+        {
+            "id": "protect-1",
+            "type": "smartDetectZone",
+            "camera_name": "Gate",
+            "smart_detect_types": ["face", "vehicle"],
+        },
+    )
+
+    assert candidate is None

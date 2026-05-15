@@ -5,7 +5,7 @@ import pytest
 from app.models import MovementSagaRecord, MovementSessionRecord
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState
 from app.services.gate_commands import GateCommandIntent
-from app.services.movement_ledger import MovementLedgerRepository, gate_command_idempotency_key
+from app.services.movement_ledger import MovementLedgerRepository, gate_command_idempotency_key, movement_saga_summary
 
 
 class FakeFlushSession:
@@ -84,7 +84,42 @@ async def test_movement_transition_records_forward_history() -> None:
     assert changed is True
     assert row.state == MovementSagaState.RECONCILIATION_REQUIRED
     assert row.reconciliation_required is True
+    assert row.updated_at is not None
     assert row.state_history[-1]["detail"] == "accepted_without_mechanical_confirmation"
+    assert row.state_history[-1]["at"] == row.updated_at.isoformat()
+    assert movement_saga_summary(row)["updated_at"] == row.updated_at.isoformat()
+    assert session.flushes == 1
+
+
+@pytest.mark.asyncio
+async def test_movement_transition_allows_reconciliation_to_complete() -> None:
+    repository = MovementLedgerRepository()
+    row = MovementSagaRecord(
+        idempotency_key="movement-reconciled",
+        source="test",
+        occurred_at=datetime(2026, 5, 3, 10, 0, tzinfo=UTC),
+        state=MovementSagaState.RECONCILIATION_REQUIRED,
+        reconciliation_required=True,
+        intent_payload={},
+        decision_payload={},
+        state_history=[],
+    )
+    session = FakeFlushSession()
+
+    changed = await repository.transition_movement_saga(
+        session,
+        row,
+        MovementSagaState.COMPLETED,
+        detail="gate_open_observation_confirmed",
+        reconciliation_required=False,
+        presence_committed=True,
+    )
+
+    assert changed is True
+    assert row.state == MovementSagaState.COMPLETED
+    assert row.reconciliation_required is False
+    assert row.presence_committed is True
+    assert row.state_history[-1]["detail"] == "gate_open_observation_confirmed"
     assert session.flushes == 1
 
 

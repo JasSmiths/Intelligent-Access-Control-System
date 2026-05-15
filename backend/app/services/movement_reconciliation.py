@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import GateCommandRecord, MovementSagaRecord, Presence
+from app.models import GateCommandRecord, GateStateObservation, MovementSagaRecord, Presence
 from app.models.enums import AccessDirection, GateCommandState, MovementSagaState, PresenceState
 from app.modules.gate.base import GateState
 from app.modules.notifications.base import NotificationContext
@@ -21,6 +21,9 @@ logger = get_logger(__name__)
 
 RECONCILIATION_INTERVAL_SECONDS = 15.0
 RECONCILIATION_GRACE_SECONDS = 20.0
+GATE_OPEN_CONFIRMATION_WINDOW_SECONDS = 120.0
+GATE_OBSERVATION_CLOCK_SKEW_SECONDS = 2.0
+GATE_OBSERVATION_OPEN_STATES = {GateState.OPEN.value, GateState.OPENING.value}
 
 
 class MovementReconciliationService:
@@ -150,33 +153,33 @@ class MovementReconciliationService:
                 reconciliation_required=True,
             )
 
+        observed_open = await self._gate_open_observation_after_command(session, command)
+        if observed_open:
+            state = _gate_state_from_observation(observed_open)
+            detail = (
+                f"Gate open observation reconciled as {state.value} "
+                f"at {observed_open.observed_at.isoformat()}."
+            )
+            return await self._complete_reconciled_saga(session, saga, command, state, detail)
+
         state = await self._current_gate_state()
         if state in {GateState.OPEN, GateState.OPENING}:
-            presence_committed = saga.presence_committed
-            if not presence_committed:
-                presence_committed = await self._commit_presence_if_possible(session, saga)
-            await self._ledger.mark_gate_command_reconciled(
-                session,
-                command,
-                detail=f"Gate state reconciled as {state.value}.",
-                success=True,
-            )
-            await self._ledger.transition_movement_saga(
+            return await self._complete_reconciled_saga(
                 session,
                 saga,
-                MovementSagaState.COMPLETED,
-                detail=f"Gate state reconciled as {state.value}.",
-                reconciliation_required=False,
-                presence_committed=presence_committed,
+                command,
+                state,
+                f"Gate state reconciled as {state.value}.",
             )
-            await self._publish_reconciled(saga, command, state)
-            return 1
 
         completed_at = command.completed_at or command.updated_at or now
         if now - completed_at < timedelta(seconds=RECONCILIATION_GRACE_SECONDS):
             return 0
 
-        detail = f"Gate command accepted but latest gate state is {state.value}."
+        detail = (
+            "Gate command accepted but no open/opening gate observation was recorded "
+            f"within {int(GATE_OPEN_CONFIRMATION_WINDOW_SECONDS)} seconds; latest gate state is {state.value}."
+        )
         await self._ledger.mark_gate_command_reconciled(session, command, detail=detail, success=False)
         await self._ledger.transition_movement_saga(
             session,
@@ -189,6 +192,54 @@ class MovementReconciliationService:
         await self._publish_saga_failed(saga, detail)
         await self._notify_reconciliation_failure(saga, command, detail)
         return 1
+
+    async def _complete_reconciled_saga(
+        self,
+        session,
+        saga: MovementSagaRecord,
+        command: GateCommandRecord,
+        state: GateState,
+        detail: str,
+    ) -> int:
+        presence_committed = saga.presence_committed
+        if not presence_committed:
+            presence_committed = await self._commit_presence_if_possible(session, saga)
+        await self._ledger.mark_gate_command_reconciled(
+            session,
+            command,
+            detail=detail,
+            success=True,
+        )
+        await self._ledger.transition_movement_saga(
+            session,
+            saga,
+            MovementSagaState.COMPLETED,
+            detail=detail,
+            reconciliation_required=False,
+            presence_committed=presence_committed,
+        )
+        await self._publish_reconciled(saga, command, state)
+        return 1
+
+    async def _gate_open_observation_after_command(
+        self,
+        session,
+        command: GateCommandRecord,
+    ) -> GateStateObservation | None:
+        started_at = command.started_at or command.leased_at or command.created_at
+        if not started_at:
+            return None
+        window_start = started_at - timedelta(seconds=GATE_OBSERVATION_CLOCK_SKEW_SECONDS)
+        window_end = started_at + timedelta(seconds=GATE_OPEN_CONFIRMATION_WINDOW_SECONDS)
+        return await session.scalar(
+            select(GateStateObservation)
+            .where(
+                GateStateObservation.state.in_(GATE_OBSERVATION_OPEN_STATES),
+                GateStateObservation.observed_at >= window_start,
+                GateStateObservation.observed_at <= window_end,
+            )
+            .order_by(GateStateObservation.observed_at.asc())
+        )
 
     async def _current_gate_state(self) -> GateState:
         try:
@@ -280,6 +331,13 @@ def _latest_reconciliation_command(commands: list[GateCommandRecord]) -> GateCom
     if not candidates:
         candidates = list(commands)
     return max(candidates, key=lambda command: command.updated_at, default=None)
+
+
+def _gate_state_from_observation(observation: GateStateObservation) -> GateState:
+    try:
+        return GateState(str(observation.state))
+    except ValueError:
+        return GateState.UNKNOWN
 
 
 @lru_cache

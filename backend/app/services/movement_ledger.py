@@ -25,6 +25,10 @@ MOVEMENT_STATE_RANK = {
     MovementSagaState.SUPPRESSED: 80,
 }
 
+MOVEMENT_RECOVERY_TRANSITIONS = {
+    (MovementSagaState.RECONCILIATION_REQUIRED, MovementSagaState.COMPLETED),
+}
+
 TERMINAL_GATE_COMMAND_STATES = {
     GateCommandState.ACCEPTED,
     GateCommandState.REJECTED,
@@ -61,6 +65,8 @@ def gate_command_idempotency_key(intent: Any) -> str:
 def movement_saga_summary(row: MovementSagaRecord | None) -> dict[str, Any] | None:
     if not row:
         return None
+    loaded_values = getattr(row, "__dict__", {})
+    updated_at = loaded_values.get("updated_at")
     return {
         "id": str(row.id),
         "state": row.state.value,
@@ -68,7 +74,7 @@ def movement_saga_summary(row: MovementSagaRecord | None) -> dict[str, Any] | No
         "gate_command_required": row.gate_command_required,
         "presence_committed": row.presence_committed,
         "failure_detail": row.failure_detail,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
     }
 
 
@@ -106,6 +112,8 @@ class MovementLedgerRepository:
             intent_payload=intent_payload or {},
             decision_payload=decision_payload or {},
             state_history=[self._history_item(state, at=now, detail="created")],
+            created_at=now,
+            updated_at=now,
         )
         try:
             async with session.begin_nested():
@@ -141,7 +149,10 @@ class MovementLedgerRepository:
         failure_detail: str | None = None,
         decision_payload: dict[str, Any] | None = None,
     ) -> bool:
-        if MOVEMENT_STATE_RANK[state] < MOVEMENT_STATE_RANK[row.state]:
+        if (
+            MOVEMENT_STATE_RANK[state] < MOVEMENT_STATE_RANK[row.state]
+            and (row.state, state) not in MOVEMENT_RECOVERY_TRANSITIONS
+        ):
             return False
         if access_event_id is not None:
             row.access_event_id = access_event_id
@@ -155,10 +166,12 @@ class MovementLedgerRepository:
             row.failure_detail = failure_detail
         if decision_payload is not None:
             row.decision_payload = decision_payload
+        now = utc_now()
         row.state = state
+        row.updated_at = now
         row.state_history = [
             *(row.state_history or []),
-            self._history_item(state, detail=detail),
+            self._history_item(state, at=now, detail=detail),
         ][-50:]
         await session.flush()
         return True

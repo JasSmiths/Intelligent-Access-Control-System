@@ -356,8 +356,14 @@
 
 .movement-detail-head {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.movement-detail-head .badge {
+  flex: 0 0 auto;
+  align-self: flex-start;
 }
 
 .movement-detail-head h2 {
@@ -423,6 +429,38 @@
   text-transform: uppercase;
   color: var(--muted);
   letter-spacing: 0;
+}
+
+.movement-detail-loading {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.movement-explanation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.movement-explanation-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.movement-explanation-row span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.movement-explanation-row p {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .movement-command-row,

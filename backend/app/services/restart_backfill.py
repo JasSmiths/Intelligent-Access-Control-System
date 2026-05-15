@@ -1041,6 +1041,9 @@ def _schedule_evaluation_payload(schedule_evaluation: ScheduleEvaluation | None)
 
 
 def _event_might_have_plate(event: dict[str, Any]) -> bool:
+    smart_types = [str(item or "").lower() for item in event.get("smart_detect_types") or []]
+    if any("license" in item or "licence" in item or "plate" in item for item in smart_types):
+        return True
     text = " ".join(
         [
             str(event.get("type") or ""),
@@ -1049,7 +1052,7 @@ def _event_might_have_plate(event: dict[str, Any]) -> bool:
             " ".join(str(item or "") for item in (event.get("smart_detect_types") or [])),
         ]
     ).lower()
-    return any(token in text for token in ("license", "licence", "plate", "lpr", "vehicle", "smartdetect"))
+    return any(token in text for token in ("license", "licence", "plate", "lpr"))
 
 
 def _confidence_ratio(value: Any) -> float:

@@ -94,7 +94,6 @@ import {
   IntegrationStatus,
   isActionableAlert,
   MaintenanceStatus,
-  movementSagaDisplay,
   NavigateToView,
   PanelHeader,
   Person,
@@ -850,7 +849,6 @@ export type DashboardEvent = {
   statusTone: BadgeTone;
   statusIcon?: React.ElementType;
   statusLabel: string;
-  movementStatus?: { label: string; tone: BadgeTone } | null;
   tone: "green" | "blue" | "gray" | "amber";
   icon: React.ElementType;
 };
@@ -865,7 +863,6 @@ export function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], p
     const ownerFirstName = owner?.first_name || vehicle?.owner?.split(" ")[0] || "";
     const visitorName = visitorEventDisplayName(event);
     const isDenied = event.decision === "denied" || event.direction === "denied";
-    const movementStatus = movementSagaDisplay(event.movement_saga);
 
     return {
       id: event.id,
@@ -878,7 +875,6 @@ export function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], p
       statusTone: isDenied ? "amber" : event.direction === "entry" ? "green" : "gray",
       statusIcon: isDenied ? Lock : undefined,
       statusLabel: isDenied ? "Denied" : event.direction === "exit" ? "Out" : "In",
-      movementStatus,
       tone: isDenied ? "amber" : event.direction === "entry" ? "green" : "blue",
       icon: event.direction === "exit" ? LogOut : isDenied ? AlertTriangle : Car
     };
@@ -895,9 +891,6 @@ export function DashboardEventSnapshotPreview({ event }: { event: DashboardEvent
 }
 
 export function EventStatusBadge({ event }: { event: DashboardEvent }) {
-  if (event.movementStatus) {
-    return <Badge tone={event.movementStatus.tone}>{event.movementStatus.label}</Badge>;
-  }
   if (event.statusIcon) {
     const Icon = event.statusIcon;
     return (

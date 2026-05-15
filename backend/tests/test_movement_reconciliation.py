@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.models import GateCommandRecord, MovementSagaRecord
+from app.models import GateCommandRecord, GateStateObservation, MovementSagaRecord
 from app.models.enums import GateCommandState, MovementSagaState
 from app.modules.gate.base import GateState
 from app.services.movement_reconciliation import (
@@ -75,6 +75,9 @@ async def test_reconcile_stale_leased_command_marks_failed_when_gate_stays_close
     async def fake_current_gate_state():
         return GateState.CLOSED
 
+    async def fake_gate_open_observation_after_command(_session, _command):
+        return None
+
     async def fake_publish_failed(row, detail):
         published.append((str(row.id), detail))
 
@@ -82,6 +85,7 @@ async def test_reconcile_stale_leased_command_marks_failed_when_gate_stays_close
         return None
 
     monkeypatch.setattr(service, "_current_gate_state", fake_current_gate_state)
+    monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)
     monkeypatch.setattr(service, "_publish_saga_failed", fake_publish_failed)
     monkeypatch.setattr(service, "_notify_reconciliation_failure", fake_notify)
 
@@ -94,6 +98,73 @@ async def test_reconcile_stale_leased_command_marks_failed_when_gate_stays_close
     assert saga.state == MovementSagaState.FAILED
     assert saga.reconciliation_required is False
     assert published
+
+
+@pytest.mark.asyncio
+async def test_reconcile_uses_open_observation_after_command_even_if_current_gate_closed(monkeypatch) -> None:
+    service = MovementReconciliationService()
+    now = datetime(2026, 5, 15, 18, 0, tzinfo=UTC)
+    command = GateCommandRecord(
+        idempotency_key="accepted-unverified",
+        source="test",
+        gate_key="default",
+        controller="fake",
+        reason="automatic lpr",
+        state=GateCommandState.RECONCILIATION_REQUIRED,
+        accepted=True,
+        requires_reconciliation=True,
+        mechanically_confirmed=False,
+        started_at=now - timedelta(seconds=70),
+        completed_at=now - timedelta(seconds=69),
+    )
+    saga = MovementSagaRecord(
+        idempotency_key="movement-observed-open",
+        source="test",
+        occurred_at=now - timedelta(seconds=70),
+        state=MovementSagaState.RECONCILIATION_REQUIRED,
+        reconciliation_required=True,
+        intent_payload={},
+        decision_payload={},
+        state_history=[],
+        gate_commands=[command],
+    )
+    command.updated_at = now - timedelta(seconds=69)
+    saga.created_at = now - timedelta(seconds=70)
+    saga.updated_at = now - timedelta(seconds=69)
+    observation = GateStateObservation(
+        gate_entity_id="cover.top_gate",
+        gate_name="Top Gate",
+        state=GateState.OPEN.value,
+        raw_state="open",
+        previous_state=GateState.CLOSED.value,
+        observed_at=now - timedelta(seconds=68),
+        source="home_assistant_websocket",
+    )
+    published: list[tuple[str, str]] = []
+
+    async def fake_gate_open_observation_after_command(_session, _command):
+        return observation
+
+    async def fake_current_gate_state():
+        return GateState.CLOSED
+
+    async def fake_publish_reconciled(row, command_row, state):
+        published.append((str(row.id), state.value))
+
+    monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)
+    monkeypatch.setattr(service, "_current_gate_state", fake_current_gate_state)
+    monkeypatch.setattr(service, "_publish_reconciled", fake_publish_reconciled)
+
+    count = await service._reconcile_saga(FakeFlushSession(), saga)
+
+    assert count == 1
+    assert command.state == GateCommandState.RECONCILED
+    assert command.requires_reconciliation is False
+    assert command.mechanically_confirmed is True
+    assert saga.state == MovementSagaState.COMPLETED
+    assert saga.reconciliation_required is False
+    assert "Gate open observation reconciled" in command.detail
+    assert published == [(str(saga.id), GateState.OPEN.value)]
 
 
 @pytest.mark.asyncio
