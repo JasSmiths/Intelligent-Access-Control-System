@@ -2,16 +2,25 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.dependencies import current_user
+from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
-from app.models import GateCommandRecord, MovementSagaRecord, User
-from app.models.enums import GateCommandState, MovementSagaState
+from app.models import AccessEvent, GateCommandRecord, MovementSagaRecord, User
+from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
+from app.services.event_bus import event_bus
+from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
+from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
 
 router = APIRouter()
+movement_ledger = get_movement_ledger_repository()
+
+
+class MovementReconciliationRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @router.get("/movements")
@@ -50,6 +59,138 @@ async def movement_detail(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movement saga was not found.")
     return _movement_payload(row, include_history=True)
+
+
+@router.post("/movements/{movement_id}/reconciliation-required")
+async def request_movement_reconciliation(
+    movement_id: uuid.UUID,
+    request: MovementReconciliationRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    row = await session.scalar(
+        select(MovementSagaRecord)
+        .options(selectinload(MovementSagaRecord.gate_commands))
+        .where(MovementSagaRecord.id == movement_id)
+    )
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movement saga was not found.")
+
+    detail = request.reason or "Operator requested movement reconciliation."
+    before = _movement_payload(row, include_history=True)
+    changed = await movement_ledger.transition_movement_saga(
+        session,
+        row,
+        MovementSagaState.RECONCILIATION_REQUIRED,
+        detail=detail,
+        reconciliation_required=True,
+        failure_detail=detail if row.state == MovementSagaState.FAILED else None,
+    )
+    if not changed:
+        row.reconciliation_required = True
+        row.failure_detail = row.failure_detail or detail
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_ACCESS,
+        action="movement_saga.reconciliation_requested",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="MovementSaga",
+        target_id=row.id,
+        target_label=row.registration_number,
+        diff={"old": before, "new": _movement_payload(row, include_history=True)},
+        metadata={"reason": detail},
+    )
+    await session.commit()
+    await session.refresh(row)
+    payload = _movement_payload(row, include_history=True)
+    await event_bus.publish(
+        "movement_saga.reconciliation_requested",
+        {"movement_saga": movement_saga_summary(row), "reason": detail, "requested_by": actor_from_user(user)},
+    )
+    return payload
+
+
+@router.post("/events/{event_id}/movement-reconciliation")
+async def request_event_movement_reconciliation(
+    event_id: uuid.UUID,
+    request: MovementReconciliationRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    event = await session.get(AccessEvent, event_id)
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Access event was not found.")
+
+    row = await session.scalar(
+        select(MovementSagaRecord)
+        .options(selectinload(MovementSagaRecord.gate_commands))
+        .where(MovementSagaRecord.access_event_id == event.id)
+        .order_by(MovementSagaRecord.created_at.desc())
+        .limit(1)
+    )
+    detail = request.reason or "Operator requested historical movement reconciliation."
+    if not row:
+        row = await movement_ledger.create_movement_saga(
+            session,
+            idempotency_key=f"movement-repair:event:{event.id}",
+            source=event.source,
+            occurred_at=event.occurred_at,
+            registration_number=event.registration_number,
+            person_id=event.person_id,
+            vehicle_id=event.vehicle_id,
+            direction=event.direction,
+            decision=event.decision,
+            state=MovementSagaState.RECONCILIATION_REQUIRED,
+            intent_payload={
+                "source": event.source,
+                "access_event_id": str(event.id),
+                "historical_repair": True,
+            },
+            decision_payload={"reason": detail, "historical_repair": True},
+        )
+    before = _movement_payload(row, include_history=True)
+    await movement_ledger.transition_movement_saga(
+        session,
+        row,
+        MovementSagaState.RECONCILIATION_REQUIRED,
+        detail=detail,
+        access_event_id=event.id,
+        gate_command_required=(
+            event.decision == AccessDecision.GRANTED
+            and event.direction == AccessDirection.ENTRY
+        ),
+        reconciliation_required=True,
+        decision_payload={"reason": detail, "historical_repair": True},
+    )
+    raw_payload = dict(event.raw_payload or {})
+    raw_payload["movement_saga"] = {
+        **(raw_payload.get("movement_saga") if isinstance(raw_payload.get("movement_saga"), dict) else {}),
+        **(movement_saga_summary(row) or {}),
+        "detail": detail,
+        "historical_repair": True,
+    }
+    event.raw_payload = raw_payload
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_ACCESS,
+        action="access_event.movement_reconciliation_requested",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="AccessEvent",
+        target_id=event.id,
+        target_label=event.registration_number,
+        diff={"old": before, "new": _movement_payload(row, include_history=True)},
+        metadata={"reason": detail, "movement_saga_id": str(row.id)},
+    )
+    await session.commit()
+    await session.refresh(row)
+    payload = _movement_payload(row, include_history=True)
+    await event_bus.publish(
+        "movement_saga.reconciliation_requested",
+        {"movement_saga": movement_saga_summary(row), "reason": detail, "requested_by": actor_from_user(user)},
+    )
+    return payload
 
 
 @router.get("/gate-commands")

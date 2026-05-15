@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import GateCommandRecord, MovementSagaRecord
+from app.models import GateCommandRecord, MovementSagaRecord, MovementSessionRecord
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
 
 
@@ -293,6 +293,148 @@ class MovementLedgerRepository:
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
 
+    async def upsert_movement_session(
+        self,
+        session: AsyncSession,
+        *,
+        session_key: str,
+        source: str,
+        registration_number: str,
+        normalized_registration_number: str,
+        direction: AccessDirection,
+        decision: AccessDecision,
+        started_at: datetime,
+        last_seen_at: datetime,
+        access_event_id: uuid.UUID | str | None = None,
+        movement_saga_id: uuid.UUID | str | None = None,
+        debounce_expires_at: datetime | None = None,
+        gate_cycle_expires_at: datetime | None = None,
+        idle_expires_at: datetime | None = None,
+        camera_id: str | None = None,
+        device_id: str | None = None,
+        protect_event_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+        ocr_variants: list[str] | set[str] | tuple[str, ...] | None = None,
+        last_gate_state: str | None = None,
+    ) -> MovementSessionRecord:
+        row = await session.scalar(
+            select(MovementSessionRecord).where(MovementSessionRecord.session_key == session_key)
+        )
+        if not row:
+            row = MovementSessionRecord(
+                session_key=session_key,
+                source=source,
+                registration_number=registration_number,
+                normalized_registration_number=normalized_registration_number,
+                direction=direction,
+                decision=decision,
+                started_at=started_at,
+                last_seen_at=last_seen_at,
+            )
+            session.add(row)
+        row.access_event_id = self._uuid_or_none(access_event_id)
+        row.movement_saga_id = self._uuid_or_none(movement_saga_id)
+        row.source = source
+        row.registration_number = registration_number
+        row.normalized_registration_number = normalized_registration_number
+        row.direction = direction
+        row.decision = decision
+        row.started_at = min(row.started_at or started_at, started_at)
+        row.last_seen_at = max(row.last_seen_at or last_seen_at, last_seen_at)
+        row.debounce_expires_at = debounce_expires_at
+        row.gate_cycle_expires_at = gate_cycle_expires_at
+        row.idle_expires_at = idle_expires_at
+        row.camera_id = camera_id or row.camera_id
+        row.device_id = device_id or row.device_id
+        row.protect_event_ids = self._merged_strings(row.protect_event_ids, protect_event_ids)
+        row.ocr_variants = self._merged_strings(row.ocr_variants, ocr_variants)
+        row.last_gate_state = last_gate_state
+        row.is_active = True
+        await session.flush()
+        return row
+
+    async def movement_sessions_for_exact_suppression(
+        self,
+        session: AsyncSession,
+        *,
+        source: str,
+        captured_at: datetime,
+        limit: int = 100,
+    ) -> list[MovementSessionRecord]:
+        return list(
+            (
+                await session.scalars(
+                    select(MovementSessionRecord)
+                    .where(
+                        MovementSessionRecord.source == source,
+                        MovementSessionRecord.started_at <= captured_at,
+                        or_(
+                            MovementSessionRecord.debounce_expires_at >= captured_at,
+                            MovementSessionRecord.gate_cycle_expires_at >= captured_at,
+                        ),
+                    )
+                    .order_by(MovementSessionRecord.started_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        )
+
+    async def movement_sessions_for_active_read(
+        self,
+        session: AsyncSession,
+        *,
+        source: str,
+        captured_at: datetime,
+        lookup_horizon: timedelta,
+        limit: int = 100,
+    ) -> list[MovementSessionRecord]:
+        return list(
+            (
+                await session.scalars(
+                    select(MovementSessionRecord)
+                    .where(
+                        MovementSessionRecord.source == source,
+                        MovementSessionRecord.is_active.is_(True),
+                        MovementSessionRecord.started_at <= captured_at,
+                        MovementSessionRecord.last_seen_at >= captured_at - lookup_horizon,
+                    )
+                    .order_by(MovementSessionRecord.last_seen_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        )
+
+    async def record_movement_session_suppression(
+        self,
+        session: AsyncSession,
+        row: MovementSessionRecord,
+        *,
+        read_captured_at: datetime,
+        idle_expires_at: datetime | None,
+        protect_event_ids: list[str] | set[str] | tuple[str, ...] | None,
+        ocr_variants: list[str] | set[str] | tuple[str, ...] | None,
+        last_gate_state: str | None,
+        reason: str,
+        matched_by: str,
+        presence_evidence: dict[str, Any] | None,
+        suppressed_read_payload: dict[str, Any],
+    ) -> None:
+        row.last_seen_at = max(row.last_seen_at, read_captured_at)
+        row.idle_expires_at = max(
+            [value for value in (row.idle_expires_at, idle_expires_at) if value],
+            default=idle_expires_at,
+        )
+        row.protect_event_ids = self._merged_strings(row.protect_event_ids, protect_event_ids)
+        row.ocr_variants = self._merged_strings(row.ocr_variants, ocr_variants)
+        row.last_gate_state = last_gate_state
+        row.suppressed_read_count = int(row.suppressed_read_count or 0) + 1
+        row.last_suppressed_reason = reason
+        row.last_matched_by = matched_by
+        row.last_presence_evidence = presence_evidence
+        suppressed_reads = list(row.suppressed_reads or [])
+        suppressed_reads.append(suppressed_read_payload)
+        row.suppressed_reads = suppressed_reads[-20:]
+        await session.flush()
+
     def _new_gate_command_record(self, intent: Any, *, idempotency_key: str) -> GateCommandRecord:
         event_id = self._uuid_or_none(getattr(intent, "event_id", None))
         movement_saga_id = self._uuid_or_none(getattr(intent, "movement_saga_id", None))
@@ -333,6 +475,21 @@ class MovementLedgerRepository:
             return uuid.UUID(str(value))
         except (TypeError, ValueError):
             return None
+
+    def _merged_strings(self, *values: Any) -> list[str]:
+        merged: set[str] = set()
+        for value in values:
+            if isinstance(value, str):
+                candidates = [value]
+            elif isinstance(value, (list, tuple, set)):
+                candidates = value
+            else:
+                candidates = []
+            for candidate in candidates:
+                text = str(candidate or "").strip()
+                if text:
+                    merged.add(text)
+        return sorted(merged)
 
 
 _repository = MovementLedgerRepository()

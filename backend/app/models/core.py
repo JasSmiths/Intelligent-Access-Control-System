@@ -845,6 +845,42 @@ class GateCommandRecord(Base, TimestampMixin):
     movement_saga: Mapped[MovementSagaRecord | None] = relationship(back_populates="gate_commands")
 
 
+class MovementSessionRecord(Base, TimestampMixin):
+    __tablename__ = "movement_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_key: Mapped[str] = mapped_column(String(220), unique=True, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("movement_sagas.id", ondelete="SET NULL"),
+        index=True,
+    )
+    registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    normalized_registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    direction: Mapped[AccessDirection] = mapped_column(Enum(AccessDirection), nullable=False, index=True)
+    decision: Mapped[AccessDecision] = mapped_column(Enum(AccessDecision), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    debounce_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    gate_cycle_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    idle_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    camera_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    device_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    protect_event_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    ocr_variants: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    last_gate_state: Mapped[str | None] = mapped_column(String(40))
+    suppressed_read_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_suppressed_reason: Mapped[str | None] = mapped_column(String(160), index=True)
+    last_matched_by: Mapped[str | None] = mapped_column(String(80))
+    last_presence_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    suppressed_reads: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
 Index("ix_movement_sagas_state_updated_at", MovementSagaRecord.state, MovementSagaRecord.updated_at)
 Index(
     "ix_movement_sagas_reconciliation_updated_at",
@@ -853,6 +889,17 @@ Index(
 )
 Index("ix_gate_command_records_gate_state_lease", GateCommandRecord.gate_key, GateCommandRecord.state, GateCommandRecord.lease_expires_at)
 Index("ix_gate_command_records_reconciliation_updated", GateCommandRecord.requires_reconciliation, GateCommandRecord.updated_at)
+Index("ix_movement_sessions_source_last_seen", MovementSessionRecord.source, MovementSessionRecord.last_seen_at)
+Index(
+    "ix_movement_sessions_source_gate_cycle",
+    MovementSessionRecord.source,
+    MovementSessionRecord.gate_cycle_expires_at,
+)
+Index(
+    "ix_movement_sessions_active_idle",
+    MovementSessionRecord.is_active,
+    MovementSessionRecord.idle_expires_at,
+)
 
 
 class ReportExport(Base, TimestampMixin):

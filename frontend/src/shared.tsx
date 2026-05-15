@@ -468,6 +468,7 @@ export type ViewKey =
   | "vehicles"
   | "top_charts"
   | "events"
+  | "movements"
   | "alerts"
   | "reports"
   | "integrations"

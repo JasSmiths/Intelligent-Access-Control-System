@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -61,6 +61,29 @@ class MovementReconciliationService:
                 continue
 
     async def reconcile_once(self) -> int:
+        now = datetime.now(tz=UTC)
+        stale_cutoff = now - timedelta(seconds=RECONCILIATION_GRACE_SECONDS)
+        command_saga_ids = (
+            select(GateCommandRecord.movement_saga_id)
+            .where(GateCommandRecord.movement_saga_id.is_not(None))
+            .where(
+                or_(
+                    GateCommandRecord.requires_reconciliation.is_(True),
+                    GateCommandRecord.state == GateCommandState.RECONCILIATION_REQUIRED,
+                    and_(
+                        GateCommandRecord.state == GateCommandState.LEASED,
+                        GateCommandRecord.lease_expires_at.is_not(None),
+                        GateCommandRecord.lease_expires_at <= now,
+                    ),
+                    and_(
+                        GateCommandRecord.state == GateCommandState.ACCEPTED,
+                        GateCommandRecord.mechanically_confirmed.is_(False),
+                        GateCommandRecord.completed_at.is_not(None),
+                        GateCommandRecord.completed_at <= stale_cutoff,
+                    ),
+                )
+            )
+        )
         async with AsyncSessionLocal() as session:
             rows = (
                 await session.scalars(
@@ -69,7 +92,13 @@ class MovementReconciliationService:
                         selectinload(MovementSagaRecord.access_event),
                         selectinload(MovementSagaRecord.gate_commands),
                     )
-                    .where(MovementSagaRecord.reconciliation_required.is_(True))
+                    .where(
+                        or_(
+                            MovementSagaRecord.reconciliation_required.is_(True),
+                            MovementSagaRecord.state == MovementSagaState.PHYSICAL_COMMAND_PENDING,
+                            MovementSagaRecord.id.in_(command_saga_ids),
+                        )
+                    )
                     .order_by(MovementSagaRecord.updated_at.asc())
                     .limit(25)
                 )
@@ -81,8 +110,16 @@ class MovementReconciliationService:
             return count
 
     async def _reconcile_saga(self, session, saga: MovementSagaRecord) -> int:
+        now = datetime.now(tz=UTC)
         command = _latest_reconciliation_command(saga.gate_commands)
         if not command:
+            pending_since = saga.updated_at or saga.created_at or saga.occurred_at
+            if (
+                saga.state == MovementSagaState.PHYSICAL_COMMAND_PENDING
+                and pending_since
+                and now - pending_since < timedelta(seconds=RECONCILIATION_GRACE_SECONDS)
+            ):
+                return 0
             await self._ledger.transition_movement_saga(
                 session,
                 saga,
@@ -93,6 +130,25 @@ class MovementReconciliationService:
             )
             await self._publish_saga_failed(saga, "missing_gate_command")
             return 1
+
+        if command.state == GateCommandState.LEASED:
+            lease_expires_at = command.lease_expires_at or command.updated_at or command.leased_at
+            if lease_expires_at and lease_expires_at > now:
+                return 0
+            expired_at = lease_expires_at or now
+            command.state = GateCommandState.RECONCILIATION_REQUIRED
+            command.requires_reconciliation = True
+            command.detail = "Gate command lease expired before completion."
+            command.completed_at = expired_at
+            command.lease_token = None
+            command.lease_expires_at = None
+            await self._ledger.transition_movement_saga(
+                session,
+                saga,
+                MovementSagaState.RECONCILIATION_REQUIRED,
+                detail="Gate command lease expired before completion.",
+                reconciliation_required=True,
+            )
 
         state = await self._current_gate_state()
         if state in {GateState.OPEN, GateState.OPENING}:
@@ -116,8 +172,8 @@ class MovementReconciliationService:
             await self._publish_reconciled(saga, command, state)
             return 1
 
-        completed_at = command.completed_at or command.updated_at or datetime.now(tz=UTC)
-        if datetime.now(tz=UTC) - completed_at < timedelta(seconds=RECONCILIATION_GRACE_SECONDS):
+        completed_at = command.completed_at or command.updated_at or now
+        if now - completed_at < timedelta(seconds=RECONCILIATION_GRACE_SECONDS):
             return 0
 
         detail = f"Gate command accepted but latest gate state is {state.value}."
@@ -214,7 +270,12 @@ def _latest_reconciliation_command(commands: list[GateCommandRecord]) -> GateCom
     candidates = [
         command
         for command in commands
-        if command.requires_reconciliation or command.state == GateCommandState.RECONCILIATION_REQUIRED
+        if command.requires_reconciliation
+        or command.state in {GateCommandState.RECONCILIATION_REQUIRED, GateCommandState.LEASED}
+        or (
+            command.state == GateCommandState.ACCEPTED
+            and not command.mechanically_confirmed
+        )
     ]
     if not candidates:
         candidates = list(commands)

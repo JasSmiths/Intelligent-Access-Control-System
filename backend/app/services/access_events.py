@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +24,7 @@ from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
-from app.models import AccessEvent, Anomaly, Person, Presence, Vehicle, VisitorPass
+from app.models import AccessEvent, Anomaly, MovementSessionRecord, Person, Presence, Vehicle, VisitorPass
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
@@ -240,6 +241,10 @@ class ActiveVehicleSession:
     last_seen_at: datetime
     direction: AccessDirection
     decision: AccessDecision
+    movement_session_id: str | None = None
+    debounce_expires_at: datetime | None = None
+    gate_cycle_expires_at: datetime | None = None
+    idle_expires_at: datetime | None = None
     camera_id: str | None = None
     device_id: str | None = None
     protect_event_ids: set[str] = field(default_factory=set)
@@ -267,9 +272,7 @@ class AccessEventService:
         self._stop_event = asyncio.Event()
         self._timezone = ZoneInfo(settings.site_timezone)
         self._runtime: RuntimeConfig | None = None
-        self._recent_exact_resolutions: list[ResolvedPlateWindow] = []
         self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
-        self._active_vehicle_sessions: list[ActiveVehicleSession] = []
         self._movement_direction_fsm = MovementDirectionFSM()
         self._movement_suppression_fsm = MovementSuppressionFSM()
         self._movement_ledger = get_movement_ledger_repository()
@@ -326,7 +329,8 @@ class AccessEventService:
             "worker_running": worker_running,
             "queue_depth": queue_depth,
             "pending_windows": len(self._pending),
-            "active_vehicle_sessions": len(self._active_vehicle_sessions),
+            "active_vehicle_sessions": 0,
+            "movement_sessions_source": "durable",
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "last_heartbeat_at": self._last_heartbeat_at.isoformat() if self._last_heartbeat_at else None,
             "last_processed_at": self._last_processed_at.isoformat() if self._last_processed_at else None,
@@ -640,7 +644,7 @@ class AccessEventService:
             return
 
         if not gate_malfunction:
-            exact_suppression_reason = self._exact_resolution_suppression_reason(read)
+            exact_suppression_reason = await self._exact_resolution_suppression_reason(read)
             if exact_suppression_reason:
                 await self._publish_suppressed_read(read, reason=exact_suppression_reason)
                 return
@@ -671,9 +675,7 @@ class AccessEventService:
 
     def _clear_pending_reads(self) -> None:
         self._pending = []
-        self._recent_exact_resolutions = []
         self._recent_visitor_pass_resolutions = []
-        self._active_vehicle_sessions = []
 
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
@@ -978,39 +980,26 @@ class AccessEventService:
         window: DebounceWindow,
         finalized: FinalizedPlateEvent | None = None,
     ) -> None:
-        exact_read = next(
-            (
-                read
-                for read in sorted(window.reads, key=lambda item: item.captured_at)
-                if _is_exact_known_vehicle_plate_match(read)
-            ),
-            None,
-        )
-        if not exact_read:
-            return
-        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
-        debounce_expires_at = window.first_seen + timedelta(seconds=max_seconds)
-        gate_cycle_expires_at = debounce_expires_at
-        if finalized and finalized.decision == AccessDecision.GRANTED:
-            gate_cycle_expires_at = max(
-                gate_cycle_expires_at,
-                window.first_seen + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
-            )
-        self._recent_exact_resolutions.append(
-            ResolvedPlateWindow(
-                source=exact_read.source,
-                registration_number=exact_read.registration_number,
-                first_seen=window.first_seen,
-                debounce_expires_at=debounce_expires_at,
-                gate_cycle_expires_at=gate_cycle_expires_at,
-                direction=finalized.direction if finalized else None,
-                decision=finalized.decision if finalized else None,
-            )
-        )
+        # Durable movement sessions are now the source of truth for exact-read
+        # suppression. The method remains as a compatibility hook for older
+        # tests/callers that finalized through this path.
+        return None
 
-    def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
-        self._prune_recent_exact_resolutions(read.captured_at)
+    async def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
         match = _known_vehicle_plate_match_from_read(read)
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = await self._movement_ledger.movement_sessions_for_exact_suppression(
+                    session,
+                    source=read.source,
+                    captured_at=read.captured_at,
+                )
+        except (ProgrammingError, RuntimeError):
+            logger.warning(
+                "movement_session_exact_suppression_unavailable",
+                extra={"registration_number": read.registration_number, "source": read.source},
+            )
+            return None
         decision = self._movement_suppression_fsm.classify_exact_plate_read(
             PlateReadMovementEvidence(
                 source=read.source,
@@ -1022,15 +1011,15 @@ class AccessEventService:
             ),
             (
                 ResolvedMovementWindow(
-                    source=resolution.source,
-                    registration_number=resolution.registration_number,
-                    first_seen=resolution.first_seen,
-                    debounce_expires_at=resolution.debounce_expires_at,
-                    gate_cycle_expires_at=resolution.gate_cycle_expires_at,
-                    direction=resolution.direction,
-                    decision=resolution.decision,
+                    source=row.source,
+                    registration_number=row.registration_number,
+                    first_seen=row.started_at,
+                    debounce_expires_at=row.debounce_expires_at or row.started_at,
+                    gate_cycle_expires_at=row.gate_cycle_expires_at or row.debounce_expires_at or row.started_at,
+                    direction=row.direction,
+                    decision=row.decision,
                 )
-                for resolution in self._recent_exact_resolutions
+                for row in rows
             ),
         )
         return decision.reason
@@ -1055,13 +1044,6 @@ class AccessEventService:
     ) -> bool:
         hint = self._read_direction_hint(read)
         return bool(direction and hint and hint != direction)
-
-    def _prune_recent_exact_resolutions(self, now: datetime) -> None:
-        self._recent_exact_resolutions = [
-            resolution
-            for resolution in self._recent_exact_resolutions
-            if max(resolution.debounce_expires_at, resolution.gate_cycle_expires_at) >= now
-        ]
 
     def _remember_visitor_pass_resolution(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
         max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
@@ -1142,25 +1124,6 @@ class AccessEventService:
         if not context.normalized_registration_number:
             return None
         idle_seconds = self._vehicle_session_idle_seconds()
-        self._prune_active_vehicle_sessions(read.captured_at, idle_seconds)
-
-        for session in sorted(self._active_vehicle_sessions, key=lambda item: item.last_seen_at, reverse=True):
-            matched_by = self._vehicle_session_match(session, context, read)
-            if not matched_by:
-                continue
-            if self._read_is_departure_after_entry_session(read, session):
-                continue
-            if self._read_is_entry_after_exit_idle_expired(read, session, idle_seconds):
-                continue
-            evidence = await self._vehicle_session_presence_evidence(session, context, read, idle_seconds)
-            if read.captured_at <= session.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
-                return VehicleSessionSuppression(
-                    session=session,
-                    reason="vehicle_session_already_active",
-                    matched_by=matched_by,
-                    evidence=evidence,
-                )
-
         return await self._vehicle_session_db_fallback(read, context, idle_seconds)
 
     def _vehicle_session_idle_seconds(self) -> float:
@@ -1174,14 +1137,6 @@ class AccessEventService:
         except (TypeError, ValueError):
             value = settings.lpr_vehicle_session_idle_seconds
         return max(10.0, value)
-
-    def _prune_active_vehicle_sessions(self, now: datetime, idle_seconds: float) -> None:
-        horizon = timedelta(seconds=max(idle_seconds * 3, idle_seconds + 300.0))
-        self._active_vehicle_sessions = [
-            session
-            for session in self._active_vehicle_sessions
-            if session.last_seen_at + horizon >= now
-        ][-100:]
 
     def _vehicle_session_match(
         self,
@@ -1261,21 +1216,16 @@ class AccessEventService:
     ) -> VehicleSessionSuppression | None:
         lookup_horizon = timedelta(seconds=max(idle_seconds * 3, 3600.0))
         async with AsyncSessionLocal() as session:
-            rows = (
-                await session.scalars(
-                    select(AccessEvent)
-                    .where(
-                        AccessEvent.source == read.source,
-                        AccessEvent.occurred_at <= read.captured_at,
-                        AccessEvent.occurred_at >= read.captured_at - lookup_horizon,
-                    )
-                    .order_by(AccessEvent.occurred_at.desc())
-                    .limit(50)
-                )
-            ).all()
+            rows = await self._movement_ledger.movement_sessions_for_active_read(
+                session,
+                source=read.source,
+                captured_at=read.captured_at,
+                lookup_horizon=lookup_horizon,
+                limit=100,
+            )
 
         for event in rows:
-            candidate = self._vehicle_session_from_event(event)
+            candidate = self._vehicle_session_from_record(event)
             if not candidate:
                 continue
             matched_by = self._vehicle_session_match(candidate, context, read)
@@ -1287,11 +1237,10 @@ class AccessEventService:
                 continue
             evidence = await self._vehicle_session_presence_evidence(candidate, context, read, idle_seconds)
             if read.captured_at <= candidate.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
-                self._upsert_active_vehicle_session(candidate)
                 return VehicleSessionSuppression(
                     session=candidate,
                     reason="vehicle_session_already_active",
-                    matched_by=f"db_{matched_by}",
+                    matched_by=f"movement_session_{matched_by}",
                     evidence=evidence,
                 )
         return None
@@ -1309,7 +1258,7 @@ class AccessEventService:
         gate_cycle_expires_at = session.last_seen_at + timedelta(
             seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS
         )
-        return read.captured_at > gate_cycle_expires_at
+        return read.captured_at > (session.gate_cycle_expires_at or gate_cycle_expires_at)
 
     def _read_is_entry_after_exit_idle_expired(
         self,
@@ -1320,7 +1269,7 @@ class AccessEventService:
         return (
             session.direction == AccessDirection.EXIT
             and self._read_direction_hint(read) == AccessDirection.ENTRY
-            and read.captured_at > session.last_seen_at + timedelta(seconds=idle_seconds)
+            and read.captured_at > (session.idle_expires_at or session.last_seen_at + timedelta(seconds=idle_seconds))
         )
 
     async def _annotate_suppressed_session_read(
@@ -1334,6 +1283,33 @@ class AccessEventService:
         session.protect_event_ids.update(context.protect_event_ids)
         session.camera_id = session.camera_id or context.camera_id
         session.device_id = session.device_id or context.device_id
+        suppressed_read_payload = self._suppressed_session_read_payload(read, suppression)
+
+        if session.movement_session_id:
+            try:
+                movement_session_uuid = uuid.UUID(session.movement_session_id)
+            except ValueError:
+                movement_session_uuid = None
+            if movement_session_uuid:
+                async with AsyncSessionLocal() as db:
+                    row = await db.get(MovementSessionRecord, movement_session_uuid)
+                    if row:
+                        await self._movement_ledger.record_movement_session_suppression(
+                            db,
+                            row,
+                            read_captured_at=read.captured_at,
+                            idle_expires_at=read.captured_at + timedelta(seconds=self._vehicle_session_idle_seconds()),
+                            protect_event_ids=context.protect_event_ids,
+                            ocr_variants=self._ocr_variants_for_reads((read,)),
+                            last_gate_state=self._gate_observation_from_read(read).get("state"),
+                            reason=suppression.reason,
+                            matched_by=suppression.matched_by,
+                            presence_evidence=self._vehicle_presence_evidence_payload(suppression.evidence)
+                            if suppression.evidence
+                            else None,
+                            suppressed_read_payload=suppressed_read_payload,
+                        )
+                        await db.commit()
 
         try:
             event_uuid = uuid.UUID(session.event_id)
@@ -1374,7 +1350,7 @@ class AccessEventService:
 
             suppressed_reads = vehicle_session.get("suppressed_reads")
             suppressed_reads = list(suppressed_reads) if isinstance(suppressed_reads, list) else []
-            suppressed_reads.append(self._suppressed_session_read_payload(read, suppression))
+            suppressed_reads.append(suppressed_read_payload)
             vehicle_session["suppressed_reads"] = suppressed_reads[-MAX_SUPPRESSED_SESSION_READS:]
 
             payload[VEHICLE_SESSION_PAYLOAD_KEY] = vehicle_session
@@ -1414,36 +1390,60 @@ class AccessEventService:
             "suppressed_reads": [],
         }
 
-    def _remember_vehicle_session(
+    def _ocr_variants_for_reads(self, reads: Iterable[PlateRead]) -> list[str]:
+        variants: set[str] = set()
+        for item in reads:
+            detected = _detected_registration_number(item)
+            if detected:
+                variants.add(detected)
+            if item.registration_number:
+                variants.add(item.registration_number)
+            variants.update(_candidate_registration_numbers(item))
+        return sorted(value for value in variants if value)
+
+    async def _remember_vehicle_session(
         self,
         event: AccessEvent,
         window: DebounceWindow,
         read: PlateRead,
+        *,
+        movement_saga_id: uuid.UUID | str | None = None,
     ) -> None:
         context = self._vehicle_session_context_from_read(read)
         if not context.normalized_registration_number:
             return
-        self._upsert_active_vehicle_session(
-            ActiveVehicleSession(
-                event_id=str(event.id),
+        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+        debounce_expires_at = window.first_seen + timedelta(seconds=max_seconds)
+        gate_cycle_expires_at = debounce_expires_at
+        if event.decision == AccessDecision.GRANTED:
+            gate_cycle_expires_at = max(
+                gate_cycle_expires_at,
+                window.first_seen + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
+            )
+        idle_expires_at = window.updated_at + timedelta(seconds=self._vehicle_session_idle_seconds())
+        async with AsyncSessionLocal() as session:
+            await self._movement_ledger.upsert_movement_session(
+                session,
+                session_key=f"movement-session:{event.id}",
                 source=read.source,
+                access_event_id=event.id,
+                movement_saga_id=movement_saga_id,
                 registration_number=read.registration_number,
                 normalized_registration_number=context.normalized_registration_number,
                 started_at=window.first_seen,
                 last_seen_at=window.updated_at,
                 direction=event.direction,
                 decision=event.decision,
+                debounce_expires_at=debounce_expires_at,
+                gate_cycle_expires_at=gate_cycle_expires_at,
+                idle_expires_at=idle_expires_at,
                 camera_id=context.camera_id,
                 device_id=context.device_id,
-                protect_event_ids=set(context.protect_event_ids),
+                protect_event_ids=context.protect_event_ids,
+                ocr_variants=self._ocr_variants_for_reads(window.reads),
+                last_gate_state=self._gate_observation_from_read(read).get("state"),
             )
-        )
-
-    def _upsert_active_vehicle_session(self, session: ActiveVehicleSession) -> None:
-        self._active_vehicle_sessions = [
-            item for item in self._active_vehicle_sessions if item.event_id != session.event_id
-        ]
-        self._active_vehicle_sessions.append(session)
+            await session.commit()
 
     def _vehicle_session_from_event(self, event: AccessEvent) -> ActiveVehicleSession | None:
         payload = dict(event.raw_payload or {})
@@ -1465,6 +1465,7 @@ class AccessEventService:
         last_seen_at = self._datetime_from_payload(session_payload.get("last_seen_at")) or event.occurred_at
         started_at = self._datetime_from_payload(session_payload.get("started_at")) or event.occurred_at
         return ActiveVehicleSession(
+            movement_session_id=None,
             event_id=str(event.id),
             source=event.source,
             registration_number=event.registration_number,
@@ -1477,6 +1478,28 @@ class AccessEventService:
             device_id=str(session_payload.get("device_id") or context.device_id or "") or None,
             protect_event_ids=set(self._string_list(session_payload.get("protect_event_ids")))
             | context.protect_event_ids,
+        )
+
+    def _vehicle_session_from_record(self, row: MovementSessionRecord) -> ActiveVehicleSession | None:
+        normalized = str(row.normalized_registration_number or "").strip()
+        if not normalized:
+            return None
+        return ActiveVehicleSession(
+            movement_session_id=str(row.id),
+            event_id=str(row.access_event_id) if row.access_event_id else "",
+            source=row.source,
+            registration_number=row.registration_number,
+            normalized_registration_number=normalized,
+            started_at=row.started_at,
+            last_seen_at=row.last_seen_at,
+            direction=row.direction,
+            decision=row.decision,
+            debounce_expires_at=row.debounce_expires_at,
+            gate_cycle_expires_at=row.gate_cycle_expires_at,
+            idle_expires_at=row.idle_expires_at,
+            camera_id=row.camera_id,
+            device_id=row.device_id,
+            protect_event_ids=set(self._string_list(row.protect_event_ids)),
         )
 
     def _vehicle_session_context_from_read(self, read: PlateRead) -> VehicleSessionContext:
@@ -2030,7 +2053,12 @@ class AccessEventService:
             await self._publish_gate_open_skipped(event, direction_resolution, person)
 
         if not (gate_command_required and gate_outcome and not gate_outcome.accepted):
-            self._remember_vehicle_session(event, window, read)
+            await self._remember_vehicle_session(
+                event,
+                window,
+                read,
+                movement_saga_id=movement_saga.id if movement_saga else None,
+            )
         persistence_span.finish(
             output_payload={
                 "event_id": str(event.id),

@@ -20,6 +20,7 @@ from app.models.enums import (
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
+    MovementSagaState,
     PresenceState,
     TimingClassification,
 )
@@ -29,6 +30,7 @@ from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
 from app.services.event_bus import event_bus
 from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
+from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
@@ -201,6 +203,7 @@ class MissedAccessEventBackfillService:
         self.source = source
         self.backfill_reason = backfill_reason
         self._movement_direction_fsm = MovementDirectionFSM()
+        self._movement_ledger = get_movement_ledger_repository()
 
     async def run(
         self,
@@ -436,6 +439,18 @@ class MissedAccessEventBackfillService:
                 await _update_presence(session, person, event)
                 presence_updated = True
 
+            movement_saga = await self._persist_backfill_movement(
+                session,
+                event,
+                candidate,
+                direction_resolution=direction_resolution,
+                presence_updated=presence_updated,
+            )
+            event.raw_payload = {
+                **(event.raw_payload or {}),
+                "movement_saga": movement_saga_summary(movement_saga),
+            }
+
             await write_audit_log(
                 session,
                 category=TELEMETRY_CATEGORY_ACCESS,
@@ -513,11 +528,84 @@ class MissedAccessEventBackfillService:
                 "event_type": "access_event.finalized",
                 "timing_classification": event.timing_classification.value,
                 "anomaly_count": len(anomalies),
+                "movement_saga": movement_saga_summary(movement_saga),
                 "backfilled": True,
                 "backfill_source": self._backfill_payload_source(),
             },
         )
         return True
+
+    async def _persist_backfill_movement(
+        self,
+        session: AsyncSession,
+        event: AccessEvent,
+        candidate: ProtectBackfillCandidate,
+        *,
+        direction_resolution: dict[str, Any],
+        presence_updated: bool,
+    ):
+        idempotency_key = f"movement-backfill:{self.source}:{candidate.protect_event_id}"
+        movement_saga = await self._movement_ledger.create_movement_saga(
+            session,
+            idempotency_key=idempotency_key,
+            source=self.source,
+            occurred_at=event.occurred_at,
+            registration_number=event.registration_number,
+            person_id=event.person_id,
+            vehicle_id=event.vehicle_id,
+            direction=event.direction,
+            decision=event.decision,
+            state=MovementSagaState.COMPLETED,
+            intent_payload={
+                "source": self.source,
+                "access_event_id": str(event.id),
+                "protect_event_id": candidate.protect_event_id,
+                "captured_at": candidate.captured_at.isoformat(),
+                "hardware_side_effects_enabled": False,
+                "backfill": True,
+            },
+            decision_payload={
+                **direction_resolution,
+                "hardware_actions_suppressed": True,
+                "backfill": True,
+            },
+        )
+        await self._movement_ledger.transition_movement_saga(
+            session,
+            movement_saga,
+            MovementSagaState.COMPLETED,
+            detail="backfill_hardware_side_effects_suppressed",
+            access_event_id=event.id,
+            gate_command_required=False,
+            presence_committed=presence_updated,
+            reconciliation_required=False,
+            decision_payload={
+                **direction_resolution,
+                "hardware_actions_suppressed": True,
+                "backfill": True,
+            },
+        )
+        await self._movement_ledger.upsert_movement_session(
+            session,
+            session_key=f"movement-session:{event.id}",
+            source=self.source,
+            access_event_id=event.id,
+            movement_saga_id=movement_saga.id,
+            registration_number=event.registration_number,
+            normalized_registration_number=normalize_registration_number(event.registration_number),
+            direction=event.direction,
+            decision=event.decision,
+            started_at=event.occurred_at,
+            last_seen_at=event.occurred_at,
+            debounce_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_debounce_max_seconds),
+            gate_cycle_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_debounce_max_seconds),
+            idle_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_vehicle_session_idle_seconds),
+            camera_id=candidate.camera_id,
+            protect_event_ids={candidate.protect_event_id},
+            ocr_variants=_candidate_ocr_variants(candidate),
+            last_gate_state=_direction_resolution_gate_state(direction_resolution),
+        )
+        return movement_saga
 
     async def _matching_existing_event(
         self,
@@ -733,6 +821,28 @@ def protect_event_ids_from_payload(payload: Any) -> set[str]:
         if isinstance(protect_event_ids, list):
             candidates.update(protect_event_ids)
     return {str(candidate).strip() for candidate in candidates if str(candidate or "").strip()}
+
+
+def _candidate_ocr_variants(candidate: ProtectBackfillCandidate) -> list[str]:
+    values = {
+        candidate.registration_number,
+        str(candidate.track_candidate.get("registration_number") or ""),
+        str(candidate.track_candidate.get("raw_value") or ""),
+        str(candidate.track_candidate.get("plate") or ""),
+    }
+    normalized_values = {normalize_registration_number(value) for value in values if value}
+    values.update(normalized_values)
+    return sorted(value for value in values if str(value or "").strip())
+
+
+def _direction_resolution_gate_state(direction_resolution: dict[str, Any]) -> str | None:
+    gate_observation = direction_resolution.get("gate_observation")
+    if isinstance(gate_observation, dict):
+        state = gate_observation.get("state")
+        if state:
+            return str(state)
+    state = direction_resolution.get("gate_state")
+    return str(state) if state else None
 
 
 def _best_track_candidate(observations: list[dict[str, Any]]) -> dict[str, Any] | None:

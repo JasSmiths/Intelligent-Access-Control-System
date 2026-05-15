@@ -42,6 +42,7 @@ import {
   LogIn,
   LogOut,
   Loader2,
+  MoveHorizontal,
   MessageCircle,
   Menu,
   Moon,
@@ -127,6 +128,7 @@ const SchedulesView = React.lazy(() => import("./views/SchedulesView").then((mod
 const PassesView = React.lazy(() => import("./views/PassesView").then((module) => ({ default: module.PassesView })));
 const TopChartsView = React.lazy(() => import("./views/TopChartsView").then((module) => ({ default: module.TopChartsView })));
 const EventsView = React.lazy(() => import("./views/EventsView").then((module) => ({ default: module.EventsView })));
+const MovementsView = React.lazy(() => import("./views/MovementsView").then((module) => ({ default: module.MovementsView })));
 const AlertsView = React.lazy(() => import("./views/AlertsView").then((module) => ({ default: module.AlertsView })));
 const ReportsView = React.lazy(() => import("./views/ReportsView").then((module) => ({ default: module.ReportsView })));
 const IntegrationsView = React.lazy(() => import("./views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
@@ -243,6 +245,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "top_charts", label: "Top Charts", icon: Trophy },
   { key: "events", label: "Events", icon: CalendarDays },
+  { key: "movements", label: "Movements", icon: MoveHorizontal },
   { key: "alerts", label: "Alerts", icon: Bell },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "integrations", label: "API & Integrations", icon: PlugZap },
@@ -269,6 +272,7 @@ const viewPaths: Record<ViewKey, string> = {
   vehicles: "/vehicles",
   top_charts: "/top-charts",
   events: "/events",
+  movements: "/movements",
   alerts: "/alerts",
   reports: "/reports",
   integrations: "/integrations",
@@ -1897,6 +1901,9 @@ function View(props: {
       break;
     case "events":
       content = <EventsView events={props.events} query={props.search} />;
+      break;
+    case "movements":
+      content = <MovementsView query={props.search} refreshToken={props.dataRefreshToken} />;
       break;
     case "alerts":
       content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} />;

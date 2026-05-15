@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from app.models import AccessEvent
+from app.models import AccessEvent, MovementSessionRecord
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
@@ -29,6 +29,84 @@ from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.snapshots import access_event_snapshot_relative_path
 from app.services.vehicle_visual_detections import VehiclePresenceTracker
+
+
+class FakeMovementLedger:
+    def __init__(self) -> None:
+        self.rows: list[MovementSessionRecord] = []
+
+    async def create_movement_saga(self, _session, **kwargs):
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            state=kwargs.get("state"),
+            state_history=[],
+            **{key: value for key, value in kwargs.items() if key != "state"},
+        )
+
+    async def transition_movement_saga(self, _session, saga, state, **kwargs):
+        saga.state = state
+        for key, value in kwargs.items():
+            setattr(saga, key, value)
+        return True
+
+    async def movement_sessions_for_exact_suppression(self, _session, *, source, captured_at, limit=100):
+        rows = [
+            row
+            for row in self.rows
+            if row.source == source
+            and row.started_at <= captured_at
+            and (
+                (row.debounce_expires_at and row.debounce_expires_at >= captured_at)
+                or (row.gate_cycle_expires_at and row.gate_cycle_expires_at >= captured_at)
+            )
+        ]
+        return sorted(rows, key=lambda row: row.started_at, reverse=True)[:limit]
+
+    async def movement_sessions_for_active_read(self, _session, *, source, captured_at, lookup_horizon, limit=100):
+        rows = [
+            row
+            for row in self.rows
+            if row.source == source
+            and row.is_active
+            and row.started_at <= captured_at
+            and row.last_seen_at >= captured_at - lookup_horizon
+        ]
+        return sorted(rows, key=lambda row: row.last_seen_at, reverse=True)[:limit]
+
+    async def record_movement_session_suppression(
+        self,
+        _session,
+        row,
+        *,
+        read_captured_at,
+        idle_expires_at,
+        protect_event_ids,
+        ocr_variants,
+        last_gate_state,
+        reason,
+        matched_by,
+        presence_evidence,
+        suppressed_read_payload,
+    ):
+        row.last_seen_at = max(row.last_seen_at, read_captured_at)
+        row.idle_expires_at = idle_expires_at
+        row.protect_event_ids = sorted(set(row.protect_event_ids or []) | set(protect_event_ids or []))
+        row.ocr_variants = sorted(set(row.ocr_variants or []) | set(ocr_variants or []))
+        row.last_gate_state = last_gate_state
+        row.suppressed_read_count = int(row.suppressed_read_count or 0) + 1
+        row.last_suppressed_reason = reason
+        row.last_matched_by = matched_by
+        row.last_presence_evidence = presence_evidence
+        row.suppressed_reads = [*(row.suppressed_reads or []), suppressed_read_payload]
+
+
+def fake_movement_ledger(service: AccessEventService) -> FakeMovementLedger:
+    ledger = getattr(service, "_movement_ledger", None)
+    if isinstance(ledger, FakeMovementLedger):
+        return ledger
+    ledger = FakeMovementLedger()
+    service._movement_ledger = ledger
+    return ledger
 
 
 class FakePresenceSession:
@@ -330,13 +408,52 @@ def remember_session(
         occurred_at=read.captured_at,
         registration_number=read.registration_number,
     )
-    window = access_events_module.DebounceWindow(
-        first_seen=read.captured_at,
-        updated_at=read.captured_at,
-        reads=[read],
-    )
-    service._remember_vehicle_session(event, window, read)
+    remember_movement_session(service, read, event=event, direction=direction, decision=decision)
     return event
+
+
+def remember_movement_session(
+    service: AccessEventService,
+    read: PlateRead,
+    *,
+    event=None,
+    direction: AccessDirection = AccessDirection.DENIED,
+    decision: AccessDecision = AccessDecision.DENIED,
+) -> MovementSessionRecord:
+    context = service._vehicle_session_context_from_read(read)
+    max_seconds = service._runtime.lpr_debounce_max_seconds if service._runtime else 6.0
+    idle_seconds = (
+        getattr(service._runtime, "lpr_vehicle_session_idle_seconds", 180.0)
+        if service._runtime
+        else 180.0
+    )
+    if event is None:
+        event = SimpleNamespace(id=uuid.uuid4())
+    row = MovementSessionRecord(
+        session_key=f"test-session:{event.id}",
+        source=read.source,
+        access_event_id=event.id,
+        movement_saga_id=None,
+        registration_number=read.registration_number,
+        normalized_registration_number=context.normalized_registration_number,
+        direction=direction,
+        decision=decision,
+        started_at=read.captured_at,
+        last_seen_at=read.captured_at,
+        debounce_expires_at=read.captured_at + timedelta(seconds=max_seconds),
+        gate_cycle_expires_at=read.captured_at + timedelta(seconds=access_events_module.EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
+        idle_expires_at=read.captured_at + timedelta(seconds=idle_seconds),
+        camera_id=context.camera_id,
+        device_id=context.device_id,
+        protect_event_ids=sorted(context.protect_event_ids),
+        ocr_variants=[read.registration_number],
+        last_gate_state=service._gate_observation_from_read(read).get("state"),
+        suppressed_read_count=0,
+        suppressed_reads=[],
+        is_active=True,
+    )
+    fake_movement_ledger(service).rows.append(row)
+    return row
 
 
 def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
@@ -918,6 +1035,12 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
                 "best_exact": best_match["exact"],
             }
         )
+        remember_movement_session(
+            service,
+            window.best_read,
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+        )
 
     async def fake_no_visitor_pass_departure_match(read):
         return read
@@ -932,6 +1055,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    fake_movement_ledger(service)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     for offset, registration_number in enumerate(["MD25VMO", "MO25VNO"]):
@@ -994,6 +1118,7 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
+    fake_movement_ledger(service)
 
     captured_at = datetime(2026, 5, 12, 13, 31, 31, tzinfo=UTC)
     await service._handle_queued_read(
@@ -1039,6 +1164,12 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
                 "best_registration_number": window.best_read.registration_number,
             }
         )
+        remember_movement_session(
+            service,
+            window.best_read,
+            direction=AccessDirection.EXIT,
+            decision=AccessDecision.GRANTED,
+        )
         return FinalizedPlateEvent(
             event_id=str(uuid.uuid4()),
             direction=AccessDirection.EXIT,
@@ -1064,6 +1195,7 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    fake_movement_ledger(service)
 
     first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
     await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "open"))
@@ -1108,6 +1240,12 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
                 "direction": direction.value,
             }
         )
+        remember_movement_session(
+            service,
+            window.best_read,
+            direction=direction,
+            decision=AccessDecision.GRANTED,
+        )
         return FinalizedPlateEvent(
             event_id=str(uuid.uuid4()),
             direction=direction,
@@ -1129,6 +1267,7 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    fake_movement_ledger(service)
 
     first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
     await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "closed"))
@@ -1180,6 +1319,12 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
                 "direction": direction.value,
             }
         )
+        remember_movement_session(
+            service,
+            window.best_read,
+            direction=direction,
+            decision=AccessDecision.GRANTED,
+        )
         return FinalizedPlateEvent(
             event_id=str(uuid.uuid4()),
             direction=direction,
@@ -1201,6 +1346,7 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    fake_movement_ledger(service)
 
     first_seen = datetime(2026, 5, 1, 23, 29, 41, tzinfo=UTC)
     await service._handle_queued_read(plate_read_with_gate_state_at("PE70DHX", first_seen, "closed"))
@@ -1276,17 +1422,6 @@ async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypat
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_gate_malfunction_context)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-    service._recent_exact_resolutions.append(
-        access_events_module.ResolvedPlateWindow(
-            source="test",
-            registration_number="SVA673",
-            first_seen=captured_at - timedelta(seconds=10),
-            debounce_expires_at=captured_at + timedelta(seconds=10),
-            gate_cycle_expires_at=captured_at + timedelta(seconds=10),
-            direction=AccessDirection.ENTRY,
-            decision=AccessDecision.GRANTED,
-        )
-    )
     remember_session(
         service,
         plate_read_with_context("SVA673", captured_at - timedelta(seconds=30), state="open"),
@@ -1647,6 +1782,7 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    fake_movement_ledger(service)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     await service._handle_queued_read(plate_read("ND25VN0", first_seen))
@@ -2055,12 +2191,8 @@ async def test_vehicle_session_presence_evidence_extends_suppression_after_idle(
     async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
         return None
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
     monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 

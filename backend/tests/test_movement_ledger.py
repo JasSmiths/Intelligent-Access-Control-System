@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.models import MovementSagaRecord
-from app.models.enums import MovementSagaState
+from app.models import MovementSagaRecord, MovementSessionRecord
+from app.models.enums import AccessDecision, AccessDirection, MovementSagaState
 from app.services.gate_commands import GateCommandIntent
 from app.services.movement_ledger import MovementLedgerRepository, gate_command_idempotency_key
 
@@ -85,4 +85,47 @@ async def test_movement_transition_records_forward_history() -> None:
     assert row.state == MovementSagaState.RECONCILIATION_REQUIRED
     assert row.reconciliation_required is True
     assert row.state_history[-1]["detail"] == "accepted_without_mechanical_confirmation"
+    assert session.flushes == 1
+
+
+@pytest.mark.asyncio
+async def test_record_movement_session_suppression_updates_durable_session() -> None:
+    repository = MovementLedgerRepository()
+    observed_at = datetime(2026, 5, 3, 10, 0, tzinfo=UTC)
+    row = MovementSessionRecord(
+        session_key="session-1",
+        source="test",
+        registration_number="AB12CDE",
+        normalized_registration_number="AB12CDE",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        started_at=observed_at,
+        last_seen_at=observed_at,
+        protect_event_ids=["event-1"],
+        ocr_variants=["AB12CDE"],
+        suppressed_reads=[],
+        is_active=True,
+    )
+    session = FakeFlushSession()
+
+    await repository.record_movement_session_suppression(
+        session,
+        row,
+        read_captured_at=observed_at.replace(minute=2),
+        idle_expires_at=observed_at.replace(minute=5),
+        protect_event_ids={"event-2"},
+        ocr_variants={"AB12C0E"},
+        last_gate_state="closed",
+        reason="vehicle_session_already_active",
+        matched_by="movement_session_registration_number",
+        presence_evidence={"source": "unifi"},
+        suppressed_read_payload={"registration_number": "AB12C0E"},
+    )
+
+    assert row.last_seen_at == observed_at.replace(minute=2)
+    assert row.protect_event_ids == ["event-1", "event-2"]
+    assert row.ocr_variants == ["AB12C0E", "AB12CDE"]
+    assert row.suppressed_read_count == 1
+    assert row.last_suppressed_reason == "vehicle_session_already_active"
+    assert row.suppressed_reads == [{"registration_number": "AB12C0E"}]
     assert session.flushes == 1
