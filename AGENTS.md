@@ -8,7 +8,7 @@ golden_rules:
 
 system:
   name: Intelligent Access Control + Presence System
-  purpose: LPR ingest -> plate resolution -> presence/anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
+  purpose: LPR ingest -> movement FSM/Saga -> presence/anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
   deploy: docker compose
   ports:
     host: {frontend: 8089, backend: 8088, postgres: 5432, redis: 6379}
@@ -84,7 +84,7 @@ repo:
     styles: frontend/src/styles.css imports frontend/src/styles/*
 
 runtime:
-  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_events, home_assistant, gate_malfunction, unifi_protect, restart_backfill, snapshot_recovery]
+  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_events, movement_reconciliation, home_assistant, gate_malfunction, unifi_protect, restart_backfill, snapshot_recovery]
   stop_order: reverse; close UniFi Protect WS/aiohttp/session resources.
   persistence_mounts:
     - ./data/backend:/app/data
@@ -100,7 +100,7 @@ data:
   tables:
     identity: users, messaging_identities
     directory: groups, people, vehicles, schedules, schedule_overrides, presence
-    access: access_events, anomalies, visitor_passes
+    access: access_events, anomalies, visitor_passes, movement_sagas, movement_sessions, gate_command_records
     chat: chat_sessions, chat_messages, alfred_memories, alfred_feedback, alfred_lessons, alfred_eval_examples
     notifications: notification_rules, notification_action_contexts
     automation: automation_rules, automation_runs, automation_webhook_senders
@@ -140,18 +140,28 @@ api:
     alfred: /api/v1/ai/chat, /stream, /ws, /agent/status, /feedback, /training/*
     dependency_jobs: WS /api/v1/dependency-updates/jobs/{job_id}/ws
   confirmations: POST /api/v1/action-confirmations; Admin-only, short-lived, one-use tokens bound to action+payload.
+  access:
+    movements: GET /api/v1/access/movements, /movements/{id}; POST /movements/{id}/reconciliation-required.
+    gate_commands: GET /api/v1/access/gate-commands.
+    event_repair: POST /api/v1/access/events/{event_id}/movement-reconciliation creates/marks a durable saga for historical review.
+    events: /api/v1/events includes compact movement_saga summary when linked.
 
 lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
   adapter: backend/app/modules/lpr/ubiquiti.py -> PlateRead(registration_number, confidence, source, captured_at, raw_payload)
-  service: backend/app/services/access_events.py
+  service: backend/app/services/access_events.py with movement_fsm.py, movement_ledger.py, gate_commands.py
   maintenance_mode: accept/ignore webhook; clear queues; no access_event/presence/gate/garage.
   smart_zones: diagnostic only; missing/empty/nonmatching zones never drop valid plate reads.
-  debounce: compare every read to active vehicles; exact active plate wins; suppress trailing same-source reads within max window; duplicate session suppression allows departure evidence.
-  direction: captured gate state at queue time; closed=entry, open/opening/closing=exit, unknown => payload then presence; known-present entry tie-breaker may use UniFi snapshot + OpenAI vision.
-  creation: authorization + visitor pass + DVLA context + one final access_events row; granted events update presence; anomalies include unauthorized_plate/outside_schedule/duplicate_entry/duplicate_exit.
-  gate: open only granted entry with captured closed state; garage opens assigned doors only after accepted gate open and schedule allows.
-  diagnostics: /api/v1/diagnostics/lpr-timing; restart backfill in backend/app/services/restart_backfill.py.
+  debounce: durable movement_sessions drive exact echo, gate-cycle/session, convoy, visitor departure, OCR variant, and arrival_ocr_noise suppression.
+  arrival_noise: unknown/nonmatching same-camera reads within 45s of a granted entry suppress cross-source OCR debris; explicit exits and different known vehicles bypass.
+  direction: MovementDirectionFSM consumes normalized intent; closed=entry+gate.open, open/opening/closing=exit unless presence evidence overrides; unknown => payload then presence.
+  creation: every live decision creates/updates movement_sagas; suppressed reads are durable SUPPRESSED movements, not alerts.
+  event_commit: final granted/denied reads create one access_events row; anomalies include unauthorized_plate/outside_schedule/duplicate_entry/duplicate_exit.
+  gate: entry gate opens go through GateCommandCoordinator DB lease/idempotency; presence commits after no gate is needed or after accepted/reconciled command.
+  garage: assigned garage doors open only after accepted gate open and schedule allows; garage commands are audited separately.
+  reconciliation: movement_reconciliation scans stale leases, pending sagas, accepted-but-unverified commands, commits presence when safe, and publishes movement/gate reconciliation events.
+  backfill: restart_backfill creates the same movement saga/session records with hardware side effects suppressed; historical repairs must be explicit/audited.
+  diagnostics: /api/v1/diagnostics/lpr-timing; runtime health reports movement_sessions_source=durable.
 
 snapshots:
   owner: backend/app/services/snapshots.py SnapshotManager
@@ -189,13 +199,14 @@ automation:
   cycle_guard: ignore notification.trigger/sent/failed/skipped and automation.run.*
   dry_run: render context/conditions only; no sends, hardware, or sync timestamps.
   maintenance_mode: skips hardware, notification-toggle, WhatsApp sends; maintenance_mode.disable allowed.
+  gate_actions: gate.open uses GateCommandCoordinator/idempotency; do not bypass durable command records.
   variables: trigger scopes; unknown/empty/unavailable @Variable => context_missing skip.
 
 integrations:
   home_assistant:
     modules: modules/home_assistant/client.py, modules/gate/home_assistant.py, modules/announcements/home_assistant_tts.py, services/home_assistant.py
     settings: url, token, gate_entities, garage_door_entities, gate_open_service, tts_service, default_media_player
-    rules: gate/garage via modules/services only; no HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
+    rules: gate opens via GateCommandCoordinator, garage/cover via modules/services only; no HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
   whatsapp:
     service: backend/app/services/whatsapp_messaging.py
     webhooks: GET/POST /api/v1/webhooks/whatsapp
@@ -248,7 +259,7 @@ frontend:
   shared: frontend/src/shared.tsx owns shared types, API client, route keys, realtime helpers, formatting, small primitives.
   views: route/domain modules in frontend/src/views/*; props explicit until server-state phase.
   styles: operational console, no landing/marketing hero; CSS under frontend/src/styles/*.
-  routes: Dashboard, People, Groups, Schedules, Passes, Vehicles, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training.
+  routes: Dashboard, People, Groups, Schedules, Passes, Vehicles, Movements, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training.
   splitting: non-shell routes are React.lazy chunks; do not move route bodies back into main.tsx or raise Vite chunk limits to hide growth.
   design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards/text overflow.
   api: relative URLs only for LAN/NPM compatibility.
@@ -256,7 +267,10 @@ frontend:
 
 extension_points:
   lpr_adapter: backend/app/modules/lpr/<vendor>.py -> PlateRead; registry if selectable; no vendor schema in AccessEventService.
+  movement_fsm: backend/app/services/movement_fsm.py owns deterministic direction/suppression transitions; keep vendor I/O and DB queries outside it.
+  movement_ledger: backend/app/services/movement_ledger.py owns durable saga/session/command repository methods and idempotency.
   gate_controller: backend/app/modules/gate/<vendor>.py -> GateController/GateCommandResult; registry in modules/registry.py.
+  gate_command: backend/app/services/gate_commands.py serializes physical gate opens for LPR, automations, notifications, admin, and malfunction recovery.
   notification_sender: backend/app/modules/notifications/<channel>.py -> NotificationSender.send(title, body, NotificationContext); no raw DB/log blobs.
   notification_trigger_variable: backend/app/services/notifications.py catalogs + rendering/delivery tests.
   domain_event: add typed publisher in backend/app/services/domain_events.py; keep existing event name/payload compatible and test it.
