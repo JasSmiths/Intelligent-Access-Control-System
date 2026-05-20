@@ -85,6 +85,7 @@ import {
   Badge,
   formatDate,
   matches,
+  movementSagaDisplay,
   Toolbar,
   visitorEventDisplayName
 } from "../shared";
@@ -125,28 +126,33 @@ export function EventsView({ events, query }: { events: AccessEvent[]; query: st
               <th>Plate</th>
               <th>Direction</th>
               <th>Decision</th>
+              <th>Movement</th>
               <th>Confidence</th>
               <th>When</th>
               <th>Alerts</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((event) => (
-              <tr key={event.id}>
-                <td className="event-snapshot-cell">
-                  <EventSnapshotThumb event={event} />
-                </td>
-                <td>
-                  <strong>{event.registration_number}</strong>
-                  {event.visitor_name ? <span className="table-muted-line">{visitorEventDisplayName(event)}</span> : null}
-                </td>
-                <td>{event.direction}</td>
-                <td><Badge tone={event.decision === "granted" ? "green" : "red"}>{event.decision}</Badge></td>
-                <td>{Math.round(event.confidence * 100)}%</td>
-                <td>{formatDate(event.occurred_at)}</td>
-                <td>{event.anomaly_count}</td>
-              </tr>
-            ))}
+            {filtered.map((event) => {
+              const movement = movementSagaDisplay(event.movement_saga);
+              return (
+                <tr key={event.id}>
+                  <td className="event-snapshot-cell">
+                    <EventSnapshotThumb event={event} />
+                  </td>
+                  <td>
+                    <strong>{event.registration_number}</strong>
+                    {event.visitor_name ? <span className="table-muted-line">{visitorEventDisplayName(event)}</span> : null}
+                  </td>
+                  <td>{event.direction}</td>
+                  <td><Badge tone={event.decision === "granted" ? "green" : "red"}>{event.decision}</Badge></td>
+                  <td>{movement ? <Badge tone={movement.tone}>{movement.label}</Badge> : <span className="table-muted-line">--</span>}</td>
+                  <td>{Math.round(event.confidence * 100)}%</td>
+                  <td>{formatDate(event.occurred_at)}</td>
+                  <td>{event.anomaly_count}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

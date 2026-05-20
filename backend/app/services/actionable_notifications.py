@@ -21,8 +21,8 @@ from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppNotifier,
     HomeAssistantMobileAppTarget,
 )
-from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.event_bus import event_bus
+from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -70,6 +70,7 @@ class GateActionOutcome:
     skipped_before_command: bool = False
     malfunction_id: uuid.UUID | None = None
     malfunction_duration_seconds: int | None = None
+    command_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -309,30 +310,36 @@ class ActionableNotificationService:
             f"{'Force ' if force else ''}Actionable notification gate open for "
             f"{bound.registration_number} by {identity.person.display_name}"
         )
-        try:
-            result = await get_gate_controller(settings.gate_controller).open_gate(
-                reason,
+        result = await get_gate_command_coordinator().execute_open(
+            GateCommandIntent(
+                reason=reason,
+                source="actionable_notification",
+                controller_name=settings.gate_controller,
                 bypass_schedule=force,
+                actor=identity.person.display_name,
+                registration_number=bound.registration_number,
+                idempotency_key=f"gate-command:actionable:{bound.id}:{'force' if force else 'open'}",
+                metadata={"context_id": str(bound.id), "force": force},
             )
-        except UnsupportedModuleError as exc:
-            return GateActionOutcome(False, str(exc), reason=reason)
-        except Exception as exc:
+        )
+        if result.exception_class:
             logger.warning(
                 "actionable_notification_gate_open_failed",
                 extra={
                     "context_id": str(bound.id),
                     "registration_number": bound.registration_number,
                     "force": force,
-                    "error": str(exc),
+                    "error": result.detail,
+                    "exception_class": result.exception_class,
                 },
             )
-            return GateActionOutcome(False, str(exc), reason=reason)
 
         return GateActionOutcome(
             accepted=result.accepted,
             state=result.state.value,
             detail=result.detail or ("Gate command accepted." if result.accepted else "Gate command failed."),
             reason=reason,
+            command_id=result.command_id,
         )
 
     async def _send_failure_follow_up(

@@ -12,7 +12,6 @@ from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
-from app.modules.gate.home_assistant import HomeAssistantGateController
 from app.models import Person, User
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
@@ -42,6 +41,7 @@ from app.modules.notifications.home_assistant_mobile import (
 from app.services.dependency_updates import get_dependency_update_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
+from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.schedules import evaluate_schedule_id
@@ -384,7 +384,14 @@ async def open_gate(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    result = await HomeAssistantGateController().open_gate(request.reason)
+    result = await get_gate_command_coordinator().execute_open(
+        GateCommandIntent(
+            reason=request.reason,
+            source="manual_admin",
+            actor=actor_from_user(user),
+            metadata={"actor_user_id": str(user.id)},
+        )
+    )
     if not result.accepted:
         emit_audit_log(
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -395,7 +402,15 @@ async def open_gate(
             target_label="Home Assistant Gate",
             outcome="failed",
             level="error",
-            metadata={"reason": request.reason, "detail": result.detail, "state": result.state.value},
+            metadata={
+                "reason": request.reason,
+                "detail": result.detail,
+                "state": result.state.value,
+                "intent_id": result.intent.intent_id,
+                "command_id": result.command_id,
+                "mechanically_confirmed": result.mechanically_confirmed,
+                "requires_reconciliation": result.requires_reconciliation,
+            },
         )
         raise HTTPException(status_code=503, detail=result.detail or "Gate command failed.")
     emit_audit_log(
@@ -405,12 +420,24 @@ async def open_gate(
         actor_user_id=user.id,
         target_entity="Gate",
         target_label="Home Assistant Gate",
-        metadata={"reason": request.reason, "state": result.state.value, "detail": result.detail},
+        metadata={
+            "reason": request.reason,
+            "state": result.state.value,
+            "detail": result.detail,
+            "intent_id": result.intent.intent_id,
+            "command_id": result.command_id,
+            "mechanically_confirmed": result.mechanically_confirmed,
+            "requires_reconciliation": result.requires_reconciliation,
+        },
     )
     return {
         "accepted": result.accepted,
         "state": result.state.value,
         "detail": result.detail,
+        "intent_id": result.intent.intent_id,
+        "command_id": result.command_id,
+        "mechanically_confirmed": result.mechanically_confirmed,
+        "requires_reconciliation": result.requires_reconciliation,
     }
 
 

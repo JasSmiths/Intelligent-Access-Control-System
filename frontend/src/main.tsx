@@ -42,6 +42,7 @@ import {
   LogIn,
   LogOut,
   Loader2,
+  MoveHorizontal,
   MessageCircle,
   Menu,
   Moon,
@@ -100,6 +101,7 @@ import {
   isActionableAlert,
   isRecord,
   MaintenanceStatus,
+  MovementSagaSummary,
   NavigateToView,
   notificationEventLabel,
   nullableString,
@@ -126,6 +128,7 @@ const SchedulesView = React.lazy(() => import("./views/SchedulesView").then((mod
 const PassesView = React.lazy(() => import("./views/PassesView").then((module) => ({ default: module.PassesView })));
 const TopChartsView = React.lazy(() => import("./views/TopChartsView").then((module) => ({ default: module.TopChartsView })));
 const EventsView = React.lazy(() => import("./views/EventsView").then((module) => ({ default: module.EventsView })));
+const MovementsView = React.lazy(() => import("./views/MovementsView").then((module) => ({ default: module.MovementsView })));
 const AlertsView = React.lazy(() => import("./views/AlertsView").then((module) => ({ default: module.AlertsView })));
 const ReportsView = React.lazy(() => import("./views/ReportsView").then((module) => ({ default: module.ReportsView })));
 const IntegrationsView = React.lazy(() => import("./views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
@@ -242,6 +245,7 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "top_charts", label: "Top Charts", icon: Trophy },
   { key: "events", label: "Events", icon: CalendarDays },
+  { key: "movements", label: "Movements", icon: MoveHorizontal },
   { key: "alerts", label: "Alerts", icon: Bell },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "integrations", label: "API & Integrations", icon: PlugZap },
@@ -268,6 +272,7 @@ const viewPaths: Record<ViewKey, string> = {
   vehicles: "/vehicles",
   top_charts: "/top-charts",
   events: "/events",
+  movements: "/movements",
   alerts: "/alerts",
   reports: "/reports",
   integrations: "/integrations",
@@ -400,7 +405,33 @@ function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
     snapshot_bytes: nullableNumber(event.payload.snapshot_bytes),
     snapshot_width: nullableNumber(event.payload.snapshot_width),
     snapshot_height: nullableNumber(event.payload.snapshot_height),
-    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null
+    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null,
+    movement_saga: movementSagaFromPayload(event.payload.movement_saga)
+  };
+}
+
+function movementSagaFromPayload(value: unknown): MovementSagaSummary | null {
+  if (!isRecord(value)) return null;
+  const state = stringPayload(value.state);
+  if (!state) return null;
+  const gate = isRecord(value.gate) ? value.gate : null;
+  return {
+    id: stringPayload(value.id) || null,
+    state,
+    reconciliation_required: value.reconciliation_required === true,
+    gate_command_required: value.gate_command_required === true,
+    presence_committed: value.presence_committed === true,
+    failure_detail: stringPayload(value.failure_detail) || null,
+    updated_at: stringPayload(value.updated_at) || null,
+    detail: stringPayload(value.detail) || null,
+    gate: gate ? {
+      command_id: stringPayload(gate.command_id) || null,
+      accepted: typeof gate.accepted === "boolean" ? gate.accepted : null,
+      state: stringPayload(gate.state) || null,
+      detail: stringPayload(gate.detail) || null,
+      mechanically_confirmed: gate.mechanically_confirmed === true,
+      requires_reconciliation: gate.requires_reconciliation === true
+    } : null
   };
 }
 
@@ -1870,6 +1901,9 @@ function View(props: {
       break;
     case "events":
       content = <EventsView events={props.events} query={props.search} />;
+      break;
+    case "movements":
+      content = <MovementsView query={props.search} refreshToken={props.dataRefreshToken} />;
       break;
     case "alerts":
       content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} />;

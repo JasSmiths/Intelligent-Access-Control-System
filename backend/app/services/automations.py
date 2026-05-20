@@ -29,7 +29,6 @@ from app.models import (
 from app.models.enums import PresenceState
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
-from app.modules.registry import get_gate_controller
 from app.services.automation_integration_actions import (
     execute_integration_action,
     integration_action_catalog,
@@ -38,6 +37,7 @@ from app.services.automation_integration_actions import (
     registered_integration_action_types,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active, set_mode as set_maintenance_mode
 from app.services.notifications import render_template
 from app.services.schedules import evaluate_schedule_id
@@ -1199,7 +1199,19 @@ class AutomationService:
             return await self._toggle_notification_rule(session, action, active=action_type.endswith("enable"))
         if action_type == "gate.open":
             reason = render_action_reason(action, context, rule)
-            outcome = await get_gate_controller(settings.gate_controller).open_gate(reason)
+            outcome = await get_gate_command_coordinator().execute_open(
+                GateCommandIntent(
+                    reason=reason,
+                    source="automation",
+                    controller_name=settings.gate_controller,
+                    actor="Automation Engine",
+                    metadata={
+                        "rule_id": str(getattr(rule, "id", "")) if getattr(rule, "id", None) else None,
+                        "rule_name": getattr(rule, "name", None),
+                        "trigger_key": context.trigger_key,
+                    },
+                )
+            )
             return {
                 "id": action["id"],
                 "type": action_type,
@@ -1207,6 +1219,10 @@ class AutomationService:
                 "accepted": outcome.accepted,
                 "state": outcome.state.value,
                 "detail": outcome.detail,
+                "intent_id": outcome.intent.intent_id,
+                "command_id": outcome.command_id,
+                "mechanically_confirmed": outcome.mechanically_confirmed,
+                "requires_reconciliation": outcome.requires_reconciliation,
             }
         if action_type in {"garage_door.open", "garage_door.close"}:
             return await self._command_garage_doors(session, action, context, rule=rule)

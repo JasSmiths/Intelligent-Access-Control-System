@@ -252,6 +252,71 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_movement_sagas_idempotency_key ON movement_sagas (idempotency_key)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_source ON movement_sagas (source)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_state ON movement_sagas (state)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_access_event_id ON movement_sagas (access_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_person_id ON movement_sagas (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_vehicle_id ON movement_sagas (vehicle_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_registration_number ON movement_sagas (registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_occurred_at ON movement_sagas (occurred_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_reconciliation_required ON movement_sagas (reconciliation_required)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_state_updated_at ON movement_sagas (state, updated_at)"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_movement_sagas_reconciliation_updated_at
+                    ON movement_sagas (reconciliation_required, updated_at)
+                    """
+                )
+            )
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_command_records_idempotency_key ON gate_command_records (idempotency_key)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_movement_saga_id ON gate_command_records (movement_saga_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_access_event_id ON gate_command_records (access_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_state ON gate_command_records (state)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_source ON gate_command_records (source)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_gate_key ON gate_command_records (gate_key)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_registration_number ON gate_command_records (registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_lease_token ON gate_command_records (lease_token)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_lease_expires_at ON gate_command_records (lease_expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_completed_at ON gate_command_records (completed_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_command_records_requires_reconciliation ON gate_command_records (requires_reconciliation)"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_gate_command_records_gate_state_lease
+                    ON gate_command_records (gate_key, state, lease_expires_at)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_gate_command_records_reconciliation_updated
+                    ON gate_command_records (requires_reconciliation, updated_at)
+                    """
+                )
+            )
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_movement_sessions_session_key ON movement_sessions (session_key)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_source ON movement_sessions (source)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_access_event_id ON movement_sessions (access_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_movement_saga_id ON movement_sessions (movement_saga_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_registration_number ON movement_sessions (registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_normalized_registration_number ON movement_sessions (normalized_registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_direction ON movement_sessions (direction)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_decision ON movement_sessions (decision)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_started_at ON movement_sessions (started_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_last_seen_at ON movement_sessions (last_seen_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_debounce_expires_at ON movement_sessions (debounce_expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_gate_cycle_expires_at ON movement_sessions (gate_cycle_expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_idle_expires_at ON movement_sessions (idle_expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_camera_id ON movement_sessions (camera_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_device_id ON movement_sessions (device_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_last_suppressed_reason ON movement_sessions (last_suppressed_reason)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_is_active ON movement_sessions (is_active)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_source_last_seen ON movement_sessions (source, last_seen_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_source_gate_cycle ON movement_sessions (source, gate_cycle_expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sessions_active_idle ON movement_sessions (is_active, idle_expires_at)"))
             await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_report_exports_report_number ON report_exports (report_number)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_report_type ON report_exports (report_type)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_report_exports_person_id ON report_exports (person_id)"))

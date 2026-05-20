@@ -21,13 +21,17 @@ from app.models.enums import (
     AccessDirection,
     AnomalySeverity,
     AnomalyType,
+    MovementSagaState,
     PresenceState,
     TimingClassification,
 )
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.modules.gate.base import GateState
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
 from app.services.event_bus import event_bus
+from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
+from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
@@ -200,6 +204,8 @@ class MissedAccessEventBackfillService:
     ) -> None:
         self.source = source
         self.backfill_reason = backfill_reason
+        self._movement_direction_fsm = MovementDirectionFSM()
+        self._movement_ledger = get_movement_ledger_repository()
 
     async def run(
         self,
@@ -450,6 +456,18 @@ class MissedAccessEventBackfillService:
                 await _update_presence(session, person, event)
                 presence_updated = True
 
+            movement_saga = await self._persist_backfill_movement(
+                session,
+                event,
+                candidate,
+                direction_resolution=direction_resolution,
+                presence_updated=presence_updated,
+            )
+            event.raw_payload = {
+                **(event.raw_payload or {}),
+                "movement_saga": movement_saga_summary(movement_saga),
+            }
+
             await write_audit_log(
                 session,
                 category=TELEMETRY_CATEGORY_ACCESS,
@@ -527,11 +545,84 @@ class MissedAccessEventBackfillService:
                 "event_type": "access_event.finalized",
                 "timing_classification": event.timing_classification.value,
                 "anomaly_count": len(anomalies),
+                "movement_saga": movement_saga_summary(movement_saga),
                 "backfilled": True,
                 "backfill_source": self._backfill_payload_source(),
             },
         )
         return True
+
+    async def _persist_backfill_movement(
+        self,
+        session: AsyncSession,
+        event: AccessEvent,
+        candidate: ProtectBackfillCandidate,
+        *,
+        direction_resolution: dict[str, Any],
+        presence_updated: bool,
+    ):
+        idempotency_key = f"movement-backfill:{self.source}:{candidate.protect_event_id}"
+        movement_saga = await self._movement_ledger.create_movement_saga(
+            session,
+            idempotency_key=idempotency_key,
+            source=self.source,
+            occurred_at=event.occurred_at,
+            registration_number=event.registration_number,
+            person_id=event.person_id,
+            vehicle_id=event.vehicle_id,
+            direction=event.direction,
+            decision=event.decision,
+            state=MovementSagaState.COMPLETED,
+            intent_payload={
+                "source": self.source,
+                "access_event_id": str(event.id),
+                "protect_event_id": candidate.protect_event_id,
+                "captured_at": candidate.captured_at.isoformat(),
+                "hardware_side_effects_enabled": False,
+                "backfill": True,
+            },
+            decision_payload={
+                **direction_resolution,
+                "hardware_actions_suppressed": True,
+                "backfill": True,
+            },
+        )
+        await self._movement_ledger.transition_movement_saga(
+            session,
+            movement_saga,
+            MovementSagaState.COMPLETED,
+            detail="backfill_hardware_side_effects_suppressed",
+            access_event_id=event.id,
+            gate_command_required=False,
+            presence_committed=presence_updated,
+            reconciliation_required=False,
+            decision_payload={
+                **direction_resolution,
+                "hardware_actions_suppressed": True,
+                "backfill": True,
+            },
+        )
+        await self._movement_ledger.upsert_movement_session(
+            session,
+            session_key=f"movement-session:{event.id}",
+            source=self.source,
+            access_event_id=event.id,
+            movement_saga_id=movement_saga.id,
+            registration_number=event.registration_number,
+            normalized_registration_number=normalize_registration_number(event.registration_number),
+            direction=event.direction,
+            decision=event.decision,
+            started_at=event.occurred_at,
+            last_seen_at=event.occurred_at,
+            debounce_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_debounce_max_seconds),
+            gate_cycle_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_debounce_max_seconds),
+            idle_expires_at=event.occurred_at + timedelta(seconds=settings.lpr_vehicle_session_idle_seconds),
+            camera_id=candidate.camera_id,
+            protect_event_ids={candidate.protect_event_id},
+            ocr_variants=_candidate_ocr_variants(candidate),
+            last_gate_state=_direction_resolution_gate_state(direction_resolution),
+        )
+        return movement_saga
 
     async def _matching_existing_event(
         self,
@@ -647,35 +738,34 @@ class MissedAccessEventBackfillService:
                 "restart_backfill": True,
             }
         gate_observation, closed_at = await _gate_observation_for_backfill(session, captured_at)
-        gate_direction = _direction_from_gate_observation(gate_observation)
-        if gate_direction:
-            return gate_direction, {
-                "source": "protect_event_backfill_with_gate_state",
-                "direction": gate_direction.value,
-                "gate_observation": _gate_observation_payload(gate_observation, closed_at=closed_at),
-                "restart_backfill": self.source == MISSED_EVENT_BACKFILL_SOURCE,
-                "reconciliation": self.source == MISSED_EVENT_RECONCILIATION_SOURCE,
-            }
-        if not person:
-            return AccessDirection.ENTRY, {
-                "source": "restart_backfill_default",
-                "direction": AccessDirection.ENTRY.value,
-                "restart_backfill": True,
-            }
-        presence = await session.get(Presence, person.id)
-        if presence and presence.state == PresenceState.PRESENT:
-            return AccessDirection.EXIT, {
-                "source": "presence_state_at_backfill",
-                "direction": AccessDirection.EXIT.value,
-                "previous_presence_state": presence.state.value,
-                "restart_backfill": True,
-            }
-        return AccessDirection.ENTRY, {
-            "source": "presence_state_at_backfill",
-            "direction": AccessDirection.ENTRY.value,
-            "previous_presence_state": presence.state.value if presence else None,
-            "restart_backfill": True,
+        gate_observation_payload = _gate_observation_payload(gate_observation, closed_at=closed_at)
+        presence = await session.get(Presence, person.id) if person else None
+        decision = self._movement_direction_fsm.resolve(
+            MovementIntent(
+                source=self.source,
+                captured_at=captured_at,
+                registration_number="",
+                allowed=allowed,
+                person_known=person is not None,
+                gate_state=_gate_state_from_observation(gate_observation),
+                gate_observation=gate_observation_payload,
+                presence_state=presence.state if presence else None,
+            )
+        )
+        resolution = {
+            **decision.resolution,
+            "direction": decision.direction.value,
+            "restart_backfill": self.source == MISSED_EVENT_BACKFILL_SOURCE,
+            "reconciliation": self.source == MISSED_EVENT_RECONCILIATION_SOURCE,
         }
+        if gate_observation and resolution.get("source") == "gate_state":
+            resolution["source"] = "protect_event_backfill_with_gate_state"
+        elif not person and resolution.get("source") == "default_entry_no_person":
+            resolution["source"] = "restart_backfill_default"
+        elif person and resolution.get("source") == "presence":
+            resolution["source"] = "presence_state_at_backfill"
+            resolution["previous_presence_state"] = presence.state.value if presence else None
+        return decision.direction, resolution
 
     def _audit_backfill_action(self) -> str:
         if self.source == MISSED_EVENT_RECONCILIATION_SOURCE:
@@ -810,6 +900,28 @@ def _payload_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
 
 
+def _candidate_ocr_variants(candidate: ProtectBackfillCandidate) -> list[str]:
+    values = {
+        candidate.registration_number,
+        str(candidate.track_candidate.get("registration_number") or ""),
+        str(candidate.track_candidate.get("raw_value") or ""),
+        str(candidate.track_candidate.get("plate") or ""),
+    }
+    normalized_values = {normalize_registration_number(value) for value in values if value}
+    values.update(normalized_values)
+    return sorted(value for value in values if str(value or "").strip())
+
+
+def _direction_resolution_gate_state(direction_resolution: dict[str, Any]) -> str | None:
+    gate_observation = direction_resolution.get("gate_observation")
+    if isinstance(gate_observation, dict):
+        state = gate_observation.get("state")
+        if state:
+            return str(state)
+    state = direction_resolution.get("gate_state")
+    return str(state) if state else None
+
+
 def _best_track_candidate(observations: list[dict[str, Any]]) -> dict[str, Any] | None:
     best: tuple[float, datetime, dict[str, Any]] | None = None
     for observation in observations:
@@ -922,6 +1034,15 @@ def _direction_from_gate_observation(observation: GateStateObservation | None) -
     return None
 
 
+def _gate_state_from_observation(observation: GateStateObservation | None) -> GateState:
+    if not observation:
+        return GateState.UNKNOWN
+    try:
+        return GateState(str(observation.state or "").lower())
+    except ValueError:
+        return GateState.UNKNOWN
+
+
 def _gate_observation_payload(
     observation: GateStateObservation | None,
     *,
@@ -997,6 +1118,9 @@ def _schedule_evaluation_payload(schedule_evaluation: ScheduleEvaluation | None)
 
 
 def _event_might_have_plate(event: dict[str, Any]) -> bool:
+    smart_types = [str(item or "").lower() for item in event.get("smart_detect_types") or []]
+    if any("license" in item or "licence" in item or "plate" in item for item in smart_types):
+        return True
     text = " ".join(
         [
             str(event.get("type") or ""),
@@ -1005,7 +1129,7 @@ def _event_might_have_plate(event: dict[str, Any]) -> bool:
             " ".join(str(item or "") for item in (event.get("smart_detect_types") or [])),
         ]
     ).lower()
-    return any(token in text for token in ("license", "licence", "plate", "lpr", "vehicle", "smartdetect"))
+    return any(token in text for token in ("license", "licence", "plate", "lpr"))
 
 
 def _confidence_ratio(value: Any) -> float:

@@ -422,7 +422,7 @@ def _observation_from_candidate(
 
 
 def _track_plate_value(row: dict[str, Any]) -> tuple[str, Any] | tuple[None, None]:
-    for key in ("licensePlate", "license_plate", "name", "matchedName", "matched_name"):
+    for key in ("licensePlate", "license_plate", "licencePlate", "licence_plate", "plate", "plateNumber", "plate_number"):
         value = row.get(key)
         if value:
             return key, value

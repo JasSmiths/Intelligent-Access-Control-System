@@ -178,3 +178,26 @@ def test_extracts_direct_license_plate_from_smart_detect_track() -> None:
     assert observations[0].payload_path == "smartDetectTrack.payload[0].licensePlate"
     assert observations[0].captured_at == "2026-04-28T16:46:28.086000+00:00"
     assert observations[0].confidence == 92
+
+
+def test_ignores_smart_detect_track_name_without_license_plate_field() -> None:
+    observations = extract_unifi_protect_track_observations(
+        {
+            "payload": [
+                {
+                    "timestamp": 1778862489856,
+                    "name": "Steph",
+                    "confidence": 73,
+                },
+            ]
+        },
+        event=SimpleNamespace(
+            id="event-1",
+            camera_id="camera-1",
+            camera=SimpleNamespace(display_name="Gate"),
+            smart_detect_types=[EnumValue("face"), EnumValue("vehicle")],
+        ),
+        received_at=datetime(2026, 5, 15, 16, 31, 46, tzinfo=UTC),
+    )
+
+    assert observations == []

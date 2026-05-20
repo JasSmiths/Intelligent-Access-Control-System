@@ -13,6 +13,8 @@ from app.services.actionable_notifications import (
     GateActionOutcome,
 )
 from app.models.enums import GateMalfunctionStatus
+from app.modules.gate.base import GateState
+from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 
 
 class DummySession:
@@ -51,6 +53,33 @@ def identity(person_id: uuid.UUID | None = None) -> ActionIdentity:
     person = SimpleNamespace(id=person_id or uuid.uuid4(), display_name="Jason Smith")
     user = SimpleNamespace(id=uuid.uuid4(), username="jason", full_name="Jason Smith")
     return ActionIdentity(person=person, user=user)
+
+
+def gate_command_outcome(
+    intent: GateCommandIntent,
+    *,
+    accepted: bool,
+    state: GateState,
+    detail: str,
+) -> GateCommandOutcome:
+    occurred_at = datetime.now(tz=UTC)
+    return GateCommandOutcome(
+        intent=intent,
+        accepted=accepted,
+        state=state,
+        detail=detail,
+        mechanically_confirmed=accepted and state in {GateState.OPEN, GateState.OPENING},
+        started_at=occurred_at,
+        completed_at=occurred_at,
+    )
+
+
+def install_gate_command_coordinator(monkeypatch, handler) -> None:
+    class FakeCoordinator:
+        async def execute_open(self, intent):
+            return handler(intent)
+
+    monkeypatch.setattr(actionable, "get_gate_command_coordinator", lambda: FakeCoordinator())
 
 
 def context_row(*, token: str = "token", consumed=False, expired=False):
@@ -148,15 +177,15 @@ async def test_normal_gate_action_success_sends_confirmation(monkeypatch) -> Non
     monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
     monkeypatch.setattr(service, "_send_success_result", lambda *_args, **_kwargs: _async_append(confirmations, _args, _kwargs))
 
-    class FakeGate:
-        async def open_gate(self, reason, *, bypass_schedule=False):
-            return SimpleNamespace(
-                accepted=True,
-                state=SimpleNamespace(value="open"),
-                detail="Opened by Home Assistant.",
-            )
-
-    monkeypatch.setattr(actionable, "get_gate_controller", lambda _name: FakeGate())
+    install_gate_command_coordinator(
+        monkeypatch,
+        lambda intent: gate_command_outcome(
+            intent,
+            accepted=True,
+            state=GateState.OPEN,
+            detail="Opened by Home Assistant.",
+        ),
+    )
 
     outcome = await service.execute_gate_action("token", force=False)
 
@@ -179,16 +208,16 @@ async def test_force_gate_action_bypasses_maintenance_and_schedule(monkeypatch) 
     monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
     monkeypatch.setattr(service, "_send_force_result", lambda *_args, **_kwargs: _async_append(force_results, _args, _kwargs))
 
-    class FakeGate:
-        async def open_gate(self, reason, *, bypass_schedule=False):
-            calls.append((reason, bypass_schedule))
-            return SimpleNamespace(
-                accepted=True,
-                state=SimpleNamespace(value="open"),
-                detail="Opened",
-            )
+    def force_outcome(intent):
+        calls.append((intent.reason, intent.bypass_schedule))
+        return gate_command_outcome(
+            intent,
+            accepted=True,
+            state=GateState.OPEN,
+            detail="Opened",
+        )
 
-    monkeypatch.setattr(actionable, "get_gate_controller", lambda _name: FakeGate())
+    install_gate_command_coordinator(monkeypatch, force_outcome)
 
     outcome = await service.execute_gate_action("token", force=True)
 
@@ -230,12 +259,12 @@ async def test_active_malfunction_blocks_action_and_notifies_with_duration(monke
     monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_append(audits, _args, _kwargs))
     monkeypatch.setattr(service, "_send_failure_follow_up", lambda *_args, **_kwargs: _async_append(followups, _args, _kwargs))
 
-    class FakeGate:
-        async def open_gate(self, *_args, **_kwargs):
+    class FailingCoordinator:
+        async def execute_open(self, *_args, **_kwargs):
             gate_calls.append(True)
             raise AssertionError("Gate controller must not be called while malfunctioning.")
 
-    monkeypatch.setattr(actionable, "get_gate_controller", lambda _name: FakeGate())
+    monkeypatch.setattr(actionable, "get_gate_command_coordinator", lambda: FailingCoordinator())
 
     outcome = await service.execute_gate_action("token", force=False)
 
@@ -330,15 +359,15 @@ async def test_force_gate_action_failure_sends_final_failure_notification(monkey
     monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
     monkeypatch.setattr(service, "_send_force_result", lambda *_args, **_kwargs: _async_append(force_results, _args, _kwargs))
 
-    class FakeGate:
-        async def open_gate(self, _reason, *, bypass_schedule=False):
-            return SimpleNamespace(
-                accepted=False,
-                state=SimpleNamespace(value="fault"),
-                detail="Home Assistant rejected the command.",
-            )
-
-    monkeypatch.setattr(actionable, "get_gate_controller", lambda _name: FakeGate())
+    install_gate_command_coordinator(
+        monkeypatch,
+        lambda intent: gate_command_outcome(
+            intent,
+            accepted=False,
+            state=GateState.FAULT,
+            detail="Home Assistant rejected the command.",
+        ),
+    )
 
     outcome = await service.execute_gate_action("token", force=True)
 

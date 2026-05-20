@@ -29,6 +29,7 @@ from app.modules.gate.base import GateState
 from app.modules.notifications.base import NotificationContext
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import (
@@ -687,18 +688,25 @@ class GateMalfunctionService:
         attempt_number = int(claim["attempt_number"])
         gate_label = str(claim.get("gate_name") or claim.get("gate_entity_id") or "gate")
         command_reason = f"{reason}: attempt {attempt_number} for {gate_label}"
-        try:
-            result = await get_gate_controller(settings.gate_controller).open_gate(
-                command_reason,
+        result = await get_gate_command_coordinator().execute_open(
+            GateCommandIntent(
+                reason=command_reason,
+                source="gate_malfunction_recovery",
+                controller_name=settings.gate_controller,
                 bypass_schedule=True,
+                actor="Gate Malfunction Monitor",
+                idempotency_key=f"gate-command:malfunction:{malfunction_id}:{attempt_number}",
+                metadata={
+                    "malfunction_id": str(malfunction_id),
+                    "attempt_number": attempt_number,
+                    "gate_label": gate_label,
+                    "claim_token": claim_token,
+                },
             )
-            accepted = result.accepted
-            detail = result.detail or command_reason
-            state = result.state.value
-        except Exception as exc:
-            accepted = False
-            detail = str(exc)
-            state = GateState.FAULT.value
+        )
+        accepted = result.accepted
+        detail = result.detail or command_reason
+        state = result.state.value
 
         after_attempt = (
             await self._current_gate_snapshot(refresh=True)

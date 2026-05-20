@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.api.dependencies import current_user
 from app.db.session import AsyncSessionLocal
 from app.db.session import get_db_session
-from app.models import AccessEvent, Anomaly, Presence, User
+from app.models import AccessEvent, Anomaly, MovementSagaRecord, Presence, User
 from app.models.enums import AnomalySeverity, AnomalyType
 from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.event_bus import event_bus
@@ -43,10 +43,19 @@ async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict
             )
         ).all()
 
-    return [_serialize_event(event) for event in events]
+        movement_rows = (
+            await session.scalars(
+                select(MovementSagaRecord).where(
+                    MovementSagaRecord.access_event_id.in_([event.id for event in events])
+                )
+            )
+        ).all() if events else []
+    movement_by_event_id = {row.access_event_id: row for row in movement_rows}
+
+    return [_serialize_event(event, movement_by_event_id.get(event.id)) for event in events]
 
 
-def _serialize_event(event: AccessEvent) -> dict:
+def _serialize_event(event: AccessEvent, movement_saga: MovementSagaRecord | None = None) -> dict:
     visitor_pass = _event_visitor_pass_payload(event)
     payload = {
         "id": str(event.id),
@@ -61,6 +70,7 @@ def _serialize_event(event: AccessEvent) -> dict:
         "visitor_pass_id": _optional_text(visitor_pass.get("id")),
         "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
         "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
+        "movement_saga": _event_movement_saga_payload(event, movement_saga),
     }
     payload.update(access_event_snapshot_payload(event))
     return payload
@@ -93,6 +103,25 @@ def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     payload = raw_payload.get("visitor_pass")
     return payload if isinstance(payload, dict) else {}
+
+
+def _event_movement_saga_payload(
+    event: AccessEvent,
+    movement_saga: MovementSagaRecord | None,
+) -> dict[str, Any] | None:
+    if movement_saga:
+        return {
+            "id": str(movement_saga.id),
+            "state": movement_saga.state.value,
+            "reconciliation_required": movement_saga.reconciliation_required,
+            "gate_command_required": movement_saga.gate_command_required,
+            "presence_committed": movement_saga.presence_committed,
+            "failure_detail": movement_saga.failure_detail,
+            "updated_at": movement_saga.updated_at.isoformat() if movement_saga.updated_at else None,
+        }
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    fallback = raw_payload.get("movement_saga")
+    return fallback if isinstance(fallback, dict) else None
 
 
 def _optional_text(value: Any) -> str | None:

@@ -21,6 +21,7 @@ from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.movement_reconciliation import get_movement_reconciliation_service
 from app.services.notifications import get_notification_service
 from app.services.restart_backfill import (
     backfill_missed_access_events_safely,
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI):
     await get_discord_messaging_service().start()
     await get_visitor_pass_service().start()
     await get_access_event_service().start()
+    await get_movement_reconciliation_service().start()
     await get_home_assistant_service().start()
     await get_gate_malfunction_service().start()
     await get_unifi_protect_service().start()
@@ -116,6 +118,7 @@ async def lifespan(app: FastAPI):
         await get_unifi_protect_service().stop()
         await get_gate_malfunction_service().stop()
         await get_home_assistant_service().stop()
+        await get_movement_reconciliation_service().stop()
         await get_access_event_service().stop()
         await get_visitor_pass_service().stop()
         await get_discord_messaging_service().stop()
