@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 import uuid
 
 import httpx
@@ -44,7 +45,7 @@ def accepted_gate_outcome(intent: GateCommandIntent) -> GateCommandOutcome:
 
 class FakeSession:
     def __init__(self) -> None:
-        self.rows = []
+        self.rows: list[Any] = []
         self.commits = 0
 
     def add(self, row) -> None:

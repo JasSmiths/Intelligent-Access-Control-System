@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -12,6 +13,8 @@ from app.api.v1.directory import (
     serialize_person,
     serialize_vehicle,
 )
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 @pytest.mark.parametrize(

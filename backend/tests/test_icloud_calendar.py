@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -28,6 +29,8 @@ from app.services.icloud_calendar import (
     source_reference_for_event,
     visitor_window_for_event,
 )
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def calendar_event(*, notes: str = "", description: str = "", title: str = "Chris Starkey") -> ICloudCalendarEvent:
@@ -259,7 +262,7 @@ async def test_bad_icloud_verification_code_keeps_handshake_for_retry() -> None:
         def cleanup_auth_session(self, auth_session):
             raise AssertionError("Rejected codes should not clear the pending handshake.")
 
-    service = ICloudCalendarService(client=RejectingClient())
+    service = ICloudCalendarService(client=cast(Any, RejectingClient()))
     auth_session = ICloudAuthSession(
         apple_id="user@example.com",
         api=object(),

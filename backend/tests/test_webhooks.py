@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.requests import Request
@@ -70,7 +71,7 @@ class FakeLprTimingRecorder:
 
 class FakeUnifiPayloadRecorder:
     def __init__(self) -> None:
-        self.calls = []
+        self.calls: list[Any] = []
 
     async def record_unifi_payload(self, payload, *, registration_number):
         self.calls.append((payload, registration_number))
@@ -95,7 +96,7 @@ class FakeUnifiProtectService:
 
 class FakeAccessEventService:
     def __init__(self) -> None:
-        self.enqueued = []
+        self.enqueued: list[Any] = []
 
     async def enqueue_plate_read(self, read):
         self.enqueued.append(read)

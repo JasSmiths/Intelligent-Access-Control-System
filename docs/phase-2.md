@@ -1,59 +1,70 @@
-# Phase 2: Data Models and LPR Debounce
+# Phase 2: Data Models and LPR Movement Pipeline
 
-## Delivered
+## Current State
 
-- Core SQLAlchemy models:
-  - Groups and profile categories.
-  - People and one-to-many vehicle ownership.
-  - Time slots and schedule assignments for groups or people.
-  - Presence state per person.
-  - Access events with direction, decision, confidence, source, and timing class.
-  - Anomalies for unauthorized plates, duplicate state transitions, and schedule violations.
-- Startup database bootstrap for early development.
-- Demo seed data:
-  - Steph, Family, `STEPH26`, all-day schedule.
-  - Bob, Contractor/Gardener, `BOB123`, Wednesday 08:00-12:00 schedule.
-- Ubiquiti webhook normalization remains isolated in `app/modules/lpr/ubiquiti.py`.
-- Debounce worker:
-  - Queues rapid LPR reads.
-  - Groups similar plate candidates from the same source.
-  - Waits for a quiet window or max debounce window.
-  - Selects the highest-confidence final read.
-  - Persists one final access event.
-- Historical timing classifier:
-  - Uses prior granted events for the same person and direction.
-  - Labels events as earlier than usual, normal, later than usual, or unknown.
+- Core SQLAlchemy models include groups, people, vehicles, vehicle/person
+  assignments, schedules, schedule overrides, presence, access events, anomalies,
+  visitor passes, movement sagas, movement sessions, gate command records, report
+  exports, audit logs, telemetry, and Alfred memory/training tables.
+- Startup uses `Base.metadata.create_all` plus idempotent transitional
+  columns/indexes in `backend/app/db/bootstrap.py`. There is no demo seed data;
+  the first Admin is created through setup UI/API.
+- Ubiquiti webhook normalization remains isolated in
+  `backend/app/modules/lpr/ubiquiti.py`.
+- `AccessEventService` owns ingest orchestration with `movement_fsm.py`,
+  `movement_ledger.py`, and `gate_commands.py`.
+- Durable `movement_sessions` and `movement_sagas` drive exact echo suppression,
+  gate-cycle/session handling, convoy handling, visitor departures, OCR variant
+  handling, arrival OCR noise suppression, restart backfill, and reconciliation.
+- Every live LPR decision creates or updates movement saga/session state. Final
+  granted/denied reads create one `access_events` row; suppressed reads are
+  durable suppressed movements, not alerts.
+- Anomalies are persisted in the `anomalies` table and exposed operationally as
+  alerts through `/api/v1/alerts`.
 
 ## Useful Endpoints
 
 - `POST /api/v1/webhooks/ubiquiti/lpr`
 - `POST /api/v1/simulation/arrival/{registration_number}`
 - `POST /api/v1/simulation/misread-sequence/{registration_number}`
+- `POST /api/v1/simulation/e2e/full-access-flow` (Admin)
 - `GET /api/v1/events`
+- `GET /api/v1/events/{event_id}/snapshot`
+- `GET /api/v1/alerts`
+- `PATCH /api/v1/alerts/action`
+- `GET /api/v1/alerts/{alert_id}/snapshot`
 - `GET /api/v1/presence`
-- `GET /api/v1/anomalies`
+- `GET /api/v1/access/movements`
+- `GET /api/v1/access/gate-commands`
+- `POST /api/v1/access/events/{event_id}/movement-reconciliation`
+- `GET /api/v1/diagnostics/lpr-timing`
 - `WS /api/v1/realtime/ws`
 
-## Debounce Settings
+There is no `/api/v1/anomalies` route; use `/api/v1/alerts`.
 
-Configured through environment variables:
+## Runtime Settings
 
-- `IACS_LPR_DEBOUNCE_QUIET_SECONDS`
-- `IACS_LPR_DEBOUNCE_MAX_SECONDS`
-- `IACS_LPR_SIMILARITY_THRESHOLD`
+Bootstrap environment variables are limited to compose/runtime selectors such as
+ports, DB/Redis URLs, auth secret file or override, CORS/trusted hosts, public
+URL/root path, and module selectors. Operational settings live in
+`system_settings` and are managed through Settings UI/API, with encrypted secrets
+derived from the active auth root secret.
 
-These defaults favor correctness over instant action during the early build:
-wait briefly for confidence to improve, then emit one final event.
+LPR timing controls such as quiet/max debounce windows, vehicle-session idle
+seconds, similarity threshold, and smart-zone diagnostics are dynamic settings.
+Smart zones are diagnostic only and must not reject otherwise valid plate reads.
 
 ## Reverse Proxy Notes
 
-The host-facing backend port defaults to `8088`. Nginx Proxy Manager should
-proxy to:
+The frontend service is the normal ingress on host port `8089`; it serves the SPA
+and proxies `/api/*`, `/health`, `/docs`, `/openapi.json`, and WebSocket upgrades
+to the backend container on port `8000`.
+
+For Nginx Proxy Manager, proxy to:
 
 ```text
-http://<docker-host-ip>:8088
+http://<docker-host-ip>:8089
 ```
 
-The container still listens internally on `8000`, and Uvicorn is started with
-proxy-header support for `X-Forwarded-Proto`, `X-Forwarded-For`, and host
-forwarding.
+Enable WebSocket support. Use backend host port `8088` only for direct API
+debugging.

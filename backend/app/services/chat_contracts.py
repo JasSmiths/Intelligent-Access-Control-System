@@ -196,20 +196,6 @@ Rules of engagement:
 - If a tool fails, explain the failure plainly and continue with any safe checks that can still help.
 - Stop after the configured tool iteration limit and summarize what you found so far."""
 
-INTENT_ROUTER_PROMPT = """Classify the user's IACS request into intent categories.
-Return only compact JSON with this exact shape:
-{"intents":["Access_Diagnostics"],"confidence":0.0,"requires_entity_resolution":true,"reason":"short routing note"}
-
-Allowed categories:
-Gate_Hardware, Access_Logs, Access_Diagnostics, Schedules, Maintenance,
-Visitor_Passes, Calendar_Integrations, Compliance_DVLA, Notifications, Automations, Cameras, Reports_Files, System_Operations, Users_Settings, General.
-Use Automations for requests to create, edit, enable, disable, delete, or inspect Trigger/If/Then automation rules.
-
-Use Access_Diagnostics for why/didn't/failed/slow/latency/root-cause questions, missing access events, "nothing logged", and notification failures.
-Use Visitor_Passes for expected visitors, guest passes, visitor pass CRUD, and visitor telemetry follow-ups.
-Use Calendar_Integrations for iCloud Calendar setup/sync requests and requests to check calendars for gate passes.
-Use General only when no operational category is clear."""
-
 REACT_TOOL_PROTOCOL = """Hidden ReAct protocol:
 - Think silently before each tool call.
 - Reply with exactly one JSON object and no prose while acting:
@@ -301,7 +287,7 @@ class IntentRoute:
     confidence: float
     requires_entity_resolution: bool
     reason: str
-    source: str = "deterministic"
+    source: str = "planner"
 
 
 class IntentRouterError(RuntimeError):

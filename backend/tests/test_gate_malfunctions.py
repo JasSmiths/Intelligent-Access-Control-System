@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -141,7 +142,7 @@ async def test_gate_malfunction_queue_notification_writes_single_trigger_stage_o
     service = GateMalfunctionService()
     row_id = uuid.uuid4()
     opened_at = datetime(2026, 4, 26, 7, 30, tzinfo=UTC)
-    state = {
+    state: dict[str, Any] = {
         "row": GateMalfunctionState(
             id=row_id,
             gate_entity_id="cover.top_gate",
@@ -368,7 +369,7 @@ async def test_recovery_gate_open_bypasses_configured_schedule(monkeypatch) -> N
     monkeypatch.setattr("app.modules.gate.home_assistant.get_runtime_config", fake_runtime_config)
     monkeypatch.setattr("app.modules.gate.home_assistant.evaluate_schedule_id", schedule_should_not_run)
 
-    result = await HomeAssistantGateController(FakeClient()).open_gate(
+    result = await HomeAssistantGateController(cast(Any, FakeClient())).open_gate(
         "recovery",
         bypass_schedule=True,
     )

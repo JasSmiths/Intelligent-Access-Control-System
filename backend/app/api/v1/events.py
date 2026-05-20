@@ -264,24 +264,6 @@ async def alert_snapshot(
     )
 
 
-@router.get("/anomalies")
-async def list_anomalies(limit: int = Query(default=50, ge=1, le=250)) -> list[dict]:
-    async with AsyncSessionLocal() as session:
-        anomalies = (
-            await session.scalars(
-                select(Anomaly)
-                .options(selectinload(Anomaly.resolved_by))
-                .order_by(Anomaly.created_at.desc())
-                .limit(limit)
-            )
-        ).all()
-
-    return [
-        _serialize_alert(anomaly)
-        for anomaly in anomalies
-    ]
-
-
 def _alert_timezone(value: str | None) -> ZoneInfo:
     try:
         return ZoneInfo(value or "Europe/London")

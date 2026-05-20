@@ -9,9 +9,9 @@ from sqlalchemy.sql import func
 from sqlalchemy.types import UserDefinedType
 
 try:
-    from pgvector.sqlalchemy import Vector
+    from pgvector.sqlalchemy import Vector as _PgVector
 except ImportError:  # pragma: no cover - dependency is installed in the backend image.
-    class Vector(UserDefinedType):
+    class _FallbackVector(UserDefinedType):
         cache_ok = True
 
         def __init__(self, dimensions: int) -> None:
@@ -19,6 +19,8 @@ except ImportError:  # pragma: no cover - dependency is installed in the backend
 
         def get_col_spec(self, **_kw: Any) -> str:
             return f"vector({self.dimensions})"
+
+    _PgVector = _FallbackVector
 
 from app.db.base import Base
 from app.models.enums import (
@@ -1146,7 +1148,7 @@ class AlfredMemory(Base, TimestampMixin):
     source_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"))
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
+    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
@@ -1167,7 +1169,7 @@ class AlfredLesson(Base, TimestampMixin):
     tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     source_feedback_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
+    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
@@ -1204,7 +1206,7 @@ class AlfredFeedback(Base, TimestampMixin):
     corrected_answer: Mapped[str | None] = mapped_column(Text)
     turn_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
+    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="received", index=True)
     lesson_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alfred_lessons.id", ondelete="SET NULL"), index=True)
 
@@ -1227,6 +1229,6 @@ class AlfredEvalExample(Base, TimestampMixin):
     corrected_answer: Mapped[str | None] = mapped_column(Text)
     lesson: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
+    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
 
     feedback: Mapped[AlfredFeedback | None] = relationship()

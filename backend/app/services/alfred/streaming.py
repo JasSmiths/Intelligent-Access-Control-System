@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
-StatusCallback = Callable[[dict], Awaitable[None]]
+StatusCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 async def emit_agent_state(
@@ -20,7 +20,7 @@ async def emit_agent_state(
 ) -> None:
     if callback is None:
         return
-    payload = {
+    payload: dict[str, Any] = {
         "event": "chat.agent_state",
         "state": state,
         "phase": state,

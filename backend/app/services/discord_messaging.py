@@ -138,8 +138,11 @@ class DiscordMessagingService:
         await self.start()
 
     async def _run_client(self, token: str) -> None:
+        client = self._client
+        if client is None:
+            return
         try:
-            await self._client.start(token)
+            await client.start(token)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

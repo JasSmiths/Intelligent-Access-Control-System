@@ -4,7 +4,8 @@ import json
 from datetime import UTC, datetime
 import time
 import uuid
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -44,8 +45,10 @@ from app.services.alfred.answer_contracts import (
 )
 from app.ai.tool_groups.registry import ToolRegistryError, _validate_tool
 from app.services.alfred.runtime import provider_agent_capability
-from app.services.chat import ChatService, IntentRoute, IntentRouterError, SYSTEM_PROMPT
+from app.services.chat import ChatService, IntentRoute, SYSTEM_PROMPT
 from app.services.chat_contracts import ChatTurnResult
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 @pytest.fixture(autouse=True)
@@ -1236,9 +1239,6 @@ async def _run_simulated_v3_turn(
     executed: list[ToolCall] = []
     selected_tool_history: list[list[str]] = []
 
-    def forbidden_deterministic_routing(*_args, **_kwargs):
-        raise AssertionError("Deterministic keyword routing was invoked in a v3 semantic-routing test.")
-
     async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
         executed.append(call)
         return {
@@ -1300,8 +1300,6 @@ async def _run_simulated_v3_turn(
         async def recall_active_lessons(self, **_kwargs):
             return []
 
-    monkeypatch.setattr(service, "_deterministic_react_calls", forbidden_deterministic_routing)
-    monkeypatch.setattr(service, "_select_tools_for_route", forbidden_deterministic_routing)
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_build_agent_messages", fake_build_messages)
     monkeypatch.setattr(service, "_append_message", fake_append_message)
@@ -1333,20 +1331,6 @@ class ActionToolProvider:
         return LlmResult(
             text='{"thought":"open","tool_name":"open_gate","arguments":{"target":"Top Gate","confirm":true}}'
         )
-
-
-class InvalidIntentProvider:
-    name = "invalid-intent-test"
-
-    async def complete(self, messages, tools=None, tool_results=None):
-        return LlmResult(text="not json")
-
-
-class MinimalIntentProvider:
-    name = "minimal-intent-test"
-
-    async def complete(self, messages, tools=None, tool_results=None):
-        return LlmResult(text='{"intents":["General"],"confidence":0.9,"reason":"missing required field"}')
 
 
 @pytest.mark.asyncio
@@ -1392,26 +1376,6 @@ async def test_provider_neutral_tool_protocol_runs_tools(monkeypatch) -> None:
     assert [(call.name, call.arguments) for call in executed] == [
         ("query_presence", {"state": "present"})
     ]
-
-
-@pytest.mark.asyncio
-async def test_semantic_router_scopes_gate_failure_tools() -> None:
-    service = ChatService()
-    route = service._deterministic_intent_route(
-        "Why didn't the gate open for Steph's car?",
-        {},
-        [],
-    )
-    selected = service._select_tools_for_route(route, [])
-    names = {tool.name for tool in selected}
-
-    assert "Gate_Hardware" in route.intents
-    assert "Access_Diagnostics" in route.intents
-    assert "resolve_human_entity" in names
-    assert "diagnose_access_event" in names
-    assert "get_maintenance_status" in names
-    assert "verify_schedule_access" in names
-    assert "query_notification_workflows" not in names
 
 
 @pytest.mark.asyncio
@@ -1541,83 +1505,12 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
     assert "five-step safety limit" in result.text
 
 
-def test_actor_context_prevents_my_car_entity_resolution() -> None:
-    service = ChatService()
-    actor_context = {
-        "person": {"id": "person-1", "display_name": "Jason Smith"},
-        "vehicles": [{"id": "vehicle-1", "registration_number": "VIP123"}],
-    }
-
-    route = service._deterministic_intent_route(
-        "Why did my car get denied?",
-        {},
-        [],
-        actor_context=actor_context,
-    )
-    args = service._access_diagnostic_args_from_message(
-        "Why did my car get denied?",
-        {},
-        actor_context=actor_context,
-    )
-
-    assert route.requires_entity_resolution is False
-    assert args["vehicle_id"] == "vehicle-1"
-
-
-def test_visitor_pass_create_prompt_prepares_pass_without_person_resolution() -> None:
-    service = ChatService()
-    message = "Chris Starkey is coming tomorrow at approx 11am, create a pass for him"
-    route = service._deterministic_intent_route(message, {}, [], actor_context={})
-    selected = service._select_tools_for_route(route, [])
-    calls = service._deterministic_react_calls(
-        message,
-        route,
-        {},
-        [],
-        [],
-        selected,
-        iteration=0,
-        actor_context={},
-    )
-
-    assert route.intents == ("Visitor_Passes",)
-    assert route.requires_entity_resolution is False
-    assert "resolve_human_entity" not in {tool.name for tool in selected}
-    assert len(calls) == 1
-    assert calls[0].name == "create_visitor_pass"
-    assert calls[0].arguments["visitor_name"] == "Chris Starkey"
-    assert calls[0].arguments["window_minutes"] == 30
-    assert calls[0].arguments["confirm"] is False
-    assert "person_id" not in calls[0].arguments
-    parsed = datetime.fromisoformat(str(calls[0].arguments["expected_time"]))
-    assert parsed.hour == 11
-    assert parsed.minute == 0
-    assert parsed.tzinfo is not None
-    assert parsed.utcoffset() is not None
-
-
 def test_visitor_pass_query_does_not_start_guided_create_flow() -> None:
     service = ChatService()
     message = "Are there any visitor passes setup for today 30th?"
-    route = service._deterministic_intent_route(message, {}, [], actor_context={})
-    selected = service._select_tools_for_route(route, [])
-    calls = service._deterministic_react_calls(
-        message,
-        route,
-        {},
-        [],
-        [],
-        selected,
-        iteration=0,
-        actor_context={},
-    )
 
     assert service._looks_like_visitor_pass_query_request(message.lower()) is True
     assert service._looks_like_visitor_pass_create_request(message.lower()) is False
-    assert calls
-    assert calls[0].name == "query_visitor_passes"
-    assert "search" not in calls[0].arguments
-    assert calls[0].arguments["statuses"] == ["active", "scheduled"]
 
 
 def test_pending_visitor_pass_create_abandons_clear_new_gate_command() -> None:
@@ -1655,56 +1548,6 @@ async def test_guided_schedule_flow_does_not_preempt_router_for_new_requests() -
     )
 
     assert result is None
-
-
-@pytest.mark.asyncio
-async def test_intent_router_invalid_response_fails_closed() -> None:
-    service = ChatService()
-
-    with pytest.raises(IntentRouterError):
-        await service._classify_intent(  # noqa: SLF001
-            InvalidIntentProvider(),
-            "Who is home?",
-            {},
-            [],
-            actor_context={},
-        )
-
-
-@pytest.mark.asyncio
-async def test_intent_router_missing_required_fields_fails_closed() -> None:
-    service = ChatService()
-
-    with pytest.raises(IntentRouterError):
-        await service._classify_intent(  # noqa: SLF001
-            MinimalIntentProvider(),
-            "Who is home?",
-            {},
-            [],
-            actor_context={},
-        )
-
-
-@pytest.mark.asyncio
-async def test_local_provider_cannot_route_free_form_chat() -> None:
-    service = ChatService()
-
-    with pytest.raises(IntentRouterError):
-        await service._classify_intent(  # noqa: SLF001
-            SimpleNamespace(name="local"),
-            "Who is home?",
-            {},
-            [],
-            actor_context={},
-        )
-
-
-def test_unlinked_actor_context_does_not_guess_me() -> None:
-    service = ChatService()
-
-    route = service._deterministic_intent_route("When did my car arrive?", {}, [], actor_context={})
-
-    assert route.requires_entity_resolution is True
 
 
 def test_pending_confirmation_uses_stored_arguments() -> None:
@@ -1765,7 +1608,7 @@ def test_assistant_text_cleanup_removes_redundant_seconds_parentheses() -> None:
 
 def test_noop_malfunction_guidance_is_a_lesson_not_keyword_filter() -> None:
     service = ChatService()
-    seeded_text = " ".join(item["lesson"] for item in DEFAULT_SEEDED_LESSONS)
+    seeded_text = " ".join(str(item["lesson"]) for item in DEFAULT_SEEDED_LESSONS)
 
     assert not hasattr(service, "_should_suppress_tool_result_for_prompt")
     assert not hasattr(service, "_humanize_robotic_absence_summary")
@@ -1776,7 +1619,11 @@ def test_noop_malfunction_guidance_is_a_lesson_not_keyword_filter() -> None:
     assert any(item["title"] == "Distinguish absence duration from visit duration" for item in DEFAULT_SEEDED_LESSONS)
     assert any(item["title"] == "Keep duration answers human" for item in DEFAULT_SEEDED_LESSONS)
     assert any(item["title"] == "Use the site clock silently" for item in DEFAULT_SEEDED_LESSONS)
-    assert any(item["metadata"]["seed"] == "sylv_absence_duration_exit_to_entry" for item in DEFAULT_SEEDED_EVAL_EXAMPLES)
+    assert any(
+        isinstance(metadata := item.get("metadata"), dict)
+        and metadata.get("seed") == "sylv_absence_duration_exit_to_entry"
+        for item in DEFAULT_SEEDED_EVAL_EXAMPLES
+    )
 
 
 def test_timezone_auto_learning_uses_prompt_guidance_not_sanitizer() -> None:
@@ -1787,7 +1634,7 @@ def test_timezone_auto_learning_uses_prompt_guidance_not_sanitizer() -> None:
 
 @pytest.mark.asyncio
 async def test_default_eval_example_seed_is_idempotent(monkeypatch) -> None:
-    rows = []
+    rows: list[Any] = []
 
     class FakeSeedSession:
         async def __aenter__(self):
@@ -2234,7 +2081,7 @@ def test_calculate_absence_duration_fallback_keeps_ongoing_absence_human() -> No
 
 def test_absence_persona_uses_training_not_phrase_humanizer() -> None:
     service = ChatService()
-    seeded_text = " ".join(item["lesson"] for item in DEFAULT_SEEDED_LESSONS)
+    seeded_text = " ".join(str(item["lesson"]) for item in DEFAULT_SEEDED_LESSONS)
 
     assert not hasattr(service, "_humanize_robotic_absence_summary")
     assert "duration first in Alfred's natural voice" in seeded_text
@@ -2464,7 +2311,7 @@ async def test_openai_embedding_provider_success_and_failure(monkeypatch) -> Non
             return {}
 
     class Client:
-        response = SuccessResponse()
+        response: Any = SuccessResponse()
 
         def __init__(self, **_kwargs):
             return None
@@ -3149,7 +2996,7 @@ async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monke
     service = ChatService()
     started: list[float] = []
     statuses: list[dict] = []
-    memory: dict[str, object] = {}
+    memory: dict[str, Any] = {}
 
     async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
         started.append(time.perf_counter())
@@ -3250,8 +3097,8 @@ async def test_react_tool_batch_returns_timeout_result(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
     service = ChatService()
-    memory: dict[str, object] = {}
-    executed = []
+    memory: dict[str, Any] = {}
+    executed: list[Any] = []
 
     async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
         executed.append(call)
@@ -3409,19 +3256,6 @@ def test_natural_schedule_time_description_normalizes_to_time_blocks() -> None:
     assert all(not blocks[str(day)] for day in [0, 1, 3, 5, 6])
 
 
-def test_schedule_delete_planner_understands_named_schedule() -> None:
-    service = ChatService()
-    lower = "delete the schedule named Jason".lower()
-    call = service._planned_schedule_delete_call("delete the schedule named Jason")
-
-    assert service._looks_like_schedule_delete_request(lower)
-    assert service._schedule_delete_name_from_message("delete the schedule named Jason") == "Jason"
-    assert call.name == "delete_schedule"
-    assert call.arguments["schedule_name"] == "Jason"
-    assert call.arguments["confirm"] is False
-    assert [planned.name for planned in service._plan_tool_calls("delete the schedule named Jason", {}, [])] == ["delete_schedule"]
-
-
 def test_schedule_delete_direct_text_prompts_for_confirmation() -> None:
     service = ChatService()
 
@@ -3458,56 +3292,12 @@ def test_assistant_text_cleanup_hides_file_urls_and_markdown() -> None:
     assert "entity ID" not in cleaned
 
 
-def test_device_open_planner_extracts_main_garage_door() -> None:
-    service = ChatService()
-    call = service._planned_device_open_call("open the main garage door")
-
-    assert call.name == "open_device"
-    assert call.arguments["target"] == "main garage door"
-    assert call.arguments["action"] == "open"
-    assert call.arguments["confirm"] is False
-
-
-def test_device_close_planner_extracts_close_action() -> None:
-    service = ChatService()
-    call = service._planned_device_action_call("close the main garage door")
-
-    assert call.name == "command_device"
-    assert call.arguments["target"] == "main garage door"
-    assert call.arguments["action"] == "close"
-    assert call.arguments["confirm"] is False
-
-
-def test_device_status_question_is_not_treated_as_open_request() -> None:
-    service = ChatService()
-    lower = "is the main garage door open?"
-
-    assert service._looks_like_device_state_request(lower)
-    assert not service._looks_like_device_open_request(lower)
-    assert [tool.name for tool in service._select_tools_for_request(lower, {}, [], [])] == ["query_device_states"]
-
-
-def test_device_closed_status_question_is_not_treated_as_close_request() -> None:
-    service = ChatService()
-    lower = "is the main garage door closed?"
-
-    assert service._looks_like_device_state_request(lower)
-    assert not service._looks_like_device_close_request(lower)
-    assert [tool.name for tool in service._select_tools_for_request(lower, {}, [], [])] == ["query_device_states"]
-
-
-def test_gate_malfunction_tools_are_registered_and_selected() -> None:
+def test_gate_malfunction_tools_are_registered() -> None:
     tools = ai_tools.build_agent_tools()
-    service = ChatService()
-
-    selected = service._select_tools_for_request("What is the gate doing right now?", {}, [], [])
-    planned = service._plan_tool_calls("What is the gate doing right now?", {}, [])
 
     assert "get_active_malfunctions" in tools
     assert "get_malfunction_history" in tools
     assert "trigger_manual_malfunction_override" in tools
-    assert [tool.name for tool in selected] == ["query_device_states", "get_active_malfunctions"]
-    assert any(call.name == "get_active_malfunctions" for call in planned)
 
 
 @pytest.mark.asyncio
@@ -3529,127 +3319,23 @@ async def test_gate_malfunction_override_tool_requires_admin_context() -> None:
     assert "Admin access" in result["error"]
 
 
-def test_camera_snapshot_planner_understands_show_me_camera() -> None:
-    service = ChatService()
-    call = service._planned_camera_snapshot_call("show me the back garden camera")
-
-    assert call.name == "get_camera_snapshot"
-    assert call.arguments["camera_name"] == "back garden"
-
-
-def test_camera_snapshot_planner_understands_show_me_location() -> None:
-    service = ChatService()
-    lower = "show me the back garden"
-    call = service._planned_camera_snapshot_call(lower)
-
-    assert service._looks_like_camera_snapshot_request(lower)
-    assert call.name == "get_camera_snapshot"
-    assert call.arguments["camera_name"] == "back garden"
-
-
-def test_camera_snapshot_planner_does_not_steal_show_me_schedules() -> None:
-    service = ChatService()
-
-    assert not service._looks_like_camera_snapshot_request("show me the schedules")
-
-
-def test_access_event_time_planner_extracts_first_name() -> None:
-    service = ChatService()
-    call = service._planned_access_event_time_call("what time did steph leave?", {})
-
-    assert call.name == "query_access_events"
-    assert call.arguments["person"] == "steph"
-    assert call.arguments["day"] == "recent"
-
-
-def test_leaderboard_tool_is_registered_and_selected() -> None:
+def test_leaderboard_tool_is_registered() -> None:
     tools = ai_tools.build_agent_tools()
-    service = ChatService()
-
-    selected = service._select_tools_for_request("Who is winning Top Charts?", {}, [], [])
-    planned = service._plan_tool_calls("Who is winning Top Charts?", {}, [])
 
     assert "query_leaderboard" in tools
-    assert [tool.name for tool in selected] == ["query_leaderboard"]
-    assert planned[0].name == "query_leaderboard"
-    assert planned[0].arguments["scope"] == "top_known"
 
 
-def test_access_diagnostic_tools_are_registered_and_planned() -> None:
+def test_access_diagnostic_tools_are_registered() -> None:
     tools = ai_tools.build_agent_tools()
-    service = ChatService()
-    message = "Why did Steph's latest LPR take much longer than the rest?"
-
-    selected = service._select_tools_for_request(message, {}, [], [])
-    planned = service._plan_tool_calls(message, {}, [])
 
     assert "diagnose_access_event" in tools
     assert "query_lpr_timing" in tools
     assert "query_vehicle_detection_history" in tools
-    assert "diagnose_access_event" in [tool.name for tool in selected]
-    assert "query_lpr_timing" in [tool.name for tool in selected]
-    assert planned[0].name == "diagnose_access_event"
-    assert planned[0].arguments["person"] == "steph"
-    assert planned[1].name == "query_lpr_timing"
-
-
-def test_missing_access_incident_routes_to_investigator() -> None:
-    tools = ai_tools.build_agent_tools()
-    service = ChatService()
-    message = "Steph left at 07:38am this morning however nothing was logged about this"
-
-    route = service._deterministic_intent_route(message, {}, [])
-    selected = service._select_tools_for_route(route, [])
-    planned = service._plan_tool_calls(message, {}, [])
 
     assert "investigate_access_incident" in tools
     assert tools["investigate_access_incident"].requires_confirmation is True
     assert tools["backfill_access_event_from_protect"].requires_confirmation is True
     assert tools["test_unifi_alarm_webhook"].requires_confirmation is True
-    assert "Access_Diagnostics" in route.intents
-    assert "investigate_access_incident" in [tool.name for tool in selected]
-    assert planned[0].name == "investigate_access_incident"
-    assert planned[0].arguments["person"] == "steph"
-    assert planned[0].arguments["direction"] == "exit"
-    assert planned[0].arguments["day"] == "today"
-    assert planned[0].arguments["expected_time"] == "07:38am"
-    assert planned[0].arguments["incident_type"] == "missing_event"
-
-
-def test_ash_style_access_incident_routes_to_suppressed_read_investigation() -> None:
-    service = ChatService()
-    message = "Ash came back at 18:18 but he wasnt let in and no notification fired"
-
-    route = service._deterministic_intent_route(message, {}, [])
-    planned = service._plan_tool_calls(message, {}, [])
-
-    assert "Access_Diagnostics" in route.intents
-    assert planned[0].name == "investigate_access_incident"
-    assert planned[0].arguments["person"] == "ash"
-    assert planned[0].arguments["direction"] == "entry"
-    assert planned[0].arguments["expected_time"] == "18:18"
-    assert planned[0].arguments["incident_type"] == "notification_failure"
-
-
-def test_diagnostic_no_match_falls_through_to_incident_in_react_loop() -> None:
-    service = ChatService()
-    route = IntentRoute(("Access_Diagnostics",), 0.9, False, "test")
-    selected = [
-        service._tools["diagnose_access_event"],
-        service._tools["investigate_access_incident"],
-    ]
-    calls = service._deterministic_react_calls(
-        "Why did Steph's latest LPR fail?",
-        route,
-        {},
-        [],
-        [{"name": "diagnose_access_event", "output": {"found": False}}],
-        selected,
-        iteration=1,
-    )
-
-    assert calls[0].name == "investigate_access_incident"
-    assert calls[0].arguments["person"] == "steph"
 
 
 def test_access_incident_direct_text_reports_comparison_and_action() -> None:
@@ -3794,37 +3480,17 @@ def test_access_incident_direct_text_reports_suppressed_read_chain() -> None:
     assert "Repair: Confirm to backfill" in text
 
 
-def test_hosted_provider_prefetches_deep_access_diagnostics() -> None:
-    service = ChatService()
-    calls = service._preplanned_context_calls(
-        "Why did Steph's latest LPR take much longer than the rest (700ms+)?",
-        {},
-        [],
-    )
-
-    assert [call.name for call in calls] == ["diagnose_access_event", "query_lpr_timing"]
-    assert calls[0].arguments["person"] == "steph"
-
-
 def test_process_arrival_wording_prefetches_diagnostics_without_lpr_keyword() -> None:
     service = ChatService()
     message = "why did Stephs latest arrival take so much longer to process than the other arrivals today? 700ms+"
 
     assert service._looks_like_access_diagnostic_request(message.lower())
-    assert not service._looks_like_access_event_time_request(message.lower())
-
-    calls = service._preplanned_context_calls(message, {}, [])
-    planned = service._plan_tool_calls(message, {}, [])
-
-    assert [call.name for call in calls] == ["diagnose_access_event", "query_lpr_timing"]
-    assert calls[0].arguments == {"day": "today", "person": "steph", "direction": "entry"}
-    assert planned[0].name == "diagnose_access_event"
-    assert planned[0].arguments == {"day": "today", "person": "steph", "direction": "entry"}
+    assert service._looks_like_lpr_timing_request(message.lower())
 
 
 def test_unhelpful_latency_answer_is_replaced_with_diagnostic_summary() -> None:
     service = ChatService()
-    tool_results = [
+    tool_results: list[dict[str, Any]] = [
         {
             "name": "diagnose_access_event",
             "output": {
@@ -3858,28 +3524,6 @@ def test_unhelpful_latency_answer_is_replaced_with_diagnostic_summary() -> None:
     replacement = service._access_diagnostic_direct_text(tool_results[0]["output"])
     assert "742.3ms" in replacement
     assert "Debounce/recognition accounted for 701.0ms" in replacement
-
-
-def test_unknown_notification_diagnostic_plans_latest_unknown() -> None:
-    service = ChatService()
-    planned = service._plan_tool_calls(
-        "Why didn't I get a notification that there was an unknown vehicle at the gate?",
-        {},
-        [],
-    )
-    diagnostic = next(call for call in planned if call.name == "diagnose_access_event")
-
-    assert diagnostic.arguments["unknown_only"] is True
-    assert diagnostic.arguments["decision"] == "denied"
-
-
-def test_detection_count_planner_uses_latest_unknown_for_that_car() -> None:
-    service = ChatService()
-    planned = service._plan_tool_calls("How many times has that car been at the gate?", {}, [])
-
-    assert planned[0].name == "query_vehicle_detection_history"
-    assert planned[0].arguments["latest_unknown"] is True
-    assert planned[0].arguments["period"] == "all"
 
 
 def test_lpr_timing_observation_reports_capture_delay() -> None:

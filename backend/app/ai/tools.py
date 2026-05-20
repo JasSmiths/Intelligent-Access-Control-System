@@ -86,6 +86,7 @@ from app.services.settings import get_runtime_config, list_settings, update_sett
 from app.services.snapshots import get_snapshot_manager
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_ACCESS, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry, write_audit_log
+from app.services.type_helpers import as_dict, as_dict_list, as_list
 from app.services.alfred.answer_contracts import artifact_payload
 from app.services.visitor_passes import (
     DEFAULT_WINDOW_MINUTES,
@@ -1330,7 +1331,7 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     expected_value = arguments.get("expected_time")
     pass_type = _visitor_pass_type_from_arguments(arguments.get("pass_type"))
     visitor_phone = str(arguments.get("visitor_phone") or "").strip()
-    number_plate = normalize_registration_number(arguments.get("number_plate")) or None
+    number_plate = normalize_registration_number(str(arguments.get("number_plate") or "")) or None
     valid_from_value = arguments.get("valid_from")
     valid_until_value = arguments.get("valid_until")
     missing = []
@@ -1367,13 +1368,22 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             expected_time = _parse_agent_datetime(expected_value, config.site_timezone)
     except (TypeError, ValueError) as exc:
         return {"created": False, "error": f"Invalid visitor pass time: {exc}"}
+    if pass_type == VisitorPassType.DURATION and (valid_from is None or valid_until is None):
+        return {"created": False, "error": "Duration Visitor Passes require valid_from and valid_until."}
     window_minutes = _bounded_int(
         arguments.get("window_minutes"),
         default=DEFAULT_WINDOW_MINUTES,
         minimum=1,
         maximum=1440,
     )
-    ends_at = valid_until if pass_type == VisitorPassType.DURATION else expected_time + timedelta(minutes=window_minutes)
+    if pass_type == VisitorPassType.DURATION:
+        starts_at = valid_from
+        ends_at = valid_until
+    else:
+        starts_at = expected_time - timedelta(minutes=window_minutes)
+        ends_at = expected_time + timedelta(minutes=window_minutes)
+    assert starts_at is not None
+    assert ends_at is not None
     if ends_at < _agent_now(config.site_timezone):
         return {
             "created": False,
@@ -1381,7 +1391,6 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
             "expected_time": _agent_datetime_iso(expected_time, config.site_timezone),
         }
 
-    starts_at = valid_from if pass_type == VisitorPassType.DURATION else expected_time - timedelta(minutes=window_minutes)
     if not bool(arguments.get("confirm")):
         return {
             "created": False,
@@ -2587,7 +2596,7 @@ def _anomaly_answer_artifacts(arguments: dict[str, Any], records: list[dict[str,
         ]
     alert = records[0]
     when = str(alert.get("created_at_display") or alert.get("resolved_at_display") or "").strip()
-    indicators = alert.get("delivery_indicators") if isinstance(alert.get("delivery_indicators"), list) else []
+    indicators = as_list(alert.get("delivery_indicators"))
     evidence = "; ".join(str(item) for item in indicators[:2] if item)
     message = str(alert.get("message") or alert.get("type") or "alert").strip()
     display = f"{_compact_time_label(when)}: {message}" if when else message
@@ -3030,7 +3039,7 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     open_entry: datetime | None = None
     total = timedelta()
-    intervals: list[dict[str, str | None]] = []
+    intervals: list[dict[str, Any]] = []
 
     for event in events:
         occurred = datetime.fromisoformat(event["occurred_at"])
@@ -3143,7 +3152,7 @@ async def calculate_absence_duration(arguments: dict[str, Any]) -> dict[str, Any
     )
     open_exit: datetime | None = None
     total = timedelta()
-    intervals: list[dict[str, str | None]] = []
+    intervals: list[dict[str, Any]] = []
 
     for event in events:
         occurred = datetime.fromisoformat(event["occurred_at"])
@@ -4715,8 +4724,8 @@ async def _telemetry_for_access_event(session, event: AccessEvent) -> tuple[Tele
 
 
 def _trace_id_from_access_event(event: AccessEvent) -> str | None:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    telemetry_payload = raw_payload.get("telemetry") if isinstance(raw_payload.get("telemetry"), dict) else {}
+    raw_payload = as_dict(event.raw_payload)
+    telemetry_payload = as_dict(raw_payload.get("telemetry"))
     trace_id = str(telemetry_payload.get("trace_id") or "").strip()
     return trace_id or None
 
@@ -4728,14 +4737,10 @@ def _access_event_diagnostic_payload(
     *,
     summarize_payload: bool = True,
 ) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    schedule = raw_payload.get("schedule") if isinstance(raw_payload.get("schedule"), dict) else {}
-    direction_resolution = (
-        raw_payload.get("direction_resolution")
-        if isinstance(raw_payload.get("direction_resolution"), dict)
-        else {}
-    )
-    debounce = raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
+    raw_payload = as_dict(event.raw_payload)
+    schedule = as_dict(raw_payload.get("schedule"))
+    direction_resolution = as_dict(raw_payload.get("direction_resolution"))
+    debounce = as_dict(raw_payload.get("debounce"))
     return {
         "id": str(event.id),
         "registration_number": event.registration_number,
@@ -5017,7 +5022,7 @@ async def _incident_iacs_events(
     end: datetime,
     direction: str,
 ) -> list[dict[str, Any]]:
-    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    summary = as_dict(subject.get("summary"))
     query = (
         select(AccessEvent)
         .options(*_access_event_load_options())
@@ -5467,7 +5472,7 @@ async def _incident_suppressed_reads(
             .limit(250)
         )
     ).all()
-    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    summary = as_dict(subject.get("summary"))
     records: list[dict[str, Any]] = []
     for event in events:
         records.extend(
@@ -5498,9 +5503,9 @@ def _incident_suppressed_read_payloads_from_event(
     direction: str,
     timezone_name: str,
 ) -> list[dict[str, Any]]:
-    raw_payload = getattr(event, "raw_payload", None) if isinstance(getattr(event, "raw_payload", None), dict) else {}
-    vehicle_session = raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY) if isinstance(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY), dict) else {}
-    suppressed_reads = vehicle_session.get("suppressed_reads") if isinstance(vehicle_session.get("suppressed_reads"), list) else []
+    raw_payload = as_dict(getattr(event, "raw_payload", None))
+    vehicle_session = as_dict(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY))
+    suppressed_reads = as_dict_list(vehicle_session.get("suppressed_reads"))
     if not suppressed_reads:
         return []
 
@@ -5690,13 +5695,14 @@ def _backfill_args_from_incident(
         "iacs_webhook_seen_but_access_event_missing",
     }:
         return None
-    event = protect.get("matched_event") if isinstance(protect.get("matched_event"), dict) else None
+    event = as_dict(protect.get("matched_event"))
     if not event:
         return None
-    candidate = event.get("matched_candidate") if isinstance(event.get("matched_candidate"), dict) else {}
-    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    candidate = as_dict(event.get("matched_candidate"))
+    summary = as_dict(subject.get("summary"))
+    summary_plates = as_list(summary.get("plates"))
     registration_number = normalize_registration_number(
-        str(candidate.get("registration_number") or (summary.get("plates") or [None])[0] or arguments.get("registration_number") or "")
+        str(candidate.get("registration_number") or (summary_plates[0] if summary_plates else None) or arguments.get("registration_number") or "")
     )
     captured_at = candidate.get("captured_at") or event.get("start") or arguments.get("expected_time")
     if not registration_number or not captured_at:
@@ -5731,9 +5737,10 @@ def _backfill_args_from_suppressed_read(
     if not suppressed_reads:
         return None
     read = next((item for item in suppressed_reads if item.get("backfill_repairable")), suppressed_reads[0])
-    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    summary = as_dict(subject.get("summary"))
+    summary_plates = as_list(summary.get("plates"))
     registration_number = normalize_registration_number(
-        str(read.get("registration_number") or (summary.get("plates") or [None])[0] or arguments.get("registration_number") or "")
+        str(read.get("registration_number") or (summary_plates[0] if summary_plates else None) or arguments.get("registration_number") or "")
     )
     captured_at = read.get("captured_at") or arguments.get("expected_time")
     source_access_event_id = read.get("source_access_event_id")
@@ -5913,9 +5920,9 @@ def _incident_notification_chain_detail(
     diagnostic: dict[str, Any] | None,
     first_suppressed: dict[str, Any],
 ) -> dict[str, str]:
-    notifications = diagnostic.get("notifications") if isinstance(diagnostic, dict) and isinstance(diagnostic.get("notifications"), dict) else {}
+    notifications = as_dict(diagnostic.get("notifications") if diagnostic else None)
     summary = str(notifications.get("summary") or "").strip()
-    deliveries = notifications.get("delivery_records") if isinstance(notifications.get("delivery_records"), list) else []
+    deliveries = as_list(notifications.get("delivery_records"))
     if deliveries:
         return {"status": "recorded", "detail": summary or "Notification delivery records were found."}
     if summary:
@@ -5979,7 +5986,7 @@ def _incident_timeline(
 async def _backfill_candidate(session, arguments: dict[str, Any], config: Any) -> dict[str, Any]:
     timezone_name = config.site_timezone
     subject = await _resolve_incident_subject(session, arguments)
-    summary = subject.get("summary") if isinstance(subject.get("summary"), dict) else {}
+    summary = as_dict(subject.get("summary"))
     plates = _incident_candidate_plates(subject, arguments)
     evidence_kind = _normalize(arguments.get("evidence_kind") or "protect")
     if evidence_kind not in {"protect", "suppressed_read"}:
@@ -6139,9 +6146,9 @@ async def _nearest_gate_observation(session, captured_at: datetime, timezone_nam
 
 
 def _suppressed_read_from_source_event(event: AccessEvent, arguments: dict[str, Any], timezone_name: str) -> dict[str, Any] | None:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    vehicle_session = raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY) if isinstance(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY), dict) else {}
-    suppressed_reads = vehicle_session.get("suppressed_reads") if isinstance(vehicle_session.get("suppressed_reads"), list) else []
+    raw_payload = as_dict(event.raw_payload)
+    vehicle_session = as_dict(raw_payload.get(VEHICLE_SESSION_PAYLOAD_KEY))
+    suppressed_reads = as_dict_list(vehicle_session.get("suppressed_reads"))
     if not suppressed_reads:
         return None
     target_time = (
@@ -6229,9 +6236,9 @@ def _recognition_diagnostics(
     trace: TelemetryTrace | None,
     spans: list[TelemetrySpan],
 ) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    debounce_payload = raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
-    candidates = debounce_payload.get("candidates") if isinstance(debounce_payload.get("candidates"), list) else []
+    raw_payload = as_dict(event.raw_payload)
+    debounce_payload = as_dict(raw_payload.get("debounce"))
+    candidates = as_dict_list(debounce_payload.get("candidates"))
     debounce_span = _find_span(spans, "Debounce & Confidence Aggregation")
     slowest_spans = sorted(
         [span for span in spans if span.duration_ms is not None],
@@ -6642,16 +6649,12 @@ def _serialize_lpr_timing_observation(
 
 
 def _gate_observation_from_event(event: AccessEvent) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    direction_resolution = (
-        raw_payload.get("direction_resolution")
-        if isinstance(raw_payload.get("direction_resolution"), dict)
-        else {}
-    )
+    raw_payload = as_dict(event.raw_payload)
+    direction_resolution = as_dict(raw_payload.get("direction_resolution"))
     gate_observation = direction_resolution.get("gate_observation")
     if isinstance(gate_observation, dict):
         return gate_observation
-    best_payload = raw_payload.get("best") if isinstance(raw_payload.get("best"), dict) else {}
+    best_payload = as_dict(raw_payload.get("best"))
     value = best_payload.get(GATE_OBSERVATION_PAYLOAD_KEY)
     return value if isinstance(value, dict) else {}
 
@@ -6741,8 +6744,8 @@ def _leaderboard_search_text(arguments: dict[str, Any]) -> str:
 def _leaderboard_known_matches(row: dict[str, Any], requested: str) -> bool:
     if not requested:
         return True
-    person = row.get("person") if isinstance(row.get("person"), dict) else {}
-    vehicle = row.get("vehicle") if isinstance(row.get("vehicle"), dict) else {}
+    person = as_dict(row.get("person"))
+    vehicle = as_dict(row.get("vehicle"))
     haystack = _person_match_key(
         " ".join(
             str(value or "")
@@ -6769,8 +6772,8 @@ def _leaderboard_known_matches(row: dict[str, Any], requested: str) -> bool:
 def _leaderboard_unknown_matches(row: dict[str, Any], requested: str) -> bool:
     if not requested:
         return True
-    dvla = row.get("dvla") if isinstance(row.get("dvla"), dict) else {}
-    display_vehicle = dvla.get("display_vehicle") if isinstance(dvla.get("display_vehicle"), dict) else {}
+    dvla = as_dict(row.get("dvla"))
+    display_vehicle = as_dict(dvla.get("display_vehicle"))
     haystack = _person_match_key(
         " ".join(
             str(value or "")
@@ -6873,18 +6876,18 @@ def _compact_value(
     if isinstance(value, list):
         if depth >= max_depth:
             return {"type": "list", "count": len(value)}
-        compacted = [
+        compacted_list = [
             _compact_value(item, key=key, depth=depth + 1, max_depth=max_depth, max_list_items=max_list_items)
             for item in value[:max_list_items]
         ]
         if len(value) > max_list_items:
-            compacted.append({"omitted_items": len(value) - max_list_items})
-        return compacted
+            compacted_list.append({"omitted_items": len(value) - max_list_items})
+        return compacted_list
     if isinstance(value, dict):
         if depth >= max_depth:
             return {"type": "object", "key_count": len(value), "keys": list(map(str, value.keys()))[:20]}
         items = list(value.items())
-        compacted = {
+        compacted_dict = {
             str(item_key): _compact_value(
                 item_value,
                 key=str(item_key),
@@ -6895,8 +6898,8 @@ def _compact_value(
             for item_key, item_value in items[:max_dict_keys]
         }
         if len(items) > max_dict_keys:
-            compacted["omitted_keys"] = len(items) - max_dict_keys
-        return compacted
+            compacted_dict["omitted_keys"] = len(items) - max_dict_keys
+        return compacted_dict
     return str(value)
 
 
@@ -6923,8 +6926,8 @@ def _payload_summary(value: Any) -> Any:
 
 
 def _compact_notification_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
-    actions = workflow.get("actions") if isinstance(workflow.get("actions"), list) else []
-    conditions = workflow.get("conditions") if isinstance(workflow.get("conditions"), list) else []
+    actions = as_dict_list(workflow.get("actions"))
+    conditions = as_list(workflow.get("conditions"))
     return _compact_observation(
         {
             "id": workflow.get("id"),
@@ -7258,7 +7261,7 @@ def _parse_natural_schedule_time_blocks(text: str) -> dict[str, list[dict[str, s
         return None
 
     start, end = time_range
-    blocks = {str(day): [] for day in range(7)}
+    blocks: dict[str, list[dict[str, str]]] = {str(day): [] for day in range(7)}
     for day in days:
         blocks[str(day)].append({"start": start, "end": end})
     return blocks

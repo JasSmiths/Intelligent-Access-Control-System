@@ -3,6 +3,7 @@ import shutil
 import stat
 import uuid
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -36,6 +37,9 @@ class _FakeJobLog:
         pass
 
     async def stdout(self, message: str) -> None:
+        pass
+
+    async def error(self, message: str) -> None:
         pass
 
 
@@ -165,9 +169,9 @@ async def test_dependency_storage_status_redacts_saved_mount_options(tmp_path, m
 @pytest.mark.asyncio
 async def test_dependency_storage_config_preserves_omitted_secret_and_redacts_outputs(tmp_path, monkeypatch) -> None:
     secret = "username=iacs,password=secret,vers=3.0,rw"
-    updates: list[dict[str, object]] = []
-    audits: list[dict[str, object]] = []
-    events: list[dict[str, object]] = []
+    updates: list[dict[str, Any]] = []
+    audits: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
 
     async def fake_runtime():
         return _storage_runtime(dependency_update_backup_mount_options=secret)
@@ -531,7 +535,7 @@ async def test_npm_clean_lock_recovery_updates_only_staged_frontend(tmp_path, mo
             1,
             "npm ERR! ERESOLVE could not resolve\nnpm ERR! peer @tiptap/core@3.23.1",
         ),
-        _FakeJobLog(),
+        cast(Any, _FakeJobLog()),
     )
 
     assert recovered is True

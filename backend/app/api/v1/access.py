@@ -14,6 +14,7 @@ from app.models.enums import AccessDecision, AccessDirection, GateCommandState, 
 from app.services.event_bus import event_bus
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
+from app.services.type_helpers import as_dict
 
 router = APIRouter()
 movement_ledger = get_movement_ledger_repository()
@@ -165,7 +166,7 @@ async def request_event_movement_reconciliation(
     )
     raw_payload = dict(event.raw_payload or {})
     raw_payload["movement_saga"] = {
-        **(raw_payload.get("movement_saga") if isinstance(raw_payload.get("movement_saga"), dict) else {}),
+        **as_dict(raw_payload.get("movement_saga")),
         **(movement_saga_summary(row) or {}),
         "detail": detail,
         "historical_repair": True,

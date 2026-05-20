@@ -11,7 +11,7 @@ before making changes.
 
 ```bash
 cp .env.example .env
-mkdir -p data/backend data/postgres data/redis logs/backend logs/frontend
+mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backend logs/frontend
 docker compose up --build
 ```
 
@@ -66,24 +66,31 @@ docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest
 - `backend/app/modules`: swappable hardware and service integrations.
 - `backend/app/services`: core orchestration services that depend on module interfaces.
 - `backend/app/db`: SQLAlchemy session and migration-ready database wiring.
-- `backend/app/workers`: queue and background processing entry points.
+- `backend/app/workers`: reserved package; current background services start from the FastAPI lifespan.
 - `backend/app/simulation`: mock event endpoints for hardware-free testing.
-- `backend/app/ai`: Phase 4 LLM provider and tool-call boundaries.
+- `backend/app/ai`: Alfred tool registry, domain tool groups, and provider boundaries.
 
 Docker storage uses host bind mounts only. No Docker named volumes are declared.
+The backend and updater containers mount the repository at `/workspace`; the updater
+service also mounts Docker's socket for dependency update jobs.
 
-## Phase 2 API
+## Access API
 
 - `POST /api/v1/webhooks/ubiquiti/lpr`
 - `POST /api/v1/simulation/arrival/{registration_number}`
 - `POST /api/v1/simulation/misread-sequence/{registration_number}`
+- `POST /api/v1/simulation/e2e/full-access-flow` (Admin)
 - `GET /api/v1/events`
+- `GET /api/v1/alerts`
+- `PATCH /api/v1/alerts/action`
+- `GET /api/v1/alerts/{alert_id}/snapshot`
 - `GET /api/v1/presence`
-- `GET /api/v1/anomalies`
+- `GET /api/v1/access/movements`
+- `GET /api/v1/access/gate-commands`
 - `WS /api/v1/realtime/ws`
 
 See [docs/phase-2.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-2.md)
-for the current data model and debounce behavior.
+for the current data model and movement-session behavior.
 
 ## Phase 3 Integrations
 
@@ -104,6 +111,19 @@ for Home Assistant, TTS, presence sync, and Apprise configuration.
 
 See [docs/phase-4.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-4.md)
 for provider configuration, agent tools, and conversational memory behavior.
+
+## Smoke Checks
+
+Anonymous:
+
+```bash
+curl -fsS http://localhost:8089/api/v1/health
+curl -fsS http://localhost:8089/api/v1/auth/status
+```
+
+Dashboard routes such as `/api/v1/maintenance/status`, `/api/v1/leaderboard`,
+`/api/v1/presence`, and `/api/v1/events` require an authenticated Admin session
+after first-run setup.
 
 ## Phase 5 Frontend
 

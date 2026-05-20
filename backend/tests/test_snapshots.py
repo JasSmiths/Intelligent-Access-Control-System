@@ -2,7 +2,8 @@ import io
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -26,6 +27,8 @@ from app.services.notification_snapshots import (
     store_notification_snapshot,
 )
 from app.services.snapshot_recovery import find_protect_snapshot_evidence_by_plate_time
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def image_bytes() -> bytes:

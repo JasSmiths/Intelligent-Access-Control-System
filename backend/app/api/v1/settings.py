@@ -64,7 +64,6 @@ async def runtime_settings(_: User = Depends(current_user)) -> dict[str, Any]:
         "log_level": config.log_level,
         "site_timezone": config.site_timezone,
         "llm_provider": config.llm_provider,
-        "alfred_agent_mode": config.alfred_agent_mode,
     }
 
 

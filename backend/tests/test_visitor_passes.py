@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -16,6 +17,8 @@ from app.services.visitor_passes import (
     serialize_visitor_pass,
     visitor_pass_whatsapp_history,
 )
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def visitor_pass(

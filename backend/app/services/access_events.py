@@ -510,7 +510,7 @@ class AccessEventService:
             return
         await self._sleep_until_retry(self._worker_backoff_seconds())
 
-    def _record_worker_failure(self, exc: Exception) -> None:
+    def _record_worker_failure(self, exc: BaseException) -> None:
         self._total_failures += 1
         self._consecutive_failures += 1
         self._last_error = self._safe_exception_detail(exc)
@@ -631,7 +631,7 @@ class AccessEventService:
         except asyncio.TimeoutError:
             return
 
-    def _safe_exception_detail(self, exc: Exception) -> str:
+    def _safe_exception_detail(self, exc: BaseException) -> str:
         detail = str(exc).replace("\n", " ").strip()
         if len(detail) > 240:
             detail = f"{detail[:237]}..."
@@ -1135,6 +1135,8 @@ class AccessEventService:
             if self._runtime
             else settings.lpr_vehicle_session_idle_seconds
         )
+        if configured is None:
+            configured = settings.lpr_vehicle_session_idle_seconds
         try:
             value = float(configured)
         except (TypeError, ValueError):
@@ -1685,7 +1687,7 @@ class AccessEventService:
     async def _flush_expired_windows(self) -> None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
-            return
+            return None
         now = datetime.now(tz=UTC)
         ready: list[DebounceWindow] = []
         waiting: list[DebounceWindow] = []
@@ -1718,7 +1720,7 @@ class AccessEventService:
     async def _flush_all_pending(self) -> None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
-            return
+            return None
         pending = self._pending
         self._pending = []
         for window in pending:
@@ -1773,7 +1775,7 @@ class AccessEventService:
     async def _finalize_window(self, window: DebounceWindow) -> FinalizedPlateEvent | None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
-            return
+            return None
         read = window.best_read
         direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
@@ -2388,6 +2390,7 @@ class AccessEventService:
         vehicle: Vehicle | None,
         allowed: bool,
     ) -> dict[str, Any]:
+        explicit_direction = self._explicit_direction_from_read(read)
         return {
             "source": read.source,
             "captured_at": read.captured_at.isoformat(),
@@ -2396,9 +2399,7 @@ class AccessEventService:
             "person_id": str(person.id) if person else None,
             "vehicle_id": str(vehicle.id) if vehicle else None,
             "gate_observation": self._gate_observation_from_read(read),
-            "explicit_direction": self._explicit_direction_from_read(read).value
-            if self._explicit_direction_from_read(read)
-            else None,
+            "explicit_direction": explicit_direction.value if explicit_direction else None,
             "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
             "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(read),
             "gate_malfunction": _gate_malfunction_from_read(read),

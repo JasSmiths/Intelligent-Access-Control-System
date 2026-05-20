@@ -20,6 +20,7 @@ from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enq
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
 from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
+from app.services.type_helpers import as_dict
 
 logger = get_logger(__name__)
 
@@ -458,7 +459,7 @@ def _dvla_vehicle_label(display_vehicle: dict[str, Any]) -> str:
 def _winner_name(leader: dict[str, Any] | None) -> str:
     if not leader:
         return "Unknown"
-    person = leader.get("person") if isinstance(leader.get("person"), dict) else {}
+    person = as_dict(leader.get("person"))
     return str(
         person.get("display_name")
         or leader.get("display_name")
@@ -481,11 +482,12 @@ def _snapshot_payload(
     height: int | None,
     camera: str | None,
 ) -> dict[str, Any] | None:
-    if not event_id or not snapshot_path_available(relative_path):
+    snapshot_event_id = _coerce_uuid(event_id)
+    if not snapshot_event_id or not snapshot_path_available(relative_path):
         return None
     return {
         "event_id": _uuid_text(event_id),
-        "url": access_event_snapshot_url(event_id),
+        "url": access_event_snapshot_url(snapshot_event_id),
         "captured_at": _datetime_iso(captured_at),
         "bytes": byte_count,
         "width": width,

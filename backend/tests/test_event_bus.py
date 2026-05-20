@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -8,7 +9,7 @@ from app.services.event_bus import EventBus
 class FakeWebSocket:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
-        self.sent = []
+        self.sent: list[Any] = []
 
     async def send_json(self, payload):
         if self.fail:
@@ -21,7 +22,7 @@ async def test_publish_discards_failed_websocket_and_still_notifies_others() -> 
     bus = EventBus()
     good_socket = FakeWebSocket()
     failed_socket = FakeWebSocket(fail=True)
-    seen = []
+    seen: list[Any] = []
     listener_called = asyncio.Event()
 
     async def listener(event):

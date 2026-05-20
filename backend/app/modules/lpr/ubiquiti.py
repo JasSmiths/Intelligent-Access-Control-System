@@ -122,16 +122,17 @@ class UbiquitiLprPayload(BaseModel):
 class UbiquitiLprAdapter:
     source_name = "ubiquiti"
 
-    def to_plate_read(self, payload: UbiquitiLprPayload) -> PlateRead:
-        raw_payload: dict[str, Any] = payload.model_dump(by_alias=True, mode="json")
+    def to_plate_read(self, payload: object) -> PlateRead:
+        parsed = payload if isinstance(payload, UbiquitiLprPayload) else UbiquitiLprPayload.model_validate(payload)
+        raw_payload: dict[str, Any] = parsed.model_dump(by_alias=True, mode="json")
         candidates = extract_plate_candidates(raw_payload)
-        if payload.registration_number not in candidates:
-            candidates = [payload.registration_number, *candidates]
+        if parsed.registration_number not in candidates:
+            candidates = [parsed.registration_number, *candidates]
         return PlateRead(
-            registration_number=payload.registration_number,
-            confidence=payload.confidence,
+            registration_number=parsed.registration_number,
+            confidence=parsed.confidence,
             source=self.source_name,
-            captured_at=payload.captured_at or now_utc(),
+            captured_at=parsed.captured_at or now_utc(),
             raw_payload=raw_payload,
             candidate_registration_numbers=tuple(candidates),
         )
@@ -425,12 +426,12 @@ def _zone_values_from_value(value: Any) -> tuple[list[str], bool]:
             empty = empty or item_empty
         return values, empty and not values
     if isinstance(value, dict):
-        values: list[str] = []
+        dict_values: list[str] = []
         for key in ("name", "displayName", "display_name", "label", "id"):
             if key in value and value[key] not in {None, ""}:
-                values.append(str(value[key]))
-        if values:
-            return values, False
+                dict_values.append(str(value[key]))
+        if dict_values:
+            return dict_values, False
         normalized_items = {_normalize_key(str(key)): item for key, item in value.items()}
         if "zone" in normalized_items:
             return _zone_values_from_value(normalized_items["zone"])

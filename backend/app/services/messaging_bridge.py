@@ -15,6 +15,7 @@ from app.models.enums import UserRole
 from app.modules.messaging.base import IncomingChatMessage, MessagingActor, MessagingBridgeResult
 from app.services.alfred.feedback import AlfredFeedbackError, alfred_feedback_service, parse_feedback_command
 from app.services.chat import chat_service
+from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
 
@@ -40,7 +41,7 @@ class MessagingBridgeService:
                     ideal_answer=feedback_command.get("ideal_answer"),
                     source_channel=message.provider,
                     actor_user_id=actor.user_id,
-                    actor_role=actor.user_role,
+                    actor_role=actor.user_role or "standard",
                 )
             except AlfredFeedbackError as exc:
                 return MessagingBridgeResult(
@@ -227,7 +228,7 @@ def _presence_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | None:
     output = _first_output(outputs, "query_presence", "presence")
     if not output:
         return None
-    records = output.get("presence") if isinstance(output.get("presence"), list) else []
+    records = as_list(output.get("presence"))
     present = [
         str(record.get("person"))
         for record in records
@@ -244,7 +245,7 @@ def _gate_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | None:
     output = _first_output(outputs, "query_device_states", "devices")
     if not output:
         return None
-    devices = output.get("devices") if isinstance(output.get("devices"), list) else []
+    devices = as_list(output.get("devices"))
     gates = [
         device
         for device in devices
@@ -264,7 +265,7 @@ def _maintenance_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | Non
     output = _first_output(outputs, "get_maintenance_status", "maintenance_mode")
     if not output:
         return None
-    status = output.get("maintenance_mode") if isinstance(output.get("maintenance_mode"), dict) else output
+    status = as_dict(output.get("maintenance_mode")) or output
     active = bool(status.get("is_active"))
     if not active:
         return "Maintenance Mode is off. Machinery may proceed with dignity."
@@ -278,7 +279,7 @@ def _malfunction_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | Non
     output = _first_output(outputs, "get_active_malfunctions", "malfunctions")
     if not output:
         return None
-    malfunctions = output.get("malfunctions") if isinstance(output.get("malfunctions"), list) else []
+    malfunctions = as_list(output.get("malfunctions"))
     count = int(output.get("count") or len(malfunctions))
     if count <= 0:
         return None
@@ -295,11 +296,11 @@ def _alert_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | None:
     output = _first_output(outputs, "query_anomalies", "anomalies")
     if not output:
         return None
-    anomalies = output.get("anomalies") if isinstance(output.get("anomalies"), list) else []
+    anomalies = as_list(output.get("anomalies"))
     count = int(output.get("count") or len(anomalies))
     if count <= 0:
         return "No active alerts. Lovely lack of drama."
-    labels = []
+    labels: list[str] = []
     for anomaly in anomalies[:3]:
         if not isinstance(anomaly, dict):
             continue

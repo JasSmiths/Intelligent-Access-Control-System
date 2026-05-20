@@ -1,99 +1,62 @@
-# Phase 4: Multi-Provider LLM Agent
+# Phase 4: Alfred V3 Agent Runtime
 
-## Delivered
+## Current State
 
-- Multi-provider LLM backend:
-  - `local` deterministic fallback.
-  - OpenAI Responses API adapter.
-  - Gemini `generateContent` adapter.
-  - Anthropic Claude Messages adapter.
-  - Ollama local chat adapter.
-- Provider selection by environment variable or per-request override.
-- Persistent chat memory:
-  - `chat_sessions`
-  - `chat_messages`
-  - Session context for pronoun/follow-up resolution.
-- Agent tools:
-  - `query_presence`
-  - `query_access_events`
-  - `query_anomalies`
-  - `summarize_access_rhythm`
-  - `calculate_visit_duration`
-  - `trigger_anomaly_alert`
-- Retrieval-augmented answers through live system tools:
-  - The agent retrieves current database state before answering operational
-    questions.
-  - Tool results are inserted into the model context as source-of-truth data.
-- Native tool-call support for OpenAI where returned by the model, plus
-  provider-neutral deterministic planning so Gemini, Claude, Ollama, and the
-  local fallback can all use the same system capabilities.
-- HTTP and WebSocket chat APIs for the frontend global chat UI.
+- Alfred is v3-only in normal operation: an LLM-owned planner selects scoped tool
+  calls from registry metadata, the executor runs only those tools, and answers
+  are grounded in tool results.
+- `alfred_agent_mode` is obsolete and is removed from dynamic settings during
+  settings seeding. Do not reintroduce mode switches unless the old rollback
+  runtime is deliberately restored and retested.
+- `backend/app/services/chat.py` is the facade for HTTP/WebSocket chat,
+  confirmations, attachments, direct result formatting, and compatibility
+  behavior.
+- `backend/app/services/alfred/*` owns planner, executor, streaming, permissions,
+  memory, embeddings, and feedback workflows.
+- `backend/app/services/chat_routing.py` now contains only small guided-flow and
+  request-shape helpers that are still used by the facade. It is not a v2
+  deterministic router.
+- `backend/app/ai/tool_groups/*` owns domain tool catalogs and metadata.
+  `backend/app/ai/tools.py` remains a live facade because several handlers still
+  depend on it; migrate handlers incrementally instead of deleting it wholesale.
 
-## Configuration
+## Providers and Settings
 
-```env
-IACS_LLM_PROVIDER=local
+LLM provider, model, timeout, learning, memory, embedding, and prompt-cache
+settings are dynamic settings under Settings UI/API. Provider secrets are
+encrypted in `system_settings`.
 
-IACS_OPENAI_API_KEY=
-IACS_OPENAI_MODEL=gpt-5
-IACS_OPENAI_BASE_URL=https://api.openai.com/v1
+The local provider can still support development/testing paths, but Alfred live
+ops must not rely on deterministic fallback answers. If the provider or planner
+cannot produce a valid plan, Alfred fails closed with a configuration/retry
+message instead of inventing operational facts.
 
-IACS_GEMINI_API_KEY=
-IACS_GEMINI_MODEL=gemini-2.5-flash
-IACS_GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+## Tooling Rules
 
-IACS_ANTHROPIC_API_KEY=
-IACS_ANTHROPIC_MODEL=claude-sonnet-4-5
-IACS_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
-
-IACS_OLLAMA_BASE_URL=http://host.docker.internal:11434
-IACS_OLLAMA_MODEL=llama3.1
-IACS_LLM_TIMEOUT_SECONDS=45
-```
-
-The default `local` provider requires no API key and is intentionally useful for
-testing the tool pipeline. It does not attempt creative language generation; it
-summarizes tool outputs deterministically.
+- Tool results are the source of truth for people, vehicles, schedules, access
+  events, device states, DVLA data, telemetry, and alerts.
+- Non-read-only tools must require confirmation and return
+  `requires_confirmation` before mutation.
+- Tool metadata must declare categories, safety level, permissions, default
+  limits, and examples/return schemas where useful.
+- Registry changes must update `backend/tests/test_chat_agent.py` for tool
+  surface, permission, confirmation, and domain-card behavior.
+- Outputs should stay compact JSON and must redact secrets, cookies, tokens, and
+  media blobs.
 
 ## API Endpoints
 
 - `GET /api/v1/ai/providers`
 - `GET /api/v1/ai/tools`
+- `GET /api/v1/ai/agent/status`
 - `POST /api/v1/ai/chat`
+- `POST /api/v1/ai/chat/confirm`
+- `POST /api/v1/ai/chat/stream`
+- `POST /api/v1/ai/chat/upload`
+- `POST /api/v1/ai/feedback`
+- `GET/POST /api/v1/ai/training/*`
 - `WS /api/v1/ai/chat/ws`
 
-Example HTTP request:
-
-```bash
-curl -X POST http://localhost:8088/api/v1/ai/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Did the gardener arrive today?"}'
-```
-
-Example WebSocket message:
-
-```json
-{"message":"Summarize today","session_id":"optional-session-id"}
-```
-
-## Memory Behavior
-
-The first request:
-
-```text
-Did the gardener arrive today?
-```
-
-stores `gardener` as the session subject. A follow-up such as:
-
-```text
-How long did they stay?
-```
-
-resolves `they` to the gardener context and calls `calculate_visit_duration`.
-
-## OpenAI Notes
-
-The OpenAI adapter uses the Responses API and supports function tools. The
-agent also has app-side tool planning so system tools continue to work when a
-provider does not support native tool calling.
+All dashboard/chat routes require authentication after first-run setup. The
+WhatsApp and Discord bridges create actor context before planning so tool
+permissions still apply outside the web UI.

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -45,6 +46,8 @@ from app.services.home_assistant import HomeAssistantIntegrationService
 from app.services.schedules import schedule_allows_at
 from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, seed_dynamic_settings_for_session
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 class ScalarResult:
@@ -93,7 +96,7 @@ class FakeSettingsSession:
             key="notification_rules",
             value={"plain": [{"id": "legacy-rule"}]},
         )
-        self.deleted = []
+        self.deleted: list[Any] = []
 
     async def scalars(self, _statement):
         self.calls += 1
@@ -932,14 +935,14 @@ async def test_home_assistant_mobile_targets_accept_specific_notify_services() -
 
 
 async def test_home_assistant_mobile_notifier_includes_image_attachment_payload() -> None:
-    calls = []
+    calls: list[Any] = []
 
     class FakeHomeAssistantClient:
         async def call_service(self, service_name, payload):
             calls.append((service_name, payload))
             return {}
 
-    await HomeAssistantMobileAppNotifier(FakeHomeAssistantClient()).send(
+    await HomeAssistantMobileAppNotifier(cast(Any, FakeHomeAssistantClient())).send(
         HomeAssistantMobileAppTarget("notify.mobile_app_jason"),
         "Gate",
         "Snapshot attached",

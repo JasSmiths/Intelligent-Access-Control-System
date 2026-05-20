@@ -46,6 +46,7 @@ from app.services.schedules import schedule_allows_at
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
+from app.services.type_helpers import as_dict
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.whatsapp_messaging import (
     get_whatsapp_messaging_service,
@@ -982,7 +983,7 @@ class NotificationService:
     ) -> dict[str, Any]:
         active_context = context or sample_notification_context(rule_trigger_event(rule))
         variables = context_variables(active_context)
-        rendered_actions = []
+        rendered_actions: list[dict[str, Any]] = []
         for action in rule_actions(rule):
             action_type = str(action.get("type") or "")
             media = normalize_media(action.get("media"))
@@ -1374,7 +1375,7 @@ class NotificationService:
                 },
             )
         image_url = snapshot.public_url if snapshot and snapshot.public_url else None
-        image_content_type = snapshot.content_type if image_url else None
+        image_content_type = snapshot.content_type if snapshot is not None and image_url else None
         notifier = HomeAssistantMobileAppNotifier()
         delivered_any = False
         for target in targets:
@@ -1581,7 +1582,7 @@ class NotificationService:
                 return targets
             return [config.home_assistant_default_media_player] if config.home_assistant_default_media_player else []
 
-        targets: list[str] = []
+        selected_targets: list[str] = []
         for endpoint_id in endpoint_ids:
             if not endpoint_id.startswith("home_assistant_tts:"):
                 continue
@@ -1589,10 +1590,10 @@ class NotificationService:
             if target == "default":
                 target = config.home_assistant_default_media_player
             if target and target != "*":
-                targets.append(target)
-        if not targets and config.home_assistant_default_media_player:
-            targets.append(config.home_assistant_default_media_player)
-        return targets
+                selected_targets.append(target)
+        if not selected_targets and config.home_assistant_default_media_player:
+            selected_targets.append(config.home_assistant_default_media_player)
+        return selected_targets
 
     async def _voice_endpoint_catalog(self, config) -> list[dict[str, Any]]:
         endpoints: list[dict[str, Any]] = []
@@ -1985,7 +1986,7 @@ def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, 
 
 def _visitor_pass_occurred_at(event_type: str, visitor_pass: dict[str, Any]) -> str:
     if event_type == "visitor_pass_arranged":
-        metadata = visitor_pass.get("source_metadata") if isinstance(visitor_pass.get("source_metadata"), dict) else {}
+        metadata = as_dict(visitor_pass.get("source_metadata"))
         return _visitor_pass_text(metadata.get("whatsapp_last_confirmed_at") or visitor_pass.get("updated_at"))
     if event_type == "visitor_pass_created":
         return _visitor_pass_text(visitor_pass.get("created_at"))
@@ -2033,7 +2034,7 @@ def _visitor_pass_text(value: Any) -> str:
 
 
 def notification_context_from_payload(payload: dict[str, Any]) -> NotificationContext:
-    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
+    facts = as_dict(payload.get("facts"))
     return NotificationContext(
         event_type=str(payload.get("event_type") or payload.get("trigger_event") or "integration_test"),
         subject=str(payload.get("subject") or facts.get("subject") or "Notification event"),

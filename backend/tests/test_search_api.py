@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 import json
+from typing import Any
 import uuid
 
 import httpx
@@ -56,7 +57,7 @@ class FakeSearchSession:
         self.rows_by_model = rows_by_model
         self.calls = 0
 
-    async def scalars(self, statement: object) -> FakeScalarResult:
+    async def scalars(self, statement: Any) -> FakeScalarResult:
         self.calls += 1
         entity = statement.column_descriptions[0]["entity"]
         return FakeScalarResult(list(self.rows_by_model.get(entity, [])))

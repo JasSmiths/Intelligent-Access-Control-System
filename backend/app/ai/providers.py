@@ -8,6 +8,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.services.settings import get_runtime_config
+from app.services.type_helpers import as_dict, as_dict_list
 
 logger = get_logger(__name__)
 
@@ -182,7 +183,7 @@ class OpenAIResponsesProvider(BaseHttpProvider):
             json_body=body,
         )
         usage_summary = _openai_usage_summary(
-            data.get("usage") if isinstance(data.get("usage"), dict) else {},
+            as_dict(data.get("usage")),
             model=model_name,
             request_id=response_headers.get("x-request-id") or response_headers.get("openai-request-id"),
             elapsed_ms=elapsed_ms,
@@ -670,15 +671,14 @@ class LocalProvider:
     def _summarize_entity_resolution(self, output: dict[str, Any]) -> str:
         status = output.get("status")
         if status == "unique" and isinstance(output.get("match"), dict):
-            match = output["match"]
+            match = as_dict(output.get("match"))
             label = match.get("display_name") or match.get("name") or match.get("registration_number")
             return f"Resolved {output.get('query')} to {match.get('type')} {label}. Neatly pinned to the board."
         if status == "ambiguous":
-            matches = output.get("matches") if isinstance(output.get("matches"), list) else []
+            matches = as_dict_list(output.get("matches"))
             labels = [
                 str(match.get("display_name") or match.get("name") or match.get("registration_number") or match.get("entity_id"))
                 for match in matches[:4]
-                if isinstance(match, dict)
             ]
             return f"That reference is ambiguous: {', '.join(labels)}."
         return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity. I will not guess; that way lies nonsense."
@@ -686,14 +686,14 @@ class LocalProvider:
     def _summarize_telemetry_trace(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
             return f"Telemetry trace: {output.get('error') or 'not found'}"
-        trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+        trace = as_dict(output.get("trace"))
         return (
             f"Telemetry trace {trace.get('trace_id')} was {trace.get('status')} "
             f"and took {trace.get('duration_ms')}ms."
         )
 
     def _summarize_events(self, output: dict[str, Any]) -> str:
-        events = output.get("events", [])
+        events = as_dict_list(output.get("events"))
         if not events:
             return "I found no matching access events. The logbook is politely blank."
         latest = events[0]
@@ -708,10 +708,10 @@ class LocalProvider:
     def _summarize_access_diagnostic(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
             return f"Access diagnostic: {output.get('error') or 'no matching event found'}. I checked the usual cupboards."
-        event = output.get("event") if isinstance(output.get("event"), dict) else {}
-        recognition = output.get("recognition") if isinstance(output.get("recognition"), dict) else {}
-        gate = output.get("gate") if isinstance(output.get("gate"), dict) else {}
-        notifications = output.get("notifications") if isinstance(output.get("notifications"), dict) else {}
+        event = as_dict(output.get("event"))
+        recognition = as_dict(output.get("recognition"))
+        gate = as_dict(output.get("gate"))
+        notifications = as_dict(output.get("notifications"))
         subject = event.get("person") or event.get("registration_number") or "matched event"
         parts = [
             f"Access diagnostic for {subject} at {event.get('occurred_at_display') or event.get('occurred_at')}.",
@@ -729,7 +729,7 @@ class LocalProvider:
         return " ".join(parts)
 
     def _summarize_lpr_timing(self, output: dict[str, Any]) -> str:
-        observations = output.get("observations") if isinstance(output.get("observations"), list) else []
+        observations = as_dict_list(output.get("observations"))
         if not observations:
             return "No recent raw LPR timing observations matched. The stopwatch drawer is empty."
         latest = observations[0]
@@ -762,7 +762,7 @@ class LocalProvider:
     def _summarize_device_states(self, output: dict[str, Any]) -> str:
         if output.get("error"):
             return f"Device state check failed: {output.get('error')}"
-        devices = output.get("devices", [])
+        devices = as_dict_list(output.get("devices"))
         if not devices:
             target = output.get("target")
             if target:
@@ -778,10 +778,10 @@ class LocalProvider:
         if output.get("requires_details"):
             return str(output.get("detail") or f"Which gate or garage door should I {action}?")
         if output.get("requires_confirmation"):
-            device = output.get("device") if isinstance(output.get("device"), dict) else {}
+            device = as_dict(output.get("device"))
             target = device.get("name") or output.get("target") or "that device"
             return f"Please use the confirmation button before I {action} {target}. Safety first; cape later."
-        device = output.get("device") if isinstance(output.get("device"), dict) else {}
+        device = as_dict(output.get("device"))
         name = device.get("name") or output.get("target") or "the device"
         success = bool(output.get("opened") if action == "open" else output.get("closed"))
         if success:
@@ -791,7 +791,7 @@ class LocalProvider:
     def _summarize_maintenance_tool(self, tool_name: str, output: dict[str, Any]) -> str:
         if output.get("requires_confirmation"):
             return str(output.get("detail") or "Please use the confirmation button first.")
-        status = output.get("maintenance_mode") if isinstance(output.get("maintenance_mode"), dict) else output
+        status = as_dict(output.get("maintenance_mode")) or output
         active = bool(status.get("is_active"))
         if tool_name in {"enable_maintenance_mode", "toggle_maintenance_mode"} and output.get("state") == "enabled":
             return "Maintenance Mode is now enabled. Automated actions are disabled." if active else "Maintenance Mode was not enabled."
@@ -809,7 +809,7 @@ class LocalProvider:
         return "Maintenance Mode is disabled. Automated actions are available; the machinery may proceed with dignity."
 
     def _summarize_anomalies(self, output: dict[str, Any]) -> str:
-        anomalies = output.get("anomalies", [])
+        anomalies = as_dict_list(output.get("anomalies"))
         if not anomalies:
             return "There are no matching anomalies. A rare case of nothing being exactly what we wanted."
         return "; ".join(
@@ -909,7 +909,7 @@ class LocalProvider:
     def _summarize_generated_file(self, output: dict[str, Any]) -> str:
         if output.get("error"):
             return f"File generation failed: {output.get('error')}"
-        attachment = output.get("attachment") if isinstance(output.get("attachment"), dict) else {}
+        attachment = as_dict(output.get("attachment"))
         filename = attachment.get("filename") or "the file"
         return f"I generated {filename} and attached it here. Paperwork, but make it useful."
 
@@ -926,7 +926,7 @@ class LocalProvider:
         if output.get("error"):
             return f"Schedule action failed: {output.get('error')}"
 
-        schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+        schedule = as_dict(output.get("schedule"))
         name = schedule.get("name") or output.get("schedule_name") or "schedule"
         summary = schedule.get("summary")
 
@@ -982,13 +982,13 @@ class LocalProvider:
             )
 
         if tool_name == "query_notification_workflows":
-            workflows = output.get("workflows", [])
+            workflows = as_dict_list(output.get("workflows"))
             if not workflows:
                 return "I found no notification workflows. The notification desk is pristine."
             names = ", ".join(str(workflow.get("name")) for workflow in workflows[:5] if isinstance(workflow, dict))
             return f"I found {output.get('count', len(workflows))} notification workflow(s): {names}."
 
-        workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+        workflow = as_dict(output.get("workflow"))
         name = workflow.get("name") or output.get("workflow_name") or "notification workflow"
         if tool_name == "get_notification_workflow":
             if output.get("found"):
@@ -1001,8 +1001,9 @@ class LocalProvider:
         if tool_name == "delete_notification_workflow":
             return f"Deleted notification workflow {name}." if output.get("deleted") else str(output.get("detail") or "I did not delete the notification workflow.")
         if tool_name == "preview_notification_workflow":
-            preview = output.get("preview") if isinstance(output.get("preview"), dict) else {}
-            action_count = len(preview.get("actions", [])) if isinstance(preview.get("actions"), list) else 0
+            preview = as_dict(output.get("preview"))
+            actions = preview.get("actions")
+            action_count = len(actions) if isinstance(actions, list) else 0
             return f"Previewed the notification workflow with {action_count} action(s)."
         if tool_name == "test_notification_workflow":
             return "Sent the notification workflow test. Tiny paper plane launched." if output.get("sent") else str(output.get("detail") or "I did not send the notification workflow test.")
@@ -1016,12 +1017,12 @@ class LocalProvider:
         if tool_name == "query_automation_catalog":
             return "Automation options are available for time, vehicle, visitor pass, maintenance, Alfred, and webhook triggers."
         if tool_name == "query_automations":
-            automations = output.get("automations", [])
+            automations = as_dict_list(output.get("automations"))
             if not automations:
                 return "I found no automation rules."
             names = ", ".join(str(item.get("name")) for item in automations[:5] if isinstance(item, dict))
             return f"I found {output.get('count', len(automations))} automation rule(s): {names}."
-        automation = output.get("automation") if isinstance(output.get("automation"), dict) else {}
+        automation = as_dict(output.get("automation"))
         name = automation.get("name") or output.get("automation_name") or "automation"
         if tool_name == "get_automation":
             return f"{name} is an automation rule." if output.get("found") else "I could not find that automation."
@@ -1128,8 +1129,8 @@ def _openai_usage_summary(
     prompt_cache_key: str | None,
     prompt_cache_retention: str | None,
 ) -> dict[str, Any]:
-    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
-    output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+    input_details = as_dict(usage.get("input_tokens_details"))
+    output_details = as_dict(usage.get("output_tokens_details"))
     input_tokens = _int_usage_value(usage.get("input_tokens"))
     output_tokens = _int_usage_value(usage.get("output_tokens"))
     cached_tokens = _int_usage_value(input_details.get("cached_tokens"))

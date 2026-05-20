@@ -748,7 +748,7 @@ class MissedAccessEventBackfillService:
                 allowed=allowed,
                 person_known=person is not None,
                 gate_state=_gate_state_from_observation(gate_observation),
-                gate_observation=gate_observation_payload,
+                gate_observation=gate_observation_payload or {},
                 presence_state=presence.state if presence else None,
             )
         )

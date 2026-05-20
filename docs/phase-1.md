@@ -5,12 +5,18 @@ Intelligent Access Control System.
 
 ## Delivered
 
-- Docker Compose deployment with `backend`, `postgres`, and `redis`.
+- Docker Compose deployment with `frontend`, `backend`, `updater`, `postgres`, and `redis`.
 - Host bind mounts only:
   - `./data/backend:/app/data`
+  - `./data/chat_attachments:/app/data/chat_attachments`
+  - `./:/workspace`
   - `./logs/backend:/app/logs`
+  - `./logs/frontend:/var/log/nginx`
   - `./data/postgres:/var/lib/postgresql/data`
   - `./data/redis:/data`
+  - `./data/backend/dependency-update-cache:/app/data/dependency-update-cache`
+  - `./data/backend/dependency-update-backups:/app/update-backups`
+  - `/var/run/docker.sock:/var/run/docker.sock` on the updater service only.
 - FastAPI backend with health, webhook, realtime WebSocket, and simulator routes.
 - Modular I/O packages:
   - `app/modules/lpr`
@@ -19,7 +25,7 @@ Intelligent Access Control System.
   - `app/modules/announcements`
 - Integration registry for selecting swappable modules by configuration.
 - Event bus abstraction for realtime dashboard updates.
-- Database and worker packages ready for Phase 2 models and queues.
+- Database bootstrap and lifespan-managed background services for runtime work.
 
 ## Modularity Rule
 
@@ -34,10 +40,12 @@ not rewrite access event services.
 
 ## Next Phase
 
-Phase 2 will add:
+The current system now includes:
 
-- SQLAlchemy models for people, groups, vehicles, schedules, events, presence,
-  anomalies, and audit logs.
-- Ubiquiti debounce and confidence-window resolution.
-- Event classification against historical rhythms.
-- Unauthorized and impossible-state anomaly detection.
+- SQLAlchemy models for people, groups, vehicles, many-to-many vehicle/person
+  assignments, schedules, events, presence, alerts/anomalies, audit logs, report
+  exports, dependency update jobs, and Alfred memory/training data.
+- Durable movement sessions/sagas for LPR suppression, idempotent gate commands,
+  reconciliation, and restart backfill.
+- Unauthorized, outside-schedule, duplicate-entry, and duplicate-exit anomaly
+  detection surfaced through `/api/v1/alerts`.

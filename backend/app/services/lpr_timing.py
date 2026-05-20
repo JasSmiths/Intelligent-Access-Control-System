@@ -112,7 +112,7 @@ class LprTimingRecorder:
             source="webhook",
             source_detail="ubiquiti_lpr_webhook",
             registration_number=_normalize_plate(read.registration_number),
-            received_at=_isoformat(received_at or _now_utc()),
+            received_at=(received_at or _now_utc()).astimezone(UTC).isoformat(),
             raw_value=read.registration_number,
             captured_at=_isoformat(read.captured_at),
             confidence=read.confidence,

@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -339,7 +340,7 @@ async def test_maintenance_mode_skips_actions_but_allows_disable(monkeypatch) ->
     monkeypatch.setattr(automations, "is_maintenance_mode_active", active)
     monkeypatch.setattr(automations, "set_maintenance_mode", set_mode)
     service = AutomationService()
-    rule = SimpleNamespace(name="Nightly reset")
+    rule: Any = SimpleNamespace(name="Nightly reset")
     context = AutomationContext(
         trigger_key="time.cron",
         subject="Schedule tick",
@@ -374,7 +375,7 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
     async def inactive() -> bool:
         return False
 
-    async def integration_enabled(_definition) -> SimpleNamespace:
+    async def integration_enabled(_definition) -> Any:
         return SimpleNamespace(enabled=True, disabled_reason=None)
 
     class Service:
@@ -394,7 +395,7 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
     monkeypatch.setattr(automation_integration_actions, "get_icloud_calendar_service", lambda: Service())
     monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_enabled)
 
-    rule = SimpleNamespace(name="Calendar sync", created_by_user_id="11111111-1111-1111-1111-111111111111")
+    rule: Any = SimpleNamespace(name="Calendar sync", created_by_user_id="11111111-1111-1111-1111-111111111111")
     context = AutomationContext(
         trigger_key="time.cron",
         subject="Schedule tick",
@@ -429,13 +430,13 @@ async def test_disabled_integration_action_skips_without_crashing(monkeypatch) -
     async def inactive() -> bool:
         return False
 
-    async def integration_disabled(_definition) -> SimpleNamespace:
+    async def integration_disabled(_definition) -> Any:
         return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
 
     monkeypatch.setattr(automations, "is_maintenance_mode_active", inactive)
     monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
 
-    rule = SimpleNamespace(name="Calendar sync", created_by_user_id=None)
+    rule: Any = SimpleNamespace(name="Calendar sync", created_by_user_id=None)
     context = AutomationContext(
         trigger_key="time.cron",
         subject="Schedule tick",
@@ -463,7 +464,7 @@ async def test_disabled_integration_action_skips_without_crashing(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_integration_catalog_marks_disabled_actions(monkeypatch) -> None:
-    async def integration_disabled(_definition) -> SimpleNamespace:
+    async def integration_disabled(_definition) -> Any:
         return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
 
     monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
@@ -532,7 +533,9 @@ def test_scheduler_next_run_and_due_trigger_helpers() -> None:
     weekly_start = datetime(2026, 4, 30, 21, 0, tzinfo=UTC)
 
     assert next_run_for_trigger(every_x, now=now) == now + timedelta(minutes=15)
-    assert due_time_trigger([every_x], now=now, scheduled_for=now)["id"] == "trigger-1"
+    due_trigger = due_time_trigger([every_x], now=now, scheduled_for=now)
+    assert due_trigger is not None
+    assert due_trigger["id"] == "trigger-1"
     assert cron_from_recurrence(weekly_start, "weekly") == "0 21 * * 4"
 
 

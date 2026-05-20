@@ -39,6 +39,7 @@ from app.services.access_events import (
     AccessEventService,
 )
 from app.services.event_bus import event_bus
+from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.telemetry import telemetry
 
 
@@ -184,7 +185,9 @@ class HardwareFreeAccessEventService(AccessEventService):
         open_garage_doors: bool,
         trace: Any | None = None,
         dvla_enrichment: dict[str, str | None] | None = None,
-    ) -> bool:
+        movement_saga_id: str | None = None,
+    ) -> GateCommandOutcome:
+        started_at = datetime.now(tz=UTC)
         reason = (
             f"Simulated automatic LPR grant for {event.registration_number}"
             f"{f' ({person.display_name})' if person else ''}"
@@ -223,7 +226,23 @@ class HardwareFreeAccessEventService(AccessEventService):
                 trace=trace,
                 dvla_enrichment=dvla_enrichment,
             )
-        return True
+        return GateCommandOutcome(
+            intent=GateCommandIntent(
+                reason=reason,
+                source="simulation",
+                event_id=str(event.id),
+                movement_saga_id=movement_saga_id,
+                registration_number=event.registration_number,
+                actor="Simulation",
+            ),
+            accepted=True,
+            state=GateState.OPENING,
+            detail=reason,
+            started_at=started_at,
+            completed_at=datetime.now(tz=UTC),
+            mechanically_confirmed=True,
+            reconciliation_required=False,
+        )
 
     async def _publish_gate_open_skipped(
         self,
@@ -326,7 +345,7 @@ class HardwareFreePatchScope:
         access_events_module.get_leaderboard_service = self._original_leaderboard_service  # type: ignore[assignment]
         access_events_module.get_notification_service = self._original_notification_service  # type: ignore[assignment]
         if self._had_publish_attr:
-            event_bus.publish = self._original_publish_attr  # type: ignore[method-assign]
+            event_bus.publish = self._original_publish_attr  # type: ignore[assignment,method-assign]
         else:
             delattr(event_bus, "publish")
 

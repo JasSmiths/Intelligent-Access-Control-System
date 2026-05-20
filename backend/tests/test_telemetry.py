@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 import uuid
 
 from app.api.v1 import telemetry as telemetry_api
@@ -165,6 +166,7 @@ async def test_audit_log_endpoint_applies_level_and_outcome_filters() -> None:
         session=session,
     )
 
+    assert session.statement is not None
     compiled = str(session.statement.compile(compile_kwargs={"literal_binds": True}))
     assert response == {"items": [], "next_cursor": None}
     assert "audit_logs.level = 'warning'" in compiled
@@ -173,8 +175,8 @@ async def test_audit_log_endpoint_applies_level_and_outcome_filters() -> None:
 
 def test_lpr_trace_captures_ordered_spans(monkeypatch) -> None:
     service = TelemetryService()
-    captured_traces = []
-    captured_spans = []
+    captured_traces: list[Any] = []
+    captured_spans: list[Any] = []
     monkeypatch.setattr(service, "enqueue_trace", captured_traces.append)
     monkeypatch.setattr(service, "enqueue_span", captured_spans.append)
 

@@ -1,7 +1,8 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -9,11 +10,13 @@ from app.modules.gate.base import GateCommandResult, GateState
 from app.services.movement_ledger import GateCommandLease
 from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 
+SimpleNamespace = cast(Any, _SimpleNamespace)
+
 
 class FakeGateCommandLedger:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self.records = {}
+        self.records: dict[Any, Any] = {}
 
     async def claim_gate_command(self, _intent) -> GateCommandLease:
         await self._lock.acquire()
@@ -69,6 +72,9 @@ async def test_gate_command_coordinator_serializes_open_commands() -> None:
             calls.append(f"end:{reason}")
             return GateCommandResult(True, GateState.OPENING, reason)
 
+        async def current_state(self) -> GateState:
+            return GateState.OPENING
+
     coordinator = GateCommandCoordinator(lambda _name: SlowGate(), ledger=FakeGateCommandLedger())
 
     first, second = await asyncio.gather(
@@ -88,6 +94,9 @@ async def test_gate_command_coordinator_marks_accepted_stale_state_for_reconcili
         async def open_gate(self, reason: str, *, bypass_schedule: bool = False):
             return GateCommandResult(True, GateState.CLOSED, reason)
 
+        async def current_state(self) -> GateState:
+            return GateState.CLOSED
+
     outcome = await GateCommandCoordinator(lambda _name: StaleGate(), ledger=FakeGateCommandLedger()).execute_open(
         GateCommandIntent(reason="stale state", source="test")
     )
@@ -103,6 +112,9 @@ async def test_gate_command_coordinator_normalizes_controller_exceptions() -> No
     class BrokenGate:
         async def open_gate(self, reason: str, *, bypass_schedule: bool = False):
             raise RuntimeError("HA down")
+
+        async def current_state(self) -> GateState:
+            return GateState.FAULT
 
     outcome = await GateCommandCoordinator(lambda _name: BrokenGate(), ledger=FakeGateCommandLedger()).execute_open(
         GateCommandIntent(reason="open", source="test")

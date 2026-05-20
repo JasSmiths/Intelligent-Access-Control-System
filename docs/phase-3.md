@@ -1,64 +1,58 @@
-# Phase 3: Home Assistant and Notifications
+# Phase 3: Integrations and Notifications
 
-## Delivered
+## Current State
 
-- Shared Home Assistant client:
-  - REST service calls.
-  - State reads.
-  - WebSocket `state_changed` subscription with reconnect behavior.
-- Home Assistant gate controller:
-  - Configurable gate entity.
-  - Configurable open service, defaulting to `cover.open_cover`.
-  - Gate state mapping into IACS states.
-- Home Assistant TTS announcer:
-  - Configurable service, defaulting to `tts.cloud_say`.
-  - Configurable default media player, for example
-    `media_player.all_google_home_speakers`.
-- Home Assistant state sync:
-  - Broadcasts gate state changes over the realtime event bus.
-  - Broadcasts configured door and cover state changes over the realtime event
-    bus.
-- Apprise notification sender:
-  - Comma-separated or newline-separated URL config.
-  - Non-blocking dispatch through a worker thread.
-- Notification composer:
-  - Accepts structured event context.
-  - Produces deterministic text now.
-  - Leaves a clean contract for Phase 4 AI naturalization.
-- Anomaly notification wiring:
-  - Unauthorized plates and schedule violations now produce contextual
-    notification events.
+- Home Assistant integration includes a shared REST/WebSocket client, gate cover
+  control, garage/cover helpers, TTS announcements, state sync, and maintenance
+  mode synchronization to `input_boolean.top_gate_maintenance_mode`.
+- Gate opens from LPR, automations, Alfred, notifications, and admin actions go
+  through `GateCommandCoordinator`; do not bypass durable command records.
+- Apprise and Home Assistant mobile notification senders implement the normalized
+  notification sender contract.
+- Notification rules are stored in `notification_rules`, not `system_settings`.
+  Templates use `@Variable`; bracket tokens remain accepted for compatibility.
+- Actionable notification context is stored in `notification_action_contexts`
+  with HMAC tokens, short TTLs, and one-time consume semantics.
+- WhatsApp Cloud API, Discord, DVLA VES, UniFi Protect, iCloud Calendar, and
+  dependency-update workflows are now part of the integration surface.
 
 ## Configuration
 
-```env
-IACS_HOME_ASSISTANT_URL=http://homeassistant.local:8123
-IACS_HOME_ASSISTANT_TOKEN=<long-lived-access-token>
-IACS_HOME_ASSISTANT_GATE_ENTITY_ID=cover.driveway_gate
-IACS_HOME_ASSISTANT_GATE_OPEN_SERVICE=cover.open_cover
-IACS_HOME_ASSISTANT_TTS_SERVICE=tts.cloud_say
-IACS_HOME_ASSISTANT_DEFAULT_MEDIA_PLAYER=media_player.all_google_home_speakers
+Integration values are dynamic settings owned by the Settings UI/API. Bootstrap
+environment should stay limited to runtime selectors and auth/bootstrap wiring.
+Secrets such as Home Assistant tokens, Apprise URLs, Discord/WhatsApp tokens,
+DVLA keys, UniFi credentials/API keys, and LLM provider keys are encrypted in
+`system_settings`.
 
-IACS_APPRISE_URLS=pover://user@token
-```
+Legacy environment values may seed defaults during development, but future work
+should read and write integration configuration through Settings UI/API.
 
-Home Assistant `person.*` geofence/entity states are not used as IACS
-presence. Access-event entry/exit records are the presence source of truth.
+Home Assistant `person.*` geofence/entity states are not used as IACS presence.
+Access-event entry/exit records are the presence source of truth.
 
 ## API Endpoints
 
 - `GET /api/v1/integrations/home-assistant/status`
 - `POST /api/v1/integrations/gate/open`
+- `POST /api/v1/integrations/cover/command`
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
+- `GET/POST /api/v1/webhooks/whatsapp`
+- `GET/PATCH/POST /api/v1/integrations/discord/*`
+- `GET/POST/DELETE /api/v1/integrations/unifi-protect/*`
+- `GET/POST/DELETE /api/v1/integrations/icloud-calendar/*`
+- `GET/POST /api/v1/dependency-updates/*`
+
+State-changing integration actions require Admin confirmation/audit where the
+action can affect hardware, external messaging, maintenance mode, update
+application, backups, or connection tests.
 
 ## Nginx Proxy Manager
 
-The backend still publishes on host port `8088`:
+Use the frontend service on host port `8089` as ingress:
 
 ```text
-http://<docker-host-ip>:8088
+http://<docker-host-ip>:8089
 ```
 
-For WebSockets, enable WebSocket support in NPM for the future frontend chat and
-live event stream routes.
+Enable WebSocket support for realtime, Alfred chat, and dependency job streams.

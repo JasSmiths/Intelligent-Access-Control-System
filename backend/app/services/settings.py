@@ -41,7 +41,7 @@ LEGACY_DEFAULT_REPLACEMENTS = {
     },
 }
 
-OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities"}
+OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities", "alfred_agent_mode"}
 
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
@@ -134,7 +134,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "unifi_protect_snapshot_width": ("integrations", 1280, "Default UniFi Protect snapshot width."),
     "unifi_protect_snapshot_height": ("integrations", 720, "Default UniFi Protect snapshot height."),
     "llm_provider": ("llm", settings.llm_provider, "Active LLM provider."),
-    "alfred_agent_mode": ("llm", "v3", "Alfred agent runtime mode. Use v3 normally; v2 is rollback-only."),
     "alfred_learning_mode": (
         "llm",
         "review_then_learn",
@@ -300,7 +299,6 @@ class RuntimeConfig:
     unifi_protect_snapshot_width: int
     unifi_protect_snapshot_height: int
     llm_provider: str
-    alfred_agent_mode: str
     alfred_learning_mode: str
     alfred_semantic_memory_enabled: bool
     alfred_memory_extraction_enabled: bool
@@ -543,9 +541,6 @@ async def get_runtime_config() -> RuntimeConfig:
         unifi_protect_snapshot_width=int(values["unifi_protect_snapshot_width"] or 1280),
         unifi_protect_snapshot_height=int(values["unifi_protect_snapshot_height"] or 720),
         llm_provider=str(values["llm_provider"]),
-        alfred_agent_mode=(
-            "v2" if str(values["alfred_agent_mode"]).strip().lower() == "v2" else "v3"
-        ),
         alfred_learning_mode=(
             "auto_learn"
             if str(values["alfred_learning_mode"]).strip().lower() == "auto_learn"

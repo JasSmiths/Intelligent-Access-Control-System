@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -30,6 +31,8 @@ from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.snapshots import access_event_snapshot_relative_path
 from app.services.vehicle_visual_detections import VehiclePresenceTracker
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 class FakeMovementLedger:
@@ -106,7 +109,7 @@ def fake_movement_ledger(service: AccessEventService) -> FakeMovementLedger:
     if isinstance(ledger, FakeMovementLedger):
         return ledger
     ledger = FakeMovementLedger()
-    service._movement_ledger = ledger
+    setattr(service, "_movement_ledger", ledger)
     return ledger
 
 
@@ -161,7 +164,7 @@ class FakeVisitorPassLookupSession:
 
 class FakeNotificationService:
     def __init__(self) -> None:
-        self.contexts = []
+        self.contexts: list[Any] = []
 
     async def notify(self, context):
         self.contexts.append(context)
@@ -364,7 +367,7 @@ def plate_read_with_context(
     camera_id: str | None = None,
     device_id: str | None = None,
 ) -> PlateRead:
-    raw_payload = {
+    raw_payload: dict[str, Any] = {
         GATE_OBSERVATION_PAYLOAD_KEY: {
             "state": state,
             "observed_at": captured_at.isoformat(),
@@ -1003,12 +1006,19 @@ def test_known_vehicle_plate_match_canonicalizes_likely_misreads() -> None:
     service = AccessEventService()
     stored = ["MD25VNO"]
 
-    assert service._known_vehicle_plate_match("MD25VMO", stored, 0.78)["registration_number"] == "MD25VNO"
-    assert service._known_vehicle_plate_match("MO25VNO", stored, 0.78)["registration_number"] == "MD25VNO"
-    assert service._known_vehicle_plate_match("MD2SVNO", stored, 0.78)["registration_number"] == "MD25VNO"
+    first_match = service._known_vehicle_plate_match("MD25VMO", stored, 0.78)
+    second_match = service._known_vehicle_plate_match("MO25VNO", stored, 0.78)
+    third_match = service._known_vehicle_plate_match("MD2SVNO", stored, 0.78)
+    assert first_match is not None
+    assert second_match is not None
+    assert third_match is not None
+    assert first_match["registration_number"] == "MD25VNO"
+    assert second_match["registration_number"] == "MD25VNO"
+    assert third_match["registration_number"] == "MD25VNO"
     assert service._known_vehicle_plate_match("ND25VN0", stored, 0.78) is None
 
     exact = service._known_vehicle_plate_match("MD25VNO", stored, 0.78)
+    assert exact is not None
     assert exact["registration_number"] == "MD25VNO"
     assert exact["exact"] is True
 
@@ -1021,7 +1031,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
         lpr_debounce_quiet_seconds=2.5,
         lpr_debounce_max_seconds=10.0,
     )
-    finalized = []
+    finalized: list[Any] = []
 
     async def fake_active_vehicle_registrations():
         return ["MD25VNO"]
@@ -1093,7 +1103,7 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
         lpr_debounce_quiet_seconds=2.5,
         lpr_debounce_max_seconds=10.0,
     )
-    finalized = []
+    finalized: list[Any] = []
 
     async def fake_active_vehicle_registrations():
         return ["MD25VNO"]
@@ -1152,8 +1162,8 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
         lpr_debounce_quiet_seconds=2.5,
         lpr_debounce_max_seconds=6.0,
     )
-    finalized = []
-    published = []
+    finalized: list[Any] = []
+    published: list[Any] = []
 
     async def fake_active_vehicle_registrations():
         return ["PE70DHX"]
@@ -1225,8 +1235,8 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
         lpr_debounce_quiet_seconds=2.5,
         lpr_debounce_max_seconds=6.0,
     )
-    finalized = []
-    published = []
+    finalized: list[Any] = []
+    published: list[Any] = []
 
     async def fake_active_vehicle_registrations():
         return ["PE70DHX"]
@@ -1304,8 +1314,8 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
         lpr_debounce_quiet_seconds=2.5,
         lpr_debounce_max_seconds=6.0,
     )
-    finalized = []
-    published = []
+    finalized: list[Any] = []
+    published: list[Any] = []
 
     async def fake_active_vehicle_registrations():
         return ["PE70DHX"]
@@ -2678,6 +2688,7 @@ async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
     assert vehicle.mot_status == "Expired"
     assert vehicle.tax_status == "Untaxed"
     assert vehicle.last_dvla_lookup_date == date(2026, 4, 27)
+    assert result is not None
     assert result["mot_expiry"] == "2026-01-01"
 
 
@@ -2706,6 +2717,7 @@ async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypat
         runtime=SimpleNamespace(site_timezone="Europe/London"),
     )
 
+    assert result is not None
     assert result["registration_number"] == "UNKNOWN1"
     assert result["make"] == "Ford"
     assert result["colour"] == "Silver"

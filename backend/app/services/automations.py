@@ -52,6 +52,7 @@ from app.services.telemetry import (
     telemetry,
     write_audit_log,
 )
+from app.services.type_helpers import as_dict
 from app.services.visitor_passes import serialize_visitor_pass
 
 logger = get_logger(__name__)
@@ -1102,7 +1103,7 @@ class AutomationService:
                 ("visitor_pass.detected", {**payload, "occurred_at": event.created_at}),
             ]
         if event.type == "visitor_pass.status_changed":
-            visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else {}
+            visitor_pass = as_dict(payload.get("visitor_pass"))
             if str(visitor_pass.get("status") or "").lower() == "expired":
                 return [("visitor_pass.expired", {**payload, "occurred_at": event.created_at})]
         if event.type == "ai.phrase_received":
@@ -1144,7 +1145,7 @@ class AutomationService:
                 "missing_variables": missing,
             }
         condition_type = str(condition.get("type") or "")
-        config = condition.get("config") if isinstance(condition.get("config"), dict) else {}
+        config = as_dict(condition.get("config"))
         if condition_type in {"person.on_site", "person.off_site"}:
             person_id = str(config.get("person_id") or context.entities.get("person_id") or "")
             present = await person_is_present(session, person_id)
@@ -1256,7 +1257,7 @@ class AutomationService:
         *,
         active: bool,
     ) -> dict[str, Any]:
-        config = action.get("config") if isinstance(action.get("config"), dict) else {}
+        config = as_dict(action.get("config"))
         rule = await resolve_notification_rule(session, config)
         if not rule:
             return {
@@ -1355,7 +1356,7 @@ class AutomationService:
         }
 
     async def _fresh_visitor_pass_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else payload
+        visitor_pass = as_dict(payload.get("visitor_pass")) or payload
         pass_id = str(visitor_pass.get("id") or payload.get("visitor_pass_id") or "").strip()
         if not pass_id:
             return payload
@@ -1405,7 +1406,7 @@ def normalize_triggers(value: Any) -> list[dict[str, Any]]:
         trigger_type = str(raw.get("type") or raw.get("trigger_key") or "").strip()
         if trigger_type not in allowed:
             continue
-        config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+        config = as_dict(raw.get("config"))
         normalized.append(
             {
                 "id": str(raw.get("id") or f"trigger-{index + 1}"),
@@ -1474,7 +1475,7 @@ def normalize_conditions(value: Any) -> list[dict[str, Any]]:
         condition_type = str(raw.get("type") or "").strip()
         if condition_type not in allowed:
             continue
-        config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+        config = as_dict(raw.get("config"))
         conditions.append(
             {
                 "id": str(raw.get("id") or f"condition-{index + 1}"),
@@ -1504,7 +1505,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
         action_type = str(raw.get("type") or "").strip()
         if action_type not in allowed:
             continue
-        config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+        config = as_dict(raw.get("config"))
         actions.append(
             {
                 "id": str(raw.get("id") or f"action-{index + 1}"),
@@ -1537,13 +1538,13 @@ def automation_garage_targets(
     *,
     default_open_service: str | None,
 ) -> list[dict[str, Any]]:
-    action_config = action.get("config") if isinstance(action.get("config"), dict) else {}
+    action_config = as_dict(action.get("config"))
     target_ids = set(normalize_string_list(action_config.get("target_entity_ids")))
     return [
         entity
         for entity in enabled_cover_entities(
             configured_entities,
-            default_open_service=default_open_service,
+            default_open_service=default_open_service or "cover.open_cover",
         )
         if not target_ids or str(entity["entity_id"]) in target_ids
     ]
@@ -1606,7 +1607,7 @@ def serialize_run(run: AutomationRun) -> dict[str, Any]:
 
 
 def variable_groups() -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, str]]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     labels = {
         "person": "Person",
         "vehicle": "Vehicles",
@@ -1639,9 +1640,9 @@ def variable_groups() -> list[dict[str, Any]]:
 
 
 def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else {}
-    body = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    facts = as_dict(payload.get("facts"))
+    visitor_pass = as_dict(payload.get("visitor_pass"))
+    body = as_dict(payload.get("payload"))
     merged = {**payload, **facts}
     if visitor_pass:
         merged.update(
@@ -1679,8 +1680,8 @@ def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, A
 
 
 def entities_from_payload(payload: dict[str, Any]) -> dict[str, str]:
-    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else {}
+    facts = as_dict(payload.get("facts"))
+    visitor_pass = as_dict(payload.get("visitor_pass"))
     merged = {**payload, **facts}
     entities = {
         "person_id": optional_text(merged.get("person_id")),
@@ -1782,7 +1783,7 @@ def render_action_reason(action: dict[str, Any], context: AutomationContext, rul
 def trigger_matches(trigger: dict[str, Any], context: AutomationContext) -> bool:
     if trigger["type"] != context.trigger_key:
         return False
-    config = trigger.get("config") if isinstance(trigger.get("config"), dict) else {}
+    config = as_dict(trigger.get("config"))
     facts = {canonical_key(key): str(value).lower() for key, value in context.facts.items() if value is not None}
     if config.get("person_id") and str(config["person_id"]) != context.entities.get("person_id"):
         return False
@@ -1895,7 +1896,7 @@ def next_run_for_trigger(
     last_fired_at: datetime | None = None,
 ) -> datetime | None:
     trigger_type = str(trigger.get("type") or "")
-    config = trigger.get("config") if isinstance(trigger.get("config"), dict) else {}
+    config = as_dict(trigger.get("config"))
     now = ensure_aware(now)
     end_at = parse_datetime(config.get("end_at"))
     if end_at and end_at <= now:
@@ -2067,8 +2068,8 @@ def validate_schedule_parse(
 
 
 def subject_for_trigger(trigger_key: str, payload: dict[str, Any]) -> str:
-    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else {}
+    facts = as_dict(payload.get("facts"))
+    visitor_pass = as_dict(payload.get("visitor_pass"))
     return str(
         payload.get("subject")
         or facts.get("subject")

@@ -87,7 +87,9 @@ async def test_movement_transition_records_forward_history() -> None:
     assert row.updated_at is not None
     assert row.state_history[-1]["detail"] == "accepted_without_mechanical_confirmation"
     assert row.state_history[-1]["at"] == row.updated_at.isoformat()
-    assert movement_saga_summary(row)["updated_at"] == row.updated_at.isoformat()
+    summary = movement_saga_summary(row)
+    assert summary is not None
+    assert summary["updated_at"] == row.updated_at.isoformat()
     assert session.flushes == 1
 
 

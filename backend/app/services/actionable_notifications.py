@@ -384,7 +384,7 @@ class ActionableNotificationService:
             )
         await self._send_result_notification(bound, title=title, message=message)
 
-    async def _create_force_action(self, parent: BoundActionContext) -> dict[str, str] | None:
+    async def _create_force_action(self, parent: BoundActionContext) -> dict[str, Any] | None:
         token = _new_token()
         async with AsyncSessionLocal() as session:
             stored_parent = await session.get(NotificationActionContext, parent.id)

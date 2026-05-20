@@ -19,6 +19,7 @@ from app.models import AlfredEvalExample, AlfredFeedback, AlfredLesson, ChatMess
 from app.services.alfred.embeddings import embedding_text, generate_embedding
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log, sanitize_payload
+from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
 
@@ -316,7 +317,7 @@ class AlfredFeedbackService:
         lesson_text = str(reflection.get("key_lesson") or "").strip()
         if not lesson_text or _contains_placeholder(lesson_text) or _reflection_text_unsafe(lesson_text):
             return None
-        tags = reflection.get("tags") if isinstance(reflection.get("tags"), list) else []
+        tags = as_list(reflection.get("tags"))
         analysis = sanitize_payload(
             {
                 "summary": "Post-turn reflection lesson drafted.",
@@ -571,9 +572,10 @@ class AlfredFeedbackService:
             learning_mode=learning_mode,
             analysis=analysis,
         )
+        eval_scope = str(lesson.get("scope") if lesson else ("site" if role == "admin" else "user"))
         eval_example = await self._create_eval_example(
             feedback_id=str(feedback.id),
-            scope=lesson.get("scope") if lesson else ("site" if role == "admin" else "user"),
+            scope=eval_scope,
             original_prompt=original_prompt,
             original_answer=original_answer,
             ideal_answer=ideal_answer,
@@ -775,8 +777,8 @@ class AlfredFeedbackService:
             assistant = await session.get(ChatMessage, assistant_message_id)
             if not assistant or assistant.role != "assistant":
                 return None
-            payload = assistant.tool_payload if isinstance(assistant.tool_payload, dict) else {}
-            snapshot = payload.get("turn_snapshot") if isinstance(payload.get("turn_snapshot"), dict) else {}
+            payload = as_dict(assistant.tool_payload)
+            snapshot = as_dict(payload.get("turn_snapshot"))
             user_message_id = _coerce_uuid(snapshot.get("user_message_id") or payload.get("user_message_id"))
             user_message = await session.get(ChatMessage, user_message_id) if user_message_id else None
             if not user_message:
@@ -808,9 +810,9 @@ class AlfredFeedbackService:
     ) -> None:
         if role == "admin":
             return
-        snapshot = context.get("turn_snapshot") if isinstance(context.get("turn_snapshot"), dict) else {}
-        actor_context = snapshot.get("actor_context") if isinstance(snapshot.get("actor_context"), dict) else {}
-        turn_user = actor_context.get("user") if isinstance(actor_context.get("user"), dict) else {}
+        snapshot = as_dict(context.get("turn_snapshot"))
+        actor_context = as_dict(snapshot.get("actor_context"))
+        turn_user = as_dict(actor_context.get("user"))
         turn_user_id = _coerce_uuid(turn_user.get("id"))
         if turn_user_id and actor_uuid and turn_user_id == actor_uuid:
             return
@@ -883,7 +885,7 @@ class AlfredFeedbackService:
         learning_mode: str,
         analysis: dict[str, Any],
     ) -> dict[str, Any] | None:
-        raw_lesson = analysis.get("lesson") if isinstance(analysis.get("lesson"), dict) else {}
+        raw_lesson = as_dict(analysis.get("lesson"))
         lesson_text = str(raw_lesson.get("lesson") or "").strip()
         if not lesson_text:
             return None
@@ -904,7 +906,7 @@ class AlfredFeedbackService:
             confidence = 0.6
         tags = [
             str(tag).strip()[:40]
-            for tag in (raw_lesson.get("tags") if isinstance(raw_lesson.get("tags"), list) else [])[:12]
+            for tag in as_list(raw_lesson.get("tags"))[:12]
             if str(tag).strip()
         ]
         if unsafe_lesson and "quarantined" not in tags:

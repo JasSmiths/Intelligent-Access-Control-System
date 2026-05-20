@@ -93,11 +93,11 @@ class EventBus:
                 )
 
         for listener in listeners:
-            task = asyncio.create_task(listener(event), name=f"event-listener:{event_type}")
+            task = asyncio.ensure_future(listener(event))
             task.add_done_callback(_log_listener_error)
 
 
-def _log_listener_error(task: asyncio.Task) -> None:
+def _log_listener_error(task: asyncio.Future) -> None:
     try:
         task.result()
     except Exception:

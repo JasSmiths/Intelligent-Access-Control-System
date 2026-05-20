@@ -8,7 +8,7 @@ golden_rules:
 
 system:
   name: Intelligent Access Control + Presence System
-  purpose: LPR ingest -> movement FSM/Saga -> presence/anomalies -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
+  purpose: LPR ingest -> movement FSM/Saga -> presence/alerts -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
   deploy: docker compose
   ports:
     host: {frontend: 8089, backend: 8088, postgres: 5432, redis: 6379}
@@ -84,27 +84,32 @@ repo:
     styles: frontend/src/styles.css imports frontend/src/styles/*
 
 runtime:
-  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_events, movement_reconciliation, home_assistant, gate_malfunction, unifi_protect, restart_backfill, snapshot_recovery]
-  stop_order: reverse; close UniFi Protect WS/aiohttp/session resources.
+  compose_services: [frontend, backend, updater, postgres, redis]
+  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_events, movement_reconciliation, home_assistant, gate_malfunction, unifi_protect, runtime_heartbeat, restart_backfill, missed_event_reconciliation, snapshot_recovery]
+  stop_order: cancel backfill/reconciliation/snapshot/heartbeat tasks, then dependency_updates, unifi_protect, gate_malfunction, home_assistant, movement_reconciliation, access_events, visitor_passes, discord, automations, notifications, event_bus.
   persistence_mounts:
     - ./data/backend:/app/data
     - ./data/chat_attachments:/app/data/chat_attachments
+    - ./:/workspace
     - ./logs/backend:/app/logs
     - ./backend/app:/app/app:ro
     - ./logs/frontend:/var/log/nginx
     - ./data/postgres:/var/lib/postgresql/data
     - ./data/redis:/data
     - ./data/backend/dependency-update-backups:/app/update-backups
+    - ./data/backend/dependency-update-cache:/app/data/dependency-update-cache (updater)
+    - /var/run/docker.sock:/var/run/docker.sock (updater only)
 
 data:
   tables:
     identity: users, messaging_identities
-    directory: groups, people, vehicles, schedules, schedule_overrides, presence
+    directory: groups, people, vehicles, vehicle_person_assignments, schedules, schedule_overrides, presence
     access: access_events, anomalies, visitor_passes, movement_sagas, movement_sessions, gate_command_records
     chat: chat_sessions, chat_messages, alfred_memories, alfred_feedback, alfred_lessons, alfred_eval_examples
     notifications: notification_rules, notification_action_contexts
     automation: automation_rules, automation_runs, automation_webhook_senders
     integrations: system_settings, icloud_calendar_accounts, icloud_calendar_sync_runs, external_dependencies, dependency_update_analyses, dependency_update_backups, dependency_update_jobs
+    reports: report_exports
     safety: action_confirmations, maintenance_mode_state, gate_state_observations, gate_malfunction_states, gate_malfunction_timeline_events, gate_malfunction_notification_outbox
     telemetry: audit_logs, telemetry_traces, telemetry_spans
     leaderboard: leaderboard_state
@@ -137,7 +142,7 @@ api:
     deletes: vehicles yes; people/groups no hard-delete endpoint
   realtime:
     system: WS /api/v1/realtime/ws via event_bus; cookie or bearer/query token.
-    alfred: /api/v1/ai/chat, /stream, /ws, /agent/status, /feedback, /training/*
+    alfred: /api/v1/ai/chat, /api/v1/ai/chat/stream, /api/v1/ai/chat/ws, /api/v1/ai/agent/status, /api/v1/ai/feedback, /api/v1/ai/training/*
     dependency_jobs: WS /api/v1/dependency-updates/jobs/{job_id}/ws
   confirmations: POST /api/v1/action-confirmations; Admin-only, short-lived, one-use tokens bound to action+payload.
   access:
@@ -145,6 +150,9 @@ api:
     gate_commands: GET /api/v1/access/gate-commands.
     event_repair: POST /api/v1/access/events/{event_id}/movement-reconciliation creates/marks a durable saga for historical review.
     events: /api/v1/events includes compact movement_saga summary when linked.
+    alerts: GET /api/v1/alerts, PATCH /api/v1/alerts/action, GET /api/v1/alerts/{alert_id}/snapshot; no /api/v1/anomalies route.
+    reports: POST /api/v1/reports/person-movements/export; GET /api/v1/reports/{report_id}, /{report_id}/pdf.
+    simulation: POST /api/v1/simulation/arrival/{registration_number}, /misread-sequence/{registration_number}; admin-only /e2e/full-access-flow.
 
 lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
@@ -232,9 +240,9 @@ integrations:
     jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream.
 
 alfred:
-  runtime: services/alfred/* v3; chat.py facade; chat_routing.py v2 rollback-only.
+  runtime: services/alfred/* v3; chat.py facade; chat_routing.py contains guided visitor-pass/request helper heuristics only.
   behavior:
-    mode: alfred_agent_mode defaults v3; LLM-owned planner -> scoped agent loop.
+    mode: v3-only LLM-owned planner -> scoped agent loop; alfred_agent_mode is obsolete and cleaned from dynamic settings.
     fail_closed: provider/planner failure => configuration/retry message; no free-form deterministic answer.
     source_of_truth: tool results; never invent people/vehicles/schedules/events/device states/DVLA/telemetry.
     permissions: actor context before planning; Admin mutation/read tools; standard read-only; visitors sandbox only.
@@ -297,5 +305,6 @@ commands:
   smoke_readonly:
     - curl -fsS http://localhost:8089/api/v1/health
     - curl -fsS http://localhost:8089/api/v1/auth/status
+  smoke_authenticated:
     - curl -fsS http://localhost:8089/api/v1/maintenance/status
     - curl -fsS http://localhost:8089/api/v1/leaderboard

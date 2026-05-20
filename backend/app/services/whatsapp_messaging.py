@@ -27,6 +27,7 @@ from app.services.event_bus import event_bus
 from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, actor_from_user, write_audit_log
+from app.services.type_helpers import as_dict, as_dict_list, as_list
 from app.services.visitor_passes import (
     VisitorPassError,
     append_visitor_pass_whatsapp_history,
@@ -291,41 +292,35 @@ class WhatsAppMessagingService:
         if unsigned_allowed:
             logger.info("whatsapp_webhook_unsigned_accepted", extra={"payload_shape": payload_shape(payload)})
 
-        entries = payload.get("entry") if isinstance(payload.get("entry"), list) else []
+        entries = as_dict_list(payload.get("entry"))
         for entry in entries:
-            changes = entry.get("changes") if isinstance(entry, dict) and isinstance(entry.get("changes"), list) else []
+            changes = as_dict_list(entry.get("changes"))
             for change in changes:
-                value = change.get("value") if isinstance(change, dict) and isinstance(change.get("value"), dict) else {}
-                phone_number_id = str(
-                    value.get("metadata", {}).get("phone_number_id")
-                    if isinstance(value.get("metadata"), dict)
-                    else ""
-                )
+                value = as_dict(change.get("value"))
+                metadata = as_dict(value.get("metadata"))
+                phone_number_id = str(metadata.get("phone_number_id") or "")
                 if config.phone_number_id and phone_number_id != config.phone_number_id:
                     logger.info(
                         "whatsapp_webhook_ignored_phone_number",
                         extra={"phone_number_id": phone_number_id, "configured_phone_number_id": config.phone_number_id},
                     )
                     continue
-                contacts = value.get("contacts") if isinstance(value.get("contacts"), list) else []
-                messages = value.get("messages") if isinstance(value.get("messages"), list) else []
-                statuses = value.get("statuses") if isinstance(value.get("statuses"), list) else []
+                contacts = as_list(value.get("contacts"))
+                messages = as_dict_list(value.get("messages"))
+                statuses = as_dict_list(value.get("statuses"))
                 for status_payload in statuses:
                     status = str(status_payload.get("status") or "")
                     message_id = str(status_payload.get("id") or "")
                     recipient = normalize_whatsapp_phone_number(status_payload.get("recipient_id"))
-                    errors = status_payload.get("errors") if isinstance(status_payload.get("errors"), list) else []
+                    errors = as_dict_list(status_payload.get("errors"))
                     error_summaries = [
                         {
                             "code": error.get("code"),
                             "title": error.get("title"),
                             "message": error.get("message"),
-                            "details": error.get("error_data", {}).get("details")
-                            if isinstance(error.get("error_data"), dict)
-                            else None,
+                            "details": as_dict(error.get("error_data")).get("details"),
                         }
                         for error in errors
-                        if isinstance(error, dict)
                     ]
                     logger.info(
                         "whatsapp_message_status",
@@ -335,9 +330,7 @@ class WhatsAppMessagingService:
                             "recipient_id": masked_phone_number(status_payload.get("recipient_id")),
                             "phone_number_id": phone_number_id,
                             "conversation_id": str(
-                                status_payload.get("conversation", {}).get("id")
-                                if isinstance(status_payload.get("conversation"), dict)
-                                else ""
+                                as_dict(status_payload.get("conversation")).get("id") or ""
                             ),
                             "errors": error_summaries,
                         },
@@ -668,7 +661,7 @@ class WhatsAppMessagingService:
         recipient = normalize_whatsapp_phone_number(to)
         if not recipient:
             raise NotificationDeliveryError("WhatsApp destination phone number is missing.")
-        normalized_buttons = [
+        normalized_buttons: list[dict[str, Any]] = [
             {
                 "type": "reply",
                 "reply": {
@@ -776,7 +769,7 @@ class WhatsAppMessagingService:
                 "integration_provider": "whatsapp",
                 "integration_action": "send_message",
             }
-        action_config = action.get("config") if isinstance(action.get("config"), dict) else {}
+        action_config = as_dict(action.get("config"))
         variables = getattr(context, "variables", {}) if isinstance(getattr(context, "variables", {}), dict) else {}
         phones = await self._automation_target_phones(session, action_config, variables)
         message_template = str(action_config.get("message_template") or "@Subject")
@@ -1033,7 +1026,7 @@ class WhatsAppMessagingService:
         if action == "timeframe_change":
             await self._handle_visitor_timeframe_change(sender, visitor_pass, text, result, config=config)
             return
-        plate = normalize_registration_number(result.get("registration_number"))
+        plate = normalize_registration_number(str(result.get("registration_number") or ""))
         if plate:
             nonce = uuid.uuid4().hex[:12]
             if await self._visitor_plate_is_privileged(plate):
@@ -1122,9 +1115,9 @@ class WhatsAppMessagingService:
             visitor_pass = await session.get(VisitorPass, pass_id)
             if not visitor_pass or normalize_whatsapp_phone_number(visitor_pass.visitor_phone) != sender:
                 return None
-            metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
-            existing = metadata.get(VISITOR_TEXT_BUFFER_KEY) if isinstance(metadata.get(VISITOR_TEXT_BUFFER_KEY), dict) else {}
-            raw_messages = existing.get("messages") if isinstance(existing.get("messages"), list) else []
+            metadata = as_dict(visitor_pass.source_metadata)
+            existing = as_dict(metadata.get(VISITOR_TEXT_BUFFER_KEY))
+            raw_messages = as_dict_list(existing.get("messages"))
             messages = [
                 item
                 for item in raw_messages
@@ -1239,12 +1232,12 @@ class WhatsAppMessagingService:
                 return None
             service = get_visitor_pass_service()
             await service.refresh_statuses(session=session, publish=False)
-            metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
-            buffer_payload = metadata.get(VISITOR_TEXT_BUFFER_KEY) if isinstance(metadata.get(VISITOR_TEXT_BUFFER_KEY), dict) else {}
+            metadata = as_dict(visitor_pass.source_metadata)
+            buffer_payload = as_dict(metadata.get(VISITOR_TEXT_BUFFER_KEY))
             if str(buffer_payload.get("token") or "") != token:
                 await session.commit()
                 return None
-            raw_messages = buffer_payload.get("messages") if isinstance(buffer_payload.get("messages"), list) else []
+            raw_messages = as_dict_list(buffer_payload.get("messages"))
             messages = [
                 str(item.get("body") or "").strip()
                 for item in raw_messages
@@ -1568,7 +1561,7 @@ class WhatsAppMessagingService:
             if isinstance(payload, dict):
                 action = str(payload.get("action") or "")
                 if action == "plate_detected":
-                    plate = normalize_registration_number(payload.get("registration_number"))
+                    plate = normalize_registration_number(str(payload.get("registration_number") or ""))
                     if plate:
                         if visitor_plate_appears_in_message(text, plate) and visitor_plate_detection_allowed(visitor_pass, text):
                             return {"action": "plate_detected", "registration_number": plate}
@@ -3210,7 +3203,7 @@ def visitor_pass_timeframe_confirmation_button_id(decision: str, pass_id: str, r
 def parse_reaction_message(message: dict[str, Any]) -> WhatsAppReaction | None:
     if str(message.get("type") or "").strip().lower() != "reaction":
         return None
-    reaction = message.get("reaction") if isinstance(message.get("reaction"), dict) else {}
+    reaction = as_dict(message.get("reaction"))
     emoji = str(reaction.get("emoji") or "").strip()
     message_id = str(reaction.get("message_id") or "").strip()
     if not emoji or not message_id:
@@ -3268,48 +3261,48 @@ def parse_visitor_pass_timeframe_confirmation_button_id(value: str) -> VisitorPa
 
 
 def parse_confirmation_message(message: dict[str, Any]) -> WhatsAppConfirmation | None:
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     button_id = button_reply.get("id")
     if button_id:
         return parse_confirmation_button_id(str(button_id))
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button.get("payload"):
         return parse_confirmation_button_id(str(button.get("payload")))
     return None
 
 
 def parse_visitor_pass_button_message(message: dict[str, Any]) -> VisitorPassButtonReply | None:
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     button_id = button_reply.get("id")
     if button_id:
         return parse_visitor_pass_button_id(str(button_id))
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button.get("payload"):
         return parse_visitor_pass_button_id(str(button.get("payload")))
     return None
 
 
 def parse_visitor_pass_timeframe_decision_message(message: dict[str, Any]) -> VisitorPassTimeframeDecision | None:
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     button_id = button_reply.get("id")
     if button_id:
         return parse_visitor_pass_timeframe_button_id(str(button_id))
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button.get("payload"):
         return parse_visitor_pass_timeframe_button_id(str(button.get("payload")))
     return None
 
 
 def parse_visitor_pass_timeframe_reply_message(message: dict[str, Any]) -> VisitorPassTimeframeReply | None:
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     button_id = button_reply.get("id")
     if button_id:
         return parse_visitor_pass_timeframe_confirmation_button_id(str(button_id))
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button.get("payload"):
         return parse_visitor_pass_timeframe_confirmation_button_id(str(button.get("payload")))
     return None
@@ -3317,13 +3310,13 @@ def parse_visitor_pass_timeframe_reply_message(message: dict[str, Any]) -> Visit
 
 def extract_message_text(message: dict[str, Any]) -> str:
     if str(message.get("type") or "") == "text":
-        text = message.get("text") if isinstance(message.get("text"), dict) else {}
+        text = as_dict(message.get("text"))
         return str(text.get("body") or "").strip()
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     if button_reply:
         return str(button_reply.get("title") or button_reply.get("id") or "").strip()
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button:
         return str(button.get("text") or button.get("payload") or "").strip()
     return ""
@@ -3333,13 +3326,13 @@ def visitor_whatsapp_message_body(message: dict[str, Any]) -> str:
     text = extract_message_text(message)
     if text:
         return text
-    interactive = message.get("interactive") if isinstance(message.get("interactive"), dict) else {}
-    button_reply = interactive.get("button_reply") if isinstance(interactive.get("button_reply"), dict) else {}
+    interactive = as_dict(message.get("interactive"))
+    button_reply = as_dict(interactive.get("button_reply"))
     if button_reply:
         title = str(button_reply.get("title") or "").strip()
         button_id = str(button_reply.get("id") or "").strip()
         return title or button_id
-    button = message.get("button") if isinstance(message.get("button"), dict) else {}
+    button = as_dict(message.get("button"))
     if button:
         return str(button.get("text") or button.get("payload") or "").strip()
     return str(message.get("type") or "WhatsApp message").replace("_", " ").title()
@@ -3411,7 +3404,7 @@ def visitor_pass_whatsapp_llm_context(visitor_pass: VisitorPass) -> dict[str, An
 
 
 def visitor_pass_whatsapp_context_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    metadata = as_dict(entry.get("metadata"))
     return {
         "direction": str(entry.get("direction") or ""),
         "kind": str(entry.get("kind") or "text"),
@@ -3428,7 +3421,7 @@ def normalize_llm_timeframe_change_payload(payload: dict[str, Any], timezone_nam
     requested_until = parse_llm_datetime_value(payload.get("valid_until"), timezone_name)
     if not requested_from or not requested_until or requested_until <= requested_from:
         return None
-    normalized = {
+    normalized: dict[str, Any] = {
         "action": "timeframe_change",
         "valid_from": requested_from.isoformat(),
         "valid_until": requested_until.isoformat(),
@@ -3548,10 +3541,10 @@ def visitor_plate_appears_in_message(value: Any, plate: Any) -> bool:
 
 
 def visitor_plate_detection_allowed(visitor_pass: VisitorPass, text: Any) -> bool:
-    metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
+    metadata = as_dict(visitor_pass.source_metadata)
     has_existing_plate_context = bool(
-        normalize_registration_number(visitor_pass.number_plate)
-        or normalize_registration_number(metadata.get("whatsapp_pending_plate"))
+        normalize_registration_number(str(visitor_pass.number_plate or ""))
+        or normalize_registration_number(str(metadata.get("whatsapp_pending_plate") or ""))
     )
     if not has_existing_plate_context:
         return True
@@ -3938,7 +3931,7 @@ def visitor_vehicle_metadata_text(value: Any) -> str | None:
 
 
 def visitor_payload_prefers_emoji(payload: dict[str, Any]) -> bool:
-    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    metadata = as_dict(payload.get("source_metadata"))
     return bool(metadata.get("whatsapp_visitor_uses_emoji"))
 
 
@@ -4057,7 +4050,7 @@ def contact_display_name(contacts: list[Any]) -> str:
     for contact in contacts:
         if not isinstance(contact, dict):
             continue
-        profile = contact.get("profile") if isinstance(contact.get("profile"), dict) else {}
+        profile = as_dict(contact.get("profile"))
         name = str(profile.get("name") or "").strip()
         if name:
             return name

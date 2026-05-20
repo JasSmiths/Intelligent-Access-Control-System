@@ -30,7 +30,7 @@ class HomeAssistantMobileAppNotifier:
         if not target.service_name.startswith("notify.mobile_app_"):
             raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.")
 
-        data = {
+        data: dict[str, Any] = {
             "tag": f"iacs-{context.event_type}",
             "group": "iacs",
         }

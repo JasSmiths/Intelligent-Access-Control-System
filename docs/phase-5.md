@@ -15,16 +15,23 @@
 - Required views:
   - Dashboard
   - People
+  - Groups
+  - Schedules
+  - Passes
   - Vehicles
+  - Movements
+  - Top Charts
   - Events
+  - Alerts
   - Reports
   - API & Integrations
-  - Logs
+  - Logs/Telemetry/Audit
   - Settings
+  - Alfred Training
 - Bento dashboard widgets:
   - Site presence
   - Gate state
-  - Anomalies
+  - Alerts
   - Recent events
   - Presence
   - Access rhythm
@@ -35,7 +42,7 @@
 - Global chat:
   - Persistent `Chat with me` pill.
   - WebSocket chat through `/api/v1/ai/chat/ws`.
-  - Session-aware responses from the Phase 4 agent.
+  - Authenticated Alfred v3 responses through the global chat launcher.
 - Theme control:
   - System, light, and dark modes.
   - System is the default.
@@ -69,7 +76,7 @@ Implemented design inventory:
 - Fixed left sidebar with operational navigation.
 - Top command bar with search, refresh, and appearance control.
 - Three status cards across the top.
-- Main bento area for recent events, presence, anomalies, rhythm, and simulator.
+- Main bento area for recent events, presence, alerts, rhythm, and simulator.
 - Functional color only: blue actions, green present/granted, gray exited, amber
   warning, red critical/denied.
 - 8px card radius and thin borders.
@@ -78,11 +85,13 @@ Implemented design inventory:
 ## Verification
 
 - `npm run build`
-- `python3 -m compileall backend/app`
-- `docker compose up -d --build`
-- `GET http://localhost:8089`
+- `python3 -m compileall -q backend/app`
+- `docker compose config --quiet`
 - `GET http://localhost:8089/api/v1/health`
-- `GET http://10.0.0.50:8089/api/v1/presence`
+- `GET http://localhost:8089/api/v1/auth/status`
+- Authenticated Admin session for dashboard data routes such as
+  `/api/v1/presence`, `/api/v1/events`, `/api/v1/maintenance/status`, and
+  `/api/v1/leaderboard`.
 - WebKit-rendered desktop and mobile snapshots.
 - WebKit-rendered navigation and chat-open states.
 - WebSocket chat response verified through the rendered chat panel.

@@ -41,13 +41,13 @@ from app.services.alfred.answer_contracts import (
     verify_answer_draft,
 )
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
+from app.services.chat_formatting import ChatResultFormattingMixin
 from app.services.chat_routing import ChatRoutingMixin
 from app.services.chat_contracts import (
     CHAT_FILE_LINK_PATTERN,
     CHAT_FILE_URL_PATTERN,
     DEFAULT_AGENT_TOOL_TIMEOUT_SECONDS,
     DEFAULT_CHAT_TIMEZONE,
-    INTENT_ROUTER_PROMPT,
     MAX_AGENT_TOOL_ITERATIONS,
     MAX_RELEVANT_HISTORY_MESSAGES,
     REACT_TOOL_PROTOCOL,
@@ -64,11 +64,12 @@ from app.services.chat_contracts import (
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log, sanitize_payload
+from app.services.type_helpers import as_dict, as_list, as_dict_list
 
 logger = get_logger(__name__)
 
 
-class ChatService(ChatRoutingMixin):
+class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
     def __init__(self) -> None:
         self._tools: dict[str, AgentTool] = build_agent_tools()
 
@@ -206,11 +207,16 @@ class ChatService(ChatRoutingMixin):
 
         runtime = await get_runtime_config()
         provider = get_llm_provider(str(pending.get("provider") or runtime.llm_provider))
-        actor_context = pending.get("actor_context") if isinstance(pending.get("actor_context"), dict) else await self._build_actor_context(
-            user_id=user_id,
-            user_role=user_role,
-            client_context=client_context,
-        )
+        pending_actor_context = pending.get("actor_context")
+        actor_context: dict[str, Any]
+        if isinstance(pending_actor_context, dict):
+            actor_context = pending_actor_context
+        else:
+            actor_context = await self._build_actor_context(
+                user_id=user_id,
+                user_role=user_role,
+                client_context=client_context,
+            )
         tool_results: list[dict[str, Any]] = []
         context_token = set_chat_tool_context(
             {
@@ -256,7 +262,7 @@ class ChatService(ChatRoutingMixin):
             finally:
                 await self._clear_pending_agent_action(session_uuid)
 
-            tool_results = list(pending.get("tool_results") if isinstance(pending.get("tool_results"), list) else [])
+            tool_results = [item for item in as_list(pending.get("tool_results")) if isinstance(item, dict)]
             tool_results.append(tool_result)
             if self._confirmed_tool_finishes_without_resume(tool_name):
                 tool_results = [tool_result]
@@ -518,7 +524,7 @@ class ChatService(ChatRoutingMixin):
                 user_message_id=user_message_id,
             )
 
-        user = actor_context.get("user") if isinstance(actor_context.get("user"), dict) else {}
+        user = as_dict(actor_context.get("user"))
         durable_memory = await alfred_memory_service.recall(
             user_id=str(user.get("id") or "") or None,
             user_role=str(user.get("role") or "") or None,
@@ -703,7 +709,8 @@ class ChatService(ChatRoutingMixin):
                 actor_context=prompt_context,
             )
             try:
-                result = await self._run_provider_agent_loop(
+                react_cache_options = self._alfred_openai_prompt_cache_options(runtime, provider.name, "react")
+                loop_result = await self._run_provider_agent_loop(
                     provider,
                     session_uuid,
                     messages,
@@ -718,12 +725,14 @@ class ChatService(ChatRoutingMixin):
                     model=self._interactive_model_for_provider(runtime, provider.name),
                     reasoning_effort=self._alfred_reasoning_effort(runtime),
                     request_purpose="alfred.react",
-                    **self._alfred_openai_prompt_cache_options(runtime, provider.name, "react"),
+                    prompt_cache_key=react_cache_options.get("prompt_cache_key"),
+                    prompt_cache_retention=react_cache_options.get("prompt_cache_retention"),
                 )
+                if isinstance(loop_result, ChatTurnResult):
+                    return loop_result
+                result = loop_result
                 if isinstance(result, LlmResult) and result.usage_summary:
                     llm_usage_summaries.append(result.usage_summary)
-                if isinstance(result, ChatTurnResult):
-                    return result
             except ProviderNotConfiguredError as exc:
                 logger.info(
                     "llm_provider_not_configured",
@@ -853,71 +862,6 @@ class ChatService(ChatRoutingMixin):
             "state_changes_require_admin_confirmation": True,
             "visible_tools_are_permission_filtered": True,
         }
-
-    async def _classify_intent(
-        self,
-        provider: Any,
-        message: str,
-        memory: dict[str, Any],
-        attachments: list[dict[str, Any]],
-        *,
-        actor_context: dict[str, Any] | None = None,
-    ) -> IntentRoute:
-        if provider.name == "local":
-            raise IntentRouterError("The local provider cannot classify free-form chat intent.")
-
-        try:
-            result = await provider.complete(
-                [
-                    ChatMessageInput("system", INTENT_ROUTER_PROMPT),
-                    ChatMessageInput(
-                        "user",
-                        json.dumps(
-                            {
-                                "message": message,
-                                "has_attachments": bool(attachments),
-                                "session_memory": memory,
-                                "actor_context": actor_context or {},
-                            },
-                            default=str,
-                            separators=(",", ":"),
-                        ),
-                    ),
-                ]
-            )
-        except Exception as exc:
-            logger.info(
-                "intent_router_request_failed",
-                extra={"provider": getattr(provider, "name", "unknown"), "error": str(exc)[:240]},
-            )
-            raise IntentRouterError(f"Intent router request failed: {self._safe_provider_error(exc)}") from exc
-
-        payload = self._extract_tool_call_payload(result.text)
-        if not isinstance(payload, dict):
-            raise IntentRouterError("Intent router returned an invalid response.")
-        raw_intents = payload.get("intents")
-        intents = tuple(
-            intent
-            for intent in (str(item).strip() for item in raw_intents or [])
-            if intent in SUPPORTED_INTENTS
-        )
-        if not intents:
-            raise IntentRouterError("Intent router returned no supported intents.")
-        if "requires_entity_resolution" not in payload:
-            raise IntentRouterError("Intent router omitted entity-resolution guidance.")
-        try:
-            confidence = max(0.0, min(1.0, float(payload.get("confidence"))))
-        except (TypeError, ValueError):
-            confidence = 0.5
-        return IntentRoute(
-            intents=intents,
-            confidence=confidence,
-            requires_entity_resolution=bool(payload.get("requires_entity_resolution")),
-            reason=str(payload.get("reason") or "LLM intent route")[:240],
-            source=f"{provider.name}_classifier",
-        )
-
-
 
     async def _run_provider_agent_loop(
         self,
@@ -1129,9 +1073,8 @@ class ChatService(ChatRoutingMixin):
             name = str(item.get("name") or item.get("tool") or "").strip()
             if not name:
                 continue
-            arguments = item.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = item.get("args") if isinstance(item.get("args"), dict) else {}
+            raw_arguments = item.get("arguments")
+            arguments = raw_arguments if isinstance(raw_arguments, dict) else as_dict(item.get("args"))
             calls.append(
                 ToolCall(
                     id=str(item.get("id") or f"protocol-{iteration}-{index}"),
@@ -1279,8 +1222,8 @@ class ChatService(ChatRoutingMixin):
         arguments: dict[str, Any],
         parameters: dict[str, Any],
     ) -> dict[str, Any] | None:
-        properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
-        required = parameters.get("required") if isinstance(parameters.get("required"), list) else []
+        properties = as_dict(parameters.get("properties"))
+        required = as_list(parameters.get("required"))
         additional_allowed = parameters.get("additionalProperties") is not False
         sanitized: dict[str, Any] = {}
         for key, value in arguments.items():
@@ -1499,7 +1442,7 @@ class ChatService(ChatRoutingMixin):
         if isinstance(value, dict):
             if depth >= 4:
                 return {"type": "object", "keys": list(value.keys())[:20], "key_count": len(value)}
-            compacted = {}
+            compacted: dict[str, Any] = {}
             for key, item in list(value.items())[:50]:
                 key_text = str(key)
                 if key_text.lower() in {"timezone", "site_timezone"}:
@@ -1637,7 +1580,7 @@ class ChatService(ChatRoutingMixin):
             },
         )
         tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
-        output = tool_result.get("output") if isinstance(tool_result.get("output"), dict) else {}
+        output = as_dict(tool_result.get("output"))
         if not output.get("requires_confirmation"):
             memory.pop("pending_visitor_pass_create", None)
             await self._save_memory(session_id, memory)
@@ -1830,10 +1773,10 @@ class ChatService(ChatRoutingMixin):
         for result in tool_results:
             if result.get("name") != "create_schedule":
                 continue
-            output = result.get("output")
-            if not isinstance(output, dict) or output.get("error_code") != "schedule_exists":
+            output = as_dict(result.get("output"))
+            if output.get("error_code") != "schedule_exists":
                 continue
-            arguments = result.get("arguments") if isinstance(result.get("arguments"), dict) else {}
+            arguments = as_dict(result.get("arguments"))
             name = str(output.get("schedule_name") or arguments.get("name") or "").strip()
             time_blocks = arguments.get("time_blocks")
             if not isinstance(time_blocks, dict):
@@ -2075,7 +2018,7 @@ class ChatService(ChatRoutingMixin):
             verification = verify_answer_draft(draft, artifacts)
 
         fallback_used = not verification.approved or draft is None
-        text = fallback_text if fallback_used else draft.answer_text.strip()
+        text = fallback_text if fallback_used or draft is None else draft.answer_text.strip()
         self._audit_answer_contract(
             artifacts=artifacts,
             verification=verification,
@@ -2414,7 +2357,7 @@ class ChatService(ChatRoutingMixin):
         if output.get("error"):
             return str(output.get("detail") or output.get("error") or "I could not complete that action.")
         if tool_name in {"open_device", "command_device", "open_gate"}:
-            device = output.get("device") if isinstance(output.get("device"), dict) else {}
+            device = as_dict(output.get("device"))
             name = device.get("name") or output.get("target") or "the gate"
             action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
             past = "Opened" if action == "open" else "Closed"
@@ -2425,23 +2368,23 @@ class ChatService(ChatRoutingMixin):
                 return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
             return str(output.get("detail") or "I did not create the schedule override.")
         if tool_name == "create_schedule":
-            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            schedule = as_dict(output.get("schedule"))
             name = schedule.get("name") or output.get("schedule_name") or "the schedule"
             summary = schedule.get("summary")
             return f"Created {name}{f' with {summary}' if summary else ''}." if output.get("created") else str(output.get("detail") or f"I did not create {name}.")
         if tool_name == "create_visitor_pass":
             if output.get("created"):
-                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                visitor_pass = as_dict(output.get("visitor_pass"))
                 return f"Created the Visitor Pass for {visitor_pass.get('visitor_name') or output.get('visitor_name') or 'that visitor'}."
             return str(output.get("detail") or output.get("error") or "I did not create the Visitor Pass.")
         if tool_name == "update_visitor_pass":
             if output.get("updated"):
-                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                visitor_pass = as_dict(output.get("visitor_pass"))
                 return f"Updated the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
             return str(output.get("detail") or output.get("error") or "I did not update the Visitor Pass.")
         if tool_name == "cancel_visitor_pass":
             if output.get("cancelled"):
-                visitor_pass = output.get("visitor_pass") if isinstance(output.get("visitor_pass"), dict) else {}
+                visitor_pass = as_dict(output.get("visitor_pass"))
                 return f"Cancelled the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
             return str(output.get("detail") or output.get("error") or "I did not cancel the Visitor Pass.")
         if tool_name == "trigger_icloud_sync":
@@ -2460,22 +2403,22 @@ class ChatService(ChatRoutingMixin):
                 return f"Maintenance Mode is now {state}."
             return str(output.get("detail") or output.get("error") or "I did not change Maintenance Mode.")
         if tool_name == "update_schedule":
-            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            schedule = as_dict(output.get("schedule"))
             name = schedule.get("name") or output.get("schedule_name") or "the schedule"
             summary = schedule.get("summary")
             return f"Updated {name}{f' to {summary}' if summary else ''}."
         if tool_name == "delete_schedule":
-            schedule = output.get("schedule") if isinstance(output.get("schedule"), dict) else {}
+            schedule = as_dict(output.get("schedule"))
             name = schedule.get("name") or output.get("schedule_name") or "the schedule"
             return f"Deleted {name}." if output.get("deleted") else str(output.get("detail") or f"I did not delete {name}.")
         if tool_name == "create_notification_workflow":
-            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            workflow = as_dict(output.get("workflow"))
             return f"Created notification workflow {workflow.get('name') or output.get('workflow_name') or ''}. Neatly filed.".strip()
         if tool_name == "update_notification_workflow":
-            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            workflow = as_dict(output.get("workflow"))
             return f"Updated notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
         if tool_name == "delete_notification_workflow":
-            workflow = output.get("workflow") if isinstance(output.get("workflow"), dict) else {}
+            workflow = as_dict(output.get("workflow"))
             return f"Deleted notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
         if tool_name == "test_notification_workflow":
             if output.get("sent"):
@@ -3036,7 +2979,7 @@ class ChatService(ChatRoutingMixin):
         return expires_at <= datetime.now(tz=UTC)
 
     def _pending_action_public_payload(self, pending: dict[str, Any]) -> dict[str, Any]:
-        output = pending.get("preview_output") if isinstance(pending.get("preview_output"), dict) else {}
+        output = as_dict(pending.get("preview_output"))
         tool_name = str(pending.get("tool_name") or "")
         target = str(
             output.get("target")
@@ -3108,14 +3051,14 @@ class ChatService(ChatRoutingMixin):
         return "Confirm"
 
     def _confirmed_arguments_for_pending(self, pending: dict[str, Any]) -> dict[str, Any]:
-        arguments = dict(pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {})
-        output = pending.get("preview_output") if isinstance(pending.get("preview_output"), dict) else {}
+        arguments = dict(as_dict(pending.get("arguments")))
+        output = as_dict(pending.get("preview_output"))
         confirmation_field = str(output.get("confirmation_field") or "confirm")
         arguments[confirmation_field] = True
         return arguments
 
     def _route_from_pending(self, pending: dict[str, Any]) -> IntentRoute:
-        route = pending.get("route") if isinstance(pending.get("route"), dict) else {}
+        route = as_dict(pending.get("route"))
         intents = tuple(
             intent
             for intent in (str(item) for item in route.get("intents", ["General"]))
@@ -3346,7 +3289,7 @@ class ChatService(ChatRoutingMixin):
                 return " ".join(part.rstrip(".") + "." for part in parts)
         latest = tool_results[-1]
         tool_name = str(latest.get("name") or "")
-        output = latest.get("output") if isinstance(latest.get("output"), dict) else {}
+        output = as_dict(latest.get("output"))
         if tool_name == "get_camera_snapshot":
             return self._camera_snapshot_direct_text(output)
         if tool_name == "resolve_human_entity":
@@ -3354,12 +3297,12 @@ class ChatService(ChatRoutingMixin):
         if tool_name == "get_telemetry_trace":
             return self._telemetry_trace_direct_text(output)
         if tool_name in {"query_visitor_passes", "get_visitor_pass"}:
-            passes = output.get("visitor_passes") if isinstance(output.get("visitor_passes"), list) else []
+            passes = as_list(output.get("visitor_passes"))
             if not passes and isinstance(output.get("visitor_pass"), dict):
                 passes = [output["visitor_pass"]]
             if not passes:
                 return str(output.get("error") or "I couldn't find any matching Visitor Passes. The visitor ledger is politely blank.")
-            visitor_pass = passes[0]
+            visitor_pass = passes[0] if isinstance(passes[0], dict) else {}
             name = visitor_pass.get("visitor_name") or "The visitor"
             arrival_time = self._chat_time_from_iso(str(visitor_pass.get("arrival_time") or ""))
             if arrival_time:
@@ -3402,16 +3345,16 @@ class ChatService(ChatRoutingMixin):
         if isinstance(diagnostic_result, dict):
             return self._access_diagnostic_direct_text(diagnostic_result)
         if tool_name == "query_access_events":
-            events = output.get("events") if isinstance(output.get("events"), list) else []
+            events = as_list(output.get("events"))
             if not events:
                 return "I couldn't find any matching recent access events. The logbook is politely blank."
-            event = events[0]
+            event = events[0] if isinstance(events[0], dict) else {}
             person_name = event.get("person") or event.get("registration_number") or "The matched subject"
             verb = "left" if event.get("direction") == "exit" else "arrived"
             occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
             return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
         if tool_name == "query_presence":
-            presence = output.get("presence") if isinstance(output.get("presence"), list) else []
+            presence = as_list(output.get("presence"))
             if not presence:
                 return "I couldn't find any matching presence records."
             records = [item for item in presence if isinstance(item, dict)]
@@ -3447,7 +3390,7 @@ class ChatService(ChatRoutingMixin):
                 summary = f"{summary}; {'; '.join(context)}"
             return summary
         if tool_name == "query_anomalies":
-            alerts = output.get("alerts") if isinstance(output.get("alerts"), list) else []
+            alerts = as_list(output.get("alerts"))
             if not alerts and isinstance(output.get("anomalies"), list):
                 alerts = output["anomalies"]
             search = str(output.get("search") or "that request").strip()
@@ -3461,7 +3404,7 @@ class ChatService(ChatRoutingMixin):
             alert = alerts[0] if isinstance(alerts[0], dict) else {}
             when = str(alert.get("created_at_display") or alert.get("resolved_at_display") or "the recorded alert time")
             note = str(alert.get("resolution_note") or "").strip()
-            indicators = alert.get("delivery_indicators") if isinstance(alert.get("delivery_indicators"), list) else []
+            indicators = as_list(alert.get("delivery_indicators"))
             if output.get("suspected_delivery") or alert.get("possible_delivery"):
                 evidence = note or "; ".join(str(item) for item in indicators[:2] if item)
                 suffix = f" Evidence: {evidence}" if evidence else ""
@@ -3470,7 +3413,7 @@ class ChatService(ChatRoutingMixin):
         if tool_name == "diagnose_access_event":
             if not output.get("found"):
                 return str(output.get("error") or "I could not find a matching access event to diagnose. I checked the usual cupboards; next stop is incident investigation.")
-            hints = output.get("answer_hints") if isinstance(output.get("answer_hints"), list) else []
+            hints = as_list(output.get("answer_hints"))
             return " ".join(str(hint) for hint in hints[:3] if hint) or "I found the diagnostic record."
         if tool_name in {"investigate_access_incident", "backfill_access_event_from_protect", "test_unifi_alarm_webhook"}:
             if output.get("requires_confirmation"):
@@ -3487,7 +3430,7 @@ class ChatService(ChatRoutingMixin):
         if tool_name == "calculate_absence_duration":
             return self._absence_duration_direct_text(output)
         if tool_name == "query_device_states":
-            devices = output.get("devices") if isinstance(output.get("devices"), list) else []
+            devices = as_dict_list(output.get("devices"))
             if not devices:
                 return "I couldn't find a matching configured device. No labelled lever for that one, alas."
             return "; ".join(
@@ -3504,9 +3447,9 @@ class ChatService(ChatRoutingMixin):
             if output.get("created"):
                 return f"Created the temporary schedule override until {output.get('ends_at_display') or output.get('ends_at')}."
         if tool_name == "query_leaderboard":
-            top = output.get("top_known") if isinstance(output.get("top_known"), dict) else None
-            known = output.get("known") if isinstance(output.get("known"), list) else []
-            unknown = output.get("unknown") if isinstance(output.get("unknown"), list) else []
+            top = as_dict(output.get("top_known")) or None
+            known = as_dict_list(output.get("known"))
+            unknown = as_dict_list(output.get("unknown"))
             if top:
                 return (
                     f"{top.get('display_name') or top.get('registration_number')} is leading Top Charts "
@@ -3529,7 +3472,7 @@ class ChatService(ChatRoutingMixin):
             seconds = output.get("duration_seconds")
             if isinstance(seconds, int | float):
                 duration = self._duration_label_from_seconds(float(seconds))
-        intervals = output.get("intervals") if isinstance(output.get("intervals"), list) else []
+        intervals = as_dict_list(output.get("intervals"))
         if not duration or duration == "0m":
             matched = int(output.get("matched_events") or 0)
             if matched:
@@ -3548,14 +3491,14 @@ class ChatService(ChatRoutingMixin):
             seconds = output.get("absence_seconds")
             if isinstance(seconds, int | float):
                 duration = self._duration_label_from_seconds(float(seconds))
-        intervals = output.get("intervals") if isinstance(output.get("intervals"), list) else []
+        intervals = as_dict_list(output.get("intervals"))
         subject = str(output.get("subject") or "The matched subject").strip()
         if not duration or duration == "0m":
             matched = int(output.get("matched_events") or 0)
             if matched:
                 return "I found matching access events, but not a complete exit and re-entry interval to time."
             return "I couldn't find enough matching access events to calculate an absence duration."
-        primary = output.get("primary_interval") if isinstance(output.get("primary_interval"), dict) else None
+        primary = as_dict(output.get("primary_interval")) or None
         latest = primary or (intervals[-1] if intervals and isinstance(intervals[-1], dict) else {})
         if output.get("mode") == "total" and len(intervals) > 1:
             return f"{subject} was out for {duration} in total across {len(intervals)} matched absences."
@@ -3583,7 +3526,7 @@ class ChatService(ChatRoutingMixin):
 
     def _entity_resolution_direct_text(self, output: dict[str, Any]) -> str:
         if output.get("status") == "unique" and isinstance(output.get("match"), dict):
-            match = output["match"]
+            match = as_dict(output.get("match"))
             if match.get("type") == "visitor_pass":
                 name = match.get("visitor_name") or match.get("display_name") or "that visitor"
                 arrival_time = self._chat_time_from_iso(str(match.get("arrival_time") or ""))
@@ -3600,7 +3543,7 @@ class ChatService(ChatRoutingMixin):
             label = match.get("display_name") or match.get("name") or match.get("registration_number") or "that entity"
             return f"I resolved that to {label}."
         if output.get("status") == "ambiguous":
-            matches = output.get("matches") if isinstance(output.get("matches"), list) else []
+            matches = as_list(output.get("matches"))
             labels = [
                 str(match.get("display_name") or match.get("name") or match.get("registration_number") or "")
                 for match in matches[:4]
@@ -3612,7 +3555,7 @@ class ChatService(ChatRoutingMixin):
     def _telemetry_trace_direct_text(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
             return str(output.get("error") or "I could not find that telemetry trace.")
-        trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+        trace = as_dict(output.get("trace"))
         trace_id = trace.get("trace_id") or "the trace"
         duration = trace.get("duration_ms")
         status = trace.get("status") or "unknown status"
@@ -3621,15 +3564,15 @@ class ChatService(ChatRoutingMixin):
     def _access_diagnostic_direct_text(self, output: dict[str, Any]) -> str:
         if not output.get("found"):
             return str(output.get("error") or "I could not find a matching access event to diagnose.")
-        event = output.get("event") if isinstance(output.get("event"), dict) else {}
-        recognition = output.get("recognition") if isinstance(output.get("recognition"), dict) else {}
-        gate = output.get("gate") if isinstance(output.get("gate"), dict) else {}
-        notifications = output.get("notifications") if isinstance(output.get("notifications"), dict) else {}
+        event = as_dict(output.get("event"))
+        recognition = as_dict(output.get("recognition"))
+        gate = as_dict(output.get("gate"))
+        notifications = as_dict(output.get("notifications"))
         subject = event.get("person") or event.get("registration_number") or "That event"
         occurred_at = event.get("occurred_at_display") or event.get("occurred_at") or "the matched time"
         total_ms = recognition.get("total_pipeline_ms")
         debounce_ms = recognition.get("debounce_or_recognition_ms")
-        slowest = recognition.get("slowest_steps") if isinstance(recognition.get("slowest_steps"), list) else []
+        slowest = as_list(recognition.get("slowest_steps"))
         slowest_text = ""
         if slowest:
             step = slowest[0]
@@ -3652,7 +3595,7 @@ class ChatService(ChatRoutingMixin):
             return self._confirmation_result_text("backfill_access_event_from_protect", output)
         if output.get("error"):
             return str(output.get("detail") or output.get("error"))
-        chain = output.get("diagnostic_chain") if isinstance(output.get("diagnostic_chain"), list) else []
+        chain = as_list(output.get("diagnostic_chain"))
         if chain:
             stage_map = {str(item.get("stage") or ""): item for item in chain if isinstance(item, dict)}
             lines = ["I traced the full access chain."]
@@ -3670,8 +3613,8 @@ class ChatService(ChatRoutingMixin):
                 detail = str(item.get("detail") or item.get("status") or "").strip()
                 if detail:
                     lines.append(f"{label}: {detail}")
-            iacs = output.get("iacs") if isinstance(output.get("iacs"), dict) else {}
-            suppressed_reads = iacs.get("suppressed_reads") if isinstance(iacs.get("suppressed_reads"), list) else []
+            iacs = as_dict(output.get("iacs"))
+            suppressed_reads = as_list(iacs.get("suppressed_reads"))
             if output.get("found_iacs_suppressed_read") and suppressed_reads:
                 read = suppressed_reads[0] if isinstance(suppressed_reads[0], dict) else {}
                 reason = read.get("reason") or "vehicle_session_already_active"
@@ -3681,7 +3624,7 @@ class ChatService(ChatRoutingMixin):
                     "IACS received the plate read, but suppressed it as "
                     f"`{reason}`{suffix}, so no access event was finalized and notifications never ran."
                 )
-            action = output.get("recommended_action") if isinstance(output.get("recommended_action"), dict) else {}
+            action = as_dict(output.get("recommended_action"))
             detail = str(output.get("detail") or action.get("summary") or "").strip()
             if detail:
                 lines.append(f"Repair: {detail}")
@@ -3690,13 +3633,13 @@ class ChatService(ChatRoutingMixin):
             return " ".join(lines)
         root = str(output.get("root_cause") or "unknown").replace("_", " ")
         confidence = output.get("confidence") or "unknown"
-        iacs = "found an IACS access event" if output.get("found_iacs_event") else "found no matching IACS access event"
+        iacs_status = "found an IACS access event" if output.get("found_iacs_event") else "found no matching IACS access event"
         protect = "Protect has matching evidence" if output.get("found_protect_event") else "Protect did not show a matching event"
-        comparison = output.get("iacs_vs_protect") if isinstance(output.get("iacs_vs_protect"), dict) else {}
-        action = output.get("recommended_action") if isinstance(output.get("recommended_action"), dict) else {}
+        comparison = as_dict(output.get("iacs_vs_protect"))
+        action = as_dict(output.get("recommended_action"))
         detail = str(output.get("detail") or action.get("summary") or "").strip()
         pieces = [
-            f"I investigated the incident: IACS {iacs}; {protect}.",
+            f"I investigated the incident: IACS {iacs_status}; {protect}.",
             f"Likely root cause: {root} ({confidence} confidence).",
         ]
         if comparison.get("comparison"):
@@ -3747,7 +3690,7 @@ class ChatService(ChatRoutingMixin):
         ]
         if any(marker in lower_text for marker in unhelpful_markers):
             return True
-        recognition = diagnostic.get("recognition") if isinstance(diagnostic.get("recognition"), dict) else {}
+        recognition = as_dict(diagnostic.get("recognition"))
         has_timing = (
             recognition.get("total_pipeline_ms") is not None
             or recognition.get("debounce_or_recognition_ms") is not None

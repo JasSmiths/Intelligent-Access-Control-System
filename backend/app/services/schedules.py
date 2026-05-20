@@ -302,15 +302,15 @@ def _iter_raw_intervals(value: Any) -> list[tuple[int, list[dict[str, Any]]]]:
         return []
     if isinstance(value, dict) and isinstance(value.get("days"), list):
         return [
-            (int(day.get("day")), list(day.get("intervals") or []))
+            (int(day["day"]), list(day.get("intervals") or []))
             for day in value["days"]
-            if isinstance(day, dict)
+            if isinstance(day, dict) and day.get("day") is not None
         ]
     if isinstance(value, list):
         return [
-            (int(day.get("day")), list(day.get("intervals") or []))
+            (int(day["day"]), list(day.get("intervals") or []))
             for day in value
-            if isinstance(day, dict)
+            if isinstance(day, dict) and day.get("day") is not None
         ]
     if isinstance(value, dict):
         return [

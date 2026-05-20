@@ -22,6 +22,7 @@ from app.services.event_bus import event_bus
 from app.services.maintenance import MAINTENANCE_HA_ENTITY_ID, set_mode
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log
+from app.services.type_helpers import as_dict
 
 logger = get_logger(__name__)
 
@@ -92,7 +93,7 @@ class HomeAssistantIntegrationService:
             config.home_assistant_garage_door_entities,
             default_open_service=config.home_assistant_gate_open_service,
         )
-        status = {
+        status: dict[str, Any] = {
             "configured": bool(config.home_assistant_url and config.home_assistant_token),
             "connected": False,
             "degraded": False,
@@ -242,7 +243,7 @@ class HomeAssistantIntegrationService:
             logger.warning("home_assistant_listener_failed", extra={"error": str(exc)})
 
     async def _handle_mobile_notification_action(self, event: dict) -> None:
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        data = as_dict(event.get("data"))
         action_id = str(data.get("action") or "").strip()
         if not action_id:
             return

@@ -199,5 +199,5 @@ if discord is not None:
             self.tree.add_command(group)
 
 else:
-    DiscordConfirmationView = None
-    IacsDiscordBot = None
+    DiscordConfirmationView = None  # type: ignore[misc,assignment]
+    IacsDiscordBot = None  # type: ignore[misc,assignment]

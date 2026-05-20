@@ -494,10 +494,11 @@ class MovementLedgerRepository:
     def _merged_strings(self, *values: Any) -> list[str]:
         merged: set[str] = set()
         for value in values:
+            candidates: list[Any]
             if isinstance(value, str):
                 candidates = [value]
             elif isinstance(value, (list, tuple, set)):
-                candidates = value
+                candidates = list(value)
             else:
                 candidates = []
             for candidate in candidates:

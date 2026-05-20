@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 import uuid
 
 import pytest
@@ -28,7 +29,7 @@ class FakeLeaderboardSession:
     def __init__(self, event, state=None) -> None:
         self.event = event
         self.state = state
-        self.added = []
+        self.added: list[Any] = []
         self.commits = 0
 
     async def get(self, model, key):
@@ -49,7 +50,7 @@ class FakeLeaderboardSession:
 
 class FakeEventBus:
     def __init__(self) -> None:
-        self.events = []
+        self.events: list[Any] = []
 
     async def publish(self, event_type, payload):
         self.events.append((event_type, payload))

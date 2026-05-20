@@ -521,7 +521,7 @@ async def _send_runtime_chat_error(websocket: WebSocket, message: str) -> None:
 
 
 def _record_chat_runtime_error(channel: str, user: User, payload: Mapping[str, Any], exc: Exception) -> None:
-    metadata = {
+    metadata: dict[str, Any] = {
         "channel": channel,
         "error_type": exc.__class__.__name__,
         "error": str(exc)[:500],

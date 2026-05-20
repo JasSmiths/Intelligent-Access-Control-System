@@ -1115,15 +1115,15 @@ class DependencyUpdateService:
             except DependencyCommandError as next_failure:
                 current_failure = next_failure
 
-        plan = await self._llm_recovery_plan(
+        llm_plan = await self._llm_recovery_plan(
             ecosystem="npm",
             dependency=dependency,
             target_version=target,
             failed_command=current_failure.command,
             command_output=current_failure.output,
         )
-        if plan:
-            await log.info(f"Recovery advisor: {plan.get('summary')}")
+        if llm_plan:
+            await log.info(f"Recovery advisor: {llm_plan.get('summary')}")
             await log.warning("The suggested recovery is not in the approved automatic strategy set, so IACS is leaving the live workspace unchanged.")
         return False
 

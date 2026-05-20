@@ -7,7 +7,6 @@ from app.models.enums import AccessDirection
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.input_booleans import (
     INPUT_BOOLEAN_ACTIONS,
-    InputBooleanCommandOutcome,
     command_input_boolean,
 )
 from app.services.event_bus import event_bus

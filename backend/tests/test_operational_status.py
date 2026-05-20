@@ -1,5 +1,6 @@
 import json
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -10,6 +11,8 @@ import app.api.v1.health as health_api
 import app.services.home_assistant as home_assistant_module
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, HomeAssistantState
 from app.services.home_assistant import HomeAssistantIntegrationService
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def _ha_runtime(**overrides):
@@ -42,7 +45,7 @@ async def test_home_assistant_status_reports_degraded_refresh_without_leaking_to
             raise HomeAssistantError("Home Assistant returned 401: Unauthorized")
 
     monkeypatch.setattr(home_assistant_module, "get_runtime_config", fake_runtime)
-    service = HomeAssistantIntegrationService(FailingClient())
+    service = HomeAssistantIntegrationService(cast(Any, FailingClient()))
 
     status = await service.status(refresh=True)
 
@@ -68,7 +71,7 @@ async def test_home_assistant_degraded_transition_publishes_notification_trigger
 
     monkeypatch.setattr(home_assistant_module, "get_runtime_config", fake_runtime)
     monkeypatch.setattr(home_assistant_module, "event_bus", SimpleNamespace(publish=fake_publish))
-    service = HomeAssistantIntegrationService(FailingClient())
+    service = HomeAssistantIntegrationService(cast(Any, FailingClient()))
 
     await service.status(refresh=True)
     await service.status(refresh=True)
@@ -95,8 +98,19 @@ async def test_home_assistant_status_reports_connected_after_state_refresh(monke
             state = "closed" if entity_id == "cover.top_gate" else "off"
             return HomeAssistantState(entity_id=entity_id, state=state, attributes={})
 
+    observations: list[tuple[str, str, str]] = []
+    maintenance_states: list[str] = []
+
+    async def fake_record_gate_state_observation(entity_id, name, raw_state, **_kwargs) -> None:
+        observations.append((entity_id, name, raw_state))
+
+    async def fake_sync_maintenance_mode_state(state_value: str) -> None:
+        maintenance_states.append(state_value)
+
     monkeypatch.setattr(home_assistant_module, "get_runtime_config", fake_runtime)
-    service = HomeAssistantIntegrationService(WorkingClient())
+    service = HomeAssistantIntegrationService(cast(Any, WorkingClient()))
+    monkeypatch.setattr(service, "_record_gate_state_observation", fake_record_gate_state_observation)
+    monkeypatch.setattr(service, "_sync_maintenance_mode_state", fake_sync_maintenance_mode_state)
 
     status = await service.status(refresh=True)
 
@@ -106,6 +120,8 @@ async def test_home_assistant_status_reports_connected_after_state_refresh(monke
     assert status["last_error"] is None
     assert status["current_gate_state"] == "closed"
     assert status["state_refreshed_at"]
+    assert observations == [("cover.top_gate", "Top Gate", "closed")]
+    assert maintenance_states == ["off"]
 
 
 async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None:

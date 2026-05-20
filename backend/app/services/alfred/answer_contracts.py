@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.services.type_helpers import as_dict
+
 
 AnswerDomain = Literal["access_logs", "alerts", "visitor_passes", "schedules", "general"]
 
@@ -119,7 +121,7 @@ def artifact_payload(
 def extract_answer_artifacts(tool_results: list[dict[str, Any]]) -> list[AnswerArtifact]:
     artifacts: list[AnswerArtifact] = []
     for result in tool_results:
-        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        output = as_dict(result.get("output"))
         for payload in _artifact_candidates(output):
             try:
                 artifact = AnswerArtifact.model_validate(payload)

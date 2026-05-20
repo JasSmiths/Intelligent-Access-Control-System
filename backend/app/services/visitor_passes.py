@@ -182,7 +182,7 @@ class VisitorPassService:
         name = _clean_visitor_name(visitor_name)
         normalized_pass_type = _visitor_pass_type(pass_type)
         normalized_phone = _normalize_phone_number(visitor_phone)
-        normalized_plate = normalize_registration_number(number_plate) or None
+        normalized_plate = normalize_registration_number(number_plate) if number_plate else None
         window = _bounded_window_minutes(window_minutes)
         explicit_valid_from, explicit_valid_until = _valid_window(valid_from, valid_until)
         if normalized_pass_type == VisitorPassType.DURATION:

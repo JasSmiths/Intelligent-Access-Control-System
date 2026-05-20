@@ -4,7 +4,8 @@ import hmac
 import json
 import logging
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -32,6 +33,8 @@ from app.services.whatsapp_messaging import (
     parse_visitor_pass_timeframe_button_id,
     parse_visitor_pass_timeframe_confirmation_button_id,
 )
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def enabled_config(**overrides):
@@ -480,7 +483,7 @@ def whatsapp_admin_user(name: str = "Mum"):
 class FakeWhatsAppFeedbackMemory:
     def __init__(self, memory: dict | None = None):
         self.memory = dict(memory or {})
-        self.saved = []
+        self.saved: list[Any] = []
 
     async def _ensure_session(self, session_id):
         self.session_id = session_id
@@ -942,7 +945,7 @@ async def test_custom_message_send_records_history_on_exact_pass(monkeypatch) ->
     )
     visitor_pass.created_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
     visitor_pass.updated_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    captured = {"published": []}
+    captured: dict[str, Any] = {"published": []}
 
     class Session:
         async def __aenter__(self):
@@ -1027,7 +1030,7 @@ async def test_clear_visitor_abuse_mute_removes_cooldown_and_records_status(monk
     )
     visitor_pass.created_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
     visitor_pass.updated_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    captured = {"published": []}
+    captured: dict[str, Any] = {"published": []}
 
     class Session:
         async def __aenter__(self):
@@ -1202,6 +1205,8 @@ async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeyp
     assert captured["body"].endswith("👍")
     parsed_confirm = parse_visitor_pass_button_id(captured["buttons"][0]["id"])
     parsed_change = parse_visitor_pass_button_id(captured["buttons"][1]["id"])
+    assert parsed_confirm is not None
+    assert parsed_change is not None
     assert parsed_confirm.decision == "confirm"
     assert parsed_confirm.pass_id == str(pass_id)
     assert parsed_confirm.nonce == "nonce123"
@@ -1232,7 +1237,7 @@ async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) 
     )
     visitor_pass.created_at = datetime(2026, 5, 1, 8, 0, tzinfo=UTC)
     visitor_pass.updated_at = datetime(2026, 5, 1, 8, 0, tzinfo=UTC)
-    captured = {"published": [], "sent": []}
+    captured: dict[str, Any] = {"published": [], "sent": []}
 
     class Session:
         async def __aenter__(self):
@@ -1488,7 +1493,7 @@ async def test_muted_visitor_message_is_marked_read_without_typing(monkeypatch) 
         creation_source="ui",
         source_metadata={"whatsapp_abuse_muted_until": "2026-05-01T11:00:00+00:00"},
     )
-    captured = {"reads": []}
+    captured: dict[str, Any] = {"reads": []}
 
     async def no_admin(_sender):
         return None
@@ -2205,6 +2210,7 @@ async def test_visitor_begin_template_button_starts_registration_prompt(monkeypa
 
 def test_visitor_timeframe_button_payload_round_trips() -> None:
     parsed = parse_visitor_pass_timeframe_button_id("iacs:vp_time:allow:pass-1:req-1")
+    assert parsed is not None
 
     assert parsed.decision == "allow"
     assert parsed.pass_id == "pass-1"
@@ -2213,6 +2219,7 @@ def test_visitor_timeframe_button_payload_round_trips() -> None:
 
 def test_visitor_timeframe_confirmation_button_payload_round_trips() -> None:
     parsed = parse_visitor_pass_timeframe_confirmation_button_id("iacs:vp_time_user:confirm:pass-1:req-1")
+    assert parsed is not None
 
     assert parsed.decision == "confirm"
     assert parsed.pass_id == "pass-1"
@@ -2848,6 +2855,7 @@ async def test_interactive_confirmation_buttons_bind_session_and_confirmation(mo
 
     assert captured["to"] == "447700900123"
     parsed = parse_confirmation_button_id(captured["buttons"][0]["id"])
+    assert parsed is not None
     assert parsed.session_id == "session-1"
     assert parsed.confirmation_id == "confirm-1"
     assert parsed.decision == "confirm"
@@ -2918,6 +2926,8 @@ async def test_timeframe_notification_uses_whatsapp_interactive_buttons(monkeypa
     assert sent[0][1] == "Timeframe request\n\nSarah wants to stay later."
     allow = parse_visitor_pass_timeframe_button_id(sent[0][2][0]["id"])
     deny = parse_visitor_pass_timeframe_button_id(sent[0][2][1]["id"])
+    assert allow is not None
+    assert deny is not None
     assert allow.decision == "allow"
     assert allow.pass_id == "pass-1"
     assert allow.request_id == "request-1"

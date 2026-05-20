@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -15,6 +16,8 @@ from app.services.restart_backfill import (
 )
 from app.models.enums import AccessDirection
 from app.services.snapshot_recovery import protect_event_id_from_access_event
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 def test_backfill_window_uses_previous_runtime_heartbeat() -> None:

@@ -1,5 +1,7 @@
+# mypy: disable-error-code=var-annotated
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+from typing import Any, cast
 import uuid
 
 from app.services import actionable_notifications as actionable
@@ -15,6 +17,8 @@ from app.services.actionable_notifications import (
 from app.models.enums import GateMalfunctionStatus
 from app.modules.gate.base import GateState
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
+
+SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
 class DummySession:

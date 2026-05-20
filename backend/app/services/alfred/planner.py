@@ -11,6 +11,7 @@ from app.ai.providers import ChatMessageInput
 from app.ai.tools import AgentTool
 from app.ai.tool_groups.metadata import domain_summary
 from app.services.chat_contracts import SUPPORTED_INTENTS
+from app.services.type_helpers import as_dict, as_list
 
 
 PLANNED_PREVIEW_TOOL_NAMES = {
@@ -148,7 +149,7 @@ def domain_cards(tools: Iterable[AgentTool]) -> list[dict[str, Any]]:
             card["tool_names"].append(tool.name)
             if tool.name not in primary_category_by_tool:
                 primary_category_by_tool[tool.name] = primary_category
-                tool_card = {
+                tool_card: dict[str, Any] = {
                     "name": tool.name,
                     "safety": tool.safety_level,
                     "desc": _compact_description(tool.description),
@@ -251,22 +252,25 @@ async def _provider_complete(
 def parse_planner_selection(payload: dict[str, Any], tools: Iterable[AgentTool]) -> PlannerSelection:
     available_names = {tool.name for tool in tools}
     available_domains = {category for tool in tools for category in tool.categories}
-    raw_domains = payload.get("selected_domains") if isinstance(payload.get("selected_domains"), list) else []
+    raw_domains = as_list(payload.get("selected_domains"))
     domains = tuple(
         domain
         for domain in (str(item).strip() for item in raw_domains)
         if domain in available_domains or domain in SUPPORTED_INTENTS
     )
-    raw_names = payload.get("selected_tool_names") if isinstance(payload.get("selected_tool_names"), list) else []
+    raw_names = as_list(payload.get("selected_tool_names"))
     names = tuple(name for name in (str(item).strip() for item in raw_names) if name in available_names)
-    raw_calls = payload.get("planned_tool_calls") if isinstance(payload.get("planned_tool_calls"), list) else []
+    raw_calls = as_list(payload.get("planned_tool_calls"))
     planned_tool_calls = tuple(
         call
         for call in (_parse_tool_call_plan(item, available_names) for item in raw_calls)
         if call is not None
     )
     requested_answer_type = str(payload.get("requested_answer_type") or "general").strip()
-    allowed_answer_types = set(PLANNER_RESPONSE_SCHEMA["schema"]["properties"]["requested_answer_type"]["enum"])
+    response_schema = as_dict(PLANNER_RESPONSE_SCHEMA.get("schema"))
+    properties = as_dict(response_schema.get("properties"))
+    answer_type_schema = as_dict(properties.get("requested_answer_type"))
+    allowed_answer_types = {str(item) for item in as_list(answer_type_schema.get("enum"))}
     if requested_answer_type not in allowed_answer_types:
         requested_answer_type = "general"
     try:
@@ -334,8 +338,8 @@ def _parse_tool_call_plan(value: Any, available_names: set[str]) -> ToolCallPlan
 
 
 def _compact_parameter_card(parameters: dict[str, Any]) -> dict[str, Any]:
-    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
-    required = parameters.get("required") if isinstance(parameters.get("required"), list) else []
+    properties = as_dict(parameters.get("properties"))
+    required = as_list(parameters.get("required"))
     compact: dict[str, Any] = {"fields": [], "required": [str(item) for item in required[:8]]}
     for name, spec in list(properties.items())[:16]:
         field = str(name)

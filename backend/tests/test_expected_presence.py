@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -224,11 +225,11 @@ def build_payload(events: list[HistoricalPresenceEvent]) -> dict:
     )
 
 
-def person(display_name: str, *, is_active: bool = True) -> SimpleNamespace:
+def person(display_name: str, *, is_active: bool = True) -> Any:
     return SimpleNamespace(id=uuid4(), display_name=display_name, is_active=is_active)
 
 
-def access_event(*, vehicle: SimpleNamespace) -> SimpleNamespace:
+def access_event(*, vehicle: Any) -> Any:
     return SimpleNamespace(
         person_id=None,
         vehicle=vehicle,
