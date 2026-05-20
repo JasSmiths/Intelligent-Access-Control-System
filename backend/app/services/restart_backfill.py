@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ MISSED_EVENT_BACKFILL_MAX_LOOKBACK = timedelta(hours=24)
 MISSED_EVENT_BACKFILL_OVERLAP = timedelta(minutes=2)
 MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW = timedelta(seconds=90)
 MISSED_EVENT_BACKFILL_PROTECT_LIMIT = 250
+MISSED_EVENT_TRAILING_OCR_SUPPRESSION_WINDOW = timedelta(seconds=45)
 MISSED_EVENT_BACKFILL_SOURCE = "unifi_protect_restart_backfill"
 MISSED_EVENT_RECONCILIATION_SOURCE = "unifi_protect_lpr_reconciliation"
 MISSED_EVENT_RECONCILIATION_INTERVAL_SECONDS = 120.0
@@ -322,6 +324,21 @@ class MissedAccessEventBackfillService:
                 return False
 
             vehicle = await self._lookup_vehicle(session, candidate.registration_number)
+            if not vehicle:
+                suppressed_by = await self._recent_known_arrival_for_candidate(session, candidate)
+                if suppressed_by:
+                    logger.info(
+                        "missed_access_event_candidate_suppressed_as_arrival_ocr_noise",
+                        extra={
+                            "protect_event_id": candidate.protect_event_id,
+                            "registration_number": candidate.registration_number,
+                            "captured_at": candidate.captured_at.isoformat(),
+                            "camera_id": candidate.camera_id,
+                            "matched_event_id": str(suppressed_by.id),
+                            "matched_registration_number": suppressed_by.registration_number,
+                        },
+                    )
+                    return False
             person = vehicle.owner if vehicle else None
             visitor_pass: VisitorPass | None = None
             visitor_pass_mode: str | None = None
@@ -553,6 +570,32 @@ class MissedAccessEventBackfillService:
             )
         )
 
+    async def _recent_known_arrival_for_candidate(
+        self,
+        session: AsyncSession,
+        candidate: ProtectBackfillCandidate,
+    ) -> AccessEvent | None:
+        if not candidate.camera_id:
+            return None
+        rows = (
+            await session.scalars(
+                select(AccessEvent)
+                .where(
+                    AccessEvent.decision == AccessDecision.GRANTED,
+                    AccessEvent.direction == AccessDirection.ENTRY,
+                    AccessEvent.vehicle_id.is_not(None),
+                    AccessEvent.occurred_at <= candidate.captured_at,
+                    AccessEvent.occurred_at >= candidate.captured_at - MISSED_EVENT_TRAILING_OCR_SUPPRESSION_WINDOW,
+                )
+                .order_by(AccessEvent.occurred_at.desc())
+                .limit(25)
+            )
+        ).all()
+        for event in rows:
+            if candidate.camera_id in _camera_ids_from_access_event(event):
+                return event
+        return None
+
     async def _match_visitor_pass(
         self,
         session: AsyncSession,
@@ -731,6 +774,40 @@ def protect_event_ids_from_payload(payload: Any) -> set[str]:
         if isinstance(protect_event_ids, list):
             candidates.update(protect_event_ids)
     return {str(candidate).strip() for candidate in candidates if str(candidate or "").strip()}
+
+
+def _camera_ids_from_access_event(event: AccessEvent) -> set[str]:
+    payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    return _payload_values(payload, ("cameraId", "camera_id", "sensorId", "sensor_id"))
+
+
+def _payload_values(value: Any, keys: tuple[str, ...]) -> set[str]:
+    normalized_keys = {_payload_key(key) for key in keys}
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _payload_key(str(key)) in normalized_keys:
+                found.update(_scalar_payload_values(item))
+            found.update(_payload_values(item, keys))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_payload_values(item, keys))
+    return found
+
+
+def _scalar_payload_values(value: Any) -> set[str]:
+    if value is None or isinstance(value, bool):
+        return set()
+    if isinstance(value, str | int | float):
+        text = str(value).strip()
+        return {text} if text else set()
+    if isinstance(value, list):
+        return {item for value_item in value for item in _scalar_payload_values(value_item)}
+    return set()
+
+
+def _payload_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
 
 
 def _best_track_candidate(observations: list[dict[str, Any]]) -> dict[str, Any] | None:

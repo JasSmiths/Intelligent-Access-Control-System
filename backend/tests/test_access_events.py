@@ -1704,6 +1704,115 @@ async def test_vehicle_session_suppresses_same_protect_event_ocr_variant(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_vehicle_session_suppresses_arrival_ocr_noise_from_same_camera(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    published = []
+    annotated = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_annotate_suppressed_session_read(_read, suppression):
+        annotated.append(suppression)
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MD25VNO", first_seen, camera_id="gate-camera", device_id="camera-device"),
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+    )
+
+    read = plate_read_with_context(
+        "ADZ5U",
+        first_seen + timedelta(seconds=18),
+        state="open",
+        camera_id="gate-camera",
+        device_id="camera-device",
+    )
+    await service._handle_queued_read(
+        PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source="unifi_protect_lpr_reconciliation",
+            captured_at=read.captured_at,
+            raw_payload=read.raw_payload,
+        )
+    )
+
+    assert service._pending == []
+    assert annotated[0].matched_by == "arrival_ocr_noise"
+    assert published == [
+        (
+            "plate_read.suppressed",
+            {
+                "registration_number": "ADZ5U",
+                "detected_registration_number": "ADZ5U",
+                "source": "unifi_protect_lpr_reconciliation",
+                "reason": "vehicle_session_already_active",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vehicle_session_does_not_suppress_camera_read_outside_arrival_noise_window(monkeypatch) -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_quiet_seconds=2.5,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+    )
+    published = []
+
+    async def fake_active_vehicle_registrations():
+        return []
+
+    async def fake_publish(event_type, payload):
+        published.append((event_type, payload))
+
+    async def fake_read_with_visitor_pass_departure_match(read):
+        return read
+
+    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
+    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+
+    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
+    remember_session(
+        service,
+        plate_read_with_context("MD25VNO", first_seen, camera_id="gate-camera"),
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+    )
+
+    await service._handle_queued_read(
+        plate_read_with_context("ADZ5U", first_seen + timedelta(seconds=60), camera_id="gate-camera")
+    )
+
+    assert len(service._pending) == 1
+    assert published == []
+
+
+@pytest.mark.asyncio
 async def test_vehicle_session_suppresses_post_exit_closed_gate_linger(monkeypatch) -> None:
     service = AccessEventService()
     service._runtime = SimpleNamespace(

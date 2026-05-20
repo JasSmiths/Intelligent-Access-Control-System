@@ -7,6 +7,8 @@ from app.services.restart_backfill import (
     MISSED_EVENT_BACKFILL_OVERLAP,
     MISSED_EVENT_RECONCILIATION_SOURCE,
     MissedAccessEventBackfillService,
+    ProtectBackfillCandidate,
+    _camera_ids_from_access_event,
     _direction_from_gate_observation,
     backfill_window_start,
     protect_event_ids_from_payload,
@@ -53,6 +55,18 @@ def test_protect_event_id_extraction_includes_backfill_payloads() -> None:
     ) == "backfill-event"
 
 
+def test_camera_id_extraction_includes_vehicle_session_payloads() -> None:
+    event = SimpleNamespace(
+        raw_payload={
+            "best": {"cameraId": "webhook-camera"},
+            "vehicle_session": {"camera_id": "session-camera"},
+            "protect_evidence": {"event": {"camera_id": "protect-camera"}},
+        }
+    )
+
+    assert _camera_ids_from_access_event(event) == {"webhook-camera", "session-camera", "protect-camera"}
+
+
 def test_gate_observation_direction_for_backfill() -> None:
     assert _direction_from_gate_observation(SimpleNamespace(state="closed")) == AccessDirection.ENTRY
     assert _direction_from_gate_observation(SimpleNamespace(state="open")) == AccessDirection.EXIT
@@ -65,6 +79,36 @@ def test_reconciliation_service_uses_reconciliation_labels() -> None:
 
     assert service._audit_backfill_action() == "access_event.reconciled"
     assert service._backfill_payload_source() == "protect_reconciliation"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_candidate_suppresses_trailing_ocr_noise_after_known_arrival() -> None:
+    service = MissedAccessEventBackfillService(source=MISSED_EVENT_RECONCILIATION_SOURCE)
+    arrival = SimpleNamespace(
+        id="event-1",
+        registration_number="MD25VNO",
+        raw_payload={"vehicle_session": {"camera_id": "gate-camera"}},
+    )
+    candidate = ProtectBackfillCandidate(
+        protect_event_id="protect-ocr-noise",
+        registration_number="ADZ5U",
+        captured_at=datetime(2026, 5, 15, 22, 11, 11, tzinfo=UTC),
+        confidence=0.9,
+        camera_id="gate-camera",
+        camera_name="Gate",
+        protect_event={},
+        track_candidate={},
+    )
+
+    class FakeRows:
+        def all(self):
+            return [arrival]
+
+    class FakeSession:
+        async def scalars(self, _statement):
+            return FakeRows()
+
+    assert await service._recent_known_arrival_for_candidate(FakeSession(), candidate) is arrival
 
 
 @pytest.mark.asyncio

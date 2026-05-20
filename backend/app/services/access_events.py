@@ -83,6 +83,8 @@ GATE_CAMERA_IDENTIFIER = "camera.gate"
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
+ARRIVAL_OCR_NOISE_SUPPRESSION_SECONDS = 45.0
+ARRIVAL_OCR_NOISE_CLOCK_SKEW_SECONDS = 2.0
 MAX_SUPPRESSED_SESSION_READS = 20
 MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
 PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
@@ -1100,7 +1102,7 @@ class AccessEventService:
             matched_by = self._vehicle_session_match(session, context, read)
             if not matched_by:
                 continue
-            if self._read_is_departure_after_entry_session(read, session):
+            if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(read, session):
                 continue
             if self._read_is_entry_after_exit_idle_expired(read, session, idle_seconds):
                 continue
@@ -1141,8 +1143,9 @@ class AccessEventService:
         context: VehicleSessionContext,
         read: PlateRead,
     ) -> str | None:
-        if read.source != session.source:
+        if self._read_matches_different_known_vehicle(session, read):
             return None
+        same_source = read.source == session.source
         same_plate = (
             context.normalized_registration_number == session.normalized_registration_number
             or self._is_similar_plate(
@@ -1151,15 +1154,59 @@ class AccessEventService:
             )
         )
         if same_plate:
-            return "registration_number"
+            return "registration_number" if same_source else "cross_source_registration_number"
 
         same_event = bool(context.protect_event_ids & session.protect_event_ids)
-        if not same_event:
-            return None
+        if same_event:
+            return "protect_event_id" if same_source else "cross_source_protect_event_id"
 
-        if _known_vehicle_plate_match_from_read(read):
-            return None
-        return "protect_event_id"
+        if self._read_looks_like_arrival_ocr_noise(session, context, read):
+            return "arrival_ocr_noise"
+
+        return None
+
+    def _read_matches_different_known_vehicle(
+        self,
+        session: ActiveVehicleSession,
+        read: PlateRead,
+    ) -> bool:
+        match = _known_vehicle_plate_match_from_read(read)
+        if not match:
+            return False
+        matched_registration = self._normalize_registration_number(
+            str(match.get("registration_number") or match.get("normalized_registration_number") or "")
+        )
+        return bool(matched_registration and matched_registration != session.normalized_registration_number)
+
+    def _read_looks_like_arrival_ocr_noise(
+        self,
+        session: ActiveVehicleSession,
+        context: VehicleSessionContext,
+        read: PlateRead,
+    ) -> bool:
+        if session.direction != AccessDirection.ENTRY or session.decision != AccessDecision.GRANTED:
+            return False
+        if self._read_has_explicit_exit_direction(read):
+            return False
+        if not self._vehicle_session_same_camera_or_device(session, context):
+            return False
+        earliest = session.started_at - timedelta(seconds=ARRIVAL_OCR_NOISE_CLOCK_SKEW_SECONDS)
+        latest = session.started_at + timedelta(seconds=ARRIVAL_OCR_NOISE_SUPPRESSION_SECONDS)
+        return earliest <= read.captured_at <= latest
+
+    def _vehicle_session_same_camera_or_device(
+        self,
+        session: ActiveVehicleSession,
+        context: VehicleSessionContext,
+    ) -> bool:
+        return bool(
+            (context.camera_id and session.camera_id and context.camera_id == session.camera_id)
+            or (context.device_id and session.device_id and context.device_id == session.device_id)
+        )
+
+    def _read_has_explicit_exit_direction(self, read: PlateRead) -> bool:
+        explicit = str((read.raw_payload or {}).get("direction") or (read.raw_payload or {}).get("Direction") or "").lower()
+        return explicit in {"exit", "leave", "departure", "out"}
 
     async def _vehicle_session_presence_evidence(
         self,
@@ -1217,7 +1264,6 @@ class AccessEventService:
                 await session.scalars(
                     select(AccessEvent)
                     .where(
-                        AccessEvent.source == read.source,
                         AccessEvent.occurred_at <= read.captured_at,
                         AccessEvent.occurred_at >= read.captured_at - lookup_horizon,
                     )
@@ -1233,7 +1279,7 @@ class AccessEventService:
             matched_by = self._vehicle_session_match(candidate, context, read)
             if not matched_by:
                 continue
-            if self._read_is_departure_after_entry_session(read, candidate):
+            if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(read, candidate):
                 continue
             if self._read_is_entry_after_exit_idle_expired(read, candidate, idle_seconds):
                 continue
