@@ -1,5 +1,6 @@
 import uuid
 from datetime import date, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,6 +17,11 @@ from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, friendly_vehicle_text
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
+from app.services.person_presence_input_booleans import (
+    DEFAULT_INPUT_BOOLEAN_ACTION,
+    normalize_input_boolean_action,
+    normalize_input_boolean_entity_ids,
+)
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -61,6 +67,9 @@ class PersonResponse(BaseModel):
     notes: str | None
     garage_door_entity_ids: list[str]
     home_assistant_mobile_app_notify_service: str | None
+    home_assistant_presence_input_boolean_entity_ids: list[str]
+    home_assistant_presence_input_boolean_entry_action: Literal["turn_on", "turn_off"]
+    home_assistant_presence_input_boolean_exit_action: Literal["turn_on", "turn_off"]
     vehicles: list[PersonVehicleResponse]
 
 
@@ -74,6 +83,15 @@ class CreatePersonRequest(BaseModel):
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
     garage_door_entity_ids: list[str] = Field(default_factory=list)
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
+    home_assistant_presence_input_boolean_entity_ids: list[str] = Field(default_factory=list)
+    home_assistant_presence_input_boolean_entry_action: str = Field(
+        default=DEFAULT_INPUT_BOOLEAN_ACTION,
+        pattern="^(turn_on|turn_off)$",
+    )
+    home_assistant_presence_input_boolean_exit_action: str = Field(
+        default=DEFAULT_INPUT_BOOLEAN_ACTION,
+        pattern="^(turn_on|turn_off)$",
+    )
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool = True
 
@@ -88,6 +106,15 @@ class UpdatePersonRequest(BaseModel):
     vehicle_ids: list[uuid.UUID] | None = None
     garage_door_entity_ids: list[str] | None = None
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
+    home_assistant_presence_input_boolean_entity_ids: list[str] | None = None
+    home_assistant_presence_input_boolean_entry_action: str | None = Field(
+        default=None,
+        pattern="^(turn_on|turn_off)$",
+    )
+    home_assistant_presence_input_boolean_exit_action: str | None = Field(
+        default=None,
+        pattern="^(turn_on|turn_off)$",
+    )
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
 
@@ -242,6 +269,20 @@ def normalize_home_assistant_mobile_notify_service(service_name: str | None) -> 
     return service_name
 
 
+def normalize_person_presence_input_boolean_entity_ids(entity_ids: list[str] | None) -> list[str]:
+    try:
+        return normalize_input_boolean_entity_ids(entity_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def normalize_person_presence_input_boolean_action(action: str | None) -> str:
+    try:
+        return normalize_input_boolean_action(action)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 def normalize_person_pronouns(pronouns: str | None) -> str | None:
     pronouns = normalize_optional_text(pronouns)
     if pronouns is None:
@@ -332,6 +373,15 @@ def serialize_person(person: Person) -> dict:
         "notes": person.notes,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
+        "home_assistant_presence_input_boolean_entity_ids": list(
+            getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
+        ),
+        "home_assistant_presence_input_boolean_entry_action": normalize_input_boolean_action(
+            getattr(person, "home_assistant_presence_input_boolean_entry_action", None)
+        ),
+        "home_assistant_presence_input_boolean_exit_action": normalize_input_boolean_action(
+            getattr(person, "home_assistant_presence_input_boolean_exit_action", None)
+        ),
         "vehicles": [
                 {
                     "id": str(vehicle.id),
@@ -366,6 +416,15 @@ def person_audit_snapshot(person: Person) -> dict:
         "schedule_id": str(person.schedule_id) if person.schedule_id else None,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
+        "home_assistant_presence_input_boolean_entity_ids": list(
+            getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
+        ),
+        "home_assistant_presence_input_boolean_entry_action": normalize_input_boolean_action(
+            getattr(person, "home_assistant_presence_input_boolean_entry_action", None)
+        ),
+        "home_assistant_presence_input_boolean_exit_action": normalize_input_boolean_action(
+            getattr(person, "home_assistant_presence_input_boolean_exit_action", None)
+        ),
         "notes": person.notes,
         "is_active": person.is_active,
     }
@@ -578,6 +637,15 @@ async def add_person(
         home_assistant_mobile_app_notify_service=normalize_home_assistant_mobile_notify_service(
             request.home_assistant_mobile_app_notify_service
         ),
+        home_assistant_presence_input_boolean_entity_ids=normalize_person_presence_input_boolean_entity_ids(
+            request.home_assistant_presence_input_boolean_entity_ids
+        ),
+        home_assistant_presence_input_boolean_entry_action=normalize_person_presence_input_boolean_action(
+            request.home_assistant_presence_input_boolean_entry_action
+        ),
+        home_assistant_presence_input_boolean_exit_action=normalize_person_presence_input_boolean_action(
+            request.home_assistant_presence_input_boolean_exit_action
+        ),
         notes=normalize_optional_text(request.notes),
         is_active=request.is_active,
     )
@@ -646,6 +714,27 @@ async def update_person(
     if "home_assistant_mobile_app_notify_service" in request.model_fields_set:
         person.home_assistant_mobile_app_notify_service = normalize_home_assistant_mobile_notify_service(
             request.home_assistant_mobile_app_notify_service
+        )
+
+    if "home_assistant_presence_input_boolean_entity_ids" in request.model_fields_set:
+        person.home_assistant_presence_input_boolean_entity_ids = (
+            normalize_person_presence_input_boolean_entity_ids(
+                request.home_assistant_presence_input_boolean_entity_ids
+            )
+        )
+
+    if "home_assistant_presence_input_boolean_entry_action" in request.model_fields_set:
+        person.home_assistant_presence_input_boolean_entry_action = (
+            normalize_person_presence_input_boolean_action(
+                request.home_assistant_presence_input_boolean_entry_action
+            )
+        )
+
+    if "home_assistant_presence_input_boolean_exit_action" in request.model_fields_set:
+        person.home_assistant_presence_input_boolean_exit_action = (
+            normalize_person_presence_input_boolean_action(
+                request.home_assistant_presence_input_boolean_exit_action
+            )
         )
 
     if request.first_name is not None:

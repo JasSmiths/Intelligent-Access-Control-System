@@ -1,9 +1,16 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
-from app.models import GateCommandRecord, GateStateObservation, MovementSagaRecord
-from app.models.enums import GateCommandState, MovementSagaState
+from app.models import AccessEvent, GateCommandRecord, GateStateObservation, MovementSagaRecord, Person, Presence
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+    GateCommandState,
+    MovementSagaState,
+    TimingClassification,
+)
 from app.modules.gate.base import GateState
 from app.services.movement_reconciliation import (
     MovementReconciliationService,
@@ -17,6 +24,23 @@ class FakeFlushSession:
 
     async def flush(self) -> None:
         self.flushes += 1
+
+
+class FakePresenceCommitSession:
+    def __init__(self, person: Person | None) -> None:
+        self.person = person
+        self.presence: Presence | None = None
+
+    async def get(self, model, _key):
+        if model is Presence:
+            return self.presence
+        if model is Person:
+            return self.person
+        return None
+
+    def add(self, row) -> None:
+        if isinstance(row, Presence):
+            self.presence = row
 
 
 def test_latest_reconciliation_command_includes_accepted_unverified_command() -> None:
@@ -40,6 +64,85 @@ def test_latest_reconciliation_command_includes_accepted_unverified_command() ->
     )
 
     assert _latest_reconciliation_command([verified, unverified]) is unverified
+
+
+@pytest.mark.asyncio
+async def test_commit_presence_queues_input_boolean_job_for_live_reconciliation() -> None:
+    service = MovementReconciliationService()
+    now = datetime(2026, 5, 15, 18, 0, tzinfo=UTC)
+    person = Person(id=uuid4(), first_name="Jason", last_name="Smith", display_name="Jason Smith")
+    event = AccessEvent(
+        id=uuid4(),
+        person_id=person.id,
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        confidence=0.98,
+        source="ubiquiti",
+        occurred_at=now,
+        timing_classification=TimingClassification.NORMAL,
+    )
+    saga = MovementSagaRecord(
+        idempotency_key="movement-live",
+        source="ubiquiti",
+        occurred_at=now,
+        state=MovementSagaState.RECONCILIATION_REQUIRED,
+        access_event=event,
+        decision_payload={},
+        intent_payload={},
+        state_history=[],
+    )
+    session = FakePresenceCommitSession(person)
+    jobs: list[tuple[Person, AccessEvent]] = []
+
+    result = await service._commit_presence_if_possible(
+        session,
+        saga,
+        presence_input_boolean_jobs=jobs,
+    )
+
+    assert result is True
+    assert session.presence is not None
+    assert session.presence.state == "present"
+    assert jobs == [(person, event)]
+
+
+@pytest.mark.asyncio
+async def test_commit_presence_skips_input_boolean_job_for_historical_repair() -> None:
+    service = MovementReconciliationService()
+    now = datetime(2026, 5, 15, 18, 0, tzinfo=UTC)
+    person = Person(id=uuid4(), first_name="Jason", last_name="Smith", display_name="Jason Smith")
+    event = AccessEvent(
+        id=uuid4(),
+        person_id=person.id,
+        registration_number="PE70DHX",
+        direction=AccessDirection.EXIT,
+        decision=AccessDecision.GRANTED,
+        confidence=0.98,
+        source="ubiquiti",
+        occurred_at=now,
+        timing_classification=TimingClassification.NORMAL,
+    )
+    saga = MovementSagaRecord(
+        idempotency_key="movement-historical",
+        source="ubiquiti",
+        occurred_at=now,
+        state=MovementSagaState.RECONCILIATION_REQUIRED,
+        access_event=event,
+        decision_payload={"historical_repair": True},
+        intent_payload={},
+        state_history=[],
+    )
+    jobs: list[tuple[Person, AccessEvent]] = []
+
+    result = await service._commit_presence_if_possible(
+        FakePresenceCommitSession(person),
+        saga,
+        presence_input_boolean_jobs=jobs,
+    )
+
+    assert result is True
+    assert jobs == []
 
 
 @pytest.mark.asyncio

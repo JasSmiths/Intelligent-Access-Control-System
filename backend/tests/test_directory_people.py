@@ -6,6 +6,8 @@ from fastapi import HTTPException
 
 from app.api.v1.directory import (
     derived_vehicle_person_id,
+    normalize_person_presence_input_boolean_action,
+    normalize_person_presence_input_boolean_entity_ids,
     normalize_person_pronouns,
     serialize_person,
     serialize_vehicle,
@@ -32,6 +34,31 @@ def test_normalize_person_pronouns_rejects_unsupported_values() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "Person pronouns must be he/him or she/her."
+
+
+def test_normalize_presence_input_boolean_entity_ids_trims_and_dedupes() -> None:
+    assert normalize_person_presence_input_boolean_entity_ids(
+        [" input_boolean.person ", "input_boolean.person", "input_boolean.announcements"]
+    ) == ["input_boolean.person", "input_boolean.announcements"]
+
+
+def test_normalize_presence_input_boolean_entity_ids_rejects_non_input_boolean() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        normalize_person_presence_input_boolean_entity_ids(["switch.person"])
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Home Assistant presence entity IDs must start with input_boolean."
+
+
+def test_normalize_presence_input_boolean_action_defaults_and_validates() -> None:
+    assert normalize_person_presence_input_boolean_action(None) == "turn_off"
+    assert normalize_person_presence_input_boolean_action("turn_on") == "turn_on"
+
+    with pytest.raises(HTTPException) as exc_info:
+        normalize_person_presence_input_boolean_action("toggle")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Home Assistant presence input_boolean action must be turn_on or turn_off."
 
 
 def test_derived_vehicle_person_id_is_only_set_for_single_assignment() -> None:
@@ -128,6 +155,9 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         notes=None,
         garage_door_entity_ids=[],
         home_assistant_mobile_app_notify_service=None,
+        home_assistant_presence_input_boolean_entity_ids=["input_boolean.ash_home"],
+        home_assistant_presence_input_boolean_entry_action="turn_on",
+        home_assistant_presence_input_boolean_exit_action="turn_off",
         vehicle_assignments=[SimpleNamespace(vehicle=assigned_vehicle)],
         vehicles=[legacy_vehicle],
     )
@@ -135,3 +165,6 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
     payload = serialize_person(person)
 
     assert [vehicle["registration_number"] for vehicle in payload["vehicles"]] == ["SHARED1"]
+    assert payload["home_assistant_presence_input_boolean_entity_ids"] == ["input_boolean.ash_home"]
+    assert payload["home_assistant_presence_input_boolean_entry_action"] == "turn_on"
+    assert payload["home_assistant_presence_input_boolean_exit_action"] == "turn_off"

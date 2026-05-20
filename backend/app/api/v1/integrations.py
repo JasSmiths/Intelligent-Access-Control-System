@@ -191,6 +191,9 @@ async def home_assistant_entities(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     cover_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")]
+    input_boolean_entities = [
+        _serialize_ha_entity(state) for state in states if state.entity_id.startswith("input_boolean.")
+    ]
     media_players = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("media_player.")]
     mobile_app_notification_services = [
         _serialize_ha_service(service)
@@ -207,6 +210,7 @@ async def home_assistant_entities(
 
     return {
         "cover_entities": cover_entities,
+        "input_boolean_entities": input_boolean_entities,
         "gate_suggestions": gate_suggestions,
         "garage_door_suggestions": garage_door_suggestions,
         "media_player_entities": media_players,

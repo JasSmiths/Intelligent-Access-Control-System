@@ -105,6 +105,7 @@ import {
 
 type PersonPronouns = NonNullable<Person["pronouns"]>;
 type PersonPronounFormValue = PersonPronouns | "";
+type HomeAssistantInputBooleanAction = Person["home_assistant_presence_input_boolean_entry_action"];
 
 const SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME: Record<string, PersonPronouns> = {
   jason: "he/him",
@@ -722,7 +723,8 @@ export function PeopleView({
     matches(item.group ?? "", query) ||
     item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
     (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoorNameMap.get(entityId) ?? entityId, query)) ||
-    matches(item.home_assistant_mobile_app_notify_service ?? "", query)
+    matches(item.home_assistant_mobile_app_notify_service ?? "", query) ||
+    (item.home_assistant_presence_input_boolean_entity_ids ?? []).some((entityId) => matches(entityId, query))
   ), [garageDoorNameMap, people, query]);
   const groupedPeople = React.useMemo(() => groupPeopleByDirectoryGroup(filtered, groups), [filtered, groups]);
   const { openGroups: openPeopleGroups, toggleGroup: togglePeopleGroup } = useDirectoryGroupOpenState(groupedPeople);
@@ -800,6 +802,11 @@ export function PeopleView({
                           <span className="vehicle-chip garage-chip" key={entityId}>{garageDoorNameMap.get(entityId) ?? entityId}</span>
                         ))}
                         {person.home_assistant_mobile_app_notify_service ? <span className="vehicle-chip ha-chip">HA mobile</span> : null}
+                        {(person.home_assistant_presence_input_boolean_entity_ids ?? []).length ? (
+                          <span className="vehicle-chip ha-chip">
+                            {person.home_assistant_presence_input_boolean_entity_ids.length} input_boolean
+                          </span>
+                        ) : null}
                       </div>
                     </article>
                   ))}
@@ -869,6 +876,12 @@ export function PersonModal({
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
     home_assistant_mobile_app_notify_service: person?.home_assistant_mobile_app_notify_service ?? "",
+    home_assistant_presence_input_boolean_entity_ids:
+      person?.home_assistant_presence_input_boolean_entity_ids ?? ([] as string[]),
+    home_assistant_presence_input_boolean_entry_action:
+      (person?.home_assistant_presence_input_boolean_entry_action ?? "turn_off") as HomeAssistantInputBooleanAction,
+    home_assistant_presence_input_boolean_exit_action:
+      (person?.home_assistant_presence_input_boolean_exit_action ?? "turn_off") as HomeAssistantInputBooleanAction,
     notes: person?.notes ?? "",
     is_active: person?.is_active ?? true
   });
@@ -927,6 +940,17 @@ export function PersonModal({
   const updatePronouns = (pronouns: string) => {
     setPronounSelectionTouched(true);
     update("pronouns", normalizePersonPronounFormValue(pronouns));
+  };
+
+  const updatePresenceInputBooleans = (entityIds: string[]) => {
+    update("home_assistant_presence_input_boolean_entity_ids", entityIds);
+  };
+
+  const updatePresenceInputBooleanAction = (
+    field: "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action",
+    action: HomeAssistantInputBooleanAction
+  ) => {
+    update(field, action);
   };
 
   const sendHomeAssistantMobileTest = async () => {
@@ -1039,6 +1063,12 @@ export function PersonModal({
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
       home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
+      home_assistant_presence_input_boolean_entity_ids:
+        form.home_assistant_presence_input_boolean_entity_ids,
+      home_assistant_presence_input_boolean_entry_action:
+        form.home_assistant_presence_input_boolean_entry_action,
+      home_assistant_presence_input_boolean_exit_action:
+        form.home_assistant_presence_input_boolean_exit_action,
       notes: form.notes || null,
       is_active: form.is_active
     };
@@ -1074,6 +1104,12 @@ export function PersonModal({
     notes: form.notes || null,
     garage_door_entity_ids: form.garage_door_entity_ids,
     home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
+    home_assistant_presence_input_boolean_entity_ids:
+      form.home_assistant_presence_input_boolean_entity_ids,
+    home_assistant_presence_input_boolean_entry_action:
+      form.home_assistant_presence_input_boolean_entry_action,
+    home_assistant_presence_input_boolean_exit_action:
+      form.home_assistant_presence_input_boolean_exit_action,
     vehicles: []
   };
 
@@ -1239,6 +1275,33 @@ export function PersonModal({
             }) : <div className="empty-state compact">No garage doors configured</div>}
           </div>
         </div>
+        <section className="person-ha-section presence-input-boolean-section">
+          <div className="person-ha-section-title">
+            <span className="ha-device-icon"><Zap size={17} /></span>
+            <div>
+              <strong>Presence input_booleans</strong>
+              <span>{haDiscoveryLoading ? "Loading discovered input_booleans" : "Run Home Assistant actions when this person arrives or leaves"}</span>
+            </div>
+          </div>
+          <InputBooleanEntityPicker
+            entities={haDiscovery?.input_boolean_entities ?? []}
+            loading={haDiscoveryLoading}
+            selectedEntityIds={form.home_assistant_presence_input_boolean_entity_ids}
+            onChange={updatePresenceInputBooleans}
+          />
+          <div className="presence-input-boolean-actions">
+            <InputBooleanActionToggle
+              label="On arrival"
+              value={form.home_assistant_presence_input_boolean_entry_action}
+              onChange={(action) => updatePresenceInputBooleanAction("home_assistant_presence_input_boolean_entry_action", action)}
+            />
+            <InputBooleanActionToggle
+              label="On leaving"
+              value={form.home_assistant_presence_input_boolean_exit_action}
+              onChange={(action) => updatePresenceInputBooleanAction("home_assistant_presence_input_boolean_exit_action", action)}
+            />
+          </div>
+        </section>
         <div className="modal-actions">
           <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
@@ -1247,6 +1310,181 @@ export function PersonModal({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+export function InputBooleanEntityPicker({
+  entities,
+  loading,
+  selectedEntityIds,
+  onChange
+}: {
+  entities: HomeAssistantDiscovery["input_boolean_entities"];
+  loading: boolean;
+  selectedEntityIds: string[];
+  onChange: (entityIds: string[]) => void;
+}) {
+  const [draft, setDraft] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  const [error, setError] = React.useState("");
+  const selectedSet = React.useMemo(() => new Set(selectedEntityIds), [selectedEntityIds]);
+  const suggestions = React.useMemo(() => {
+    const query = draft.trim().toLowerCase();
+    const candidates = entities.filter((entity) => !selectedSet.has(entity.entity_id));
+    const filtered = query
+      ? candidates.filter((entity) =>
+          entity.entity_id.toLowerCase().includes(query) ||
+          (entity.name ?? "").toLowerCase().includes(query)
+        )
+      : candidates;
+    return filtered.slice(0, 8);
+  }, [draft, entities, selectedSet]);
+
+  React.useEffect(() => {
+    setHighlightedIndex(0);
+  }, [draft]);
+
+  const addEntity = (entityId: string) => {
+    const normalized = entityId.trim();
+    if (!normalized) return;
+    if (!normalized.startsWith("input_boolean.")) {
+      setError("Use an input_boolean.* entity ID.");
+      return;
+    }
+    setError("");
+    if (!selectedSet.has(normalized)) {
+      onChange([...selectedEntityIds, normalized]);
+    }
+    setDraft("");
+    setOpen(false);
+  };
+
+  const acceptHighlighted = () => {
+    const suggestion = suggestions[highlightedIndex] ?? suggestions[0];
+    if (suggestion) {
+      addEntity(suggestion.entity_id);
+      return true;
+    }
+    return false;
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown" && suggestions.length) {
+      event.preventDefault();
+      setOpen(true);
+      setHighlightedIndex((current) => Math.min(current + 1, suggestions.length - 1));
+      return;
+    }
+    if (event.key === "ArrowUp" && suggestions.length) {
+      event.preventDefault();
+      setOpen(true);
+      setHighlightedIndex((current) => Math.max(current - 1, 0));
+      return;
+    }
+    if ((event.key === "Tab" || event.key === " ") && suggestions.length && draft.trim()) {
+      event.preventDefault();
+      acceptHighlighted();
+      return;
+    }
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      if (!acceptHighlighted()) addEntity(draft);
+    }
+    if (event.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="input-boolean-picker">
+      <div className="input-boolean-chip-list" aria-label="Selected input_boolean entities">
+        {selectedEntityIds.length ? selectedEntityIds.map((entityId) => (
+          <span className="input-boolean-chip" key={entityId}>
+            {entityId}
+            <button
+              aria-label={`Remove ${entityId}`}
+              onClick={() => onChange(selectedEntityIds.filter((selected) => selected !== entityId))}
+              type="button"
+            >
+              <X size={13} />
+            </button>
+          </span>
+        )) : <span className="muted-value">No input_booleans selected</span>}
+      </div>
+      <label className="field input-boolean-autocomplete">
+        <span>Entity ID</span>
+        <div className="field-control">
+          <Zap size={17} />
+          <input
+            autoComplete="off"
+            onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setOpen(true);
+              setError("");
+            }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={handleKeyDown}
+            placeholder={loading ? "Loading input_booleans..." : "input_boolean.person_announcements"}
+            value={draft}
+          />
+        </div>
+        {open && suggestions.length ? (
+          <div className="input-boolean-suggestions" role="listbox">
+            {suggestions.map((entity, index) => (
+              <button
+                className={index === highlightedIndex ? "active" : ""}
+                key={entity.entity_id}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  addEntity(entity.entity_id);
+                }}
+                role="option"
+                type="button"
+                aria-selected={index === highlightedIndex}
+              >
+                <strong>{entity.entity_id}</strong>
+                <span>{entity.name || titleFromEntityId(entity.entity_id)}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {error ? <small className="input-boolean-error">{error}</small> : null}
+      </label>
+    </div>
+  );
+}
+
+export function InputBooleanActionToggle({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value: HomeAssistantInputBooleanAction;
+  onChange: (value: HomeAssistantInputBooleanAction) => void;
+}) {
+  return (
+    <div className="input-boolean-action-toggle">
+      <span>{label}</span>
+      <div className="input-boolean-segmented" role="group" aria-label={label}>
+        <button
+          className={value === "turn_off" ? "active" : ""}
+          onClick={() => onChange("turn_off")}
+          type="button"
+        >
+          Off
+        </button>
+        <button
+          className={value === "turn_on" ? "active" : ""}
+          onClick={() => onChange("turn_on")}
+          type="button"
+        >
+          On
+        </button>
+      </div>
     </div>
   );
 }

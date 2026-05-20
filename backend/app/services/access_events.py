@@ -54,6 +54,7 @@ from app.services.movement_fsm import (
     ResolvedMovementWindow,
 )
 from app.services.notifications import get_notification_service
+from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
 from app.services.schedules import ScheduleEvaluation, evaluate_schedule_id, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.snapshots import (
@@ -2106,6 +2107,22 @@ class AccessEventService:
                 read,
                 movement_saga_id=movement_saga.id if movement_saga else None,
             )
+        if presence_updated and person:
+            try:
+                await apply_person_presence_input_boolean_actions(
+                    person,
+                    event,
+                    source="access_event_presence_commit",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "person_presence_input_boolean_unhandled_failure",
+                    extra={
+                        "event_id": str(event.id),
+                        "person_id": str(person.id),
+                        "error": str(exc),
+                    },
+                )
         persistence_span.finish(
             output_payload={
                 "event_id": str(event.id),

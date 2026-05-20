@@ -11,6 +11,7 @@ from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
 from app.services import access_events as access_events_module
+from app.services import person_presence_input_booleans as presence_input_booleans_module
 from app.services.access_events import (
     AccessEventService,
     ActiveVehicleSession,
@@ -1610,6 +1611,62 @@ async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) 
     assert gate_audit["metadata"]["detail"] == "Unsupported gate controller: missing"
     assert any(event_type == "gate.open_failed" for event_type, _payload in published)
     assert len(notifications.contexts) == 1
+
+
+@pytest.mark.asyncio
+async def test_person_presence_input_boolean_commands_apply_to_all_entities(monkeypatch) -> None:
+    person = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name="Jason Smith",
+        home_assistant_presence_input_boolean_entity_ids=[
+            "input_boolean.jason_home",
+            "input_boolean.jason_announcements",
+        ],
+        home_assistant_presence_input_boolean_entry_action="turn_on",
+        home_assistant_presence_input_boolean_exit_action="turn_off",
+    )
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="PE70DHX",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        vehicle_id=None,
+        vehicle=None,
+        source="ubiquiti",
+        occurred_at=datetime(2026, 5, 3, 9, 15, tzinfo=UTC),
+    )
+    calls: list[tuple[str, dict]] = []
+    records: list[dict] = []
+
+    async def fake_maintenance_mode():
+        return False
+
+    async def fake_record(_person, _event, **kwargs):
+        records.append(kwargs)
+
+    class FakeClient:
+        async def call_service(self, service_name, payload):
+            calls.append((service_name, payload))
+            return {}
+
+        async def get_state(self, entity_id):
+            return SimpleNamespace(entity_id=entity_id, state="on")
+
+    monkeypatch.setattr(presence_input_booleans_module, "is_maintenance_mode_active", fake_maintenance_mode)
+    monkeypatch.setattr(presence_input_booleans_module, "HomeAssistantClient", lambda: FakeClient())
+    monkeypatch.setattr(presence_input_booleans_module, "_record_input_boolean_result", fake_record)
+
+    await presence_input_booleans_module.apply_person_presence_input_boolean_actions(
+        person,
+        event,
+        source="access_event_presence_commit",
+    )
+
+    assert calls == [
+        ("input_boolean.turn_on", {"entity_id": "input_boolean.jason_home"}),
+        ("input_boolean.turn_on", {"entity_id": "input_boolean.jason_announcements"}),
+    ]
+    assert [record["outcome"] for record in records] == ["accepted", "accepted"]
 
 
 @pytest.mark.asyncio

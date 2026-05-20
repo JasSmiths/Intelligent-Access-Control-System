@@ -44,6 +44,9 @@ async def init_database() -> None:
             )
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS garage_door_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS home_assistant_mobile_app_notify_service VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS home_assistant_presence_input_boolean_entity_ids JSONB NOT NULL DEFAULT '[]'::jsonb"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS home_assistant_presence_input_boolean_entry_action VARCHAR(20) NOT NULL DEFAULT 'turn_off'"))
+            await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS home_assistant_presence_input_boolean_exit_action VARCHAR(20) NOT NULL DEFAULT 'turn_off'"))
             await conn.execute(
                 text(
                     """

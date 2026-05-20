@@ -56,7 +56,7 @@ type ReportSnapshotVehicle = Person["vehicles"][number] & {
   tax_tone?: "green" | "red" | "muted";
 };
 
-type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "vehicles"> & {
+type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "vehicles"> & {
   vehicles: ReportSnapshotVehicle[];
 };
 

@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import GateCommandRecord, GateStateObservation, MovementSagaRecord, Presence
+from app.models import AccessEvent, GateCommandRecord, GateStateObservation, MovementSagaRecord, Person, Presence
 from app.models.enums import AccessDirection, GateCommandState, MovementSagaState, PresenceState
 from app.modules.gate.base import GateState
 from app.modules.notifications.base import NotificationContext
@@ -16,6 +16,7 @@ from app.modules.registry import get_gate_controller
 from app.services.event_bus import event_bus
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.notifications import get_notification_service
+from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
 
 logger = get_logger(__name__)
 
@@ -107,12 +108,39 @@ class MovementReconciliationService:
                 )
             ).all()
             count = 0
+            presence_input_boolean_jobs: list[tuple[Person, AccessEvent]] = []
             for saga in rows:
-                count += await self._reconcile_saga(session, saga)
+                count += await self._reconcile_saga(
+                    session,
+                    saga,
+                    presence_input_boolean_jobs=presence_input_boolean_jobs,
+                )
             await session.commit()
+            for person, event in presence_input_boolean_jobs:
+                try:
+                    await apply_person_presence_input_boolean_actions(
+                        person,
+                        event,
+                        source="movement_reconciliation_presence_commit",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "movement_reconciliation_input_boolean_unhandled_failure",
+                        extra={
+                            "event_id": str(event.id),
+                            "person_id": str(person.id),
+                            "error": str(exc),
+                        },
+                    )
             return count
 
-    async def _reconcile_saga(self, session, saga: MovementSagaRecord) -> int:
+    async def _reconcile_saga(
+        self,
+        session,
+        saga: MovementSagaRecord,
+        *,
+        presence_input_boolean_jobs: list[tuple[Person, AccessEvent]] | None = None,
+    ) -> int:
         now = datetime.now(tz=UTC)
         command = _latest_reconciliation_command(saga.gate_commands)
         if not command:
@@ -160,7 +188,14 @@ class MovementReconciliationService:
                 f"Gate open observation reconciled as {state.value} "
                 f"at {observed_open.observed_at.isoformat()}."
             )
-            return await self._complete_reconciled_saga(session, saga, command, state, detail)
+            return await self._complete_reconciled_saga(
+                session,
+                saga,
+                command,
+                state,
+                detail,
+                presence_input_boolean_jobs=presence_input_boolean_jobs,
+            )
 
         state = await self._current_gate_state()
         if state in {GateState.OPEN, GateState.OPENING}:
@@ -170,6 +205,7 @@ class MovementReconciliationService:
                 command,
                 state,
                 f"Gate state reconciled as {state.value}.",
+                presence_input_boolean_jobs=presence_input_boolean_jobs,
             )
 
         completed_at = command.completed_at or command.updated_at or now
@@ -200,10 +236,16 @@ class MovementReconciliationService:
         command: GateCommandRecord,
         state: GateState,
         detail: str,
+        *,
+        presence_input_boolean_jobs: list[tuple[Person, AccessEvent]] | None = None,
     ) -> int:
         presence_committed = saga.presence_committed
         if not presence_committed:
-            presence_committed = await self._commit_presence_if_possible(session, saga)
+            presence_committed = await self._commit_presence_if_possible(
+                session,
+                saga,
+                presence_input_boolean_jobs=presence_input_boolean_jobs,
+            )
         await self._ledger.mark_gate_command_reconciled(
             session,
             command,
@@ -248,7 +290,13 @@ class MovementReconciliationService:
             logger.warning("movement_reconciliation_gate_state_failed", extra={"error": str(exc)})
             return GateState.UNKNOWN
 
-    async def _commit_presence_if_possible(self, session, saga: MovementSagaRecord) -> bool:
+    async def _commit_presence_if_possible(
+        self,
+        session,
+        saga: MovementSagaRecord,
+        *,
+        presence_input_boolean_jobs: list[tuple[Person, AccessEvent]] | None = None,
+    ) -> bool:
         event = saga.access_event
         if not event or not event.person_id:
             return False
@@ -274,6 +322,13 @@ class MovementReconciliationService:
         )
         presence.last_event_id = event.id
         presence.last_changed_at = event.occurred_at
+        if (
+            presence_input_boolean_jobs is not None
+            and not (saga.decision_payload or {}).get("historical_repair")
+        ):
+            person = await session.get(Person, event.person_id)
+            if person:
+                presence_input_boolean_jobs.append((person, event))
         return True
 
     async def _publish_reconciled(

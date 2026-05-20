@@ -183,6 +183,10 @@ def _person_candidate(person: Person) -> SearchCandidate:
         *_fact("Schedule", schedule_name),
         *_fact("Vehicles", ", ".join(vehicle_regs)),
         *_fact("Garage doors", ", ".join(person.garage_door_entity_ids or [])),
+        *_fact(
+            "Presence input_booleans",
+            ", ".join(getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []),
+        ),
     ]
     label = _text(person.display_name) or "Unnamed person"
     return SearchCandidate(
@@ -207,6 +211,7 @@ def _person_candidate(person: Person) -> SearchCandidate:
             group_name,
             schedule_name,
             _text(person.home_assistant_mobile_app_notify_service),
+            _text(" ".join(getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or [])),
             *vehicle_regs,
         ),
         plate_texts=tuple(vehicle_regs),

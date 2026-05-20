@@ -74,6 +74,15 @@ class Person(Base, TimestampMixin):
     )
     garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     home_assistant_mobile_app_notify_service: Mapped[str | None] = mapped_column(String(255))
+    home_assistant_presence_input_boolean_entity_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    home_assistant_presence_input_boolean_entry_action: Mapped[str] = mapped_column(
+        String(20), default="turn_off", nullable=False
+    )
+    home_assistant_presence_input_boolean_exit_action: Mapped[str] = mapped_column(
+        String(20), default="turn_off", nullable=False
+    )
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

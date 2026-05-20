@@ -237,3 +237,44 @@ async def test_home_assistant_entities_returns_service_unavailable_when_ha_is_do
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Unable to reach Home Assistant: All connection attempts failed"
+
+
+async def test_home_assistant_entities_includes_input_boolean_entities(monkeypatch) -> None:
+    class FakeScalarRows:
+        def all(self):
+            return []
+
+    class FakeSession:
+        async def scalars(self, _statement):
+            return FakeScalarRows()
+
+    class WorkingClient:
+        async def list_states(self):
+            return [
+                HomeAssistantState(
+                    entity_id="input_boolean.person_announcements",
+                    state="off",
+                    attributes={"friendly_name": "Person Announcements"},
+                ),
+                HomeAssistantState(
+                    entity_id="cover.top_gate",
+                    state="closed",
+                    attributes={"friendly_name": "Top Gate"},
+                ),
+            ]
+
+        async def list_services(self):
+            return []
+
+    monkeypatch.setattr(integrations_api, "HomeAssistantClient", lambda: WorkingClient())
+
+    payload = await integrations_api.home_assistant_entities(_=SimpleNamespace(), session=FakeSession())
+
+    assert payload["input_boolean_entities"] == [
+        {
+            "entity_id": "input_boolean.person_announcements",
+            "name": "Person Announcements",
+            "state": "off",
+            "device_class": None,
+        }
+    ]

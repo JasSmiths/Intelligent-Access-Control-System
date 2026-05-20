@@ -221,6 +221,9 @@ export type Person = {
   notes: string | null;
   garage_door_entity_ids: string[];
   home_assistant_mobile_app_notify_service: string | null;
+  home_assistant_presence_input_boolean_entity_ids: string[];
+  home_assistant_presence_input_boolean_entry_action: "turn_on" | "turn_off";
+  home_assistant_presence_input_boolean_exit_action: "turn_on" | "turn_off";
   vehicles: Vehicle[];
 };
 
@@ -374,6 +377,7 @@ export type HomeAssistantMobileAppSuggestion = {
 
 export type HomeAssistantDiscovery = {
   cover_entities: HomeAssistantEntity[];
+  input_boolean_entities: HomeAssistantEntity[];
   gate_suggestions?: HomeAssistantManagedCover[];
   garage_door_suggestions?: HomeAssistantManagedCover[];
   media_player_entities: HomeAssistantEntity[];
