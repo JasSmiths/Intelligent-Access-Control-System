@@ -22,6 +22,7 @@ from app.services.person_presence_input_booleans import (
     normalize_input_boolean_action,
     normalize_input_boolean_entity_ids,
 )
+from app.services.access_devices import get_access_device_service
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -600,10 +601,9 @@ async def validate_garage_door_entity_ids(entity_ids: list[str]) -> list[str]:
     if not selected_entity_ids:
         return []
 
-    config = await get_runtime_config()
     configured_ids = {
-        str(entity["entity_id"])
-        for entity in config.home_assistant_garage_door_entities
+        device.key
+        for device in await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
     }
     unknown = [entity_id for entity_id in selected_entity_ids if entity_id not in configured_ids]
     if unknown:

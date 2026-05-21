@@ -1,5 +1,5 @@
 from app.modules.gate.base import GateController
-from app.modules.gate.home_assistant import HomeAssistantGateController
+from app.modules.gate.access_devices import AccessDeviceGateController
 from app.modules.lpr.base import LprAdapter
 from app.modules.lpr.ubiquiti import UbiquitiLprAdapter
 from app.modules.notifications.apprise_client import AppriseNotificationSender
@@ -26,7 +26,8 @@ def get_gate_controller(name: str) -> GateController:
     """Return a configured gate controller by plugin name."""
 
     controllers: dict[str, GateController] = {
-        "home_assistant": HomeAssistantGateController(),
+        "configured": AccessDeviceGateController(),
+        "access_device": AccessDeviceGateController(),
     }
     try:
         return controllers[name]

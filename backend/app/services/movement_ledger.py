@@ -247,6 +247,7 @@ class MovementLedgerRepository:
         mechanically_confirmed: bool,
         requires_reconciliation: bool,
         exception_class: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> GateCommandRecord:
         async with AsyncSessionLocal() as session:
             row = await session.get(GateCommandRecord, command_id)
@@ -260,6 +261,8 @@ class MovementLedgerRepository:
             row.mechanically_confirmed = mechanically_confirmed
             row.requires_reconciliation = requires_reconciliation
             row.exception_class = exception_class
+            if metadata:
+                row.command_metadata = {**(row.command_metadata or {}), **metadata}
             row.completed_at = utc_now()
             row.lease_token = None
             row.lease_expires_at = None

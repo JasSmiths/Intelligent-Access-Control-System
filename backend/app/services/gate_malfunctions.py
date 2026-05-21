@@ -10,7 +10,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
@@ -28,9 +27,9 @@ from app.models.enums import AccessDirection, GateMalfunctionStatus
 from app.modules.gate.base import GateState
 from app.modules.notifications.base import NotificationContext
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
+from app.services.access_devices import get_access_device_service
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
-from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import (
     GATE_MALFUNCTION_EVENT_TYPE,
@@ -417,13 +416,13 @@ class GateMalfunctionService:
         observed_at = datetime.now(tz=UTC)
         status: dict[str, Any] = {}
         try:
-            status = await get_home_assistant_service().status(refresh=refresh)
+            status = await get_access_device_service().status(refresh=refresh)
         except Exception as exc:
-            logger.warning("gate_malfunction_ha_status_failed", extra={"error": str(exc)})
+            logger.warning("gate_malfunction_access_device_status_failed", extra={"error": str(exc)})
 
         gates = status.get("gate_entities") if isinstance(status.get("gate_entities"), list) else []
         primary = gates[0] if gates and isinstance(gates[0], dict) else {}
-        entity_id = str(primary.get("entity_id") or status.get("gate_entity_id") or settings.home_assistant_gate_entity_id or "primary_gate")
+        entity_id = str(primary.get("entity_id") or status.get("gate_entity_id") or "primary_gate")
         name = str(primary.get("name") or entity_id)
         raw_state = str(status.get("current_gate_state") or primary.get("state") or "")
         changed_at = self._parse_datetime(
@@ -435,7 +434,7 @@ class GateMalfunctionService:
 
         if state == GateState.UNKNOWN:
             try:
-                state = self._coerce_gate_state(await get_gate_controller(settings.gate_controller).current_state())
+                state = self._coerce_gate_state(await get_gate_controller("configured").current_state())
             except UnsupportedModuleError as exc:
                 logger.warning("gate_malfunction_controller_unavailable", extra={"error": str(exc)})
             except Exception as exc:
@@ -692,7 +691,6 @@ class GateMalfunctionService:
             GateCommandIntent(
                 reason=command_reason,
                 source="gate_malfunction_recovery",
-                controller_name=settings.gate_controller,
                 bypass_schedule=True,
                 actor="Gate Malfunction Monitor",
                 idempotency_key=f"gate-command:malfunction:{malfunction_id}:{attempt_number}",

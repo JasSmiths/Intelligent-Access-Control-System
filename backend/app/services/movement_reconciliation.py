@@ -5,7 +5,6 @@ from functools import lru_cache
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import selectinload
 
-from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, GateCommandRecord, GateStateObservation, MovementSagaRecord, Person, Presence
@@ -285,7 +284,7 @@ class MovementReconciliationService:
 
     async def _current_gate_state(self) -> GateState:
         try:
-            return await get_gate_controller(settings.gate_controller).current_state()
+            return await get_gate_controller("configured").current_state()
         except Exception as exc:
             logger.warning("movement_reconciliation_gate_state_failed", extra={"error": str(exc)})
             return GateState.UNKNOWN

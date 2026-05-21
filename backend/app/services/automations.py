@@ -27,8 +27,7 @@ from app.models import (
     VisitorPass,
 )
 from app.models.enums import PresenceState
-from app.modules.home_assistant.client import HomeAssistantClient
-from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
+from app.services.access_devices import get_access_device_service
 from app.services.automation_integration_actions import (
     execute_integration_action,
     integration_action_catalog,
@@ -40,7 +39,6 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active, set_mode as set_maintenance_mode
 from app.services.notifications import render_template
-from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_AUTOMATION,
@@ -444,7 +442,7 @@ class AutomationService:
         logger.info("automation_engine_stopped")
 
     async def catalog(self) -> dict[str, Any]:
-        config = await get_runtime_config()
+        garage_devices = await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
         return {
             "triggers": TRIGGER_CATALOG,
             "conditions": CONDITION_CATALOG,
@@ -453,14 +451,11 @@ class AutomationService:
             "notification_rules": await self._notification_rule_catalog(),
             "garage_doors": [
                 {
-                    "entity_id": str(entity["entity_id"]),
-                    "name": str(entity.get("name") or entity["entity_id"]),
-                    "schedule_id": entity.get("schedule_id"),
+                    "entity_id": device.key,
+                    "name": device.name,
+                    "schedule_id": device.schedule_id,
                 }
-                for entity in enabled_cover_entities(
-                    config.home_assistant_garage_door_entities,
-                    default_open_service=config.home_assistant_gate_open_service,
-                )
+                for device in garage_devices
             ],
             "mock_context": build_context_variables(
                 AutomationContext(
@@ -1204,7 +1199,6 @@ class AutomationService:
                 GateCommandIntent(
                     reason=reason,
                     source="automation",
-                    controller_name=settings.gate_controller,
                     actor="Automation Engine",
                     metadata={
                         "rule_id": str(getattr(rule, "id", "")) if getattr(rule, "id", None) else None,
@@ -1283,13 +1277,8 @@ class AutomationService:
         *,
         rule: AutomationRule,
     ) -> dict[str, Any]:
-        config = await get_runtime_config()
-        entities = automation_garage_targets(
-            action,
-            config.home_assistant_garage_door_entities,
-            default_open_service=config.home_assistant_gate_open_service,
-        )
-        if not entities:
+        devices = await automation_garage_targets(action)
+        if not devices:
             return {
                 "id": action["id"],
                 "type": action["type"],
@@ -1299,15 +1288,13 @@ class AutomationService:
         command = "open" if action["type"] == "garage_door.open" else "close"
         reason = render_action_reason(action, context, rule)
         outcomes = []
-        for entity in entities:
+        for device in devices:
             outcomes.append(
                 await self._garage_command_outcome(
                     session,
-                    entity,
+                    device.key,
                     command,
                     reason,
-                    timezone_name=config.site_timezone,
-                    default_policy=config.schedule_default_policy,
                 )
             )
         failed = [outcome for outcome in outcomes if not outcome["accepted"]]
@@ -1322,38 +1309,17 @@ class AutomationService:
     async def _garage_command_outcome(
         self,
         session: AsyncSession,
-        entity: dict[str, Any],
+        device_key: str,
         command: str,
         reason: str,
-        *,
-        timezone_name: str,
-        default_policy: str,
     ) -> dict[str, Any]:
-        if command == "open":
-            schedule = await evaluate_schedule_id(
-                session,
-                entity.get("schedule_id"),
-                datetime.now(tz=UTC),
-                timezone_name=timezone_name,
-                default_policy=default_policy,
-                source="garage_door",
-            )
-            if not schedule.allowed:
-                return {
-                    "entity_id": str(entity["entity_id"]),
-                    "name": str(entity.get("name") or entity["entity_id"]),
-                    "accepted": False,
-                    "state": "schedule_denied",
-                    "detail": schedule.reason,
-                }
-        outcome = await command_cover(HomeAssistantClient(), entity, command, reason)
-        return {
-            "entity_id": outcome.entity_id,
-            "name": outcome.name,
-            "accepted": outcome.accepted,
-            "state": outcome.state,
-            "detail": outcome.detail,
-        }
+        outcome = await get_access_device_service().command_device(
+            device_key,
+            command,
+            reason,
+            schedule_source="garage_door",
+        )
+        return outcome.as_payload()
 
     async def _fresh_visitor_pass_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         visitor_pass = as_dict(payload.get("visitor_pass")) or payload
@@ -1532,21 +1498,13 @@ def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[st
     return {}
 
 
-def automation_garage_targets(
-    action: dict[str, Any],
-    configured_entities: list[dict[str, Any]],
-    *,
-    default_open_service: str | None,
-) -> list[dict[str, Any]]:
+async def automation_garage_targets(action: dict[str, Any]) -> list[Any]:
     action_config = as_dict(action.get("config"))
     target_ids = set(normalize_string_list(action_config.get("target_entity_ids")))
     return [
-        entity
-        for entity in enabled_cover_entities(
-            configured_entities,
-            default_open_service=default_open_service or "cover.open_cover",
-        )
-        if not target_ids or str(entity["entity_id"]) in target_ids
+        device
+        for device in await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
+        if not target_ids or device.key in target_ids
     ]
 
 

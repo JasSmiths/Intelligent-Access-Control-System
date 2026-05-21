@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Callable
 
-from app.core.config import settings
 from app.modules.gate.base import GateController, GateState
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.movement_ledger import GateCommandLease, get_movement_ledger_repository
@@ -17,7 +16,7 @@ MECHANICALLY_OPENING_STATES = {GateState.OPEN, GateState.OPENING}
 class GateCommandIntent:
     reason: str
     source: str
-    controller_name: str = settings.gate_controller
+    controller_name: str = "configured"
     bypass_schedule: bool = False
     action: str = "open"
     gate_key: str = "default"
@@ -42,6 +41,7 @@ class GateCommandOutcome:
     exception_class: str | None = None
     command_id: str | None = None
     reconciliation_required: bool | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def requires_reconciliation(self) -> bool:
@@ -68,7 +68,7 @@ class GateCommandOutcome:
             "exception_class": self.exception_class,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat(),
-            "metadata": self.intent.metadata,
+            "metadata": {**self.intent.metadata, **self.metadata},
         }
 
 
@@ -106,6 +106,7 @@ class GateCommandCoordinator:
                 accepted=result.accepted,
                 state=result.state,
                 detail=result.detail,
+                metadata=dict(result.metadata or {}),
                 mechanically_confirmed=bool(
                     result.accepted and result.state in MECHANICALLY_OPENING_STATES
                 ),
@@ -124,6 +125,7 @@ class GateCommandCoordinator:
                 mechanically_confirmed=outcome.mechanically_confirmed,
                 requires_reconciliation=outcome.requires_reconciliation,
                 exception_class=outcome.exception_class,
+                metadata=outcome.metadata,
             )
         return outcome
 
@@ -163,6 +165,7 @@ class GateCommandCoordinator:
             completed_at=completed_at,
             command_id=str(lease.record.id),
             reconciliation_required=lease.record.requires_reconciliation,
+            metadata=getattr(lease.record, "command_metadata", None) or {},
         )
 
     def _exception_outcome(

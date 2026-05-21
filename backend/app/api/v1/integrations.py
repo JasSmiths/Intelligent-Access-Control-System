@@ -1,5 +1,4 @@
 from difflib import SequenceMatcher
-from datetime import UTC, datetime
 import re
 
 from pydantic import BaseModel, Field
@@ -13,12 +12,11 @@ from app.db.session import get_db_session
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.models import Person, User
+from app.modules.access_devices.registry import get_access_device_provider
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
-    command_cover,
     detected_garage_door_entities,
     detected_gate_entities,
-    enabled_cover_entities,
     normalize_cover_entities,
 )
 from app.modules.home_assistant.client import (
@@ -39,13 +37,13 @@ from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppTarget,
 )
 from app.services.dependency_updates import get_dependency_update_service
+from app.services.access_devices import get_access_device_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
-from app.services.schedules import evaluate_schedule_id
-from app.services.settings import get_runtime_config, update_settings
+from app.services.settings import get_runtime_config, normalize_esphome_device_id, update_settings
 from app.services.action_confirmations import (
     ActionConfirmationError,
     consume_action_confirmation,
@@ -129,7 +127,9 @@ async def update_integration_settings(
         service = get_home_assistant_service()
         await service.stop()
         await service.start()
-    if any(key.startswith(("home_assistant_", "apprise_")) for key in values):
+    if any(key.startswith("esphome_") or key.startswith("gate_") for key in values):
+        await get_access_device_service().restart()
+    if any(key.startswith(("home_assistant_", "esphome_", "apprise_")) for key in values):
         await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
 
 
@@ -169,6 +169,26 @@ class AddAppriseUrlRequest(BaseModel):
     url: str = Field(min_length=6, max_length=1200)
 
 
+class ESPHomeDeviceRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=6053, ge=1, le=65535)
+    encryption_key: str | None = Field(default=None, max_length=512)
+    legacy_password: str | None = Field(default=None, max_length=512)
+    timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+    enabled: bool = True
+
+
+class ESPHomeDevicePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    encryption_key: str | None = Field(default=None, max_length=512)
+    legacy_password: str | None = Field(default=None, max_length=512)
+    timeout_seconds: float | None = Field(default=None, ge=5.0, le=120.0)
+    enabled: bool | None = None
+
+
 class DvlaLookupRequest(BaseModel):
     registration_number: str = Field(min_length=1, max_length=20)
 
@@ -176,6 +196,127 @@ class DvlaLookupRequest(BaseModel):
 @router.get("/home-assistant/status")
 async def home_assistant_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
     return await get_home_assistant_service().status(refresh=refresh)
+
+
+@router.get("/gate/status")
+async def gate_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+    return await get_access_device_service().status(refresh=refresh)
+
+
+@router.get("/esphome/devices")
+async def esphome_devices(_: User = Depends(admin_user)) -> dict:
+    config = await get_runtime_config()
+    return {"devices": [_esphome_device_summary(device) for device in config.esphome_devices]}
+
+
+@router.post("/esphome/devices")
+async def add_esphome_device(request: ESPHomeDeviceRequest, user: User = Depends(admin_user)) -> dict:
+    config = await get_runtime_config()
+    devices = [dict(device) for device in config.esphome_devices]
+    device_id = _unique_esphome_device_id(request.name, devices)
+    devices.append(_esphome_device_from_request(device_id, request))
+    await update_integration_settings(
+        user,
+        {"esphome_devices": devices},
+        before={"esphome_devices": [_esphome_device_summary(device) for device in config.esphome_devices]},
+        after={"esphome_devices": [_esphome_device_summary(device) for device in devices]},
+    )
+    return {"devices": [_esphome_device_summary(device) for device in devices]}
+
+
+@router.patch("/esphome/devices/{device_id}")
+async def update_esphome_device(
+    device_id: str,
+    request: ESPHomeDevicePatchRequest,
+    user: User = Depends(admin_user),
+) -> dict:
+    config = await get_runtime_config()
+    devices = [dict(device) for device in config.esphome_devices]
+    index = _find_esphome_device_index(devices, device_id)
+    if index is None:
+        raise HTTPException(status_code=404, detail="ESPHome device not found.")
+    before = [_esphome_device_summary(device) for device in devices]
+    device = devices[index]
+    updates = request.model_dump(exclude_unset=True)
+    if "name" in updates:
+        device["name"] = str(updates["name"] or "").strip()
+    if "host" in updates:
+        device["host"] = str(updates["host"] or "").strip()
+    if "port" in updates and updates["port"] is not None:
+        device["port"] = int(updates["port"])
+    if "encryption_key" in updates and updates["encryption_key"] is not None:
+        device["encryption_key"] = str(updates["encryption_key"] or "")
+    if "legacy_password" in updates and updates["legacy_password"] is not None:
+        device["legacy_password"] = str(updates["legacy_password"] or "")
+    if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
+        device["timeout_seconds"] = float(updates["timeout_seconds"])
+    if "enabled" in updates and updates["enabled"] is not None:
+        device["enabled"] = bool(updates["enabled"])
+    devices[index] = device
+    await update_integration_settings(
+        user,
+        {"esphome_devices": devices},
+        before={"esphome_devices": before},
+        after={"esphome_devices": [_esphome_device_summary(row) for row in devices]},
+    )
+    return {"devices": [_esphome_device_summary(row) for row in devices]}
+
+
+@router.delete("/esphome/devices/{device_id}")
+async def remove_esphome_device(device_id: str, user: User = Depends(admin_user)) -> dict:
+    config = await get_runtime_config()
+    devices = [dict(device) for device in config.esphome_devices]
+    index = _find_esphome_device_index(devices, device_id)
+    if index is None:
+        raise HTTPException(status_code=404, detail="ESPHome device not found.")
+    before = [_esphome_device_summary(device) for device in devices]
+    devices.pop(index)
+    await update_integration_settings(
+        user,
+        {"esphome_devices": devices},
+        before={"esphome_devices": before},
+        after={"esphome_devices": [_esphome_device_summary(device) for device in devices]},
+    )
+    return {"devices": [_esphome_device_summary(device) for device in devices]}
+
+
+@router.get("/esphome/status")
+async def esphome_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+    status = await get_access_device_provider("esphome").status(refresh=refresh)
+    return status.__dict__
+
+
+@router.post("/esphome/devices/{device_id}/test")
+async def test_esphome_device(device_id: str, _: User = Depends(admin_user)) -> dict:
+    try:
+        entities = await get_access_device_provider("esphome").discover_covers(device_id=device_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "cover_count": len(entities)}
+
+
+@router.get("/esphome/entities")
+async def esphome_entities(device_id: str | None = None, _: User = Depends(admin_user)) -> dict:
+    try:
+        entities = await get_access_device_provider("esphome").discover_covers(device_id=device_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "cover_entities": [
+            _serialize_esphome_entity(entity)
+            for entity in entities
+        ],
+        "gate_suggestions": [
+            {**_serialize_esphome_entity(entity), "enabled": True}
+            for entity in entities
+            if entity.kind == "gate"
+        ],
+        "garage_door_suggestions": [
+            {**_serialize_esphome_entity(entity), "enabled": True}
+            for entity in entities
+            if entity.kind == "garage_door"
+        ],
+    }
 
 
 @router.get("/home-assistant/entities")
@@ -403,7 +544,7 @@ async def open_gate(
             actor=actor_from_user(user),
             actor_user_id=user.id,
             target_entity="Gate",
-            target_label="Home Assistant Gate",
+            target_label="Configured Gate",
             outcome="failed",
             level="error",
             metadata={
@@ -423,7 +564,7 @@ async def open_gate(
         actor=actor_from_user(user),
         actor_user_id=user.id,
         target_entity="Gate",
-        target_label="Home Assistant Gate",
+        target_label="Configured Gate",
         metadata={
             "reason": request.reason,
             "state": result.state.value,
@@ -452,20 +593,16 @@ async def cover_command(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     await _raise_if_maintenance_active()
-    entity_id = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
-    if not entity_id:
+    device_key = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
+    if not device_key:
         raise HTTPException(status_code=400, detail="A configured garage door entity is required.")
 
-    config = await get_runtime_config()
-    configured_entities = {
-        str(entity["entity_id"]): entity
-        for entity in enabled_cover_entities(
-            config.home_assistant_garage_door_entities,
-            default_open_service=config.home_assistant_gate_open_service,
-        )
+    devices = {
+        device.key: device
+        for device in await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
     }
-    entity = configured_entities.get(entity_id)
-    if not entity:
+    device = devices.get(device_key)
+    if not device:
         raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
@@ -477,23 +614,12 @@ async def cover_command(
         confirmation_token=request.confirmation_token,
     )
 
-    if request.action == "open":
-        schedule_evaluation = await evaluate_schedule_id(
-            session,
-            entity.get("schedule_id"),
-            datetime.now(tz=UTC),
-            timezone_name=config.site_timezone,
-            default_policy=config.schedule_default_policy,
-            source="garage_door",
-        )
-        if not schedule_evaluation.allowed:
-            raise HTTPException(
-                status_code=403,
-                detail=schedule_evaluation.reason or "Garage door is outside its assigned schedule.",
-            )
-
-    client = HomeAssistantClient()
-    outcome = await command_cover(client, entity, request.action, request.reason)
+    outcome = await get_access_device_service().command_device(
+        device.key,
+        request.action,
+        request.reason,
+        schedule_source="garage_door",
+    )
     if not outcome.accepted:
         emit_audit_log(
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -501,11 +627,11 @@ async def cover_command(
             actor=actor_from_user(user),
             actor_user_id=user.id,
             target_entity="Cover",
-            target_id=outcome.entity_id,
-            target_label=outcome.name,
+            target_id=device.key,
+            target_label=device.name,
             outcome="failed",
             level="error",
-            metadata={"reason": request.reason, "state": outcome.state, "detail": outcome.detail},
+            metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
         )
         raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
     emit_audit_log(
@@ -514,17 +640,19 @@ async def cover_command(
         actor=actor_from_user(user),
         actor_user_id=user.id,
         target_entity="Cover",
-        target_id=outcome.entity_id,
-        target_label=outcome.name,
-        metadata={"reason": request.reason, "state": outcome.state, "detail": outcome.detail},
+        target_id=device.key,
+        target_label=device.name,
+        metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
     )
     return {
         "accepted": True,
-        "entity_id": outcome.entity_id,
-        "target": request.target or outcome.entity_id,
+        "entity_id": device.key,
+        "target": request.target or device.key,
         "action": request.action,
-        "state": outcome.state,
+        "state": outcome.state.value,
         "detail": request.reason,
+        "used_provider": outcome.used_provider,
+        "failover_used": outcome.failover_used,
     }
 
 
@@ -682,6 +810,68 @@ async def send_test_notification(
         metadata={"severity": request.severity},
     )
     return {"status": "sent", "title": notification.title, "body": notification.body}
+
+
+def _esphome_device_summary(device: dict) -> dict:
+    return {
+        "id": str(device.get("id") or ""),
+        "name": str(device.get("name") or ""),
+        "host": str(device.get("host") or ""),
+        "port": int(device.get("port") or 6053),
+        "timeout_seconds": float(device.get("timeout_seconds") or 30.0),
+        "enabled": bool(device.get("enabled", True)),
+        "encryption_key_configured": bool(str(device.get("encryption_key") or "").strip()),
+        "legacy_password_configured": bool(str(device.get("legacy_password") or "").strip()),
+    }
+
+
+def _esphome_device_from_request(device_id: str, request: ESPHomeDeviceRequest) -> dict:
+    return {
+        "id": device_id,
+        "name": request.name.strip(),
+        "host": request.host.strip(),
+        "port": request.port,
+        "encryption_key": str(request.encryption_key or ""),
+        "legacy_password": str(request.legacy_password or ""),
+        "timeout_seconds": request.timeout_seconds,
+        "enabled": request.enabled,
+    }
+
+
+def _find_esphome_device_index(devices: list[dict], device_id: str) -> int | None:
+    for index, device in enumerate(devices):
+        if str(device.get("id") or "") == device_id:
+            return index
+    return None
+
+
+def _unique_esphome_device_id(name: str, devices: list[dict]) -> str:
+    base = normalize_esphome_device_id(name) or "esphome_device"
+    existing = {str(device.get("id") or "") for device in devices}
+    if base not in existing:
+        return base
+    suffix = 2
+    while f"{base}_{suffix}" in existing:
+        suffix += 1
+    return f"{base}_{suffix}"
+
+
+def _serialize_esphome_entity(entity) -> dict:
+    device_id = str(entity.metadata.get("device_id") or "")
+    external_id = str(entity.metadata.get("external_id") or entity.external_id)
+    entity_id = f"{device_id}:{external_id}" if device_id else external_id
+    return {
+        "entity_id": entity_id,
+        "name": (
+            f"{entity.metadata.get('device_name')} - {entity.name}"
+            if entity.metadata.get("device_name")
+            else entity.name
+        ),
+        "state": entity.state,
+        "device_class": entity.metadata.get("device_class"),
+        "kind": entity.kind,
+        "metadata": {**entity.metadata, "external_id": external_id},
+    }
 
 
 def _serialize_ha_entity(state: HomeAssistantState) -> dict[str, str | None]:

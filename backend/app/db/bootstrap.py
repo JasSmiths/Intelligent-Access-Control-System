@@ -6,6 +6,7 @@ from app.db.base import Base
 from app.db.session import engine
 from app.services.alfred.feedback import alfred_feedback_service
 from app.services.auth_secret_management import migrate_encrypted_payloads_for_active_auth_secret
+from app.services.access_devices import seed_access_devices_from_legacy_settings
 from app.services.settings import seed_dynamic_settings
 
 logger = get_logger(__name__)
@@ -580,6 +581,7 @@ async def init_database() -> None:
         logger.info("auth_secret_encrypted_payloads_migrated", extra=migration)
 
     await seed_dynamic_settings()
+    await seed_access_devices_from_legacy_settings()
     await alfred_feedback_service.seed_default_lessons()
     await alfred_feedback_service.seed_default_eval_examples()
 

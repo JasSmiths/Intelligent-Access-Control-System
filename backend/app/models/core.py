@@ -98,6 +98,52 @@ class Person(Base, TimestampMixin):
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
 
 
+class AccessDevice(Base, TimestampMixin):
+    __tablename__ = "access_devices"
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_access_devices_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL"),
+        index=True,
+    )
+    open_for_access: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+
+    schedule: Mapped["Schedule | None"] = relationship()
+    provider_bindings: Mapped[list["AccessDeviceProviderBinding"]] = relationship(
+        back_populates="access_device",
+        cascade="all, delete-orphan",
+        order_by="AccessDeviceProviderBinding.provider",
+    )
+
+
+class AccessDeviceProviderBinding(Base, TimestampMixin):
+    __tablename__ = "access_device_provider_bindings"
+    __table_args__ = (
+        UniqueConstraint("access_device_id", "provider", name="uq_access_device_provider"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    access_device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("access_devices.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    access_device: Mapped[AccessDevice] = relationship(back_populates="provider_bindings")
+
+
 class Vehicle(Base, TimestampMixin):
     __tablename__ = "vehicles"
 

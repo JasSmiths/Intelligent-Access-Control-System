@@ -13,6 +13,7 @@ from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal
 from app.services.auth import authenticate_request, count_users
+from app.services.access_devices import get_access_device_service
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.automations import get_automation_service
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI):
     await get_automation_service().start()
     await get_discord_messaging_service().start()
     await get_visitor_pass_service().start()
+    await get_access_device_service().start()
     await get_access_event_service().start()
     await get_movement_reconciliation_service().start()
     await get_home_assistant_service().start()
@@ -120,6 +122,7 @@ async def lifespan(app: FastAPI):
         await get_home_assistant_service().stop()
         await get_movement_reconciliation_service().stop()
         await get_access_event_service().stop()
+        await get_access_device_service().stop()
         await get_visitor_pass_service().stop()
         await get_discord_messaging_service().stop()
         await get_automation_service().stop()

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Person, Schedule, ScheduleOverride, Vehicle
-from app.services.settings import get_runtime_config
+from app.services.access_devices import get_access_device_service
 
 MINUTES_PER_SLOT = 30
 SLOTS_PER_DAY = 48
@@ -210,21 +210,16 @@ async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -
             .order_by(Vehicle.registration_number)
         )
     ).all()
-    config = await get_runtime_config()
     schedule_id_text = str(schedule_id)
     doors = [
         {
-            "id": str(entity.get("entity_id")),
-            "name": str(entity.get("name") or entity.get("entity_id")),
-            "entity_id": str(entity.get("entity_id")),
-            "kind": kind,
+            "id": device.key,
+            "name": device.name,
+            "entity_id": device.key,
+            "kind": device.kind,
         }
-        for kind, entities in (
-            ("gate", config.home_assistant_gate_entities),
-            ("garage_door", config.home_assistant_garage_door_entities),
-        )
-        for entity in entities
-        if str(entity.get("schedule_id") or "") == schedule_id_text
+        for device in await get_access_device_service().list_devices()
+        if str(device.schedule_id or "") == schedule_id_text
     ]
     return {
         "people": [

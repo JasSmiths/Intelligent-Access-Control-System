@@ -208,10 +208,10 @@ export function Dashboard({
   const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
   const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
-  const homeAssistantDegraded = Boolean(integrationStatus?.configured && (integrationStatus.degraded || integrationStatus.connected === false));
-  const siteStatusTitle = maintenanceActive ? "Maintenance Mode Enabled" : homeAssistantDegraded ? "Integration degraded" : critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
-  const siteStatusDetail = maintenanceActive ? "All automated actions disabled" : homeAssistantDegraded
-    ? integrationStatus?.last_error || "Home Assistant state sync is not connected"
+  const integrationDegraded = Boolean(integrationStatus?.configured && (integrationStatus.degraded || integrationStatus.connected === false));
+  const siteStatusTitle = maintenanceActive ? "Maintenance Mode Enabled" : integrationDegraded ? "Integration degraded" : critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
+  const siteStatusDetail = maintenanceActive ? "All automated actions disabled" : integrationDegraded
+    ? integrationStatus?.last_error || "Access-device state sync is not connected"
     : critical
     ? `${critical} critical alert${critical === 1 ? "" : "s"}`
     : warning
@@ -309,7 +309,7 @@ export function Dashboard({
       <div className="dashboard-grid">
         <div className="card site-status-card">
           <PanelHeader title="Site Status" />
-          <div className={maintenanceActive ? "site-status-main maintenance" : homeAssistantDegraded ? "site-status-main degraded" : "site-status-main"}>
+          <div className={maintenanceActive ? "site-status-main maintenance" : integrationDegraded ? "site-status-main degraded" : "site-status-main"}>
             {maintenanceActive ? (
               <button
                 className="maintenance-status-icon"
@@ -324,7 +324,7 @@ export function Dashboard({
               >
                 <Construction size={54} strokeWidth={1} />
               </button>
-            ) : homeAssistantDegraded ? (
+            ) : integrationDegraded ? (
               <AlertTriangle size={54} />
             ) : (
               <ShieldCheck size={54} />

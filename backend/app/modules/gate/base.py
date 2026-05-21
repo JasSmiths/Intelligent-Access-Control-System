@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class GateState(StrEnum):
@@ -17,6 +17,7 @@ class GateCommandResult:
     accepted: bool
     state: GateState
     detail: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class GateController(Protocol):

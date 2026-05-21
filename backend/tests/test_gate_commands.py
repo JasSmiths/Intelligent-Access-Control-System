@@ -32,6 +32,7 @@ class FakeGateCommandLedger:
             detail=None,
             mechanically_confirmed=False,
             exception_class=None,
+            command_metadata={},
             lease_token="lease-token",
         )
         self.records[record.id] = record
@@ -48,6 +49,7 @@ class FakeGateCommandLedger:
         mechanically_confirmed: bool,
         requires_reconciliation: bool,
         exception_class: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         record = self.records[command_id]
         record.accepted = accepted
@@ -55,6 +57,7 @@ class FakeGateCommandLedger:
         record.detail = detail
         record.mechanically_confirmed = mechanically_confirmed
         record.exception_class = exception_class
+        record.command_metadata = metadata or {}
         record.completed_at = datetime.now(tz=UTC)
         record.updated_at = record.completed_at
         self._lock.release()

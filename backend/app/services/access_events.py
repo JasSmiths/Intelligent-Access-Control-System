@@ -20,8 +20,6 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
-from app.modules.home_assistant.client import HomeAssistantClient
-from app.modules.home_assistant.covers import command_cover, enabled_cover_entities
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
 from app.models import AccessEvent, Anomaly, MovementSessionRecord, Person, Presence, Vehicle, VisitorPass
@@ -38,6 +36,7 @@ from app.models.enums import (
 )
 from app.modules.notifications.base import NotificationContext
 from app.services.alert_snapshots import alert_snapshot_metadata_from_event
+from app.services.access_devices import get_access_device_service
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
@@ -55,7 +54,7 @@ from app.services.movement_fsm import (
 )
 from app.services.notifications import get_notification_service
 from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
-from app.services.schedules import ScheduleEvaluation, evaluate_schedule_id, evaluate_vehicle_schedule
+from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.snapshots import (
     SNAPSHOT_HEIGHT,
@@ -347,6 +346,7 @@ class AccessEventService:
     async def enqueue_plate_read(self, read: PlateRead) -> None:
         if await is_maintenance_mode_active():
             return
+        received_at = datetime.now(tz=UTC)
         read = await self._read_with_gate_observation(read)
         gate_observation = self._gate_observation_from_read(read)
         logger.info(
@@ -355,7 +355,11 @@ class AccessEventService:
                 "registration_number": read.registration_number,
                 "confidence": read.confidence,
                 "source": read.source,
+                "captured_at": read.captured_at.isoformat(),
+                "received_at": received_at.isoformat(),
+                "capture_to_receive_ms": _datetime_delta_ms(received_at, read.captured_at),
                 "gate_state": gate_observation.get("state"),
+                "gate_observed_at": gate_observation.get("observed_at"),
             },
         )
         await self._queue.put(read)
@@ -376,7 +380,7 @@ class AccessEventService:
         observed_at = datetime.now(tz=UTC)
         detail: str | None = None
         try:
-            gate = get_gate_controller(settings.gate_controller)
+            gate = get_gate_controller("configured")
             state = self._coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
         except UnsupportedModuleError as exc:
             state = GateState.UNKNOWN
@@ -397,7 +401,7 @@ class AccessEventService:
         raw_payload[GATE_OBSERVATION_PAYLOAD_KEY] = {
             "state": state.value,
             "observed_at": observed_at.isoformat(),
-            "controller": settings.gate_controller,
+            "controller": "configured",
             "detail": detail,
         }
         return PlateRead(
@@ -1779,6 +1783,21 @@ class AccessEventService:
         read = window.best_read
         direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
+        logger.info(
+            "plate_read_finalize_started",
+            extra={
+                "registration_number": read.registration_number,
+                "source": read.source,
+                "candidate_count": len(window.reads),
+                "first_seen": window.first_seen.isoformat(),
+                "updated_at": window.updated_at.isoformat(),
+                "finalize_started_at": finalize_started_at.isoformat(),
+                "first_seen_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.first_seen),
+                "last_read_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.updated_at),
+                "exact_known_vehicle": _is_exact_known_vehicle_plate_match(read),
+                "visitor_pass_match": _is_visitor_pass_plate_match(read) is not None,
+            },
+        )
         trace = telemetry.start_trace(
             f"Plate Detection - {read.registration_number}",
             category=TELEMETRY_CATEGORY_LPR,
@@ -2766,7 +2785,7 @@ class AccessEventService:
                 attributes={
                     "event_id": str(event.id),
                     "registration_number": event.registration_number,
-                    "controller": settings.gate_controller,
+                    "controller": "configured",
                 },
                 input_payload={"reason": reason},
             )
@@ -2777,7 +2796,6 @@ class AccessEventService:
             GateCommandIntent(
                 reason=reason,
                 source="automatic_lpr_grant",
-                controller_name=settings.gate_controller,
                 event_id=str(event.id),
                 movement_saga_id=movement_saga_id,
                 registration_number=event.registration_number,
@@ -2829,6 +2847,10 @@ class AccessEventService:
                             "registration_number": event.registration_number,
                             "event_id": str(event.id),
                             "state": outcome.state.value,
+                            "used_provider": outcome.metadata.get("used_provider"),
+                            "primary_provider": outcome.metadata.get("primary_provider"),
+                            "failover_used": outcome.metadata.get("failover_used"),
+                            "access_device_outcomes": outcome.metadata.get("access_device_outcomes"),
                         },
                     )
             else:
@@ -2851,7 +2873,7 @@ class AccessEventService:
             outcome=audit_outcome,
             level=audit_level,
             metadata={
-                "controller": settings.gate_controller,
+                "controller": "configured",
                 "reason": reason,
                 **outcome.as_payload(),
             },
@@ -2913,7 +2935,7 @@ class AccessEventService:
             outcome="skipped",
             level="warning",
             metadata={
-                "controller": settings.gate_controller,
+                    "controller": "configured",
                 "reason": "gate_state_not_closed_at_plate_read_time",
                 "state": gate_observation.get("state") or GateState.UNKNOWN.value,
                 "gate_observation": gate_observation,
@@ -2944,141 +2966,63 @@ class AccessEventService:
         if not person or not person.garage_door_entity_ids:
             return
 
-        config = await get_runtime_config()
         selected_ids = set(person.garage_door_entity_ids)
-        entities = [
-            entity
-            for entity in enabled_cover_entities(
-                config.home_assistant_garage_door_entities,
-                default_open_service=config.home_assistant_gate_open_service,
-            )
-            if str(entity["entity_id"]) in selected_ids
+        service = get_access_device_service()
+        devices = [
+            device
+            for device in await service.list_devices(kind="garage_door", enabled_only=True)
+            if device.key in selected_ids
         ]
-        if not entities:
+        if not devices:
             return
 
-        client = HomeAssistantClient()
-        async with AsyncSessionLocal() as schedule_session:
-            schedule_evaluations = {
-                str(entity["entity_id"]): await evaluate_schedule_id(
-                    schedule_session,
-                    entity.get("schedule_id"),
-                    event.occurred_at,
-                    timezone_name=config.site_timezone,
-                    default_policy=config.schedule_default_policy,
-                    source="garage_door",
-                )
-                for entity in entities
-            }
-
-        for entity in entities:
-            schedule_evaluation = schedule_evaluations[str(entity["entity_id"])]
+        for device in devices:
             garage_span = (
                 trace.start_span(
-                    "Home Assistant Garage Door Command",
+                    "Garage Door Command",
                     category=TELEMETRY_CATEGORY_INTEGRATIONS,
                     attributes={
                         "event_id": str(event.id),
-                        "entity_id": str(entity["entity_id"]),
-                        "name": str(entity.get("name") or entity["entity_id"]),
+                        "entity_id": device.key,
+                        "name": device.name,
                     },
                     input_payload={"reason": reason, "action": "open"},
                 )
                 if trace
                 else None
             )
-            if not schedule_evaluation.allowed:
-                detail = (
-                    schedule_evaluation.reason
-                    or f"{entity.get('name') or entity['entity_id']} is outside its assigned schedule."
-                )
-                await event_bus.publish(
-                    "garage_door.open_failed",
-                    {
-                        "event_id": str(event.id),
-                        "registration_number": event.registration_number,
-                        "person_id": str(person.id),
-                        "person": person.display_name,
-                        "entity_id": str(entity["entity_id"]),
-                        "name": str(entity.get("name") or entity["entity_id"]),
-                        "accepted": False,
-                        "state": "schedule_denied",
-                        "detail": detail,
-                    },
-                )
-                await self._audit_automatic_hardware_command(
-                    action="garage_door.open.automatic",
-                    event=event,
-                    person=person,
-                    target_entity="GarageDoor",
-                    target_id=str(entity["entity_id"]),
-                    target_label=str(entity.get("name") or entity["entity_id"]),
-                    outcome="rejected",
-                    level="warning",
-                    metadata={
-                        "controller": "home_assistant",
-                        "reason": reason,
-                        "accepted": False,
-                        "state": "schedule_denied",
-                        "detail": detail,
-                        "schedule": self._schedule_evaluation_payload(schedule_evaluation),
-                    },
-                )
-                await get_notification_service().notify(
-                    NotificationContext(
-                        event_type="garage_door_open_failed",
-                        subject=event.registration_number,
-                        severity=AnomalySeverity.WARNING.value,
-                        facts=self._notification_facts(
-                            event,
-                            person,
-                            event.vehicle,
-                            detail,
-                            dvla_enrichment=dvla_enrichment,
-                            garage_door=str(entity.get("name") or entity["entity_id"]),
-                            entity_id=str(entity["entity_id"]),
-                        ),
-                    )
-                )
-                if garage_span:
-                    garage_span.finish(
-                        status="error",
-                        output_payload={
-                            "accepted": False,
-                            "state": "schedule_denied",
-                            "detail": detail,
-                        },
-                        error=detail,
-                    )
-                continue
-
-            outcome = await command_cover(client, entity, "open", reason)
+            outcome = await service.command_device(
+                device.key,
+                "open",
+                reason,
+                schedule_source="garage_door",
+            )
             if garage_span:
                 garage_span.finish(
                     status="ok" if outcome.accepted else "error",
-                    output_payload={
-                        "accepted": outcome.accepted,
-                        "state": outcome.state,
-                        "detail": outcome.detail,
-                    },
+                    output_payload=outcome.as_payload(),
                     error=None if outcome.accepted else outcome.detail,
                 )
             event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
+            schedule_denied = bool(outcome.metadata.get("schedule_denied")) if hasattr(outcome, "metadata") else False
             await self._audit_automatic_hardware_command(
                 action="garage_door.open.automatic",
                 event=event,
                 person=person,
                 target_entity="GarageDoor",
-                target_id=outcome.entity_id,
-                target_label=outcome.name,
-                outcome="accepted" if outcome.accepted else "failed",
-                level="info" if outcome.accepted else "error",
+                target_id=device.key,
+                target_label=device.name,
+                outcome="accepted" if outcome.accepted else "rejected" if schedule_denied else "failed",
+                level="info" if outcome.accepted else "warning" if schedule_denied else "error",
                 metadata={
-                    "controller": "home_assistant",
+                    "controller": outcome.used_provider or outcome.primary_provider or "configured",
                     "reason": reason,
                     "accepted": outcome.accepted,
-                    "state": outcome.state,
+                    "state": "schedule_denied" if schedule_denied else outcome.state.value,
                     "detail": outcome.detail,
+                    "failover_used": outcome.failover_used,
+                    "attempts": [attempt.__dict__ for attempt in outcome.attempts],
+                    **({"schedule_denied": True} if schedule_denied else {}),
                 },
             )
             await event_bus.publish(
@@ -3088,10 +3032,10 @@ class AccessEventService:
                     "registration_number": event.registration_number,
                     "person_id": str(person.id),
                     "person": person.display_name,
-                    "entity_id": outcome.entity_id,
-                    "name": outcome.name,
+                    "entity_id": device.key,
+                    "name": device.name,
                     "accepted": outcome.accepted,
-                    "state": outcome.state,
+                    "state": outcome.state.value,
                     "detail": outcome.detail,
                 },
             )
@@ -3102,8 +3046,13 @@ class AccessEventService:
                         "registration_number": event.registration_number,
                         "event_id": str(event.id),
                         "person_id": str(person.id),
-                        "entity_id": outcome.entity_id,
-                        "state": outcome.state,
+                        "entity_id": device.key,
+                        "state": outcome.state.value,
+                        "used_provider": outcome.used_provider,
+                        "primary_provider": outcome.primary_provider,
+                        "failover_used": outcome.failover_used,
+                        "attempts": [attempt.__dict__ for attempt in outcome.attempts],
+                        "metadata": outcome.metadata,
                     },
                 )
                 continue
@@ -3114,7 +3063,7 @@ class AccessEventService:
                     "registration_number": event.registration_number,
                     "event_id": str(event.id),
                     "person_id": str(person.id),
-                    "entity_id": outcome.entity_id,
+                    "entity_id": device.key,
                     "detail": outcome.detail,
                 },
             )
@@ -3127,10 +3076,10 @@ class AccessEventService:
                         event,
                         person,
                         event.vehicle,
-                        outcome.detail or f"Automatic garage door open command failed for {outcome.name}.",
+                        outcome.detail or f"Automatic garage door open command failed for {device.name}.",
                         dvla_enrichment=dvla_enrichment,
-                        garage_door=outcome.name,
-                        entity_id=outcome.entity_id,
+                        garage_door=device.name,
+                        entity_id=device.key,
                     ),
                 )
             )
@@ -3891,6 +3840,10 @@ class AccessEventService:
         presence.last_event_id = event.id
         presence.last_changed_at = event.occurred_at
         return True
+
+
+def _datetime_delta_ms(end: datetime, start: datetime) -> float:
+    return round(max(0.0, (end - start).total_seconds()) * 1000.0, 3)
 
 
 @lru_cache

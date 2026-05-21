@@ -82,6 +82,7 @@ import {
 
 import {
   api,
+  AccessDevice,
   Badge,
   CardHeader,
   coerceSettingsPayload,
@@ -336,6 +337,348 @@ export function DynamicSettingsView({
       </form>
     </section>
   );
+}
+
+type AccessDeviceKind = "gate" | "garage_door";
+type AccessDeviceDiscoveryItem = {
+  entity_id: string;
+  name: string | null;
+  state?: string | null;
+  kind?: string;
+  device_class?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export function AccessDevicesSettingsView({
+  kind,
+  title,
+  icon: Icon,
+  refreshToken,
+  schedules
+}: {
+  kind: AccessDeviceKind;
+  title: string;
+  icon: React.ElementType;
+  refreshToken: number;
+  schedules: Schedule[];
+}) {
+  const [devices, setDevices] = React.useState<AccessDevice[]>([]);
+  const [devicesLoading, setDevicesLoading] = React.useState(true);
+  const [discoveryLoading, setDiscoveryLoading] = React.useState(false);
+  const [savingKey, setSavingKey] = React.useState("");
+  const [providerSavingKey, setProviderSavingKey] = React.useState("");
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [homeAssistantCovers, setHomeAssistantCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
+  const [esphomeCovers, setEsphomeCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
+  const accessSettings = useSettings("access");
+  const lastRefreshTokenRef = React.useRef(refreshToken);
+
+  const loadDevices = React.useCallback(async (showLoading = true) => {
+    if (showLoading) setDevicesLoading(true);
+    setError("");
+    try {
+      setDevices(await api.get<AccessDevice[]>(`/api/v1/access-devices?kind=${kind}`));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load access devices.");
+    } finally {
+      if (showLoading) setDevicesLoading(false);
+    }
+  }, [kind]);
+
+  const loadDiscovery = React.useCallback(async () => {
+    setDiscoveryLoading(true);
+    try {
+      const [haDiscovery, esphomeDiscovery] = await Promise.all([
+        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/home-assistant/entities").catch(() => ({ cover_entities: [] })),
+        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/esphome/entities").catch(() => ({ cover_entities: [] }))
+      ]);
+      setHomeAssistantCovers((haDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
+      setEsphomeCovers((esphomeDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
+    } finally {
+      setDiscoveryLoading(false);
+    }
+  }, [kind]);
+
+  React.useEffect(() => {
+    loadDevices().catch(() => undefined);
+    loadDiscovery().catch(() => undefined);
+  }, [loadDevices, loadDiscovery]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    loadDevices().catch(() => undefined);
+    loadDiscovery().catch(() => undefined);
+  }, [loadDevices, loadDiscovery, refreshToken]);
+
+  const updateDevice = (deviceId: string, patch: Partial<AccessDevice>) => {
+    setDevices((current) => current.map((device) => device.id === deviceId ? { ...device, ...patch } : device));
+  };
+
+  const updateBinding = (deviceId: string, provider: string, selection: string) => {
+    setDevices((current) => current.map((device) => {
+      if (device.id !== deviceId) return device;
+      const options = provider === "esphome" ? esphomeCovers : homeAssistantCovers;
+      const match = options.find((option) => option.entity_id === selection);
+      const externalId = String(match?.metadata?.external_id ?? selection);
+      return {
+        ...device,
+        bindings: [
+          ...device.bindings.filter((binding) => binding.provider !== provider),
+          {
+            provider,
+            external_id: externalId,
+            enabled: Boolean(externalId),
+            config: bindingConfigForDiscovery(provider, selection, options)
+          }
+        ]
+      };
+    }));
+  };
+
+  const addDevice = async () => {
+    setError("");
+    const suffix = devices.length + 1;
+    const baseKey = kind === "gate" ? `gate_${suffix}` : `garage_door_${suffix}`;
+    try {
+      const created = await api.post<AccessDevice>("/api/v1/access-devices", {
+        key: baseKey,
+        kind,
+        name: kind === "gate" ? `Gate ${suffix}` : `Garage Door ${suffix}`,
+        enabled: true,
+        schedule_id: null,
+        open_for_access: kind === "gate",
+        sort_order: devices.length
+      });
+      setDevices((current) => [...current, created]);
+      setMessage("Device added.");
+    } catch (addError) {
+      setError(addError instanceof Error ? addError.message : "Unable to add access device.");
+    }
+  };
+
+  const saveDevice = async (device: AccessDevice) => {
+    setSavingKey(device.id);
+    setMessage("");
+    setError("");
+    try {
+      let saved = await api.patch<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
+        key: device.key,
+        kind: device.kind,
+        name: device.name,
+        enabled: device.enabled,
+        schedule_id: device.schedule_id || null,
+        open_for_access: device.open_for_access,
+        sort_order: device.sort_order
+      });
+      for (const provider of ["home_assistant", "esphome"]) {
+        const binding = device.bindings.find((item) => item.provider === provider);
+        saved = await api.put<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(saved.id)}/bindings/${provider}`, {
+          external_id: binding?.external_id ?? "",
+          enabled: Boolean(binding?.external_id),
+          config: binding?.config ?? {}
+        });
+      }
+      setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setMessage("Device saved.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
+    } finally {
+      setSavingKey("");
+    }
+  };
+
+  const saveProviderSetting = async (key: "gate_control_provider" | "gate_failover_provider", value: string) => {
+    setProviderSavingKey(key);
+    setError("");
+    setMessage("");
+    try {
+      await accessSettings.save({ [key]: value });
+      setMessage("Provider preference saved.");
+    } catch (providerError) {
+      setError(providerError instanceof Error ? providerError.message : "Unable to save provider preference.");
+    } finally {
+      setProviderSavingKey("");
+    }
+  };
+
+  const deleteDevice = async (device: AccessDevice) => {
+    if (!window.confirm(`Remove ${device.name}?`)) return;
+    setError("");
+    try {
+      await api.delete(`/api/v1/access-devices/${encodeURIComponent(device.id)}`);
+      setDevices((current) => current.filter((item) => item.id !== device.id));
+      setMessage("Device removed.");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to remove access device.");
+    }
+  };
+
+  return (
+    <section className="view-stack settings-page">
+      <Toolbar title={title} count={devices.length} icon={Icon} />
+      <div className="dashboard-grid settings-grid">
+        <div className="card span-2 access-provider-card">
+          <CardHeader icon={SlidersHorizontal} title={`${kind === "gate" ? "Gate" : "Garage Door"} Command Provider`} action={<Badge tone={accessSettings.loading || providerSavingKey ? "gray" : "blue"}>{providerSavingKey ? "saving" : "global"}</Badge>} />
+          <p className="access-provider-copy">Choose the integration order used when IACS sends open/close commands. Each {kind === "gate" ? "gate" : "garage door"} still keeps its own Home Assistant and ESPHome mappings below.</p>
+          <div className="settings-form-grid access-provider-grid">
+            <label className="field">
+              <span>Primary integration</span>
+              <select
+                disabled={accessSettings.loading || Boolean(providerSavingKey)}
+                value={stringifySetting(accessSettings.values.gate_control_provider || "home_assistant")}
+                onChange={(event) => saveProviderSetting("gate_control_provider", event.target.value)}
+              >
+                <option value="home_assistant">Home Assistant</option>
+                <option value="esphome">ESPHome</option>
+              </select>
+              <small className="field-hint">First provider attempted for cover commands.</small>
+            </label>
+            <label className="field">
+              <span>Failover integration</span>
+              <select
+                disabled={accessSettings.loading || Boolean(providerSavingKey)}
+                value={stringifySetting(accessSettings.values.gate_failover_provider || "none")}
+                onChange={(event) => saveProviderSetting("gate_failover_provider", event.target.value)}
+              >
+                <option value="none">None</option>
+                <option value="home_assistant">Home Assistant</option>
+                <option value="esphome">ESPHome</option>
+              </select>
+              <small className="field-hint">Used only when the primary provider is technically unavailable.</small>
+            </label>
+          </div>
+        </div>
+        <div className="card span-2">
+          <CardHeader
+            icon={Icon}
+            title={`${title} Source Of Truth`}
+            action={<button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add</button>}
+          />
+          {(devicesLoading || discoveryLoading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
+          {error ? <div className="auth-error inline-error">{error}</div> : null}
+          {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
+          {message ? <div className="success-note">{message}</div> : null}
+          <div className="settings-list access-device-list">
+            {devices.length ? devices.map((device) => (
+              <AccessDeviceEditor
+                device={device}
+                homeAssistantCovers={homeAssistantCovers}
+                esphomeCovers={esphomeCovers}
+                key={device.id}
+                schedules={schedules}
+                saving={savingKey === device.id}
+                onDelete={() => deleteDevice(device)}
+                onSave={() => saveDevice(device)}
+                onUpdate={(patch) => updateDevice(device.id, patch)}
+                onUpdateBinding={(provider, externalId) => updateBinding(device.id, provider, externalId)}
+              />
+            )) : !devicesLoading ? (
+              <div className="empty-state compact">No {kind === "gate" ? "gates" : "garage doors"} configured</div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AccessDeviceLoadingBar({ label }: { label: string }) {
+  return (
+    <div className="access-device-loading-bar" role="status" aria-live="polite">
+      <div className="access-device-loading-track"><span /></div>
+      <div className="access-device-loading-meta">
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
+
+function AccessDeviceEditor({
+  device,
+  homeAssistantCovers,
+  esphomeCovers,
+  schedules,
+  saving,
+  onDelete,
+  onSave,
+  onUpdate,
+  onUpdateBinding
+}: {
+  device: AccessDevice;
+  homeAssistantCovers: AccessDeviceDiscoveryItem[];
+  esphomeCovers: AccessDeviceDiscoveryItem[];
+  schedules: Schedule[];
+  saving: boolean;
+  onDelete: () => void;
+  onSave: () => void;
+  onUpdate: (patch: Partial<AccessDevice>) => void;
+  onUpdateBinding: (provider: string, externalId: string) => void;
+}) {
+  const haBinding = device.bindings.find((binding) => binding.provider === "home_assistant");
+  const esphomeBinding = device.bindings.find((binding) => binding.provider === "esphome");
+  return (
+    <div className="access-device-editor">
+      <div className="settings-form-grid">
+        <SettingField field={{ key: "name", label: "Name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
+        <SettingField field={{ key: "key", label: "IACS key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} />
+        <SettingField field={{ key: "enabled", label: "Enabled", type: "select", options: ["true", "false"] }} value={device.enabled ? "true" : "false"} onChange={(value) => onUpdate({ enabled: value === "true" })} />
+        {device.kind === "gate" ? (
+          <SettingField field={{ key: "open_for_access", label: "Open for access", type: "select", options: ["true", "false"] }} value={device.open_for_access ? "true" : "false"} onChange={(value) => onUpdate({ open_for_access: value === "true" })} />
+        ) : null}
+        <label className="field">
+          <span>Schedule</span>
+          <select value={device.schedule_id ?? ""} onChange={(event) => onUpdate({ schedule_id: event.target.value || null })}>
+            <option value="">Default policy</option>
+            {schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name}</option>)}
+          </select>
+        </label>
+        <ProviderBindingField label="Home Assistant entity" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
+        <ProviderBindingField label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
+      </div>
+      <div className="modal-actions">
+        <button className="secondary-button danger" onClick={onDelete} type="button"><Trash2 size={15} /> Remove</button>
+        <button className="primary-button" disabled={saving} onClick={onSave} type="button">{saving ? "Saving..." : "Save Device"}</button>
+      </div>
+    </div>
+  );
+}
+
+function ProviderBindingField({ label, options, value, onChange }: { label: string; options: AccessDeviceDiscoveryItem[]; value: string; onChange: (value: string) => void }) {
+  const listId = React.useId();
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="Select or enter an external ID" />
+      <datalist id={listId}>
+        {options.map((option) => <option key={option.entity_id} value={option.entity_id}>{option.name || option.entity_id}</option>)}
+      </datalist>
+    </label>
+  );
+}
+
+function bindingSelectionValue(binding: AccessDevice["bindings"][number] | undefined, options: AccessDeviceDiscoveryItem[]) {
+  if (!binding) return "";
+  const deviceId = String(binding.config?.device_id ?? "");
+  const match = options.find((option) => {
+    const optionDeviceId = String(option.metadata?.device_id ?? "");
+    const optionExternalId = String(option.metadata?.external_id ?? option.entity_id);
+    return optionExternalId === binding.external_id && (!deviceId || optionDeviceId === deviceId);
+  });
+  return match?.entity_id ?? binding.external_id;
+}
+
+function coverMatchesKind(cover: AccessDeviceDiscoveryItem, kind: AccessDeviceKind) {
+  if (cover.kind === kind) return true;
+  const label = `${cover.entity_id} ${cover.name ?? ""} ${cover.device_class ?? ""}`.toLowerCase();
+  return kind === "garage_door" ? label.includes("garage") || label.includes("door") : label.includes("gate");
+}
+
+function bindingConfigForDiscovery(provider: string, selection: string, options: AccessDeviceDiscoveryItem[]) {
+  const match = options.find((option) => option.entity_id === selection);
+  if (!match) return {};
+  return provider === "esphome" ? { ...(match.metadata ?? {}) } : {};
 }
 
 export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number }) {

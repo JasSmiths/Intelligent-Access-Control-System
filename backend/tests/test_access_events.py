@@ -170,6 +170,48 @@ class FakeNotificationService:
         self.contexts.append(context)
 
 
+class FakeAccessDeviceService:
+    def __init__(
+        self,
+        *,
+        accepted: bool = True,
+        state: GateState = GateState.OPENING,
+        detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.device = SimpleNamespace(key="cover.main_garage_door", name="Main Garage", kind="garage_door")
+        self.accepted = accepted
+        self.state = state
+        self.detail = detail
+        self.metadata = metadata or {}
+        self.commands: list[tuple[str, str, str]] = []
+
+    async def list_devices(self, *, kind: str | None = None, enabled_only: bool = False):
+        return [self.device] if kind in {None, "garage_door"} else []
+
+    async def command_device(self, device_key: str, action: str, reason: str, **_kwargs):
+        self.commands.append((device_key, action, reason))
+        return SimpleNamespace(
+            device=self.device,
+            action=action,
+            accepted=self.accepted,
+            state=self.state,
+            detail=self.detail or reason,
+            used_provider="home_assistant",
+            primary_provider="home_assistant",
+            failover_used=False,
+            attempts=[],
+            metadata=self.metadata,
+            as_payload=lambda: {
+                "entity_id": self.device.key,
+                "name": self.device.name,
+                "accepted": self.accepted,
+                "state": self.state.value,
+                "detail": self.detail or reason,
+            },
+        )
+
+
 def hardware_audit_subjects():
     occurred_at = datetime(2026, 5, 3, 9, 15, tzinfo=UTC)
     person = SimpleNamespace(
@@ -1567,7 +1609,7 @@ async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
     assert gate_audit["metadata"]["registration_number"] == "PE70DHX"
     assert gate_audit["metadata"]["person_id"] == str(person.id)
     assert gate_audit["metadata"]["vehicle_id"] == str(vehicle.id)
-    assert gate_audit["metadata"]["controller"] == access_events_module.settings.gate_controller
+    assert gate_audit["metadata"]["controller"] == "configured"
     assert gate_audit["metadata"]["accepted"] is True
     assert any(event_type == "audit.log.created" for event_type, _payload in published)
 
@@ -1684,33 +1726,9 @@ async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> 
     service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
+    devices = FakeAccessDeviceService()
 
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_garage_door_entities=[
-                {"entity_id": "cover.main_garage_door", "name": "Main Garage", "enabled": True}
-            ],
-            home_assistant_gate_open_service="cover.open_cover",
-            site_timezone="Europe/London",
-            schedule_default_policy="allow",
-        )
-
-    async def fake_schedule_evaluation(*_args, **_kwargs):
-        return access_events_module.ScheduleEvaluation(allowed=True, source="garage_door")
-
-    async def fake_command_cover(_client, entity, action, reason):
-        return SimpleNamespace(
-            entity_id=str(entity["entity_id"]),
-            name=str(entity["name"]),
-            action=action,
-            accepted=True,
-            state="opening",
-            detail=reason,
-        )
-
-    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
-    monkeypatch.setattr(access_events_module, "command_cover", fake_command_cover)
+    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
 
     await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
 
@@ -1720,6 +1738,7 @@ async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> 
     assert garage_audit["target_label"] == "Main Garage"
     assert garage_audit["metadata"]["accepted"] is True
     assert garage_audit["metadata"]["state"] == "opening"
+    assert devices.commands == [("cover.main_garage_door", "open", "Automatic LPR grant")]
     assert any(event_type == "garage_door.open_requested" for event_type, _payload in published)
 
 
@@ -1729,35 +1748,14 @@ async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monke
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
+    devices = FakeAccessDeviceService(
+        accepted=False,
+        state=GateState.FAULT,
+        detail="Main Garage is outside schedule.",
+        metadata={"schedule_denied": True},
+    )
 
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_garage_door_entities=[
-                {
-                    "entity_id": "cover.main_garage_door",
-                    "name": "Main Garage",
-                    "enabled": True,
-                    "schedule_id": str(uuid.uuid4()),
-                }
-            ],
-            home_assistant_gate_open_service="cover.open_cover",
-            site_timezone="Europe/London",
-            schedule_default_policy="deny",
-        )
-
-    async def fake_schedule_evaluation(*_args, **_kwargs):
-        return access_events_module.ScheduleEvaluation(
-            allowed=False,
-            source="garage_door",
-            reason="Main Garage is outside schedule.",
-        )
-
-    async def fail_command_cover(*_args, **_kwargs):
-        raise AssertionError("Schedule-denied garage doors must not call Home Assistant.")
-
-    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
-    monkeypatch.setattr(access_events_module, "command_cover", fail_command_cover)
+    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
     monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
 
     await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
@@ -1767,7 +1765,6 @@ async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monke
     assert garage_audit["level"] == "warning"
     assert garage_audit["metadata"]["state"] == "schedule_denied"
     assert garage_audit["metadata"]["detail"] == "Main Garage is outside schedule."
-    assert garage_audit["metadata"]["schedule"]["allowed"] is False
     assert any(event_type == "garage_door.open_failed" for event_type, _payload in published)
     assert len(notifications.contexts) == 1
 
@@ -1778,33 +1775,13 @@ async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeyp
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
+    devices = FakeAccessDeviceService(
+        accepted=False,
+        state=GateState.FAULT,
+        detail="Home Assistant rejected the command.",
+    )
 
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_garage_door_entities=[
-                {"entity_id": "cover.main_garage_door", "name": "Main Garage", "enabled": True}
-            ],
-            home_assistant_gate_open_service="cover.open_cover",
-            site_timezone="Europe/London",
-            schedule_default_policy="allow",
-        )
-
-    async def fake_schedule_evaluation(*_args, **_kwargs):
-        return access_events_module.ScheduleEvaluation(allowed=True, source="garage_door")
-
-    async def fake_command_cover(_client, entity, action, _reason):
-        return SimpleNamespace(
-            entity_id=str(entity["entity_id"]),
-            name=str(entity["name"]),
-            action=action,
-            accepted=False,
-            state="fault",
-            detail="Home Assistant rejected the command.",
-        )
-
-    monkeypatch.setattr(access_events_module, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(access_events_module, "evaluate_schedule_id", fake_schedule_evaluation)
-    monkeypatch.setattr(access_events_module, "command_cover", fake_command_cover)
+    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
     monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
 
     await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")

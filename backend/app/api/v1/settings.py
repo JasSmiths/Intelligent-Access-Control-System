@@ -9,12 +9,14 @@ from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import User
 from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.modules.access_devices.registry import get_access_device_provider
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.auth_secret_management import (
     AuthSecretRotationError,
     auth_secret_security_status,
     rotate_auth_secret,
 )
+from app.services.access_devices import get_access_device_service
 from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
@@ -114,6 +116,8 @@ async def patch_settings(
         service = get_home_assistant_service()
         await service.stop()
         await service.start()
+    if any(key.startswith("esphome_") or key.startswith("gate_") for key in request.values):
+        await get_access_device_service().restart()
     if any(key.startswith("unifi_protect_") for key in request.values):
         await get_unifi_protect_service().restart()
     if any(key.startswith("discord_") for key in request.values):
@@ -121,6 +125,8 @@ async def patch_settings(
     if any(
         key.startswith((
             "home_assistant_",
+            "esphome_",
+            "gate_",
             "apprise_",
             "discord_",
             "whatsapp_",
@@ -160,6 +166,8 @@ async def test_connection(
     try:
         if integration == "home_assistant":
             await _test_home_assistant(values)
+        elif integration == "esphome":
+            await _test_esphome(values)
         elif integration == "apprise":
             await _test_apprise(values)
         elif integration == "discord":
@@ -217,6 +225,47 @@ async def _test_home_assistant(values: dict[str, Any]) -> None:
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.get(f"{base_url}/api/", headers={"Authorization": f"Bearer {token}"})
     _raise_for_test(response, "Home Assistant")
+
+
+async def _test_esphome(values: dict[str, Any]) -> None:
+    import asyncio
+    import importlib
+
+    runtime = await get_runtime_config()
+    if not values and runtime.esphome_devices:
+        status = await get_access_device_provider("esphome").status(refresh=True)
+        if not status.connected:
+            raise ValueError(status.last_error or "No configured ESPHome devices connected.")
+        return
+    host = str(values.get("esphome_host") or runtime.esphome_host or "").strip()
+    port = int(values.get("esphome_port") or runtime.esphome_port or 6053)
+    encryption_key = str(values.get("esphome_api_encryption_key") or runtime.esphome_api_encryption_key or "").strip()
+    legacy_password = str(values.get("esphome_legacy_password") or runtime.esphome_legacy_password or "").strip() or None
+    timeout = float(values.get("esphome_timeout_seconds") or runtime.esphome_timeout_seconds or 30.0)
+    if not host:
+        raise ValueError("ESPHome host is required.")
+    if not encryption_key:
+        raise ValueError("ESPHome API encryption key is required.")
+    aio = importlib.import_module("aioesphomeapi")
+    client = aio.APIClient(
+        address=host,
+        port=port,
+        password=legacy_password,
+        noise_psk=encryption_key,
+    )
+    try:
+        await asyncio.wait_for(client.start_resolve_host(), timeout=min(timeout, 15.0))
+        await asyncio.wait_for(client.start_connection(), timeout=timeout)
+        await asyncio.wait_for(client.finish_connection(login=legacy_password is not None), timeout=timeout)
+        entities, _services = await asyncio.wait_for(client.list_entities_services(), timeout=10.0)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    covers = [entity for entity in entities if entity.__class__.__name__ == "CoverInfo"]
+    if not covers:
+        raise ValueError("ESPHome connected, but no cover entities were discovered.")
 
 
 async def _test_apprise(values: dict[str, Any]) -> None:

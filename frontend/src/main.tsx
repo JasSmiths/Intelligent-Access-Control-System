@@ -138,6 +138,7 @@ const AutomationsView = React.lazy(() => import("./views/WorkflowViews").then((m
 const NotificationsView = React.lazy(() => import("./views/WorkflowViews").then((module) => ({ default: module.NotificationsView })));
 const SettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.SettingsView })));
 const DynamicSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.DynamicSettingsView })));
+const AccessDevicesSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
 const UsersView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.UsersView })));
 const ChatWidget = React.lazy(() => import("./views/ChatWidgetView").then((module) => ({ default: module.ChatWidget })));
 
@@ -255,6 +256,8 @@ const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; ic
 
 const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType; adminOnly?: boolean }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
+  { key: "settings_gates", label: "Gates", icon: DoorOpen },
+  { key: "settings_garage_doors", label: "Garage Doors", icon: Warehouse },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
   { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true },
   { key: "settings_automations", label: "Automations", icon: GitBranch },
@@ -279,6 +282,8 @@ const viewPaths: Record<ViewKey, string> = {
   logs: "/logs",
   settings: "/settings",
   settings_general: "/settings/general",
+  settings_gates: "/settings/gates",
+  settings_garage_doors: "/settings/garage-doors",
   settings_auth: "/settings/auth-security",
   alfred_training: "/settings/alfred-training",
   settings_automations: "/settings/automations",
@@ -1315,7 +1320,7 @@ function App() {
         api.get<Vehicle[]>("/api/v1/vehicles"),
         api.get<Group[]>("/api/v1/groups"),
         api.get<Schedule[]>("/api/v1/schedules"),
-        api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"),
+        api.get<IntegrationStatus>("/api/v1/integrations/gate/status"),
         api.get<MaintenanceStatus>("/api/v1/maintenance/status")
       ]);
     setPresence(nextPresence);
@@ -1334,7 +1339,7 @@ function App() {
 
   const refreshIntegrationStatus = React.useCallback(async () => {
     try {
-      setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status?refresh=true"));
+      setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/gate/status?refresh=true"));
     } catch (error) {
       setIntegrationStatus((current) => current ? {
         ...current,
@@ -1919,6 +1924,12 @@ function View(props: {
       break;
     case "settings_general":
       content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
+      break;
+    case "settings_gates":
+      content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      break;
+    case "settings_garage_doors":
+      content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
 	    case "settings_auth":
 	      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;

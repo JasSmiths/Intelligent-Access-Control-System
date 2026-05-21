@@ -82,6 +82,7 @@ import {
 
 import {
   api,
+  AccessDeviceStreamDeviceStatus,
   Badge,
   BadgeTone,
   coerceSettingsPayload,
@@ -182,6 +183,34 @@ export type AppriseUrlSummary = {
   scheme: string;
   preview: string;
 };
+
+export type ESPHomeDeviceSummary = {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  timeout_seconds: number;
+  enabled: boolean;
+  encryption_key_configured: boolean;
+  legacy_password_configured: boolean;
+};
+
+function streamStatusForDevice(
+  device: ESPHomeDeviceSummary,
+  streamDevices: AccessDeviceStreamDeviceStatus[]
+): AccessDeviceStreamDeviceStatus | null {
+  const deviceId = device.id.trim().toLowerCase();
+  const deviceName = device.name.trim().toLowerCase();
+  const deviceHost = device.host.trim().toLowerCase();
+  return streamDevices.find((streamDevice) => {
+    const streamDeviceId = String(streamDevice.device_id || "").trim().toLowerCase();
+    const streamName = String(streamDevice.name || "").trim().toLowerCase();
+    const streamHost = String(streamDevice.host || "").trim().toLowerCase();
+    return (deviceId && streamDeviceId === deviceId)
+      || (deviceName && streamName === deviceName)
+      || (deviceHost && streamHost === deviceHost);
+  }) ?? null;
+}
 
 export type DiscordStatus = {
   configured: boolean;
@@ -469,6 +498,8 @@ export type DependencyConfirmAction =
 
 export function IntegrationsView({ people, realtime, refreshToken, schedules, status }: { people: Person[]; realtime: RealtimeMessage[]; refreshToken: number; schedules: Schedule[]; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
+  const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
+  const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
   const [pageTab, setPageTab] = React.useState<IntegrationsPageTab>("integrations");
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
@@ -535,6 +566,24 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
       setIcloudLoading(false);
     }
   }, []);
+  const loadHomeAssistantStatus = React.useCallback(async () => {
+    try {
+      setHomeAssistantStatus(await api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"));
+    } catch {
+      setHomeAssistantStatus(null);
+    }
+  }, []);
+  const loadAccessDeviceStatus = React.useCallback(async () => {
+    try {
+      setAccessDeviceStatus(await api.get<IntegrationStatus>("/api/v1/integrations/gate/status"));
+    } catch {
+      setAccessDeviceStatus(null);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    setAccessDeviceStatus(status);
+  }, [status]);
 
   React.useEffect(() => {
     for (const message of realtime.slice(0, 20).reverse()) {
@@ -601,22 +650,26 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
   }, []);
   const reloadSettingsAndProtect = React.useCallback(async () => {
     await reload();
+    await loadHomeAssistantStatus();
+    await loadAccessDeviceStatus();
     await loadProtect(true);
     await loadProtectUpdateStatus();
     await loadICloudCalendar();
     await loadDiscord();
     await loadWhatsApp();
     await loadDependencyUpdates();
-  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp, reload]);
+  }, [loadAccessDeviceStatus, loadDependencyUpdates, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp, reload]);
 
   React.useEffect(() => {
+    loadHomeAssistantStatus().catch(() => undefined);
+    loadAccessDeviceStatus().catch(() => undefined);
     loadProtect(false).catch(() => undefined);
     loadProtectUpdateStatus().catch(() => undefined);
     loadICloudCalendar().catch(() => undefined);
     loadDiscord().catch(() => undefined);
     loadWhatsApp().catch(() => undefined);
     loadDependencyUpdates().catch(() => undefined);
-  }, [loadDependencyUpdates, loadDiscord, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
+  }, [loadAccessDeviceStatus, loadDependencyUpdates, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
 
   React.useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
@@ -625,7 +678,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
   }, [refreshToken, reloadSettingsAndProtect]);
 
   const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
-  const tiles = integrationDefinitions(status, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
+  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -726,7 +779,8 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
           protectLoading={protectLoading}
           protectStatus={protectStatus}
           protectUpdateStatus={protectUpdateStatus}
-          homeAssistantStatus={status}
+          accessDeviceStatus={accessDeviceStatus}
+          homeAssistantStatus={homeAssistantStatus}
           icloudError={icloudError}
           icloudLoading={icloudLoading}
           icloudPayload={icloudPayload}
@@ -752,6 +806,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
           }}
           onProtectRefresh={() => loadProtect(true)}
           onSettingsChanged={reloadSettingsAndProtect}
+          onAccessDeviceStatusChanged={setAccessDeviceStatus}
           onSaved={async (updates) => {
             await save(updates);
             await loadProtect(true);
@@ -936,12 +991,21 @@ export function integrationDefinitions(
       fields: [
         { key: "home_assistant_url", label: "URL" },
         { key: "home_assistant_token", label: "Long-lived token", type: "password" },
-        { key: "home_assistant_gate_entities", label: "Gate entities" },
         { key: "home_assistant_gate_open_service", label: "Cover open service" },
-        { key: "home_assistant_garage_door_entities", label: "Garage doors" },
         { key: "home_assistant_tts_service", label: "TTS service" },
         { key: "home_assistant_default_media_player", label: "Default media player" }
       ]
+    },
+    {
+      key: "esphome",
+      title: "ESPHome",
+      description: "Direct native API access for gate and garage-door covers.",
+      category: "access",
+      icon: Zap,
+      statusLabel: values.esphome_devices || values.esphome_host ? "Configured" : "Not Configured",
+      statusTone: values.esphome_devices || values.esphome_host ? "blue" : "gray",
+      updateAvailable: hasDependencyUpdate("esphome"),
+      fields: []
     },
     {
       key: "icloud_calendar",
@@ -2906,6 +2970,7 @@ export function IntegrationModal({
   protectLoading,
   protectStatus,
   protectUpdateStatus,
+  accessDeviceStatus,
   homeAssistantStatus,
   dependencyPackages,
   dependencyStorage,
@@ -2929,6 +2994,7 @@ export function IntegrationModal({
   onProtectUpdateChanged,
   onProtectRefresh,
   onSettingsChanged,
+  onAccessDeviceStatusChanged,
   onSaved
 }: {
   definition: IntegrationDefinition;
@@ -2940,6 +3006,7 @@ export function IntegrationModal({
   protectLoading?: boolean;
   protectStatus?: UnifiProtectStatus | null;
   protectUpdateStatus?: UnifiProtectUpdateStatus | null;
+  accessDeviceStatus?: IntegrationStatus | null;
   homeAssistantStatus?: IntegrationStatus | null;
   dependencyPackages: DependencyPackage[];
   dependencyStorage: DependencyStorageStatus | null;
@@ -2963,6 +3030,7 @@ export function IntegrationModal({
   onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
+  onAccessDeviceStatusChanged?: (status: IntegrationStatus) => void;
   onSaved: (updates: Record<string, unknown>) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
@@ -2976,8 +3044,11 @@ export function IntegrationModal({
   const [haDiscoveryLoading, setHaDiscoveryLoading] = React.useState(false);
   const [appriseUrls, setAppriseUrls] = React.useState<AppriseUrlSummary[]>([]);
   const [appriseLoading, setAppriseLoading] = React.useState(false);
+  const [esphomeDevices, setEsphomeDevices] = React.useState<ESPHomeDeviceSummary[]>([]);
+  const [esphomeLoading, setEsphomeLoading] = React.useState(false);
   const isHomeAssistant = definition.key === "home_assistant";
   const isApprise = definition.key === "apprise";
+  const isESPHome = definition.key === "esphome";
   const isUnifiProtect = definition.key === "unifi_protect";
   const isICloudCalendar = definition.key === "icloud_calendar";
   const isDiscord = definition.key === "discord";
@@ -2991,6 +3062,7 @@ export function IntegrationModal({
     setHaDiscovery(null);
     setHaDiscoveryError("");
     setAppriseUrls([]);
+    setEsphomeDevices([]);
   }, [definition.key, initialTab]);
 
   const update = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
@@ -3037,6 +3109,29 @@ export function IntegrationModal({
       loadAppriseUrls().catch(() => undefined);
     }
   }, [isApprise, loadAppriseUrls]);
+
+  const loadESPHomeDevices = React.useCallback(async () => {
+    if (!isESPHome) return;
+    setEsphomeLoading(true);
+    try {
+      const result = await api.get<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices");
+      setEsphomeDevices(result.devices);
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        title: "Unable to load ESPHome devices",
+        detail: error instanceof Error ? error.message : "Unable to load ESPHome devices."
+      });
+    } finally {
+      setEsphomeLoading(false);
+    }
+  }, [isESPHome]);
+
+  React.useEffect(() => {
+    if (isESPHome) {
+      loadESPHomeDevices().catch(() => undefined);
+    }
+  }, [isESPHome, loadESPHomeDevices]);
 
   const testConnection = async () => {
     setTesting(true);
@@ -3298,6 +3393,22 @@ export function IntegrationModal({
               detail: error
             })}
           />
+        ) : isESPHome ? (
+          <ESPHomeSettingsFields
+            accessStatus={accessDeviceStatus ?? null}
+            devices={esphomeDevices}
+            loading={esphomeLoading}
+            onAccessStatusChanged={onAccessDeviceStatusChanged}
+            onChanged={async (devices) => {
+              setEsphomeDevices(devices);
+              await onSettingsChanged();
+            }}
+            onError={(error) => setFeedback({
+              tone: "error",
+              title: "ESPHome update failed",
+              detail: error
+            })}
+          />
         ) : isDiscord ? (
           <DiscordSettingsFields
             channels={discordChannels ?? []}
@@ -3345,7 +3456,7 @@ export function IntegrationModal({
           <button className="secondary-button" onClick={testConnection} disabled={testing} type="button">
             {testing ? "Testing..." : "Test Connection"}
           </button>
-          {isApprise ? (
+          {isApprise || isESPHome ? (
             <button className="primary-button" onClick={onClose} type="button">Done</button>
           ) : (
             <button className="primary-button" disabled={saving} type="submit">
@@ -3857,6 +3968,330 @@ export function AppriseSettingsFields({
   );
 }
 
+export function ESPHomeSettingsFields({
+  accessStatus,
+  loading,
+  devices,
+  onAccessStatusChanged,
+  onChanged,
+  onError
+}: {
+  accessStatus: IntegrationStatus | null;
+  loading: boolean;
+  devices: ESPHomeDeviceSummary[];
+  onAccessStatusChanged?: (status: IntegrationStatus) => void;
+  onChanged: (devices: ESPHomeDeviceSummary[]) => Promise<void>;
+  onError: (error: string) => void;
+}) {
+  const [adding, setAdding] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [testingId, setTestingId] = React.useState("");
+  const [verifyingStreamDeviceId, setVerifyingStreamDeviceId] = React.useState("");
+  const [currentAccessStatus, setCurrentAccessStatus] = React.useState<IntegrationStatus | null>(accessStatus);
+  const [statusMessage, setStatusMessage] = React.useState("");
+  const onAccessStatusChangedRef = React.useRef(onAccessStatusChanged);
+  const onErrorRef = React.useRef(onError);
+  const [form, setForm] = React.useState({
+    name: "",
+    host: "",
+    port: "6053",
+    encryption_key: "",
+    legacy_password: "",
+    timeout_seconds: "30"
+  });
+
+  React.useEffect(() => {
+    onAccessStatusChangedRef.current = onAccessStatusChanged;
+  }, [onAccessStatusChanged]);
+
+  React.useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
+  React.useEffect(() => {
+    setCurrentAccessStatus(accessStatus);
+  }, [accessStatus]);
+
+  const streamStatus = currentAccessStatus?.state_stream_status?.esphome ?? null;
+  const streamDevices = streamStatus?.devices ?? [];
+  const liveStreamCount = devices.filter((device) => {
+    const deviceStatus = streamStatusForDevice(device, streamDevices);
+    return Boolean(streamStatus?.running && deviceStatus?.connected);
+  }).length;
+  const enabledDeviceCount = devices.filter((device) => device.enabled).length;
+  const streamSummary = enabledDeviceCount
+    ? `${liveStreamCount} of ${enabledDeviceCount} ESPHome device${enabledDeviceCount === 1 ? "" : "s"} streaming live.`
+    : "Add an ESPHome device to enable live native API streaming.";
+
+  const updateForm = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
+
+  const resetForm = () => {
+    setForm({
+      name: "",
+      host: "",
+      port: "6053",
+      encryption_key: "",
+      legacy_password: "",
+      timeout_seconds: "30"
+    });
+  };
+
+  const refreshStreamStatus = React.useCallback(async (reportErrors = false): Promise<IntegrationStatus | null> => {
+    try {
+      const nextStatus = await api.get<IntegrationStatus>("/api/v1/integrations/gate/status");
+      setCurrentAccessStatus(nextStatus);
+      onAccessStatusChangedRef.current?.(nextStatus);
+      return nextStatus;
+    } catch (error) {
+      if (reportErrors) {
+        onErrorRef.current(error instanceof Error ? error.message : "Unable to verify ESPHome stream status.");
+      }
+      return null;
+    }
+  }, []);
+
+  const streamDeviceRefreshKey = devices.map((device) => `${device.id}:${device.enabled ? "1" : "0"}`).join("|");
+
+  React.useEffect(() => {
+    if (!devices.some((device) => device.enabled)) return;
+    let cancelled = false;
+    const refresh = () => {
+      if (cancelled) return;
+      refreshStreamStatus(false).catch(() => undefined);
+    };
+    const firstRefresh = window.setTimeout(refresh, 750);
+    const interval = window.setInterval(refresh, 2500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(firstRefresh);
+      window.clearInterval(interval);
+    };
+  }, [refreshStreamStatus, streamDeviceRefreshKey]);
+
+  const verifyStream = async (device: ESPHomeDeviceSummary) => {
+    setVerifyingStreamDeviceId(device.id);
+    setStatusMessage("");
+    try {
+      const nextStatus = await refreshStreamStatus(true);
+      if (!nextStatus) return;
+      const nextStream = nextStatus.state_stream_status?.esphome;
+      const nextDeviceStatus = streamStatusForDevice(device, nextStream?.devices ?? []);
+      if (nextStream?.running && nextDeviceStatus?.connected) {
+        setStatusMessage(`${device.name} native stream is live.`);
+      } else {
+        setStatusMessage(
+          nextDeviceStatus?.last_error
+            || nextStream?.last_error
+            || `${device.name} is using polling fallback; native stream is not confirmed live.`
+        );
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to verify ESPHome stream status.");
+    } finally {
+      setVerifyingStreamDeviceId("");
+    }
+  };
+
+  const addDevice = async () => {
+    setSubmitting(true);
+    setStatusMessage("");
+    try {
+      const result = await api.post<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", {
+        name: form.name.trim(),
+        host: form.host.trim(),
+        port: Number(form.port || 6053),
+        encryption_key: form.encryption_key,
+        legacy_password: form.legacy_password,
+        timeout_seconds: Number(form.timeout_seconds || 30),
+        enabled: true
+      });
+      resetForm();
+      setAdding(false);
+      await onChanged(result.devices);
+      setStatusMessage("ESPHome device added. Waiting for native stream...");
+      refreshStreamStatus(false).catch(() => undefined);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to add ESPHome device.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const removeDevice = async (device: ESPHomeDeviceSummary) => {
+    if (!window.confirm(`Remove ESPHome device ${device.name}?`)) return;
+    setSubmitting(true);
+    setStatusMessage("");
+    try {
+      const result = await api.delete<{ devices: ESPHomeDeviceSummary[] }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`);
+      await onChanged(result.devices);
+      setStatusMessage("ESPHome device removed.");
+      refreshStreamStatus(false).catch(() => undefined);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to remove ESPHome device.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const testDevice = async (device: ESPHomeDeviceSummary) => {
+    setTestingId(device.id);
+    setStatusMessage("");
+    try {
+      const result = await api.post<{ ok: boolean; cover_count: number }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, {});
+      setStatusMessage(`${device.name} connected. ${result.cover_count} cover${result.cover_count === 1 ? "" : "s"} discovered.`);
+      refreshStreamStatus(false).catch(() => undefined);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : `Unable to connect to ${device.name}.`);
+    } finally {
+      setTestingId("");
+    }
+  };
+
+  return (
+    <div className="apprise-manager esphome-manager">
+      <div className="apprise-manager-header">
+        <div>
+          <strong>ESPHome Devices</strong>
+          <span>Add one native API controller per gate or garage-door device. Cover mappings live under Settings Gates and Garage Doors.</span>
+        </div>
+        <div className="esphome-header-actions">
+          <button className="primary-button" onClick={() => setAdding((current) => !current)} type="button">
+            <Plus size={15} /> Add New ESPHome Device
+          </button>
+        </div>
+      </div>
+
+      <div className={liveStreamCount && liveStreamCount === enabledDeviceCount ? "esphome-stream-note live" : "esphome-stream-note"}>
+        {streamSummary}
+      </div>
+
+      {adding ? (
+        <div className="apprise-add-row esphome-add-row">
+          <div className="settings-form-grid">
+            <label className="field">
+              <span>Name</span>
+              <div className="field-control">
+                <Zap size={16} />
+                <input autoFocus value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Top Gate" />
+              </div>
+            </label>
+            <label className="field">
+              <span>Host or IP</span>
+              <div className="field-control">
+                <PlugZap size={16} />
+                <input value={form.host} onChange={(event) => updateForm("host", event.target.value)} placeholder="10.0.107.22" />
+              </div>
+            </label>
+            <label className="field">
+              <span>Native API port</span>
+              <div className="field-control">
+                <SlidersHorizontal size={16} />
+                <input min={1} max={65535} step={1} type="number" value={form.port} onChange={(event) => updateForm("port", event.target.value)} />
+              </div>
+            </label>
+            <label className="field">
+              <span>Timeout seconds</span>
+              <div className="field-control">
+                <Clock3 size={16} />
+                <input min={5} step={1} type="number" value={form.timeout_seconds} onChange={(event) => updateForm("timeout_seconds", event.target.value)} />
+              </div>
+            </label>
+            <label className="field">
+              <span>Encryption key</span>
+              <div className="field-control">
+                <Key size={16} />
+                <input type="password" value={form.encryption_key} onChange={(event) => updateForm("encryption_key", event.target.value)} placeholder="Blank if encryption is disabled" />
+              </div>
+            </label>
+            <label className="field">
+              <span>Legacy password</span>
+              <div className="field-control">
+                <Lock size={16} />
+                <input type="password" value={form.legacy_password} onChange={(event) => updateForm("legacy_password", event.target.value)} placeholder="Leave blank unless api.password is configured" />
+              </div>
+            </label>
+          </div>
+          <div className="apprise-add-actions">
+            <button className="secondary-button" onClick={() => setAdding(false)} type="button">Cancel</button>
+            <button className="primary-button" disabled={submitting || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
+              {submitting ? "Adding..." : "Add Device"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {statusMessage ? <div className="success-note">{statusMessage}</div> : null}
+
+      <div className="apprise-url-table esphome-device-table">
+        <div className="apprise-url-head esphome-device-head">
+          <span>Device</span>
+          <span>Connection</span>
+          <span>Stream</span>
+          <span>Secrets</span>
+          <span />
+        </div>
+        {loading ? (
+          <div className="apprise-empty">Loading ESPHome devices</div>
+        ) : devices.length ? (
+          devices.map((device) => {
+            const deviceStreamStatus = streamStatusForDevice(device, streamDevices);
+            const deviceStreamLive = Boolean(streamStatus?.running && deviceStreamStatus?.connected);
+            const deviceStreamChecking = verifyingStreamDeviceId === device.id;
+            const deviceStreamLabel = deviceStreamLive ? "Live" : device.enabled ? "Polling" : "Disabled";
+            const deviceStreamTone: BadgeTone = deviceStreamLive ? "green" : device.enabled ? "amber" : "gray";
+            const deviceStreamUpdatedAt = deviceStreamStatus?.updated_at ? formatDate(deviceStreamStatus.updated_at) : "";
+            const deviceStreamDetail = deviceStreamLive
+              ? `${device.name} native state stream is connected${deviceStreamUpdatedAt ? `; checked ${deviceStreamUpdatedAt}` : ""}.`
+              : device.enabled
+              ? deviceStreamStatus?.last_error || streamStatus?.last_error || `${device.name} native stream is not confirmed; status falls back to polling.`
+              : `${device.name} is disabled.`;
+            return (
+              <div className="apprise-url-row esphome-device-row" key={device.id}>
+                <div>
+                  <strong>{device.name}</strong>
+                  <span>{device.id}</span>
+                </div>
+                <div>
+                  <strong>{device.host}:{device.port}</strong>
+                  <span>{device.enabled ? `Timeout ${device.timeout_seconds}s` : "Disabled"}</span>
+                </div>
+                <div className="esphome-device-stream">
+                  <button
+                    className={deviceStreamLive ? "esphome-stream-pill live" : device.enabled ? "esphome-stream-pill polling" : "esphome-stream-pill"}
+                    disabled={deviceStreamChecking}
+                    onClick={() => verifyStream(device)}
+                    title={deviceStreamDetail}
+                    type="button"
+                  >
+                    {deviceStreamChecking ? <Loader2 className="spin" size={14} /> : deviceStreamLive ? <Activity size={14} /> : <RefreshCw size={14} />}
+                    <Badge tone={deviceStreamTone}>{deviceStreamChecking ? "Checking" : deviceStreamLabel}</Badge>
+                  </button>
+                  <span>{deviceStreamDetail}</span>
+                </div>
+                <div>
+                  <Badge tone={device.encryption_key_configured ? "green" : "gray"}>{device.encryption_key_configured ? "Key saved" : "No key"}</Badge>
+                  {device.legacy_password_configured ? <span>Legacy password saved</span> : <span>No legacy password</span>}
+                </div>
+                <div className="esphome-device-actions">
+                  <button className="secondary-button" onClick={() => testDevice(device)} disabled={Boolean(testingId) || submitting} type="button">
+                    {testingId === device.id ? <Loader2 className="spin" size={14} /> : <Activity size={14} />}
+                    {testingId === device.id ? "Testing" : "Test"}
+                  </button>
+                  <button className="icon-button danger" onClick={() => removeDevice(device)} disabled={submitting || testingId === device.id} type="button" aria-label={`Remove ${device.name}`}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="apprise-empty">No ESPHome devices configured</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function DiscordSettingsFields({
   channels,
   error,
@@ -4093,10 +4528,8 @@ export function HomeAssistantSettingsFields({
   schedules: Schedule[];
   status: IntegrationStatus | null;
 }) {
-  type HomeAssistantTab = "setup" | "gates" | "garages";
+  type HomeAssistantTab = "setup";
   const [activeTab, setActiveTab] = React.useState<HomeAssistantTab>("setup");
-  const gateEntities = parseManagedCovers(form.home_assistant_gate_entities);
-  const garageDoorEntities = parseManagedCovers(form.home_assistant_garage_door_entities);
   const configured = Boolean(status?.configured || form.home_assistant_url || form.home_assistant_token);
   const connected = status?.connected === true;
   const degraded = Boolean(configured && (status?.degraded || status?.connected === false || status?.last_error));
@@ -4105,32 +4538,8 @@ export function HomeAssistantSettingsFields({
   const connectionDetail = status?.last_error
     || (status?.state_refreshed_at ? `State refreshed ${formatOptionalDate(status.state_refreshed_at)}` : configured ? "Credentials are saved, but live state has not been verified yet." : "Save credentials to enable Home Assistant state sync.");
   const tabs: Array<{ key: HomeAssistantTab; label: string; meta: string; icon: React.ElementType }> = [
-    { key: "setup", label: "Setup", meta: discovery ? "Discovery ready" : "Credentials", icon: Home },
-    { key: "gates", label: "Gates", meta: `${gateEntities.length} configured`, icon: DoorOpen },
-    { key: "garages", label: "Garage doors", meta: `${garageDoorEntities.length} configured`, icon: Warehouse }
+    { key: "setup", label: "Setup", meta: discovery ? "Discovery ready" : "Credentials", icon: Home }
   ];
-
-  const updateGateEntities = (entities: HomeAssistantManagedCover[]) => {
-    onChange("home_assistant_gate_entities", JSON.stringify(normalizeManagedCoversForSave(entities), null, 2));
-  };
-
-  const updateGarageDoorEntities = (entities: HomeAssistantManagedCover[]) => {
-    onChange("home_assistant_garage_door_entities", JSON.stringify(normalizeManagedCoversForSave(entities), null, 2));
-  };
-
-  const autoDetectGateEntities = () => {
-    const suggestions = discovery?.gate_suggestions?.length
-      ? discovery.gate_suggestions
-      : (discovery?.cover_entities ?? []).filter(isGateCandidate).map(managedCoverFromEntity);
-    updateGateEntities(mergeManagedCovers(gateEntities, suggestions));
-  };
-
-  const autoDetectGarageDoors = () => {
-    const suggestions = discovery?.garage_door_suggestions?.length
-      ? discovery.garage_door_suggestions
-      : (discovery?.cover_entities ?? []).filter(isGarageDoorCandidate).map(managedCoverFromEntity);
-    updateGarageDoorEntities(mergeManagedCovers(garageDoorEntities, suggestions));
-  };
 
   return (
     <div className="ha-config-shell">
@@ -4206,38 +4615,6 @@ export function HomeAssistantSettingsFields({
               </div>
             </div>
           </section>
-        ) : null}
-
-        {activeTab === "gates" ? (
-        <HomeAssistantCoverTable
-          addLabel="Add Gate"
-          autoDetectLabel="Auto Detect"
-          emptyLabel="No gate entities configured"
-          entities={gateEntities}
-          icon={DoorOpen}
-          availableEntities={discovery?.cover_entities ?? []}
-          description="Gates opened when access is granted."
-          onAutoDetect={autoDetectGateEntities}
-          onChange={updateGateEntities}
-          schedules={schedules}
-          title="Gate entities"
-        />
-        ) : null}
-
-        {activeTab === "garages" ? (
-        <HomeAssistantCoverTable
-          addLabel="Add Door"
-          autoDetectLabel="Auto Detect"
-          emptyLabel="No garage doors configured"
-          entities={garageDoorEntities}
-          icon={Warehouse}
-          availableEntities={discovery?.cover_entities ?? []}
-          description="Garage doors available in each person profile."
-          onAutoDetect={autoDetectGarageDoors}
-          onChange={updateGarageDoorEntities}
-          schedules={schedules}
-          title="Garage doors"
-        />
         ) : null}
       </div>
     </div>
@@ -4411,6 +4788,8 @@ export function integrationInitialValues(definition: IntegrationDefinition, valu
     unifi_protect_snapshot_height: "720",
     home_assistant_gate_entities: "[]",
     home_assistant_garage_door_entities: "[]",
+    esphome_port: "6053",
+    esphome_timeout_seconds: "30",
     discord_guild_allowlist: "",
     discord_channel_allowlist: "",
     discord_user_allowlist: "",

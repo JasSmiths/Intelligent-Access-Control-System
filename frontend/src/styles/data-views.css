@@ -2684,6 +2684,75 @@ tr:last-child td {
   gap: 4px;
 }
 
+.access-device-list {
+  gap: 12px;
+}
+
+.access-provider-card {
+  align-content: start;
+  gap: 12px;
+}
+
+.access-provider-copy {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.access-provider-grid {
+  align-items: start;
+}
+
+.access-device-loading-bar {
+  display: grid;
+  gap: 7px;
+  padding: 4px 0 10px;
+}
+
+.access-device-loading-track {
+  height: 5px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+}
+
+.access-device-loading-track span {
+  width: 38%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), color-mix(in srgb, var(--green) 55%, var(--blue)));
+  animation: accessDeviceLoading 1.1s ease-in-out infinite;
+}
+
+.access-device-loading-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@keyframes accessDeviceLoading {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(270%);
+  }
+}
+
+.access-device-editor {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
 @media (max-width: 1100px) {
   .alfred-training-grid {
     grid-template-columns: 1fr;

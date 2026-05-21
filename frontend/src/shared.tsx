@@ -268,6 +268,8 @@ export type IntegrationStatus = {
   last_failure_at?: string | null;
   state_refreshed_at?: string | null;
   listener_running?: boolean;
+  provider_status?: Record<string, AccessDeviceProviderRuntimeStatus>;
+  state_stream_status?: Record<string, AccessDeviceStreamStatus>;
   gate_entity_id: string | null;
   gate_entities?: HomeAssistantManagedCover[];
   garage_door_entities?: HomeAssistantManagedCover[];
@@ -278,6 +280,34 @@ export type IntegrationStatus = {
   back_door_state?: string;
   main_garage_door_state?: string;
   mums_garage_door_state?: string;
+};
+
+export type AccessDeviceProviderRuntimeStatus = {
+  provider: string;
+  configured?: boolean;
+  connected?: boolean;
+  degraded?: boolean;
+  last_error?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type AccessDeviceStreamStatus = {
+  provider: string;
+  connected?: boolean;
+  running?: boolean;
+  last_error?: string | null;
+  updated_at?: string | null;
+  devices?: AccessDeviceStreamDeviceStatus[];
+};
+
+export type AccessDeviceStreamDeviceStatus = {
+  device_id?: string | null;
+  name?: string;
+  host?: string;
+  connected?: boolean;
+  last_error?: string | null;
+  cover_count?: number | null;
+  updated_at?: string | null;
 };
 
 export type MaintenanceStatus = {
@@ -357,6 +387,25 @@ export type HomeAssistantManagedCover = {
   schedule_id?: string | null;
   open_service?: string;
   close_service?: string;
+};
+
+export type AccessDeviceProviderBinding = {
+  provider: "home_assistant" | "esphome" | string;
+  external_id: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+};
+
+export type AccessDevice = {
+  id: string;
+  key: string;
+  kind: "gate" | "garage_door";
+  name: string;
+  enabled: boolean;
+  schedule_id: string | null;
+  open_for_access: boolean;
+  sort_order: number;
+  bindings: AccessDeviceProviderBinding[];
 };
 
 export type HomeAssistantMobileAppService = {
@@ -479,6 +528,8 @@ export type ViewKey =
   | "logs"
   | "settings"
   | "settings_general"
+  | "settings_gates"
+  | "settings_garage_doors"
   | "settings_auth"
   | "alfred_training"
   | "settings_automations"
@@ -513,6 +564,16 @@ export const api = {
   async patch<T>(path: string, body?: unknown): Promise<T> {
     const response = await fetch(path, {
       method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!response.ok) throw await apiError(response);
+    return response.json() as Promise<T>;
+  },
+  async put<T>(path: string, body?: unknown): Promise<T> {
+    const response = await fetch(path, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: body ? JSON.stringify(body) : undefined
@@ -860,6 +921,9 @@ export type SettingFieldDefinition = {
 
 export const secretSettingKeys = new Set([
   "home_assistant_token",
+  "esphome_devices",
+  "esphome_api_encryption_key",
+  "esphome_legacy_password",
   "apprise_urls",
   "discord_bot_token",
   "whatsapp_access_token",
@@ -993,7 +1057,7 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
     ) {
       if (!value.trim()) continue;
     }
-    if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
+  if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
       try {
         const parsed = value.trim() ? JSON.parse(value) : [];
         payload[key] = Array.isArray(parsed) ? parsed : [];
@@ -1013,6 +1077,8 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
       "lpr_similarity_threshold",
       "llm_timeout_seconds",
       "dvla_timeout_seconds",
+      "esphome_port",
+      "esphome_timeout_seconds",
       "unifi_protect_port",
       "unifi_protect_snapshot_width",
       "unifi_protect_snapshot_height"

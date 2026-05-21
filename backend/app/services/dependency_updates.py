@@ -2467,6 +2467,7 @@ def _setting_relevant_to_dependency(key: str, dependency: ExternalDependency | N
         "discord": "discord_",
         "dvla": "dvla_",
         "home assistant": "home_assistant_",
+        "esphome": "esphome_",
         "notifications": "apprise_",
         "backend": "",
         "frontend": "",

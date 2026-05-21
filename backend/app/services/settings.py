@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from time import monotonic
 from typing import Any
 
@@ -14,6 +15,9 @@ from app.modules.home_assistant.covers import legacy_gate_entities, normalize_co
 
 SECRET_KEYS = {
     "home_assistant_token",
+    "esphome_devices",
+    "esphome_api_encryption_key",
+    "esphome_legacy_password",
     "apprise_urls",
     "discord_bot_token",
     "whatsapp_access_token",
@@ -70,6 +74,16 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "allow",
         "Access policy when no schedule is assigned. Use allow or deny.",
     ),
+    "gate_control_provider": (
+        "access",
+        settings.gate_controller if settings.gate_controller in {"home_assistant", "esphome"} else "home_assistant",
+        "Primary provider for gate and garage-door cover commands.",
+    ),
+    "gate_failover_provider": (
+        "access",
+        "none",
+        "Optional failover provider for gate and garage-door cover commands.",
+    ),
     "home_assistant_url": ("integrations", str(settings.home_assistant_url) if settings.home_assistant_url else "", "Home Assistant base URL."),
     "home_assistant_token": ("integrations", settings.home_assistant_token or "", "Home Assistant long-lived access token."),
     "home_assistant_gate_entity_id": ("integrations", settings.home_assistant_gate_entity_id or "", "Gate entity ID."),
@@ -86,6 +100,12 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "home_assistant_tts_service": ("integrations", settings.home_assistant_tts_service, "TTS service name."),
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
+    "esphome_host": ("integrations", "", "ESPHome native API host or IP address."),
+    "esphome_port": ("integrations", 6053, "ESPHome native API port."),
+    "esphome_api_encryption_key": ("integrations", "", "ESPHome native API encryption key."),
+    "esphome_legacy_password": ("integrations", "", "Optional legacy ESPHome API password."),
+    "esphome_timeout_seconds": ("integrations", 30.0, "ESPHome native API connection timeout."),
+    "esphome_devices": ("integrations", "[]", "Configured ESPHome native API devices."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
     "discord_bot_token": ("integrations", "", "Discord bot token."),
     "discord_guild_allowlist": ("integrations", [], "Allowed Discord guild/server IDs."),
@@ -259,6 +279,8 @@ class RuntimeConfig:
     lpr_similarity_threshold: float
     lpr_allowed_smart_zones: list[str]
     schedule_default_policy: str
+    gate_control_provider: str
+    gate_failover_provider: str
     home_assistant_url: str
     home_assistant_token: str
     home_assistant_gate_entity_id: str
@@ -267,6 +289,12 @@ class RuntimeConfig:
     home_assistant_garage_door_entities: list[dict[str, Any]]
     home_assistant_tts_service: str
     home_assistant_default_media_player: str
+    esphome_host: str
+    esphome_port: int
+    esphome_api_encryption_key: str
+    esphome_legacy_password: str
+    esphome_timeout_seconds: float
+    esphome_devices: list[dict[str, Any]]
     apprise_urls: str
     discord_bot_token: str
     discord_guild_allowlist: list[str]
@@ -362,6 +390,9 @@ def decrypted_value(record: SystemSetting) -> Any:
 
 def setting_payload(key: str, value: Any) -> dict[str, Any]:
     if key in SECRET_KEYS:
+        if key == "esphome_devices":
+            encoded = json.dumps(value if value is not None else [], separators=(",", ":")) if not isinstance(value, str) else value
+            return {"encrypted": encrypt_secret(encoded)} if encoded else {"encrypted": ""}
         return {"encrypted": encrypt_secret(str(value or ""))} if value else {"encrypted": ""}
     return {"plain": value}
 
@@ -394,6 +425,83 @@ def string_list_value(value: Any) -> list[str]:
         for item in raw.replace(",", "\n").splitlines()
         if item.strip()
     ]
+
+
+def json_list_value(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    raw = str(value).strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def normalize_esphome_device_id(value: str) -> str:
+    return "_".join(str(value or "").strip().lower().replace("-", "_").split())
+
+
+def normalize_esphome_devices(
+    value: Any,
+    *,
+    legacy_host: str = "",
+    legacy_port: int = 6053,
+    legacy_encryption_key: str = "",
+    legacy_password: str = "",
+    legacy_timeout_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    devices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(json_list_value(value)):
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("host") or "").strip()
+        name = str(item.get("name") or host or f"ESPHome Device {index + 1}").strip()
+        base_id = normalize_esphome_device_id(str(item.get("id") or item.get("key") or name or host))
+        device_id = base_id or f"esphome_{index + 1}"
+        if device_id in seen:
+            suffix = 2
+            while f"{device_id}_{suffix}" in seen:
+                suffix += 1
+            device_id = f"{device_id}_{suffix}"
+        seen.add(device_id)
+        devices.append(
+            {
+                "id": device_id,
+                "name": name,
+                "host": host,
+                "port": int(item.get("port") or 6053),
+                "encryption_key": str(
+                    item.get("encryption_key")
+                    or item.get("api_encryption_key")
+                    or item.get("noise_psk")
+                    or ""
+                ),
+                "legacy_password": str(item.get("legacy_password") or item.get("password") or ""),
+                "timeout_seconds": float(item.get("timeout_seconds") or 30.0),
+                "enabled": bool_value(item.get("enabled", True)),
+            }
+        )
+    raw_was_blank = not isinstance(value, list) and not str(value or "").strip()
+    if not devices and raw_was_blank and str(legacy_host or "").strip():
+        devices.append(
+            {
+                "id": "default",
+                "name": "ESPHome Device",
+                "host": str(legacy_host or "").strip(),
+                "port": int(legacy_port or 6053),
+                "encryption_key": str(legacy_encryption_key or ""),
+                "legacy_password": str(legacy_password or ""),
+                "timeout_seconds": float(legacy_timeout_seconds or 30.0),
+                "enabled": True,
+            }
+        )
+    return devices
 
 
 async def seed_dynamic_settings() -> None:
@@ -495,6 +603,16 @@ async def get_runtime_config() -> RuntimeConfig:
         schedule_default_policy=(
             "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
         ),
+        gate_control_provider=(
+            str(values["gate_control_provider"]).strip().lower()
+            if str(values["gate_control_provider"]).strip().lower() in {"home_assistant", "esphome"}
+            else "home_assistant"
+        ),
+        gate_failover_provider=(
+            str(values["gate_failover_provider"]).strip().lower()
+            if str(values["gate_failover_provider"]).strip().lower() in {"none", "home_assistant", "esphome"}
+            else "none"
+        ),
         home_assistant_url=str(values["home_assistant_url"] or ""),
         home_assistant_token=str(values["home_assistant_token"] or ""),
         home_assistant_gate_entity_id=str(values["home_assistant_gate_entity_id"] or ""),
@@ -509,6 +627,19 @@ async def get_runtime_config() -> RuntimeConfig:
         ),
         home_assistant_tts_service=str(values["home_assistant_tts_service"]),
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
+        esphome_host=str(values["esphome_host"] or "").strip(),
+        esphome_port=int(values["esphome_port"] or 6053),
+        esphome_api_encryption_key=str(values["esphome_api_encryption_key"] or ""),
+        esphome_legacy_password=str(values["esphome_legacy_password"] or ""),
+        esphome_timeout_seconds=float(values["esphome_timeout_seconds"] or 30.0),
+        esphome_devices=normalize_esphome_devices(
+            values["esphome_devices"],
+            legacy_host=str(values["esphome_host"] or "").strip(),
+            legacy_port=int(values["esphome_port"] or 6053),
+            legacy_encryption_key=str(values["esphome_api_encryption_key"] or ""),
+            legacy_password=str(values["esphome_legacy_password"] or ""),
+            legacy_timeout_seconds=float(values["esphome_timeout_seconds"] or 30.0),
+        ),
         apprise_urls=str(values["apprise_urls"] or ""),
         discord_bot_token=str(values["discord_bot_token"] or ""),
         discord_guild_allowlist=string_list_value(values["discord_guild_allowlist"]),
@@ -638,7 +769,7 @@ async def update_settings(updates: dict[str, Any]) -> list[dict[str, Any]]:
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)
             if record:
-                if record.is_secret and value in {None, ""} and key not in CLEARABLE_SECRET_KEYS:
+                if record.is_secret and (value is None or value == "") and key not in CLEARABLE_SECRET_KEYS:
                     continue
                 record.value = setting_payload(key, value)
                 record.is_secret = key in SECRET_KEYS

@@ -1,0 +1,1 @@
+"""Access-device provider adapters."""

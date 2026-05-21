@@ -2,6 +2,8 @@
 
 from app.models.core import (
     AccessEvent,
+    AccessDevice,
+    AccessDeviceProviderBinding,
     ActionConfirmation,
     AlfredEvalExample,
     AlfredFeedback,
@@ -49,6 +51,8 @@ from app.models.core import (
 
 __all__ = [
     "AccessEvent",
+    "AccessDevice",
+    "AccessDeviceProviderBinding",
     "ActionConfirmation",
     "AlfredEvalExample",
     "AlfredFeedback",

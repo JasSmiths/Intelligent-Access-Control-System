@@ -314,7 +314,6 @@ class ActionableNotificationService:
             GateCommandIntent(
                 reason=reason,
                 source="actionable_notification",
-                controller_name=settings.gate_controller,
                 bypass_schedule=force,
                 actor=identity.person.display_name,
                 registration_number=bound.registration_number,
