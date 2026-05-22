@@ -402,9 +402,9 @@ def apply_snapshot_to_access_event(event: Any, metadata: SnapshotMetadata) -> No
     event.snapshot_camera = metadata.camera
 
 
-def access_event_snapshot_payload(event: Any) -> dict[str, Any]:
+def access_event_snapshot_payload(event: Any, *, verify_available: bool = True) -> dict[str, Any]:
     snapshot_path = getattr(event, "snapshot_path", None)
-    if not snapshot_path or not snapshot_path_available(snapshot_path):
+    if not snapshot_path or (verify_available and not snapshot_path_available(snapshot_path)):
         return empty_access_event_snapshot_payload()
     event_id = getattr(event, "id", None)
     return {

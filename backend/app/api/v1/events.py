@@ -53,10 +53,18 @@ async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict
         ).all() if events else []
     movement_by_event_id = {row.access_event_id: row for row in movement_rows}
 
-    return [_serialize_event(event, movement_by_event_id.get(event.id)) for event in events]
+    return [
+        _serialize_event(event, movement_by_event_id.get(event.id), verify_snapshot_available=False)
+        for event in events
+    ]
 
 
-def _serialize_event(event: AccessEvent, movement_saga: MovementSagaRecord | None = None) -> dict:
+def _serialize_event(
+    event: AccessEvent,
+    movement_saga: MovementSagaRecord | None = None,
+    *,
+    verify_snapshot_available: bool = True,
+) -> dict:
     visitor_pass = _event_visitor_pass_payload(event)
     payload = {
         "id": str(event.id),
@@ -73,7 +81,7 @@ def _serialize_event(event: AccessEvent, movement_saga: MovementSagaRecord | Non
         "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
         "movement_saga": _event_movement_saga_payload(event, movement_saga),
     }
-    payload.update(access_event_snapshot_payload(event))
+    payload.update(access_event_snapshot_payload(event, verify_available=verify_snapshot_available))
     return payload
 
 

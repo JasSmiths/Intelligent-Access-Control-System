@@ -280,6 +280,32 @@ def test_access_event_snapshot_payload_suppresses_missing_files(tmp_path, monkey
     }
 
 
+def test_access_event_snapshot_payload_can_skip_availability_check(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    event_id = uuid4()
+    event = SimpleNamespace(
+        id=event_id,
+        snapshot_path=access_event_snapshot_relative_path(event_id),
+        snapshot_captured_at=datetime(2026, 4, 30, 20, 45, tzinfo=UTC),
+        snapshot_bytes=1200,
+        snapshot_width=320,
+        snapshot_height=180,
+        snapshot_camera="camera.gate",
+    )
+
+    assert access_event_snapshot_payload(event, verify_available=False) == {
+        "snapshot_url": f"/api/v1/events/{event_id}/snapshot",
+        "snapshot_captured_at": "2026-04-30T20:45:00+00:00",
+        "snapshot_bytes": 1200,
+        "snapshot_width": 320,
+        "snapshot_height": 180,
+        "snapshot_camera": "camera.gate",
+    }
+
+
 def test_notification_snapshot_wrapper_routes_through_snapshot_manager(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
