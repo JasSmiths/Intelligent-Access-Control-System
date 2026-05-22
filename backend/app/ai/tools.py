@@ -1265,7 +1265,7 @@ def _visitor_pass_answer_artifacts(
                     "kind": "count",
                     "must_appear": False,
                 },
-                fallback_text=f"I couldn't find a matching visitor pass for {subject}.",
+                canonical_text=f"I couldn't find a matching visitor pass for {subject}.",
             )
         ]
     record = records[0]
@@ -1278,25 +1278,25 @@ def _visitor_pass_answer_artifacts(
         fact_id = "visitor.departure_time"
         label = "Visitor departure"
         display = _compact_time_label(departure_display)
-        fallback = f"{subject} left at {display}."
+        canonical_text = f"{subject} left at {display}."
     elif arrival_display:
         answer_type = "visitor_arrival"
         fact_id = "visitor.arrival_time"
         label = "Visitor arrival"
         display = _compact_time_label(arrival_display)
-        fallback = f"{subject} arrived at {display}."
+        canonical_text = f"{subject} arrived at {display}."
     elif duration:
         answer_type = "visitor_duration"
         fact_id = "visitor.duration"
         label = "Visitor duration"
         display = duration
-        fallback = f"{subject} was on site for {display}."
+        canonical_text = f"{subject} was on site for {display}."
     else:
         answer_type = "visitor_pass"
         fact_id = "visitor.status"
         label = "Visitor pass status"
         display = str(record.get("status") or "visitor pass")
-        fallback = f"{subject} has a {display} visitor pass."
+        canonical_text = f"{subject} has a {display} visitor pass."
     return [
         artifact_payload(
             domain="visitor_passes",
@@ -1321,7 +1321,7 @@ def _visitor_pass_answer_artifacts(
                 }
             ],
             display={"voice": "natural_concise", "no_timezone_labels": True},
-            fallback_text=fallback,
+            canonical_text=canonical_text,
         )
     ]
 
@@ -1724,7 +1724,7 @@ def _access_events_answer_artifacts(arguments: dict[str, Any], records: list[dic
                     "must_appear": False,
                 },
                 time_scope={"day": arguments.get("day") or "recent"},
-                fallback_text=f"I couldn't find any matching access events for {subject}.",
+                canonical_text=f"I couldn't find any matching access events for {subject}.",
             )
         ]
     event = records[0]
@@ -1771,7 +1771,7 @@ def _access_events_answer_artifacts(arguments: dict[str, Any], records: list[dic
                 }
             ],
             display={"verb": verb, "voice": "natural_concise", "no_timezone_labels": True},
-            fallback_text=f"{subject} {verb} at {compact_display or display}.",
+            canonical_text=f"{subject} {verb} at {compact_display or display}.",
         )
     ]
 
@@ -2570,7 +2570,7 @@ def _anomaly_answer_artifacts(arguments: dict[str, Any], records: list[dict[str,
     suspected_delivery = bool(arguments.get("suspected_delivery") or arguments.get("possible_delivery"))
     if not records:
         subject = search if search != "matching alerts" else "alerts"
-        fallback = (
+        canonical_text = (
             f"I couldn't find any matching active or resolved alerts for {subject}."
             if subject != "alerts"
             else "I couldn't find any matching active or resolved alerts."
@@ -2591,7 +2591,7 @@ def _anomaly_answer_artifacts(arguments: dict[str, Any], records: list[dict[str,
                 },
                 time_scope={"day": arguments.get("day") or "recent"},
                 display={"voice": "natural_concise", "no_timezone_labels": True},
-                fallback_text=fallback,
+                canonical_text=canonical_text,
             )
         ]
     alert = records[0]
@@ -2627,7 +2627,7 @@ def _anomaly_answer_artifacts(arguments: dict[str, Any], records: list[dict[str,
                 }
             ],
             display={"voice": "natural_concise", "no_timezone_labels": True},
-            fallback_text=f"The latest matching alert was {display}.",
+            canonical_text=f"The latest matching alert was {display}.",
         )
     ]
 
@@ -2657,7 +2657,7 @@ def _alert_activity_answer_artifacts(
                     "must_appear": False,
                 },
                 time_scope={"day": day, "label": scope_label},
-                fallback_text=f"No alerts were raised or resolved {scope_label}.",
+                canonical_text=f"No alerts were raised or resolved {scope_label}.",
             )
         ]
     parts = [f"{raised_count} raised", f"{resolved_count} resolved"]
@@ -2723,7 +2723,7 @@ def _alert_activity_answer_artifacts(
                 ],
             ],
             display={"voice": "natural_concise", "no_timezone_labels": True, "alerts_only": True},
-            fallback_text=display + ".",
+            canonical_text=display + ".",
         )
     ]
 
@@ -3103,7 +3103,7 @@ async def calculate_visit_duration(arguments: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(interval, dict)
             ],
             display={"voice": "natural_concise", "no_timezone_labels": True},
-            fallback_text=(
+            canonical_text=(
                 f"{subject} has been here for {display_duration}."
                 if isinstance(latest_interval, dict) and latest_interval.get("exit") == "still_present"
                 else f"{subject} was here for {display_duration}."
@@ -3204,7 +3204,7 @@ async def calculate_absence_duration(arguments: dict[str, Any]) -> dict[str, Any
     display_duration = _human_duration_natural(primary_seconds)
     display_subject = _preferred_subject_label(arguments, subject or "The matched subject")
     source_records: list[dict[str, Any]] = []
-    fallback_text = ""
+    canonical_text = ""
     if latest_interval:
         left_display_raw = latest_interval.get("exit_display")
         returned_display_raw = latest_interval.get("entry_display")
@@ -3222,16 +3222,16 @@ async def calculate_absence_duration(arguments: dict[str, Any]) -> dict[str, Any
             }
         )
         if mode == "total" and len(intervals) > 1:
-            fallback_text = f"{display_subject} was out for {display_duration} in total across {len(intervals)} matched absences."
+            canonical_text = f"{display_subject} was out for {display_duration} in total across {len(intervals)} matched absences."
         elif latest_interval.get("entry") == "still_away":
             suffix = f" since {left_display}" if left_display else ""
-            fallback_text = f"{display_subject} has been out for {display_duration}{suffix}. Still away, so the clock is still running."
+            canonical_text = f"{display_subject} has been out for {display_duration}{suffix}. Still away, so the clock is still running."
         elif left_display and returned_display:
-            fallback_text = f"{display_subject} was out for {display_duration}, from {left_display} to {returned_display}."
+            canonical_text = f"{display_subject} was out for {display_duration}, from {left_display} to {returned_display}."
         else:
-            fallback_text = f"{display_subject} was out for {display_duration}."
+            canonical_text = f"{display_subject} was out for {display_duration}."
     else:
-        fallback_text = "I couldn't find enough matching access events to calculate an absence duration."
+        canonical_text = "I couldn't find enough matching access events to calculate an absence duration."
     response_hint = _absence_duration_answer_hint(
         subject=subject or "The matched subject",
         duration=duration_human,
@@ -3294,7 +3294,7 @@ async def calculate_absence_duration(arguments: dict[str, Any]) -> dict[str, Any
                 time_scope={"day": arguments.get("day") or "today", "mode": mode, "status": status},
                 source_records=source_records,
                 display={"voice": "natural_concise", "no_timezone_labels": True, "subject_full_name": subject},
-                fallback_text=fallback_text,
+                canonical_text=canonical_text,
             )
         ],
     }
@@ -4531,7 +4531,7 @@ def _schedule_answer_artifacts(payload: dict[str, Any], *, subject: str) -> list
                 }
             ],
             display={"voice": "natural_concise", "no_timezone_labels": True},
-            fallback_text=display,
+            canonical_text=display,
         )
     ]
 

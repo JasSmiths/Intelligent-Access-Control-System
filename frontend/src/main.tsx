@@ -147,6 +147,11 @@ function RouteLoading() {
 }
 
 const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
+const REALTIME_RECONNECT_DELAY_MS = 1500;
+const REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS = 1000;
+const REALTIME_RESUME_RECONNECT_AFTER_MS = 30000;
+const REALTIME_CLIENT_PING_INTERVAL_MS = 25000;
+const REALTIME_PROBE_TIMEOUT_MS = 5000;
 
 const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "access_event.finalize_failed",
@@ -201,7 +206,42 @@ type AuthStatus = {
 
 type ThemeMode = "system" | "light" | "dark";
 
-type RealtimeConnectionStatus = "connecting" | "live" | "reconnecting";
+type RealtimeConnectionStatus = "connecting" | "checking" | "live" | "refreshing" | "reconnecting" | "offline";
+
+type RealtimeConnectionState = {
+  status: RealtimeConnectionStatus;
+  title: string;
+  detail: string;
+};
+
+const REALTIME_STATUS_TITLES: Record<RealtimeConnectionStatus, string> = {
+  connecting: "Opening stream",
+  checking: "Verifying stream",
+  live: "Realtime live",
+  refreshing: "Syncing data",
+  reconnecting: "Reconnecting",
+  offline: "Network offline"
+};
+
+function realtimeStatus(status: RealtimeConnectionStatus, detail: string): RealtimeConnectionState {
+  return {
+    status,
+    title: REALTIME_STATUS_TITLES[status],
+    detail
+  };
+}
+
+function realtimeProbeDetail(reason: string) {
+  if (reason === "focus") return "Page focused; checking stream health";
+  if (reason === "visibilitychange") return "Page visible; checking stream health";
+  if (reason === "pageshow") return "Page restored; checking stream health";
+  if (reason === "online") return "Network restored; checking stream health";
+  if (reason === "interval") return "Routine stream health check";
+  if (reason === "open") return "Waiting for server response";
+  if (reason.startsWith("probe_timeout")) return "Health check timed out; opening a fresh stream";
+  if (reason.startsWith("connect_timeout")) return "Connection attempt stalled; retrying";
+  return "Checking live event stream";
+}
 
 type GlobalSearchResultType =
   | "person"
@@ -1246,7 +1286,10 @@ function App() {
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
-  const [realtimeConnectionStatus, setRealtimeConnectionStatus] = React.useState<RealtimeConnectionStatus>("connecting");
+  const [realtimeConnection, setRealtimeConnection] = React.useState<RealtimeConnectionState>(() =>
+    realtimeStatus("connecting", "Preparing live updates")
+  );
+  const realtimeConnectionStatus = realtimeConnection.status;
   const [search, setSearch] = React.useState("");
   const [searchPaletteOpen, setSearchPaletteOpen] = React.useState(false);
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
@@ -1262,6 +1305,10 @@ function App() {
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
   const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
   const profileButtonRef = React.useRef<HTMLButtonElement | null>(null);
+
+  const setRealtimeStatus = React.useCallback((status: RealtimeConnectionStatus, detail: string) => {
+    setRealtimeConnection(realtimeStatus(status, detail));
+  }, []);
 
   const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
     setView(nextView);
@@ -1367,13 +1414,28 @@ function App() {
   }, [refresh]);
 
   const realtimeRefreshLastRunRef = React.useRef(0);
+  const realtimeLifecycleRefreshLastRunRef = React.useRef(0);
 
   const refreshFromRealtime = React.useCallback(() => {
     const now = Date.now();
     if (now - realtimeRefreshLastRunRef.current < REALTIME_REFRESH_MIN_INTERVAL_MS) return;
     realtimeRefreshLastRunRef.current = now;
-    refresh().catch(() => undefined);
-  }, [refresh]);
+    setRealtimeStatus("refreshing", "Applying live update");
+    refresh()
+      .then(() => setRealtimeStatus("live", "Live update applied"))
+      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; waiting for the stream"));
+  }, [refresh, setRealtimeStatus]);
+
+  const refreshFromRealtimeLifecycle = React.useCallback(() => {
+    const now = Date.now();
+    if (now - realtimeLifecycleRefreshLastRunRef.current < REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS) return;
+    realtimeLifecycleRefreshLastRunRef.current = now;
+    realtimeRefreshLastRunRef.current = now;
+    setRealtimeStatus("refreshing", "Pulling current site state");
+    refresh()
+      .then(() => setRealtimeStatus("live", "Data refreshed just now"))
+      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; retrying with the stream"));
+  }, [refresh, setRealtimeStatus]);
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
@@ -1392,11 +1454,37 @@ function App() {
     if (!authStatus?.authenticated) return;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
+    let pingTimer: number | null = null;
+    let probeTimer: number | null = null;
+    let pendingProbeId: string | null = null;
+    let verifiedSocket: WebSocket | null = null;
     let stopped = false;
+    let backgroundedAt: number | null = document.visibilityState === "hidden" ? Date.now() : null;
+    let unfocusedAt: number | null = document.hasFocus() ? null : Date.now();
+    let lastSocketActivityAt = Date.now();
+    let hasVerifiedSocket = false;
 
-    const handleMessage = (event: MessageEvent) => {
-      const parsed = JSON.parse(event.data) as RealtimeMessage;
+    const handleMessage = (event: MessageEvent, sourceSocket: WebSocket) => {
+      lastSocketActivityAt = Date.now();
+      let parsed: RealtimeMessage;
+      try {
+        parsed = JSON.parse(event.data) as RealtimeMessage;
+      } catch {
+        return;
+      }
+      if (parsed.type === "connection.pong") {
+        markSocketVerified(sourceSocket, parsed);
+        return;
+      }
       setRealtime((current) => [parsed, ...current].slice(0, 80));
+      if (parsed.type === "connection.ready") {
+        if (pendingProbeId) {
+          setRealtimeStatus("checking", "Server accepted stream; waiting for health reply");
+        } else {
+          markSocketVerified(sourceSocket, parsed);
+        }
+        return;
+      }
       const notificationToast = notificationToastFromRealtime(parsed);
       if (notificationToast) {
         setNotificationToasts((current) => [notificationToast, ...current].slice(0, 4));
@@ -1422,35 +1510,241 @@ function App() {
       }
     };
 
-    const scheduleReconnect = () => {
+    const clearProbeTimer = () => {
+      if (probeTimer === null) return;
+      window.clearTimeout(probeTimer);
+      probeTimer = null;
+    };
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer === null) return;
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    };
+
+    const markSocketVerified = (target: WebSocket, message: RealtimeMessage) => {
+      if (stopped || socket !== target) return;
+      const payload = isRecord(message.payload) ? message.payload : {};
+      const messageProbeId = typeof payload.id === "string" ? payload.id : null;
+      if (message.type === "connection.pong" && pendingProbeId && messageProbeId !== pendingProbeId) return;
+      const firstVerificationForSocket = verifiedSocket !== target;
+      verifiedSocket = target;
+      pendingProbeId = null;
+      lastSocketActivityAt = Date.now();
+      clearProbeTimer();
+      setRealtimeStatus(
+        "live",
+        message.type === "connection.pong" ? "Stream verified just now" : "Server accepted stream"
+      );
+      if (firstVerificationForSocket) {
+        if (hasVerifiedSocket) {
+          refreshFromRealtimeLifecycle();
+        }
+        hasVerifiedSocket = true;
+      }
+    };
+
+    const nextProbeId = () => {
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+      }
+      return `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    };
+
+    const sendSocketProbe = (target: WebSocket, reason: string) => {
+      if (target.readyState !== WebSocket.OPEN) return false;
+      const probeId = nextProbeId();
+      clearProbeTimer();
+      pendingProbeId = probeId;
+      setRealtimeStatus("checking", realtimeProbeDetail(reason));
+      try {
+        target.send(JSON.stringify({
+          type: "client.ping",
+          payload: {
+            id: probeId,
+            reason,
+            at: new Date().toISOString()
+          }
+        }));
+        probeTimer = window.setTimeout(() => {
+          if (stopped || socket !== target || pendingProbeId !== probeId) return;
+          pendingProbeId = null;
+          reconnectNow(`probe_timeout:${reason}`);
+        }, REALTIME_PROBE_TIMEOUT_MS);
+        return true;
+      } catch {
+        try {
+          target.close();
+        } catch {
+          // The resume handler will replace sockets that cannot be probed.
+        }
+        return false;
+      }
+    };
+
+    const scheduleReconnect = (closedSocket: WebSocket | null) => {
+      if (closedSocket && socket !== closedSocket) return;
+      if (closedSocket) {
+        socket = null;
+      }
       if (stopped || reconnectTimer !== null) return;
-      setRealtimeConnectionStatus("reconnecting");
+      pendingProbeId = null;
+      verifiedSocket = null;
+      clearProbeTimer();
+      setRealtimeStatus("reconnecting", "Opening a fresh stream shortly");
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
         openSocket();
-      }, 1500);
+      }, REALTIME_RECONNECT_DELAY_MS);
     };
 
-    const openSocket = () => {
+    const reconnectNow = (reason: string) => {
       if (stopped) return;
+      clearReconnectTimer();
+      clearProbeTimer();
+      const currentSocket = socket;
+      socket = null;
+      pendingProbeId = null;
+      verifiedSocket = null;
+      setRealtimeStatus("reconnecting", realtimeProbeDetail(reason));
+      if (currentSocket && currentSocket.readyState !== WebSocket.CLOSED) {
+        try {
+          currentSocket.close(4000, reason.slice(0, 100));
+        } catch {
+          try {
+            currentSocket.close();
+          } catch {
+            // The follow-up open below replaces the failed socket either way.
+          }
+        }
+      }
+      openSocket();
+    };
+
+    const handleResume = (reason: string) => {
+      if (stopped) return;
+      const now = Date.now();
+      const inactiveFor = Math.max(
+        backgroundedAt === null ? 0 : now - backgroundedAt,
+        unfocusedAt === null ? 0 : now - unfocusedAt
+      );
+      backgroundedAt = null;
+      unfocusedAt = null;
+      const currentSocket = socket;
+      const connectingTimedOut =
+        currentSocket?.readyState === WebSocket.CONNECTING &&
+        now - lastSocketActivityAt >= REALTIME_RESUME_RECONNECT_AFTER_MS;
+      const shouldReconnect =
+        !currentSocket ||
+        currentSocket.readyState === WebSocket.CLOSED ||
+        currentSocket.readyState === WebSocket.CLOSING ||
+        connectingTimedOut ||
+        inactiveFor >= REALTIME_RESUME_RECONNECT_AFTER_MS;
+
+      if (shouldReconnect) {
+        reconnectNow(reason);
+      } else if (currentSocket.readyState === WebSocket.OPEN && !sendSocketProbe(currentSocket, reason)) {
+        reconnectNow(`${reason}:probe_failed`);
+      } else if (currentSocket.readyState === WebSocket.CONNECTING) {
+        setRealtimeStatus("connecting", "Connection is still opening");
+      }
+      refreshFromRealtimeLifecycle();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        backgroundedAt = backgroundedAt ?? Date.now();
+        return;
+      }
+      handleResume("visibilitychange");
+    };
+
+    const handleWindowBlur = () => {
+      unfocusedAt = unfocusedAt ?? Date.now();
+    };
+
+    const handleWindowFocus = () => handleResume("focus");
+    const handlePageHide = () => {
+      backgroundedAt = backgroundedAt ?? Date.now();
+      unfocusedAt = unfocusedAt ?? Date.now();
+    };
+    const handlePageShow = () => handleResume("pageshow");
+    const handleOnline = () => handleResume("online");
+    const handleOffline = () => {
+      setRealtimeStatus("offline", "Waiting for network to return");
+      backgroundedAt = backgroundedAt ?? Date.now();
+    };
+
+    function openSocket() {
+      if (stopped) return;
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+      clearReconnectTimer();
       const nextSocket = new WebSocket(wsUrl("/api/v1/realtime/ws"));
       socket = nextSocket;
-      setRealtimeConnectionStatus("connecting");
-      nextSocket.onopen = () => setRealtimeConnectionStatus("live");
-      nextSocket.onmessage = handleMessage;
-      nextSocket.onclose = scheduleReconnect;
-      nextSocket.onerror = () => nextSocket.close();
-    };
+      lastSocketActivityAt = Date.now();
+      setRealtimeStatus("connecting", "Opening /api/v1/realtime/ws");
+      nextSocket.onopen = () => {
+        if (stopped || socket !== nextSocket) return;
+        lastSocketActivityAt = Date.now();
+        sendSocketProbe(nextSocket, "open");
+      };
+      nextSocket.onmessage = (event) => handleMessage(event, nextSocket);
+      nextSocket.onclose = () => scheduleReconnect(nextSocket);
+      nextSocket.onerror = () => {
+        if (socket === nextSocket) {
+          nextSocket.close();
+        }
+      };
+    }
 
     openSocket();
+    pingTimer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      const currentSocket = socket;
+      if (!currentSocket) {
+        scheduleReconnect(null);
+        return;
+      }
+      if (currentSocket.readyState === WebSocket.OPEN) {
+        sendSocketProbe(currentSocket, "interval");
+        return;
+      }
+      if (
+        currentSocket.readyState === WebSocket.CONNECTING &&
+        Date.now() - lastSocketActivityAt >= REALTIME_RESUME_RECONNECT_AFTER_MS
+      ) {
+        reconnectNow("connect_timeout");
+        return;
+      }
+      if (currentSocket.readyState === WebSocket.CLOSED || currentSocket.readyState === WebSocket.CLOSING) {
+        scheduleReconnect(currentSocket);
+      }
+    }, REALTIME_CLIENT_PING_INTERVAL_MS);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
     return () => {
       stopped = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
+      clearReconnectTimer();
+      clearProbeTimer();
+      if (pingTimer !== null) {
+        window.clearInterval(pingTimer);
       }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       socket?.close();
     };
-  }, [authStatus?.authenticated, refreshFromRealtime]);
+  }, [authStatus?.authenticated, refreshFromRealtime, refreshFromRealtimeLifecycle, setRealtimeStatus]);
 
   React.useEffect(() => {
     const media = window.matchMedia("(max-width: 720px)");
@@ -1748,9 +2042,12 @@ function App() {
               </div>
             ) : null}
           </div>
-          <div className="sidebar-status">
-            <span className={`dot ${realtimeConnectionStatus}`} />
-            <span>{realtimeConnectionStatus === "live" ? "Realtime live" : realtimeConnectionStatus === "reconnecting" ? "Realtime reconnecting" : "Realtime connecting"}</span>
+          <div className="sidebar-status" aria-live="polite" title={`${realtimeConnection.title}: ${realtimeConnection.detail}`}>
+            <span className={`dot ${realtimeConnectionStatus}`} aria-hidden="true" />
+            <span className="sidebar-status-copy">
+              <strong>{realtimeConnection.title}</strong>
+              <small>{realtimeConnection.detail}</small>
+            </span>
           </div>
         </div>
       </aside>

@@ -102,7 +102,7 @@ export function LogsWorkspace({
     const records = activeSource === "live"
       ? relevantLiveRecords
       : [...traceRecords, ...auditRecords, ...relevantLiveRecords];
-    return [...records].sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp));
+    return sortRecordsByNewest(records);
   }, [activeSource, auditRecords, displayedLiveRecords, traceRecords]);
 
   const liveSourceCounts = React.useMemo(() => {
@@ -443,5 +443,12 @@ export function LogsWorkspace({
 function mergeRecords(left: LogRecord[], right: LogRecord[]) {
   const byId = new Map<string, LogRecord>();
   [...left, ...right].forEach((record) => byId.set(record.id, record));
-  return Array.from(byId.values()).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  return sortRecordsByNewest(Array.from(byId.values()));
+}
+
+function sortRecordsByNewest(records: LogRecord[]) {
+  return records
+    .map((record, index) => ({ record, index, timestamp: Date.parse(record.timestamp) || 0 }))
+    .sort((left, right) => right.timestamp - left.timestamp || left.index - right.index)
+    .map((item) => item.record);
 }

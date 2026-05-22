@@ -4137,11 +4137,11 @@ export function ESPHomeSettingsFields({
     setTestingId(device.id);
     setStatusMessage("");
     try {
-      const result = await api.post<{ ok: boolean; cover_count: number }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, {});
-      setStatusMessage(`${device.name} connected. ${result.cover_count} cover${result.cover_count === 1 ? "" : "s"} discovered.`);
+      const result = await api.post<{ ok: boolean; cover_count: number; stream?: string }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, {});
+      setStatusMessage(`${device.name} live stream verified. ${result.cover_count} cover${result.cover_count === 1 ? "" : "s"} available.`);
       refreshStreamStatus(false).catch(() => undefined);
     } catch (error) {
-      onError(error instanceof Error ? error.message : `Unable to connect to ${device.name}.`);
+      onError(error instanceof Error ? error.message : `Unable to verify the live stream for ${device.name}.`);
     } finally {
       setTestingId("");
     }

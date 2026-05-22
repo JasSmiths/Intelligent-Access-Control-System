@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 from datetime import UTC, datetime
 import time
@@ -869,7 +868,16 @@ async def test_alfred_v3_duration_turn_cannot_finish_with_timestamp_only_tools(m
             '"confidence":0.83,'
             '"reason":"bad historical plan: timestamp and presence only"}'
         ),
-        agent_steps=[],
+        agent_steps=[
+            (
+                '{"answer_text":"Ash was out for 9 mins, from 19:21 to 19:30.",'
+                '"fact_ids_used":["absence.duration.latest"],'
+                '"style":"natural_concise",'
+                '"confidence":0.95,'
+                '"needs_clarification":false,'
+                '"clarification_question":null}'
+            )
+        ],
     )
 
     result, executed, _selected_tool_history = await _run_simulated_v3_turn(
@@ -994,51 +1002,11 @@ async def test_alfred_v3_planned_confirmation_action_skips_react_loop(monkeypatc
     assert [(call.name, call.arguments) for call in executed] == [
         ("open_device", {"target": "main garage door", "kind": "garage_door", "action": "open", "confirm": False})
     ]
-    assert "Please confirm before I open Main Garage" in result.text
-
-
-def test_planned_direct_render_depends_on_tool_contract_not_chat_text() -> None:
-    service = ChatService()
-    signature = inspect.signature(service._planned_results_can_render_directly)
-
-    assert list(signature.parameters) == ["tool_results"]
-    assert service._planned_results_can_render_directly(
-        [
-            {
-                "name": "query_presence",
-                "output": {"presence": [{"person": "Jas", "state": "present"}]},
-            }
-        ]
-    )
-    assert service._planned_results_can_render_directly(
-        [
-            {
-                "name": "query_access_events",
-                "output": {
-                    "answer_artifacts": [
-                        {
-                            "domain": "access_logs",
-                            "answer_type": "latest_arrival",
-                            "subject_label": "Jas",
-                            "primary_fact": {
-                                "id": "access.latest_entry",
-                                "label": "Latest arrival",
-                                "display_value": "08:10",
-                                "must_appear": True,
-                            },
-                        }
-                    ]
-                },
-            }
-        ]
-    )
-    assert not service._planned_results_can_render_directly(
-        [{"name": "query_presence", "output": {"unexpected": "shape"}}]
-    )
+    assert "Use the chat confirmation action before I continue" in result.text
 
 
 @pytest.mark.asyncio
-async def test_alfred_v3_simple_planned_read_renders_without_interactive_model(monkeypatch) -> None:
+async def test_alfred_v3_simple_planned_read_uses_interactive_model(monkeypatch) -> None:
     provider = V3SimulatedSemanticProvider(
         planner_json=(
             '{"selected_domains":["Access_Logs"],'
@@ -1050,7 +1018,7 @@ async def test_alfred_v3_simple_planned_read_renders_without_interactive_model(m
             '"confidence":0.91,'
             '"reason":"presence state"}'
         ),
-        agent_steps=[],
+        agent_steps=['{"final":"Jas is present"}'],
     )
 
     result, executed, selected_tool_history = await _run_simulated_v3_turn(
@@ -1061,13 +1029,13 @@ async def test_alfred_v3_simple_planned_read_renders_without_interactive_model(m
     )
 
     assert [(call.name, call.arguments) for call in executed] == [("query_presence", {"person": "Jas"})]
-    assert provider.agent_tool_catalogs == []
-    assert selected_tool_history == []
+    assert provider.agent_tool_catalogs == [[]]
+    assert selected_tool_history == [["query_presence"]]
     assert result.text == "Jas is present"
 
 
 @pytest.mark.asyncio
-async def test_alfred_v3_multi_planned_read_renders_all_tool_results_without_interactive_model(monkeypatch) -> None:
+async def test_alfred_v3_multi_planned_read_uses_interactive_model(monkeypatch) -> None:
     provider = V3SimulatedSemanticProvider(
         planner_json=(
             '{"selected_domains":["Access_Logs","Gate_Hardware"],'
@@ -1082,7 +1050,7 @@ async def test_alfred_v3_multi_planned_read_renders_all_tool_results_without_int
             '"confidence":0.93,'
             '"reason":"presence and gate state"}'
         ),
-        agent_steps=[],
+        agent_steps=['{"final":"2 people are on site: Jas, Steph. Top Gate is closed."}'],
     )
 
     result, executed, selected_tool_history = await _run_simulated_v3_turn(
@@ -1108,8 +1076,8 @@ async def test_alfred_v3_multi_planned_read_renders_all_tool_results_without_int
         ("query_presence", {}),
         ("query_device_states", {"target": "Top Gate", "kind": "gate"}),
     ]
-    assert provider.agent_tool_catalogs == []
-    assert selected_tool_history == []
+    assert provider.agent_tool_catalogs == [[]]
+    assert selected_tool_history == [["query_presence", "query_device_states"]]
     assert "2 people are on site: Jas, Steph" in result.text
     assert "Top Gate is closed" in result.text
 
@@ -1443,7 +1411,7 @@ async def test_react_loop_does_not_expose_raw_tool_json_after_empty_alert_search
     )
 
     assert not result.text.strip().startswith("[")
-    assert "couldn't find any matching active or resolved alerts for hellofresh" in result.text
+    assert "provider returned tool protocol JSON instead of a final answer" in result.text
 
 
 @pytest.mark.asyncio
@@ -1503,6 +1471,7 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
 
     assert len(executed) == 5
     assert "five-step safety limit" in result.text
+    assert "did not make anything up from partial tool output" in result.text
 
 
 def test_visitor_pass_query_does_not_start_guided_create_flow() -> None:
@@ -1673,71 +1642,6 @@ def test_messaging_feedback_commands_parse_without_keyword_routing() -> None:
     assert parse_feedback_command("is the top gate open") is None
 
 
-def test_visitor_pass_resolution_direct_text_reports_arrival_time() -> None:
-    service = ChatService()
-
-    text = service._entity_resolution_direct_text(
-        {
-            "status": "unique",
-            "match": {
-                "type": "visitor_pass",
-                "visitor_name": "Stu",
-                "display_name": "Stu",
-                "arrival_time": "2026-05-04T10:12:45+01:00",
-            },
-        }
-    )
-
-    assert text == "Stu's Visitor Pass shows arrival at 10:12."
-
-
-def test_query_visitor_pass_fallback_prioritizes_arrival_time() -> None:
-    service = ChatService()
-
-    text = service._fallback_text(
-        [
-            {
-                "name": "query_visitor_passes",
-                "output": {
-                    "visitor_passes": [
-                        {
-                            "visitor_name": "Stu",
-                            "arrival_time": "2026-05-04T10:12:45+01:00",
-                            "vehicle_summary": "Blue Ford - AB12CDE",
-                        }
-                    ]
-                },
-            }
-        ]
-    )
-
-    assert text == "Stu arrived at 10:12."
-
-
-def test_calculate_visit_duration_fallback_never_returns_raw_json() -> None:
-    service = ChatService()
-    output = {
-        "duration_seconds": 820,
-        "duration_human": "13m",
-        "intervals": [
-            {
-                "entry": "2026-05-09T16:44:13.005000+01:00",
-                "entry_display": "09 May 2026, 16:44",
-                "exit": "still_present",
-                "exit_display": None,
-            }
-        ],
-        "matched_events": 2,
-        "timezone": "Europe/London",
-    }
-
-    text = service._fallback_text([{"name": "calculate_visit_duration", "output": output}])
-
-    assert text == "The matched visit has lasted 13m since 09 May 2026, 16:44, and is still marked open."
-    assert not text.lstrip().startswith(("[", "{"))
-    assert "duration_seconds" not in text
-
-
 @pytest.mark.asyncio
 async def test_calculate_absence_duration_pairs_exit_to_next_entry(monkeypatch) -> None:
     async def fake_query_access_events(arguments):
@@ -1887,11 +1791,11 @@ async def test_absence_duration_artifact_uses_latest_interval_and_requested_name
     assert artifact.primary_fact.id == "absence.duration.latest"
     assert artifact.primary_fact.value == 2970
     assert artifact.primary_fact.display_value == "50 mins"
-    fallback = render_answer_from_artifacts(artifacts)
-    assert fallback == "Sylv was out for 50 mins, from 15:54 to 16:44."
-    assert "1h 49m" not in fallback
-    assert "(Sylvia Smith)" not in fallback
-    assert "Europe/London" not in fallback
+    canonical = render_answer_from_artifacts(artifacts)
+    assert canonical == "Sylv was out for 50 mins, from 15:54 to 16:44."
+    assert "1h 49m" not in canonical
+    assert "(Sylvia Smith)" not in canonical
+    assert "Europe/London" not in canonical
 
 
 def test_answer_verifier_rejects_duration_not_in_artifact() -> None:
@@ -1911,7 +1815,7 @@ def test_answer_verifier_rejects_duration_not_in_artifact() -> None:
                     "must_appear": True,
                 },
                 "source_records": [{"left_at": "15:54", "returned_at": "16:44"}],
-                "fallback_text": "Sylv was out for 50 mins, from 15:54 to 16:44.",
+                "canonical_text": "Sylv was out for 50 mins, from 15:54 to 16:44.",
             }
         ]
     }
@@ -1951,7 +1855,7 @@ def test_answer_artifact_selection_keeps_absence_separate_from_visitor_pass() ->
                                 "must_appear": True,
                             },
                             "source_records": [{"left_at": "15:21", "returned_at": "17:40"}],
-                            "fallback_text": "Ash was out for 2h 19m, from 15:21 to 17:40.",
+                            "canonical_text": "Ash was out for 2h 19m, from 15:21 to 17:40.",
                         }
                     ]
                 },
@@ -1973,7 +1877,7 @@ def test_answer_artifact_selection_keeps_absence_separate_from_visitor_pass() ->
                                 "source": "visitor_passes",
                                 "must_appear": True,
                             },
-                            "fallback_text": "Ash has a cancelled visitor pass.",
+                            "canonical_text": "Ash has a cancelled visitor pass.",
                         }
                     ]
                 },
@@ -2024,61 +1928,6 @@ async def test_calculate_absence_duration_ongoing_includes_human_answer_hint(mon
     assert "avoid robotic audit-log phrasing" in hint
 
 
-def test_calculate_absence_duration_fallback_uses_natural_language() -> None:
-    service = ChatService()
-    output = {
-        "subject": "Sylvia Smith",
-        "absence_seconds": 820,
-        "absence_human": "13m",
-        "intervals": [
-            {
-                "exit": "2026-05-09T16:30:33+01:00",
-                "exit_display": "09 May 2026, 16:30",
-                "entry": "2026-05-09T16:44:13+01:00",
-                "entry_display": "09 May 2026, 16:44",
-            }
-        ],
-        "matched_events": 2,
-        "status": "returned",
-        "timezone": "Europe/London",
-    }
-
-    text = service._fallback_text([{"name": "calculate_absence_duration", "output": output}])
-
-    assert text == "Sylvia Smith was out for 13m, from 09 May 2026, 16:30 to 09 May 2026, 16:44. Neat little there-and-back loop."
-    assert not text.lstrip().startswith(("[", "{"))
-    assert "absence_seconds" not in text
-
-
-def test_calculate_absence_duration_fallback_keeps_ongoing_absence_human() -> None:
-    service = ChatService()
-    output = {
-        "subject": "Ash",
-        "absence_seconds": 6600,
-        "absence_human": "1h 50m",
-        "intervals": [
-            {
-                "exit": "2026-05-09T15:50:00+01:00",
-                "exit_display": "09 May 2026, 15:50",
-                "entry": "still_away",
-                "entry_display": None,
-            }
-        ],
-        "matched_events": 1,
-        "status": "still_away",
-        "timezone": "Europe/London",
-        "as_of": "2026-05-09T17:40:00+01:00",
-        "as_of_display": "09 May 2026, 17:40",
-    }
-
-    text = service._fallback_text([{"name": "calculate_absence_duration", "output": output}])
-
-    assert text == "Ash has been out for 1h 50m since 09 May 2026, 15:50. Still marked away as of 17:40, so the clock's still running."
-    assert "latest logged departure" not in text
-    assert "That means" not in text
-    assert "absence_seconds" not in text
-
-
 def test_absence_persona_uses_training_not_phrase_humanizer() -> None:
     service = ChatService()
     seeded_text = " ".join(str(item["lesson"]) for item in DEFAULT_SEEDED_LESSONS)
@@ -2112,7 +1961,7 @@ def test_assistant_text_cleanup_blocks_raw_json_tool_payloads() -> None:
     for response_text in (raw_json, json.dumps(raw_json)):
         cleaned = service._clean_assistant_text(response_text, [])
 
-        assert cleaned == "The matched visit has lasted 13m since 09 May 2026, 16:44, and is still marked open."
+        assert "provider returned raw structured data instead of a final answer" in cleaned
         assert not cleaned.lstrip().startswith(("[", "{", '"[', '"{'))
         assert "duration_seconds" not in cleaned
 
@@ -3146,7 +2995,7 @@ async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
     assert executed[0].arguments["confirm"] is False
     assert pending["tool_name"] == "open_gate"
     assert pending["arguments"]["confirm"] is False
-    assert "confirm before I open Top Gate" in result.text
+    assert result.text == "Open Top Gate?"
 
 
 @pytest.mark.asyncio
@@ -3256,17 +3105,6 @@ def test_natural_schedule_time_description_normalizes_to_time_blocks() -> None:
     assert all(not blocks[str(day)] for day in [0, 1, 3, 5, 6])
 
 
-def test_schedule_delete_direct_text_prompts_for_confirmation() -> None:
-    service = ChatService()
-
-    assert (
-        service._schedule_delete_direct_text(
-            {"requires_confirmation": True, "schedule_name": "Jason", "detail": "Delete the Jason schedule?"}
-        )
-        == "Delete the Jason schedule?"
-    )
-
-
 def test_assistant_text_cleanup_hides_file_urls_and_markdown() -> None:
     service = ChatService()
     text = (
@@ -3336,27 +3174,6 @@ def test_access_diagnostic_tools_are_registered() -> None:
     assert tools["investigate_access_incident"].requires_confirmation is True
     assert tools["backfill_access_event_from_protect"].requires_confirmation is True
     assert tools["test_unifi_alarm_webhook"].requires_confirmation is True
-
-
-def test_access_incident_direct_text_reports_comparison_and_action() -> None:
-    service = ChatService()
-    text = service._access_incident_direct_text(
-        {
-            "found_iacs_event": False,
-            "found_protect_event": True,
-            "root_cause": "protect_lpr_detected_but_iacs_webhook_missing",
-            "confidence": "high",
-            "iacs_vs_protect": {
-                "comparison": "Protect saw a matching LPR candidate but IACS has no access event."
-            },
-            "recommended_action": {"summary": "Fix UniFi Protect Alarm Manager delivery, then send a test."},
-        }
-    )
-
-    assert "IACS found no matching IACS access event" in text
-    assert "Protect has matching evidence" in text
-    assert "protect lpr detected but iacs webhook missing" in text
-    assert "Fix UniFi Protect Alarm Manager delivery" in text
 
 
 def test_suppressed_read_extraction_and_root_cause_chain() -> None:
@@ -3445,85 +3262,6 @@ def test_suppressed_read_incident_builds_backfill_candidate_args() -> None:
     assert args["source_access_event_id"] == source_event_id
     assert args["suppression_reason"] == "vehicle_session_already_active"
     assert args["decision"] == "granted"
-
-
-def test_access_incident_direct_text_reports_suppressed_read_chain() -> None:
-    service = ChatService()
-
-    text = service._access_incident_direct_text(
-        {
-            "found_iacs_event": False,
-            "found_iacs_suppressed_read": True,
-            "root_cause": "iacs_read_suppressed_as_active_vehicle_session",
-            "diagnostic_chain": [
-                {"stage": "camera_webhook", "detail": "IACS suppressed-read history contains the matching LPR read."},
-                {"stage": "access_event", "detail": "IACS received the read at 18:18 but suppressed it as vehicle_session_already_active."},
-                {"stage": "gate_command", "detail": "No gate command ran because no access event was finalized."},
-                {"stage": "notification", "detail": "Notifications never ran because notification workflows are evaluated after finalized access events."},
-                {"stage": "root_cause", "detail": "iacs_read_suppressed_as_active_vehicle_session"},
-            ],
-            "iacs": {
-                "suppressed_reads": [
-                    {
-                        "reason": "vehicle_session_already_active",
-                        "source_access_event_id": "event-1",
-                    }
-                ]
-            },
-            "detail": "Confirm to backfill the access event and update presence only.",
-        }
-    )
-
-    assert "Camera/webhook" in text
-    assert "IACS received the plate read, but suppressed it as `vehicle_session_already_active`" in text
-    assert "no access event was finalized and notifications never ran" in text
-    assert "Repair: Confirm to backfill" in text
-
-
-def test_process_arrival_wording_prefetches_diagnostics_without_lpr_keyword() -> None:
-    service = ChatService()
-    message = "why did Stephs latest arrival take so much longer to process than the other arrivals today? 700ms+"
-
-    assert service._looks_like_access_diagnostic_request(message.lower())
-    assert service._looks_like_lpr_timing_request(message.lower())
-
-
-def test_unhelpful_latency_answer_is_replaced_with_diagnostic_summary() -> None:
-    service = ChatService()
-    tool_results: list[dict[str, Any]] = [
-        {
-            "name": "diagnose_access_event",
-            "output": {
-                "found": True,
-                "event": {
-                    "person": "Steph Smith",
-                    "registration_number": "PE70DHX",
-                    "occurred_at_display": "28 Apr 2026, 17:46 Europe/London",
-                },
-                "recognition": {
-                    "total_pipeline_ms": 742.3,
-                    "debounce_or_recognition_ms": 701.0,
-                    "slowest_steps": [
-                        {"name": "Debounce & Confidence Aggregation", "duration_ms": 701.0}
-                    ],
-                    "likely_delay_reason": "Most of the time was spent waiting in the LPR debounce/confidence window.",
-                },
-                "gate": {"outcome_reason": "The automatic gate open command was accepted."},
-                "notifications": {"summary": "A persisted notification delivery record exists for this trigger."},
-            },
-        }
-    ]
-
-    bad_text = "However, this system view doesn’t include the per-scan LPR processing/latency metrics."
-
-    assert service._should_replace_with_diagnostic_answer(
-        "Why did Steph's latest LPR take much longer than the rest?",
-        bad_text,
-        tool_results,
-    )
-    replacement = service._access_diagnostic_direct_text(tool_results[0]["output"])
-    assert "742.3ms" in replacement
-    assert "Debounce/recognition accounted for 701.0ms" in replacement
 
 
 def test_lpr_timing_observation_reports_capture_delay() -> None:
@@ -3890,12 +3628,6 @@ def test_compact_observation_redacts_and_summarizes_payloads() -> None:
     assert "empty" not in compacted
     assert compacted["events"][-1]["omitted_items"] == 5
     assert compacted["nested"]["a"]["b"]["c"]["type"] == "object"
-
-
-def test_chat_time_from_iso_converts_utc_to_london() -> None:
-    service = ChatService()
-
-    assert service._chat_time_from_iso("2026-04-27T12:00:00+00:00") == "13:00"
 
 
 def test_agent_datetime_formats_europe_london() -> None:

@@ -35,13 +35,11 @@ from app.services.alfred.answer_contracts import (
     answer_artifacts_for_prompt,
     extract_answer_artifacts,
     parse_answer_draft,
-    rendered_answer_draft,
     render_answer_from_artifacts,
     select_answer_artifacts,
     verify_answer_draft,
 )
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
-from app.services.chat_formatting import ChatResultFormattingMixin
 from app.services.chat_routing import ChatRoutingMixin
 from app.services.chat_contracts import (
     CHAT_FILE_LINK_PATTERN,
@@ -64,12 +62,12 @@ from app.services.chat_contracts import (
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log, sanitize_payload
-from app.services.type_helpers import as_dict, as_list, as_dict_list
+from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
 
 
-class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
+class ChatService(ChatRoutingMixin):
     def __init__(self) -> None:
         self._tools: dict[str, AgentTool] = build_agent_tools()
 
@@ -663,7 +661,6 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         }
         result = LlmResult(text="")
         planned_pending_action: dict[str, Any] | None = None
-        planned_direct_answer = False
         if planned_read_calls:
             tool_results.extend(
                 await self._execute_tool_batch(
@@ -694,11 +691,9 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                 status_callback=status_callback,
             )
             if planned_pending_action:
-                result = LlmResult(text=self._fallback_text(tool_results))
-            planned_direct_answer = self._planned_results_can_render_directly(tool_results)
+                result = LlmResult(text=self._confirmation_prompt_from_tool_results(tool_results))
         if (
             not planned_pending_action
-            and not planned_direct_answer
             and not select_answer_artifacts(extract_answer_artifacts(tool_results))
         ):
             messages = await self._build_agent_messages(
@@ -766,11 +761,37 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         response_attachments = self._attachments_from_tool_results(tool_results)
         answer_artifacts = select_answer_artifacts(extract_answer_artifacts(tool_results))
         if answer_artifacts:
-            raw_text = self._render_verified_artifact_answer(provider, runtime, artifacts=answer_artifacts)
+            try:
+                raw_text = await self._compose_verified_artifact_answer(
+                    provider,
+                    runtime,
+                    message=message,
+                    artifacts=answer_artifacts,
+                    status_callback=status_callback,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "alfred_answer_composer_failed_closed",
+                    extra={"provider": provider.name, "error": str(exc)[:240]},
+                )
+                await emit_agent_state(
+                    status_callback,
+                    "provider_error",
+                    "Provider error",
+                    detail="Answer composer failed closed",
+                    agents_running=0,
+                    active_tool_calls=0,
+                )
+                return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
         else:
-            raw_text = result.text or self._fallback_text(tool_results)
-        if not answer_artifacts and self._should_replace_with_diagnostic_answer(message, raw_text, tool_results):
-            raw_text = self._access_diagnostic_direct_text(self._diagnostic_output(tool_results) or {})
+            raw_text = result.text.strip()
+            if not raw_text:
+                return await self._provider_error_response(
+                    session_uuid,
+                    provider.name,
+                    IntentRouterError("Alfred v3 provider did not return a final answer."),
+                    user_message_id=user_message_id,
+                )
         text = self._clean_assistant_text(raw_text, response_attachments)
         assistant_message_id = await self._append_message(
             session_uuid,
@@ -910,7 +931,12 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
             calls = self._tool_calls_from_result(result, iteration=iteration)
             if not calls:
                 if tool_results and self._extract_tool_call_payload(result.text) is not None:
-                    return LlmResult(text=self._fallback_text(tool_results), raw=result.raw)
+                    return LlmResult(
+                        text=self._agent_fail_closed_text(
+                            "the provider returned tool protocol JSON instead of a final answer"
+                        ),
+                        raw=result.raw,
+                    )
                 return LlmResult(text=self._clean_agent_text(result.text), raw=result.raw)
 
             fresh_calls: list[ToolCall] = []
@@ -937,7 +963,9 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                     fresh_calls.append(call)
             if not fresh_calls:
                 return LlmResult(
-                    text=self._fallback_text(tool_results),
+                    text=self._agent_fail_closed_text(
+                        "the provider repeated the same tool call without reaching a final answer"
+                    ),
                     raw=result.raw,
                 )
 
@@ -1010,7 +1038,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                             **pending_action,
                         }
                     )
-                return LlmResult(text=self._fallback_text(tool_results), raw=result.raw)
+                return LlmResult(text=self._confirmation_prompt_from_tool_results(native_results), raw=result.raw)
             messages = await self._build_agent_messages(
                 session_id,
                 tool_results,
@@ -1020,9 +1048,8 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
             )
 
         return LlmResult(
-            text=(
-                "I hit my five-step safety limit while checking this, so I'm stopping before I start inventing plot twists. "
-                f"{self._fallback_text(tool_results)}"
+            text=self._agent_fail_closed_text(
+                "the provider hit the five-step safety limit before returning a final answer"
             ),
             raw=result.raw,
         )
@@ -1153,6 +1180,30 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
 
     def _tool_call_fingerprint(self, call: ToolCall) -> str:
         return f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
+
+    def _agent_fail_closed_text(self, reason: str) -> str:
+        reason = reason.strip().rstrip(".")
+        return (
+            f"I stopped because {reason}. I did not make anything up from partial tool output; "
+            "please retry or narrow the request."
+        )
+
+    def _confirmation_prompt_from_tool_results(self, tool_results: list[dict[str, Any]]) -> str:
+        for result in reversed(tool_results):
+            output = result.get("output")
+            if not isinstance(output, dict) or not output.get("requires_confirmation"):
+                continue
+            detail = str(output.get("detail") or "").strip()
+            if detail:
+                return detail
+            tool_name = str(result.get("name") or "")
+            if tool_name in {"open_device", "command_device", "open_gate"}:
+                device = as_dict(output.get("device"))
+                action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
+                name = str(device.get("name") or output.get("target") or "that device").strip()
+                return f"Please confirm before I {action} {name}."
+            return "That action needs confirmation before I can continue."
+        return "That action needs confirmation before I can continue."
 
     def _planned_read_tool_calls(
         self,
@@ -1369,38 +1420,6 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                 }
             )
         return pending_action
-
-    def _planned_results_can_render_directly(self, tool_results: list[dict[str, Any]]) -> bool:
-        if not tool_results:
-            return False
-        if select_answer_artifacts(extract_answer_artifacts(tool_results)):
-            return True
-        return all(self._tool_result_has_direct_render_contract(result) for result in tool_results)
-
-    def _tool_result_has_direct_render_contract(self, result: dict[str, Any]) -> bool:
-        tool_name = str(result.get("name") or "")
-        output = result.get("output") if isinstance(result.get("output"), dict) else {}
-        if not output:
-            return False
-        if output.get("requires_confirmation") or output.get("error"):
-            return True
-        contract_keys_by_tool = {
-            "open_device": {"device", "opened", "closed", "accepted", "target"},
-            "command_device": {"device", "opened", "closed", "accepted", "target"},
-            "open_gate": {"device", "opened", "accepted", "target"},
-            "query_device_states": {"devices"},
-            "query_alert_activity": {"raised", "resolved", "alerts"},
-            "query_presence": {"presence"},
-            "query_visitor_passes": {"visitor_passes"},
-            "get_visitor_pass": {"visitor_pass"},
-            "calculate_absence_duration": {"absence_seconds", "absence_human", "intervals"},
-            "calculate_visit_duration": {"duration_seconds", "duration_human", "intervals"},
-            "query_access_events": {"events"},
-            "verify_schedule_access": {"allowed", "decision", "subject"},
-            "get_maintenance_status": {"enabled", "state"},
-        }
-        expected_keys = contract_keys_by_tool.get(tool_name)
-        return bool(expected_keys and any(key in output for key in expected_keys))
 
     def _safe_state_changing_call(self, call: ToolCall) -> ToolCall:
         tool = self._tools.get(call.name)
@@ -1989,13 +2008,13 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         artifacts: list[Any],
         status_callback: StatusCallback | None,
     ) -> str:
-        fallback_text = render_answer_from_artifacts(artifacts)
+        reference_text = render_answer_from_artifacts(artifacts)
         draft = await self._draft_artifact_answer(
             provider,
             runtime,
             message=message,
             artifacts=artifacts,
-            fallback_text=fallback_text,
+            reference_text=reference_text,
         )
         verification = verify_answer_draft(draft, artifacts)
         repair_count = 0
@@ -2012,43 +2031,23 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                 runtime,
                 message=message,
                 artifacts=artifacts,
-                fallback_text=fallback_text,
+                reference_text=reference_text,
                 verifier_reasons=verification.reasons,
             )
             verification = verify_answer_draft(draft, artifacts)
 
-        fallback_used = not verification.approved or draft is None
-        text = fallback_text if fallback_used or draft is None else draft.answer_text.strip()
         self._audit_answer_contract(
             artifacts=artifacts,
             verification=verification,
             repair_count=repair_count,
-            fallback_used=fallback_used,
+            failed_closed=not verification.approved or draft is None,
             provider_name=getattr(provider, "name", ""),
             model_name=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
         )
-        return text or fallback_text
-
-    def _render_verified_artifact_answer(
-        self,
-        provider: Any,
-        runtime: Any,
-        *,
-        artifacts: list[Any],
-    ) -> str:
-        selected = select_answer_artifacts(artifacts)
-        text = render_answer_from_artifacts(selected)
-        verification = verify_answer_draft(rendered_answer_draft(text, selected), selected)
-        fallback_used = not verification.approved
-        self._audit_answer_contract(
-            artifacts=selected,
-            verification=verification,
-            repair_count=0,
-            fallback_used=fallback_used,
-            provider_name=getattr(provider, "name", ""),
-            model_name=self._interactive_model_for_provider(runtime, getattr(provider, "name", "")),
-        )
-        return text
+        if not verification.approved or draft is None:
+            reason = "; ".join(verification.reasons[:3]) or "answer composer did not satisfy the answer contract"
+            raise ValueError(reason)
+        return draft.answer_text.strip()
 
     async def _draft_artifact_answer(
         self,
@@ -2057,7 +2056,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         *,
         message: str,
         artifacts: list[Any],
-        fallback_text: str,
+        reference_text: str,
         verifier_reasons: list[str] | None = None,
     ) -> AnswerDraft | None:
         system_prompt = (
@@ -2071,7 +2070,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         user_payload: dict[str, Any] = {
             "user_message": message,
             "answer_artifacts": answer_artifacts_for_prompt(artifacts),
-            "safe_fallback_text": fallback_text,
+            "reference_answer": reference_text,
             "voice_profile": {
                 "style": "natural_concise",
                 "personality": "warm and lightly characterful",
@@ -2138,7 +2137,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         artifacts: list[Any],
         verification: AnswerVerifierResult,
         repair_count: int,
-        fallback_used: bool,
+        failed_closed: bool,
         provider_name: str,
         model_name: str | None,
     ) -> None:
@@ -2150,8 +2149,8 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
             actor_user_id=context.get("user_id"),
             target_entity="AlfredAnswerContract",
             target_label="; ".join(str(getattr(artifact, "answer_type", "")) for artifact in artifacts[:3]),
-            outcome="fallback" if fallback_used else "success",
-            level="warning" if fallback_used else "info",
+            outcome="failed_closed" if failed_closed else "success",
+            level="warning" if failed_closed else "info",
             metadata={
                 "session_id": context.get("session_id"),
                 "provider": provider_name,
@@ -2162,7 +2161,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
                 "verifier_passed": verification.approved,
                 "verifier_reasons": verification.reasons,
                 "repair_count": repair_count,
-                "fallback_used": fallback_used,
+                "failed_closed": failed_closed,
             },
         )
 
@@ -2292,7 +2291,7 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         raw_payload = self._raw_json_response_payload(cleaned)
         if raw_payload is not None:
-            return self._structured_payload_direct_text(raw_payload)
+            return self._agent_fail_closed_text("the provider returned raw structured data instead of a final answer")
         if not cleaned and any(attachment.get("kind") == "image" for attachment in attachments):
             return "Here's the latest snapshot."
         return cleaned
@@ -2318,26 +2317,6 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
         except json.JSONDecodeError:
             return None
         return payload if isinstance(payload, (dict, list)) else None
-
-    def _structured_payload_direct_text(self, payload: Any) -> str:
-        if isinstance(payload, list):
-            if len(payload) == 1 and isinstance(payload[0], dict):
-                return self._structured_payload_direct_text(payload[0])
-            return (
-                f"I checked the system and found {len(payload)} structured result"
-                f"{'s' if len(payload) != 1 else ''}, but I need to summarize them before showing them."
-            )
-        if not isinstance(payload, dict):
-            return "I checked the system, but I need to summarize the result before showing it."
-        if payload.get("absence_human") or payload.get("absence_seconds") is not None:
-            return self._absence_duration_direct_text(payload)
-        if payload.get("duration_human") or payload.get("duration_seconds") is not None:
-            return self._visit_duration_direct_text(payload)
-        if payload.get("requires_confirmation"):
-            return str(payload.get("detail") or "That action needs confirmation before I can do it.")
-        if payload.get("error"):
-            return str(payload.get("error"))
-        return "I checked the system, but I need to summarize the result before showing it."
 
     def _strip_redundant_precise_time(self, text: str) -> str:
         return re.sub(r"\b(\d{1,2}:\d{2})\s*\(\1:\d{2}(?:\.\d+)?\)", r"\1", text)
@@ -3272,431 +3251,6 @@ class ChatService(ChatResultFormattingMixin, ChatRoutingMixin):
             tool_name=call.name,
             tool_payload=output,
         )
-
-    def _fallback_text(self, tool_results: list[dict[str, Any]]) -> str:
-        if not tool_results:
-            return "I don't have live system context for that yet. Point me at a person, vehicle, gate, or schedule and I'll take it from there."
-        artifacts = extract_answer_artifacts(tool_results)
-        if artifacts:
-            return render_answer_from_artifacts(artifacts)
-        if len(tool_results) > 1 and all(self._tool_result_has_direct_render_contract(result) for result in tool_results):
-            parts: list[str] = []
-            for result in tool_results:
-                text = self._fallback_text([result]).strip()
-                if text and text not in parts:
-                    parts.append(text)
-            if parts:
-                return " ".join(part.rstrip(".") + "." for part in parts)
-        latest = tool_results[-1]
-        tool_name = str(latest.get("name") or "")
-        output = as_dict(latest.get("output"))
-        if tool_name == "get_camera_snapshot":
-            return self._camera_snapshot_direct_text(output)
-        if tool_name == "resolve_human_entity":
-            return self._entity_resolution_direct_text(output)
-        if tool_name == "get_telemetry_trace":
-            return self._telemetry_trace_direct_text(output)
-        if tool_name in {"query_visitor_passes", "get_visitor_pass"}:
-            passes = as_list(output.get("visitor_passes"))
-            if not passes and isinstance(output.get("visitor_pass"), dict):
-                passes = [output["visitor_pass"]]
-            if not passes:
-                return str(output.get("error") or "I couldn't find any matching Visitor Passes. The visitor ledger is politely blank.")
-            visitor_pass = passes[0] if isinstance(passes[0], dict) else {}
-            name = visitor_pass.get("visitor_name") or "The visitor"
-            arrival_time = self._chat_time_from_iso(str(visitor_pass.get("arrival_time") or ""))
-            if arrival_time:
-                return f"{name} arrived at {arrival_time}."
-            departure_time = self._chat_time_from_iso(str(visitor_pass.get("departure_time") or ""))
-            if departure_time:
-                return f"{name} left at {departure_time}."
-            if visitor_pass.get("vehicle_summary"):
-                duration = f" {visitor_pass.get('visit_summary')}." if visitor_pass.get("visit_summary") else ""
-                return f"{name} arrived in {visitor_pass.get('vehicle_summary')}.{duration}".strip()
-            if visitor_pass.get("duration_human"):
-                return f"{name} was on site for {visitor_pass.get('duration_human')}."
-            return f"{name} has a {visitor_pass.get('status') or 'visitor'} pass for {visitor_pass.get('expected_time_display') or visitor_pass.get('expected_time')}."
-        if tool_name in {"create_visitor_pass", "update_visitor_pass", "cancel_visitor_pass"}:
-            if output.get("requires_confirmation"):
-                return str(output.get("detail") or "That Visitor Pass change needs confirmation first. Sensible paperwork, not theatrics.")
-            return self._confirmation_result_text(tool_name, output)
-        if tool_name == "trigger_icloud_sync":
-            if output.get("requires_confirmation"):
-                return str(output.get("detail") or "That calendar sync needs confirmation first. Calendars are small chaos engines; I prefer a button press.")
-            return self._confirmation_result_text(tool_name, output)
-        incident_result = next(
-            (
-                result.get("output")
-                for result in reversed(tool_results)
-                if result.get("name") == "investigate_access_incident" and isinstance(result.get("output"), dict)
-            ),
-            None,
-        )
-        if isinstance(incident_result, dict):
-            return self._access_incident_direct_text(incident_result)
-        diagnostic_result = next(
-            (
-                result.get("output")
-                for result in tool_results
-                if result.get("name") == "diagnose_access_event" and isinstance(result.get("output"), dict)
-            ),
-            None,
-        )
-        if isinstance(diagnostic_result, dict):
-            return self._access_diagnostic_direct_text(diagnostic_result)
-        if tool_name == "query_access_events":
-            events = as_list(output.get("events"))
-            if not events:
-                return "I couldn't find any matching recent access events. The logbook is politely blank."
-            event = events[0] if isinstance(events[0], dict) else {}
-            person_name = event.get("person") or event.get("registration_number") or "The matched subject"
-            verb = "left" if event.get("direction") == "exit" else "arrived"
-            occurred_at = self._chat_time_from_iso(str(event.get("occurred_at") or ""))
-            return f"{person_name} {verb} at {occurred_at}." if occurred_at else f"{person_name} {verb} recently."
-        if tool_name == "query_presence":
-            presence = as_list(output.get("presence"))
-            if not presence:
-                return "I couldn't find any matching presence records."
-            records = [item for item in presence if isinstance(item, dict)]
-            if len(records) == 1:
-                item = records[0]
-                return f"{item.get('person') or item.get('display_name') or 'Someone'} is {item.get('state') or 'unknown'}"
-            present = [item for item in records if str(item.get("state") or "").lower() == "present"]
-            exited = [item for item in records if str(item.get("state") or "").lower() == "exited"]
-            unknown = [
-                item
-                for item in records
-                if str(item.get("state") or "").lower() not in {"present", "exited"}
-            ]
-            if not records:
-                return "I checked presence, but there was nothing useful to report."
-            if present:
-                names = [
-                    str(item.get("person") or item.get("display_name") or "").strip()
-                    for item in present[:5]
-                    if str(item.get("person") or item.get("display_name") or "").strip()
-                ]
-                subject = "person is" if len(present) == 1 else "people are"
-                suffix = f": {', '.join(names)}" if names else ""
-                summary = f"{len(present)} {subject} on site{suffix}"
-            else:
-                summary = "No one is currently marked present"
-            context: list[str] = []
-            if exited:
-                context.append(f"{len(exited)} exited")
-            if unknown:
-                context.append(f"{len(unknown)} unknown")
-            if context:
-                summary = f"{summary}; {'; '.join(context)}"
-            return summary
-        if tool_name == "query_anomalies":
-            alerts = as_list(output.get("alerts"))
-            if not alerts and isinstance(output.get("anomalies"), list):
-                alerts = output["anomalies"]
-            search = str(output.get("search") or "that request").strip()
-            if not alerts:
-                if output.get("suspected_delivery"):
-                    return (
-                        f"I couldn't find any matching active or resolved alerts for {search}. "
-                        "No delivery breadcrumb in the alert ledger, which is irritatingly tidy."
-                    )
-                return "I couldn't find any matching active or resolved alerts. The alert ledger is politely blank."
-            alert = alerts[0] if isinstance(alerts[0], dict) else {}
-            when = str(alert.get("created_at_display") or alert.get("resolved_at_display") or "the recorded alert time")
-            note = str(alert.get("resolution_note") or "").strip()
-            indicators = as_list(alert.get("delivery_indicators"))
-            if output.get("suspected_delivery") or alert.get("possible_delivery"):
-                evidence = note or "; ".join(str(item) for item in indicators[:2] if item)
-                suffix = f" Evidence: {evidence}" if evidence else ""
-                return f"The most likely matching delivery alert was recorded at {when}.{suffix}"
-            return f"The latest matching alert was recorded at {when}: {alert.get('message') or alert.get('type') or 'alert'}."
-        if tool_name == "diagnose_access_event":
-            if not output.get("found"):
-                return str(output.get("error") or "I could not find a matching access event to diagnose. I checked the usual cupboards; next stop is incident investigation.")
-            hints = as_list(output.get("answer_hints"))
-            return " ".join(str(hint) for hint in hints[:3] if hint) or "I found the diagnostic record."
-        if tool_name in {"investigate_access_incident", "backfill_access_event_from_protect", "test_unifi_alarm_webhook"}:
-            if output.get("requires_confirmation"):
-                return str(output.get("detail") or "This needs confirmation before I change anything. Safety first; dramatic button second.")
-            return self._confirmation_result_text(tool_name, output)
-        if tool_name == "query_vehicle_detection_history":
-            if not output.get("found"):
-                return str(output.get("error") or "I could not find that vehicle in the access events.")
-            registration_number = output.get("registration_number") or "That vehicle"
-            count = output.get("total_count")
-            return f"{registration_number} has been detected at the gate {count} time{'s' if count != 1 else ''}."
-        if tool_name == "calculate_visit_duration":
-            return self._visit_duration_direct_text(output)
-        if tool_name == "calculate_absence_duration":
-            return self._absence_duration_direct_text(output)
-        if tool_name == "query_device_states":
-            devices = as_dict_list(output.get("devices"))
-            if not devices:
-                return "I couldn't find a matching configured device. No labelled lever for that one, alas."
-            return "; ".join(
-                f"{device.get('name') or 'Device'} is {device.get('state') or 'unknown'}"
-                for device in devices[:5]
-            )
-        if tool_name in {"open_device", "command_device", "open_gate"}:
-            return self._device_open_direct_text(output)
-        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"} and output.get("requires_confirmation"):
-            return str(output.get("detail") or "Maintenance Mode needs confirmation before I change it. That switch deserves a proper nod.")
-        if tool_name == "override_schedule":
-            if output.get("requires_confirmation"):
-                return str(output.get("detail") or "The temporary schedule override needs confirmation. A tiny calendar exception, properly witnessed.")
-            if output.get("created"):
-                return f"Created the temporary schedule override until {output.get('ends_at_display') or output.get('ends_at')}."
-        if tool_name == "query_leaderboard":
-            top = as_dict(output.get("top_known")) or None
-            known = as_dict_list(output.get("known"))
-            unknown = as_dict_list(output.get("unknown"))
-            if top:
-                return (
-                    f"{top.get('display_name') or top.get('registration_number')} is leading Top Charts "
-                    f"with {top.get('read_count')} detections. Very much the driveway headliner."
-                )
-            if known:
-                first = known[0]
-                return f"{first.get('display_name') or first.get('registration_number')} leads the VIP Lounge."
-            if unknown:
-                first = unknown[0]
-                return f"{first.get('registration_number')} leads the Mystery Guests list."
-            return "I found no leaderboard entries yet. The podium is spotless."
-        if tool_name == "delete_schedule":
-            return self._schedule_delete_direct_text(output)
-        return "I checked the system, but I need to summarize the result before showing it."
-
-    def _visit_duration_direct_text(self, output: dict[str, Any]) -> str:
-        duration = str(output.get("duration_human") or "").strip()
-        if not duration:
-            seconds = output.get("duration_seconds")
-            if isinstance(seconds, int | float):
-                duration = self._duration_label_from_seconds(float(seconds))
-        intervals = as_dict_list(output.get("intervals"))
-        if not duration or duration == "0m":
-            matched = int(output.get("matched_events") or 0)
-            if matched:
-                return "I found matching access events, but not a complete entry/exit interval to time."
-            return "I couldn't find enough matching access events to calculate a visit duration."
-        latest = intervals[-1] if intervals and isinstance(intervals[-1], dict) else {}
-        if latest.get("exit") == "still_present":
-            started = latest.get("entry_display") or self._chat_time_from_iso(str(latest.get("entry") or ""))
-            suffix = f" since {started}" if started else ""
-            return f"The matched visit has lasted {duration}{suffix}, and is still marked open."
-        return f"The matched visit lasted {duration}."
-
-    def _absence_duration_direct_text(self, output: dict[str, Any]) -> str:
-        duration = str(output.get("absence_human") or "").strip()
-        if not duration:
-            seconds = output.get("absence_seconds")
-            if isinstance(seconds, int | float):
-                duration = self._duration_label_from_seconds(float(seconds))
-        intervals = as_dict_list(output.get("intervals"))
-        subject = str(output.get("subject") or "The matched subject").strip()
-        if not duration or duration == "0m":
-            matched = int(output.get("matched_events") or 0)
-            if matched:
-                return "I found matching access events, but not a complete exit and re-entry interval to time."
-            return "I couldn't find enough matching access events to calculate an absence duration."
-        primary = as_dict(output.get("primary_interval")) or None
-        latest = primary or (intervals[-1] if intervals and isinstance(intervals[-1], dict) else {})
-        if output.get("mode") == "total" and len(intervals) > 1:
-            return f"{subject} was out for {duration} in total across {len(intervals)} matched absences."
-        if latest.get("entry") == "still_away":
-            started = latest.get("exit_display") or self._chat_time_from_iso(str(latest.get("exit") or ""))
-            as_of = self._chat_time_from_iso(str(output.get("as_of") or "")) or output.get("as_of_display")
-            suffix = f" since {started}" if started else ""
-            as_of_suffix = f" as of {as_of}" if as_of else ""
-            return f"{subject} has been out for {duration}{suffix}. Still marked away{as_of_suffix}, so the clock's still running."
-        left_at = latest.get("exit_display") or self._chat_time_from_iso(str(latest.get("exit") or ""))
-        returned_at = latest.get("entry_display") or self._chat_time_from_iso(str(latest.get("entry") or ""))
-        if left_at and returned_at:
-            return f"{subject} was out for {duration}, from {left_at} to {returned_at}. Neat little there-and-back loop."
-        return f"{subject} was out for {duration}."
-
-    def _duration_label_from_seconds(self, seconds: float) -> str:
-        total_seconds = max(0, int(seconds))
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes = remainder // 60
-        if hours and minutes:
-            return f"{hours}h {minutes}m"
-        if hours:
-            return f"{hours}h"
-        return f"{minutes}m"
-
-    def _entity_resolution_direct_text(self, output: dict[str, Any]) -> str:
-        if output.get("status") == "unique" and isinstance(output.get("match"), dict):
-            match = as_dict(output.get("match"))
-            if match.get("type") == "visitor_pass":
-                name = match.get("visitor_name") or match.get("display_name") or "that visitor"
-                arrival_time = self._chat_time_from_iso(str(match.get("arrival_time") or ""))
-                if arrival_time:
-                    return f"{name}'s Visitor Pass shows arrival at {arrival_time}."
-                departure_time = self._chat_time_from_iso(str(match.get("departure_time") or ""))
-                if departure_time:
-                    return f"{name}'s Visitor Pass shows departure at {departure_time}."
-                status = match.get("status") or "visitor"
-                expected = match.get("expected_time_display") or match.get("expected_time")
-                if expected:
-                    return f"{name} has a {status} Visitor Pass for {expected}."
-                return f"I found {name}'s Visitor Pass, but no arrival is recorded yet."
-            label = match.get("display_name") or match.get("name") or match.get("registration_number") or "that entity"
-            return f"I resolved that to {label}."
-        if output.get("status") == "ambiguous":
-            matches = as_list(output.get("matches"))
-            labels = [
-                str(match.get("display_name") or match.get("name") or match.get("registration_number") or "")
-                for match in matches[:4]
-                if isinstance(match, dict)
-            ]
-            return f"I found multiple possible matches: {', '.join(label for label in labels if label)}."
-        return f"I could not resolve {output.get('query') or 'that reference'} to a known IACS entity."
-
-    def _telemetry_trace_direct_text(self, output: dict[str, Any]) -> str:
-        if not output.get("found"):
-            return str(output.get("error") or "I could not find that telemetry trace.")
-        trace = as_dict(output.get("trace"))
-        trace_id = trace.get("trace_id") or "the trace"
-        duration = trace.get("duration_ms")
-        status = trace.get("status") or "unknown status"
-        return f"{trace_id} finished with {status}{f' in {duration}ms' if duration is not None else ''}."
-
-    def _access_diagnostic_direct_text(self, output: dict[str, Any]) -> str:
-        if not output.get("found"):
-            return str(output.get("error") or "I could not find a matching access event to diagnose.")
-        event = as_dict(output.get("event"))
-        recognition = as_dict(output.get("recognition"))
-        gate = as_dict(output.get("gate"))
-        notifications = as_dict(output.get("notifications"))
-        subject = event.get("person") or event.get("registration_number") or "That event"
-        occurred_at = event.get("occurred_at_display") or event.get("occurred_at") or "the matched time"
-        total_ms = recognition.get("total_pipeline_ms")
-        debounce_ms = recognition.get("debounce_or_recognition_ms")
-        slowest = as_list(recognition.get("slowest_steps"))
-        slowest_text = ""
-        if slowest:
-            step = slowest[0]
-            slowest_text = f" Slowest step: {step.get('name')} at {step.get('duration_ms')}ms."
-        timing_text = ""
-        if total_ms is not None:
-            timing_text = f" Total pipeline time was {round(float(total_ms), 1)}ms."
-        if debounce_ms is not None:
-            timing_text += f" Debounce/recognition accounted for {round(float(debounce_ms), 1)}ms."
-        return (
-            f"{subject}'s matched event was at {occurred_at}."
-            f"{timing_text}{slowest_text} "
-            f"{recognition.get('likely_delay_reason') or ''} "
-            f"{gate.get('outcome_reason') or ''} "
-            f"{notifications.get('summary') or ''}"
-        ).strip()
-
-    def _access_incident_direct_text(self, output: dict[str, Any]) -> str:
-        if output.get("backfilled"):
-            return self._confirmation_result_text("backfill_access_event_from_protect", output)
-        if output.get("error"):
-            return str(output.get("detail") or output.get("error"))
-        chain = as_list(output.get("diagnostic_chain"))
-        if chain:
-            stage_map = {str(item.get("stage") or ""): item for item in chain if isinstance(item, dict)}
-            lines = ["I traced the full access chain."]
-            labels = [
-                ("camera_webhook", "Camera/webhook"),
-                ("access_event", "Access event"),
-                ("gate_command", "Gate command"),
-                ("notification", "Notification"),
-                ("root_cause", "Root cause"),
-            ]
-            for key, label in labels:
-                item = stage_map.get(key)
-                if not item:
-                    continue
-                detail = str(item.get("detail") or item.get("status") or "").strip()
-                if detail:
-                    lines.append(f"{label}: {detail}")
-            iacs = as_dict(output.get("iacs"))
-            suppressed_reads = as_list(iacs.get("suppressed_reads"))
-            if output.get("found_iacs_suppressed_read") and suppressed_reads:
-                read = suppressed_reads[0] if isinstance(suppressed_reads[0], dict) else {}
-                reason = read.get("reason") or "vehicle_session_already_active"
-                source_id = read.get("source_access_event_id")
-                suffix = f" against earlier event {source_id}" if source_id else " against an earlier event"
-                lines.append(
-                    "IACS received the plate read, but suppressed it as "
-                    f"`{reason}`{suffix}, so no access event was finalized and notifications never ran."
-                )
-            action = as_dict(output.get("recommended_action"))
-            detail = str(output.get("detail") or action.get("summary") or "").strip()
-            if detail:
-                lines.append(f"Repair: {detail}")
-            elif output.get("requires_confirmation"):
-                lines.append("Repair: a confirmation-required backfill is available.")
-            return " ".join(lines)
-        root = str(output.get("root_cause") or "unknown").replace("_", " ")
-        confidence = output.get("confidence") or "unknown"
-        iacs_status = "found an IACS access event" if output.get("found_iacs_event") else "found no matching IACS access event"
-        protect = "Protect has matching evidence" if output.get("found_protect_event") else "Protect did not show a matching event"
-        comparison = as_dict(output.get("iacs_vs_protect"))
-        action = as_dict(output.get("recommended_action"))
-        detail = str(output.get("detail") or action.get("summary") or "").strip()
-        pieces = [
-            f"I investigated the incident: IACS {iacs_status}; {protect}.",
-            f"Likely root cause: {root} ({confidence} confidence).",
-        ]
-        if comparison.get("comparison"):
-            pieces.append(str(comparison["comparison"]))
-        if detail:
-            pieces.append(detail)
-        return " ".join(pieces)
-
-    def _diagnostic_output(self, tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for result in tool_results:
-            if result.get("name") != "diagnose_access_event":
-                continue
-            output = result.get("output")
-            if isinstance(output, dict):
-                return output
-        return None
-
-    def _should_replace_with_diagnostic_answer(
-        self,
-        message: str,
-        text: str,
-        tool_results: list[dict[str, Any]],
-    ) -> bool:
-        diagnostic = self._diagnostic_output(tool_results)
-        if not diagnostic or not diagnostic.get("found"):
-            return False
-        lower_message = message.lower()
-        if not self._looks_like_access_diagnostic_request(lower_message):
-            return False
-        lower_text = text.lower()
-        unhelpful_markers = [
-            "doesn't include",
-            "doesn’t include",
-            "does not include",
-            "not include",
-            "can't determine",
-            "can’t determine",
-            "cannot determine",
-            "couldn't determine",
-            "could not determine",
-            "share the timestamp",
-            "specific timestamp",
-            "per-scan",
-            "per scan",
-            "latency metrics",
-            "processing/latency metrics",
-            "underlying signals",
-        ]
-        if any(marker in lower_text for marker in unhelpful_markers):
-            return True
-        recognition = as_dict(diagnostic.get("recognition"))
-        has_timing = (
-            recognition.get("total_pipeline_ms") is not None
-            or recognition.get("debounce_or_recognition_ms") is not None
-        )
-        timing_question = self._looks_like_lpr_timing_request(lower_message)
-        return bool(timing_question and has_timing and "ms" not in lower_text and "millisecond" not in lower_text)
 
     def _normalize_attachments(
         self,

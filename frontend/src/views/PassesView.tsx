@@ -177,6 +177,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
   const [detailPass, setDetailPass] = React.useState<VisitorPass | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const deferredQuery = React.useDeferredValue(query);
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const loadPasses = React.useCallback(async (options?: { showLoading?: boolean }) => {
@@ -185,7 +186,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
     if (filters.size && filters.size < visitorPassStatuses.length) {
       filters.forEach((status) => params.append("status", status));
     }
-    if (query.trim()) params.set("q", query.trim());
+    if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
     const suffix = params.toString() ? `?${params.toString()}` : "";
     if (showLoading) setLoading(true);
     setError("");
@@ -196,7 +197,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [filters, query]);
+  }, [deferredQuery, filters]);
 
   React.useEffect(() => {
     loadPasses().catch(() => undefined);
@@ -286,11 +287,17 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
     }
   };
 
-  const visiblePasses = passes.filter((visitorPass) => visitorPassMatchesStatus(visitorPass, filters) && visitorPassMatches(visitorPass, query));
-  const counts = React.useMemo(() => visitorPassStatuses.reduce<Record<VisitorPassStatus, number>>((acc, status) => {
-    acc[status] = passes.filter((visitorPass) => visitorPass.status === status).length;
-    return acc;
-  }, { active: 0, scheduled: 0, used: 0, expired: 0, cancelled: 0 }), [passes]);
+  const { visiblePasses, counts } = React.useMemo(() => {
+    const nextCounts: Record<VisitorPassStatus, number> = { active: 0, scheduled: 0, used: 0, expired: 0, cancelled: 0 };
+    const nextVisible: VisitorPass[] = [];
+    for (const visitorPass of passes) {
+      nextCounts[visitorPass.status] += 1;
+      if (visitorPassMatchesStatus(visitorPass, filters) && visitorPassMatches(visitorPass, deferredQuery)) {
+        nextVisible.push(visitorPass);
+      }
+    }
+    return { visiblePasses: nextVisible, counts: nextCounts };
+  }, [deferredQuery, filters, passes]);
 
   return (
     <section className="view-stack passes-page">

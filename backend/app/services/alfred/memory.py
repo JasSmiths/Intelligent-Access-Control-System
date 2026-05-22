@@ -68,7 +68,7 @@ class AlfredMemoryService:
                     return rows
             except Exception as exc:
                 logger.info("alfred_semantic_search_failed", extra={"error": str(exc)[:180]})
-        rows = await self._lexical_semantic_fallback(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
+        rows = await self._lexical_semantic_search(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
         await _semantic_cache_set(cache_key, rows)
         return rows
 
@@ -371,7 +371,7 @@ class AlfredMemoryService:
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return results[:limit]
 
-    async def _lexical_semantic_fallback(
+    async def _lexical_semantic_search(
         self,
         query: str,
         *,

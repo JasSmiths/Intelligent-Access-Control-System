@@ -1541,7 +1541,7 @@
   .profile-switcher span:not(.profile-photo),
   .site-switcher > svg:last-child,
   .profile-switcher > svg:last-child,
-  .sidebar-status span:last-child {
+  .sidebar-status .sidebar-status-copy {
     display: none;
   }
 
@@ -1700,9 +1700,12 @@
   .brand div:last-child,
   .brand-copy,
   .nav-item span,
-  .profile-switcher span:not(.profile-photo),
-  .sidebar-status span:last-child {
+  .profile-switcher span:not(.profile-photo) {
     display: block;
+  }
+
+  .sidebar-status .sidebar-status-copy {
+    display: grid;
   }
 
   .sidebar-footer {
@@ -1839,9 +1842,12 @@
   .sidebar-collapsed .nav-item span,
   .sidebar-collapsed .profile-switcher span:not(.profile-photo),
   .sidebar-collapsed .nav-chevron,
-  .sidebar-collapsed .profile-switcher > svg:last-child,
-  .sidebar-collapsed .sidebar-status span:last-child {
+  .sidebar-collapsed .profile-switcher > svg:last-child {
     display: block;
+  }
+
+  .sidebar-collapsed .sidebar-status .sidebar-status-copy {
+    display: grid;
   }
 
   .sidebar-collapsed .main {

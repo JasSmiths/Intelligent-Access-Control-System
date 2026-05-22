@@ -1,83 +1,7 @@
 import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
   Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
   FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
 } from "lucide-react";
 
 import {
@@ -92,7 +16,7 @@ import {
 
 
 
-export function EventSnapshotThumb({ event }: { event: AccessEvent }) {
+export const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event }: { event: AccessEvent }) {
   const label = `Snapshot for ${visitorEventDisplayName(event) || event.registration_number}`;
   if (!event.snapshot_url) {
     return (
@@ -109,11 +33,18 @@ export function EventSnapshotThumb({ event }: { event: AccessEvent }) {
       </span>
     </span>
   );
-}
+});
 
 export function EventsView({ events, query }: { events: AccessEvent[]; query: string }) {
-  const filtered = events.filter(
-    (item) => matches(item.registration_number, query) || matches(item.source, query) || matches(item.visitor_name || "", query)
+  const deferredQuery = React.useDeferredValue(query);
+  const filtered = React.useMemo(
+    () => events.filter(
+      (item) =>
+        matches(item.registration_number, deferredQuery) ||
+        matches(item.source, deferredQuery) ||
+        matches(item.visitor_name || "", deferredQuery)
+    ),
+    [deferredQuery, events]
   );
   return (
     <section className="view-stack">

@@ -23,6 +23,7 @@ from app.services.settings import get_runtime_config
 
 CONNECT_TIMEOUT_SECONDS = 30.0
 DISCOVERY_TIMEOUT_SECONDS = 10.0
+LIVE_DISCOVERY_WAIT_SECONDS = 1.5
 STATE_SAMPLE_TIMEOUT_SECONDS = 3.0
 STATE_STREAM_INITIAL_RECONNECT_SECONDS = 0.5
 STATE_STREAM_MAX_RECONNECT_SECONDS = 5.0
@@ -83,58 +84,48 @@ class ESPHomeAccessDeviceProvider:
         )
 
     async def discover_covers(self, device_id: str | None = None) -> list[AccessDeviceDiscoveryItem]:
-        devices = await self._configured_devices()
+        configured_devices = await self._configured_devices()
+        devices = configured_devices
         if device_id:
             devices = [device for device in devices if str(device["id"]) == device_id]
             if not devices:
                 raise AccessDeviceProviderUnavailable(f"ESPHome device is not configured: {device_id}")
+        await self._sync_sessions(configured_devices)
         items: list[AccessDeviceDiscoveryItem] = []
+        errors: list[str] = []
         for device in devices:
-            items.extend(await self._discover_device_covers(device))
+            session = await self._session_for_device(device)
+            try:
+                items.extend(await session.discovery_items(wait_timeout=LIVE_DISCOVERY_WAIT_SECONDS))
+            except AccessDeviceProviderUnavailable as exc:
+                errors.append(str(exc))
+                logger.debug(
+                    "esphome_live_discovery_unavailable",
+                    extra={
+                        "device_id": str(device.get("id") or ""),
+                        "device_name": str(device.get("name") or ""),
+                        "host": str(device.get("host") or ""),
+                        "error": str(exc),
+                    },
+                )
+                if device_id:
+                    raise
+        if device_id and not items:
+            detail = errors[0] if errors else f"ESPHome live stream has not discovered covers for {device_id}."
+            raise AccessDeviceProviderUnavailable(detail)
         return items
 
-    async def _discover_device_covers(self, device: dict[str, Any]) -> list[AccessDeviceDiscoveryItem]:
-        aio, client = await self._connected_client(device)
-        try:
-            entities, _services = await asyncio.wait_for(
-                client.list_entities_services(),
-                timeout=DISCOVERY_TIMEOUT_SECONDS,
-            )
-            items = []
-            for entity in entities:
-                if not _is_cover_info(aio, entity):
-                    continue
-                device_class = str(getattr(entity, "device_class", "") or "").lower()
-                name = str(getattr(entity, "name", "") or getattr(entity, "object_id", "") or entity.key)
-                object_id = str(getattr(entity, "object_id", "") or "")
-                external_id = object_id or name or str(entity.key)
-                label = f"{name} {object_id}".lower()
-                kind = (
-                    ACCESS_DEVICE_KIND_GARAGE_DOOR
-                    if device_class == "garage" or "garage" in label or "door" in label
-                    else ACCESS_DEVICE_KIND_GATE
-                )
-                items.append(
-                    AccessDeviceDiscoveryItem(
-                        external_id=external_id,
-                        name=name,
-                        kind=kind,
-                        metadata={
-                            "device_id": str(device["id"]),
-                            "device_name": str(device["name"]),
-                            "host": str(device["host"]),
-                            "key": int(entity.key),
-                            "object_id": object_id,
-                            "external_id": external_id,
-                            "device_class": device_class,
-                            "supports_position": bool(getattr(entity, "supports_position", False)),
-                            "supports_stop": bool(getattr(entity, "supports_stop", False)),
-                        },
-                    )
-                )
-            return items
-        finally:
-            await _disconnect(client)
+    async def verify_live_device(self, device_id: str) -> list[AccessDeviceDiscoveryItem]:
+        devices = await self._configured_devices()
+        matches = [device for device in devices if str(device["id"]) == device_id]
+        if not matches:
+            raise AccessDeviceProviderUnavailable(f"ESPHome device is not configured: {device_id}")
+        await self._sync_sessions(devices)
+        session = await self._session_for_device(matches[0])
+        return await session.discovery_items(
+            require_connected=True,
+            wait_timeout=LIVE_DISCOVERY_WAIT_SECONDS,
+        )
 
     async def current_state(self, binding: AccessDeviceBinding) -> GateState:
         device = await self._device_for_binding(binding)
@@ -413,19 +404,8 @@ class ESPHomeAccessDeviceProvider:
         for entity in entities:
             if not _is_cover_info(aio, entity):
                 continue
-            key = int(getattr(entity, "key"))
-            object_id = str(getattr(entity, "object_id", "") or "")
-            name = str(getattr(entity, "name", "") or object_id or key)
-            external_id = object_id or name or str(key)
-            metadata[key] = {
-                "device_id": str(device["id"]),
-                "device_name": str(device["name"]),
-                "host": str(device["host"]),
-                "key": key,
-                "object_id": object_id,
-                "external_id": external_id,
-                "name": name,
-            }
+            record = _cover_metadata_from_entity(entity, device)
+            metadata[int(record["key"])] = record
         return metadata
 
     async def _resolve_cover(self, aio: Any, client: Any, binding: AccessDeviceBinding) -> Any:
@@ -506,6 +486,7 @@ class _ESPHomeDeviceSession:
         self.cover_metadata: dict[int, dict[str, Any]] = {}
         self.states: dict[int, _ESPHomeStateRecord] = {}
         self.state_events: dict[int, asyncio.Event] = {}
+        self.metadata_loaded = asyncio.Event()
         self.last_seen_at: datetime | None = None
 
     @property
@@ -574,6 +555,49 @@ class _ESPHomeDeviceSession:
             )
         record = self.states.get(key)
         return record.state if record else GateState.UNKNOWN
+
+    async def discovery_items(
+        self,
+        *,
+        require_connected: bool = False,
+        wait_timeout: float = LIVE_DISCOVERY_WAIT_SECONDS,
+    ) -> list[AccessDeviceDiscoveryItem]:
+        if not self.cover_metadata:
+            try:
+                await asyncio.wait_for(self.metadata_loaded.wait(), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                pass
+        if require_connected and not self.connected:
+            raise AccessDeviceProviderUnavailable(
+                self.last_error
+                or f"ESPHome native API stream is not connected for {self.device.get('name') or self.device_id}."
+            )
+        if not self.cover_metadata:
+            raise AccessDeviceProviderUnavailable(
+                self.last_error
+                or f"ESPHome live stream has not discovered covers for {self.device.get('name') or self.device_id}."
+            )
+        items: list[AccessDeviceDiscoveryItem] = []
+        for key, metadata in sorted(self.cover_metadata.items(), key=lambda item: str(item[1].get("name") or item[0])):
+            record = self.states.get(key)
+            item_metadata = {
+                **metadata,
+                "discovery_source": "live_stream",
+                "stream_connected": self.connected,
+            }
+            if record is not None:
+                item_metadata["raw_state"] = record.raw_state
+                item_metadata["state_updated_at"] = record.updated_at.isoformat()
+            items.append(
+                AccessDeviceDiscoveryItem(
+                    external_id=str(metadata.get("external_id") or key),
+                    name=str(metadata.get("name") or metadata.get("object_id") or key),
+                    kind=str(metadata.get("kind") or ACCESS_DEVICE_KIND_GATE),
+                    state=record.state.value if record is not None else GateState.UNKNOWN.value,
+                    metadata=item_metadata,
+                )
+            )
+        return items
 
     async def command_cover(
         self,
@@ -697,8 +721,11 @@ class _ESPHomeDeviceSession:
                 stopped.set()
 
             try:
+                if not self.cover_metadata:
+                    self.metadata_loaded.clear()
                 aio, client = await self.provider._connected_client(self.device, on_stop=on_stop)
                 self.cover_metadata = await self.provider._cover_metadata_by_key(aio, client, self.device)
+                self.metadata_loaded.set()
                 self.aio = aio
                 self.client = client
                 self.connected = True
@@ -732,6 +759,7 @@ class _ESPHomeDeviceSession:
                 self.last_error = detail
                 self.client = None
                 self.aio = None
+                self.metadata_loaded.set()
                 self._queue_disconnected(detail)
                 await self._sleep_before_reconnect(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, STATE_STREAM_MAX_RECONNECT_SECONDS)
@@ -827,6 +855,33 @@ def _is_cover_state(aio: Any, state: Any) -> bool:
     if cover_state is not None:
         return isinstance(state, cover_state)
     return state.__class__.__name__ == "CoverState"
+
+
+def _cover_metadata_from_entity(entity: Any, device: dict[str, Any]) -> dict[str, Any]:
+    key = int(getattr(entity, "key"))
+    object_id = str(getattr(entity, "object_id", "") or "")
+    name = str(getattr(entity, "name", "") or object_id or key)
+    external_id = object_id or name or str(key)
+    device_class = str(getattr(entity, "device_class", "") or "").lower()
+    label = f"{name} {object_id}".lower()
+    kind = (
+        ACCESS_DEVICE_KIND_GARAGE_DOOR
+        if device_class == "garage" or "garage" in label or "door" in label
+        else ACCESS_DEVICE_KIND_GATE
+    )
+    return {
+        "device_id": str(device["id"]),
+        "device_name": str(device["name"]),
+        "host": str(device["host"]),
+        "key": key,
+        "object_id": object_id,
+        "external_id": external_id,
+        "name": name,
+        "device_class": device_class,
+        "kind": kind,
+        "supports_position": bool(getattr(entity, "supports_position", False)),
+        "supports_stop": bool(getattr(entity, "supports_stop", False)),
+    }
 
 
 def _cover_state_label(state: Any) -> GateState:

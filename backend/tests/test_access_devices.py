@@ -6,6 +6,7 @@ import pytest
 from app.modules.access_devices.base import (
     AccessDeviceBinding,
     AccessDeviceCommandResult,
+    AccessDeviceDiscoveryItem,
     AccessDeviceEntity,
     AccessDeviceProviderUnavailable,
 )
@@ -525,6 +526,82 @@ async def test_esphome_provider_current_state_uses_live_cache(monkeypatch) -> No
 
     assert state is GateState.OPEN
     assert connected_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_esphome_provider_discovery_uses_live_stream_metadata(monkeypatch) -> None:
+    provider = ESPHomeAccessDeviceProvider()
+    client = FakeESPHomeClient()
+    connected_calls = 0
+    device = {
+        "id": "top_gate",
+        "name": "Top Gate",
+        "host": "10.0.107.22",
+        "port": 6053,
+        "enabled": True,
+    }
+
+    async def fake_configured_devices():
+        return [device]
+
+    async def fake_connected_client(configured_device, on_stop=None, timeout_budget=None):
+        nonlocal connected_calls
+        connected_calls += 1
+        assert configured_device == device
+        assert timeout_budget is None
+        client.on_stop = on_stop
+        return FakeESPHomeAio, client
+
+    monkeypatch.setattr(esphome_module, "LIVE_DISCOVERY_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(provider, "_configured_devices", fake_configured_devices)
+    monkeypatch.setattr(provider, "_connected_client", fake_connected_client)
+
+    items = await provider.discover_covers()
+    await provider.close()
+
+    assert len(items) == 1
+    assert items[0].external_id == "gate"
+    assert items[0].metadata["device_id"] == "top_gate"
+    assert items[0].metadata["discovery_source"] == "live_stream"
+    assert items[0].metadata["stream_connected"] is True
+    assert connected_calls == 1
+    assert client.list_calls == 1
+    assert client.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_esphome_provider_device_specific_discovery_keeps_all_sessions_synced(monkeypatch) -> None:
+    provider = ESPHomeAccessDeviceProvider()
+    devices = [
+        {"id": "top_gate", "name": "Top Gate", "host": "10.0.107.22"},
+        {"id": "main_garage_door", "name": "Main Garage Door", "host": "10.0.107.17"},
+    ]
+    synced_ids: list[list[str]] = []
+
+    class FakeLiveSession:
+        async def discovery_items(self, **_kwargs):
+            return [AccessDeviceDiscoveryItem(external_id="gate", name="Gate", kind="gate")]
+
+    async def fake_configured_devices():
+        return devices
+
+    async def fake_sync_sessions(configured_devices=None):
+        synced_ids.append([str(device["id"]) for device in configured_devices])
+
+    async def fake_session_for_device(_device):
+        return FakeLiveSession()
+
+    monkeypatch.setattr(provider, "_configured_devices", fake_configured_devices)
+    monkeypatch.setattr(provider, "_sync_sessions", fake_sync_sessions)
+    monkeypatch.setattr(provider, "_session_for_device", fake_session_for_device)
+
+    await provider.discover_covers(device_id="top_gate")
+    await provider.verify_live_device("top_gate")
+
+    assert synced_ids == [
+        ["top_gate", "main_garage_door"],
+        ["top_gate", "main_garage_door"],
+    ]
 
 
 @pytest.mark.asyncio

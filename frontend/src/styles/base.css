@@ -360,13 +360,40 @@ h2 {
 }
 
 .sidebar-status {
-  min-height: 32px;
+  min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   padding: 0 30px;
   color: var(--text);
   font-size: 12px;
+  min-width: 0;
+}
+
+.sidebar-status-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  line-height: 1.15;
+}
+
+.sidebar-status-copy strong,
+.sidebar-status-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-status-copy strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sidebar-status-copy small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .dot,
@@ -387,6 +414,35 @@ h2 {
 .dot.connecting,
 .dot.reconnecting {
   background: var(--amber);
+}
+
+.dot.checking,
+.dot.refreshing {
+  background: var(--blue);
+}
+
+.dot.offline {
+  background: var(--red);
+}
+
+.dot.connecting,
+.dot.checking,
+.dot.refreshing,
+.dot.reconnecting {
+  animation: realtime-status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes realtime-status-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .event-dot.denied {
@@ -422,7 +478,7 @@ h2 {
 .sidebar-collapsed .nav-chevron,
 .sidebar-collapsed .site-switcher > svg:last-child,
 .sidebar-collapsed .profile-switcher > svg:last-child,
-.sidebar-collapsed .sidebar-status span:last-child {
+.sidebar-collapsed .sidebar-status .sidebar-status-copy {
   display: none;
 }
 

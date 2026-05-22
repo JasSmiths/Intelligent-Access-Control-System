@@ -289,10 +289,16 @@ async def esphome_status(refresh: bool = False, _: User = Depends(current_user))
 @router.post("/esphome/devices/{device_id}/test")
 async def test_esphome_device(device_id: str, _: User = Depends(admin_user)) -> dict:
     try:
-        entities = await get_access_device_provider("esphome").discover_covers(device_id=device_id)
+        provider = get_access_device_provider("esphome")
+        verify_live_device = getattr(provider, "verify_live_device", None)
+        entities = (
+            await verify_live_device(device_id)
+            if verify_live_device is not None
+            else await provider.discover_covers(device_id=device_id)
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"ok": True, "cover_count": len(entities)}
+    return {"ok": True, "cover_count": len(entities), "stream": "live"}
 
 
 @router.get("/esphome/entities")

@@ -83,6 +83,7 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const deferredQuery = React.useDeferredValue(query);
 
   const loadMovements = React.useCallback(async () => {
     setLoading(true);
@@ -136,15 +137,15 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
     void loadMovementDetail(selected, { optimistic: false, quiet: true });
   }, [loadMovementDetail, selected, selectedNeedsDetail]);
 
-  const visibleMovements = movements.filter((movement) => {
+  const visibleMovements = React.useMemo(() => movements.filter((movement) => {
     const category = movementCategory(movement);
     const textMatches =
-      matches(movement.registration_number || "", query) ||
-      matches(movement.source, query) ||
-      matches(movement.failure_detail || "", query) ||
-      matches(movementExplanationSearchText(movement), query);
+      matches(movement.registration_number || "", deferredQuery) ||
+      matches(movement.source, deferredQuery) ||
+      matches(movement.failure_detail || "", deferredQuery) ||
+      matches(movementExplanationSearchText(movement), deferredQuery);
     return (filter === "all" || filter === category) && textMatches;
-  });
+  }), [deferredQuery, filter, movements]);
 
   const selectMovement = async (movement: MovementRecord) => {
     await loadMovementDetail(movement);

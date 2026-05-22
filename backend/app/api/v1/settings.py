@@ -233,9 +233,22 @@ async def _test_esphome(values: dict[str, Any]) -> None:
 
     runtime = await get_runtime_config()
     if not values and runtime.esphome_devices:
-        status = await get_access_device_provider("esphome").status(refresh=True)
-        if not status.connected:
-            raise ValueError(status.last_error or "No configured ESPHome devices connected.")
+        provider = get_access_device_provider("esphome")
+        verify_live_device = getattr(provider, "verify_live_device", None)
+        if verify_live_device is None:
+            status = await provider.status(refresh=True)
+            if not status.connected:
+                raise ValueError(status.last_error or "No configured ESPHome devices connected.")
+            return
+        enabled_devices = [
+            device
+            for device in runtime.esphome_devices
+            if device.get("enabled", True) and str(device.get("host") or "").strip()
+        ]
+        if not enabled_devices:
+            raise ValueError("No enabled ESPHome devices are configured.")
+        for device in enabled_devices:
+            await verify_live_device(str(device["id"]))
         return
     host = str(values.get("esphome_host") or runtime.esphome_host or "").strip()
     port = int(values.get("esphome_port") or runtime.esphome_port or 6053)

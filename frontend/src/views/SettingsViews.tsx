@@ -412,6 +412,17 @@ export function AccessDevicesSettingsView({
     loadDiscovery().catch(() => undefined);
   }, [loadDevices, loadDiscovery, refreshToken]);
 
+  const enabledCount = React.useMemo(() => devices.filter((device) => device.enabled).length, [devices]);
+  const haMappedCount = React.useMemo(() => devices.filter((device) => deviceHasProviderBinding(device, "home_assistant")).length, [devices]);
+  const esphomeMappedCount = React.useMemo(() => devices.filter((device) => deviceHasProviderBinding(device, "esphome")).length, [devices]);
+  const mappedCount = React.useMemo(() => devices.filter(deviceHasAnyProviderBinding).length, [devices]);
+  const accessOpenCount = React.useMemo(() => devices.filter((device) => device.open_for_access).length, [devices]);
+  const scheduleNameById = React.useMemo(() => new Map(schedules.map((schedule) => [schedule.id, schedule.name])), [schedules]);
+  const primaryProvider = stringifySetting(accessSettings.values.gate_control_provider || "home_assistant");
+  const failoverProvider = stringifySetting(accessSettings.values.gate_failover_provider || "none");
+  const deviceNoun = kind === "gate" ? "gate" : "garage door";
+  const deviceNounPlural = kind === "gate" ? "gates" : "garage doors";
+
   const updateDevice = (deviceId: string, patch: Partial<AccessDevice>) => {
     setDevices((current) => current.map((device) => device.id === deviceId ? { ...device, ...patch } : device));
   };
@@ -516,58 +527,89 @@ export function AccessDevicesSettingsView({
   };
 
   return (
-    <section className="view-stack settings-page">
-      <Toolbar title={title} count={devices.length} icon={Icon} />
-      <div className="dashboard-grid settings-grid">
-        <div className="card span-2 access-provider-card">
-          <CardHeader icon={SlidersHorizontal} title={`${kind === "gate" ? "Gate" : "Garage Door"} Command Provider`} action={<Badge tone={accessSettings.loading || providerSavingKey ? "gray" : "blue"}>{providerSavingKey ? "saving" : "global"}</Badge>} />
-          <p className="access-provider-copy">Choose the integration order used when IACS sends open/close commands. Each {kind === "gate" ? "gate" : "garage door"} still keeps its own Home Assistant and ESPHome mappings below.</p>
-          <div className="settings-form-grid access-provider-grid">
-            <label className="field">
-              <span>Primary integration</span>
-              <select
-                disabled={accessSettings.loading || Boolean(providerSavingKey)}
-                value={stringifySetting(accessSettings.values.gate_control_provider || "home_assistant")}
-                onChange={(event) => saveProviderSetting("gate_control_provider", event.target.value)}
-              >
-                <option value="home_assistant">Home Assistant</option>
-                <option value="esphome">ESPHome</option>
-              </select>
-              <small className="field-hint">First provider attempted for cover commands.</small>
-            </label>
-            <label className="field">
-              <span>Failover integration</span>
-              <select
-                disabled={accessSettings.loading || Boolean(providerSavingKey)}
-                value={stringifySetting(accessSettings.values.gate_failover_provider || "none")}
-                onChange={(event) => saveProviderSetting("gate_failover_provider", event.target.value)}
-              >
-                <option value="none">None</option>
-                <option value="home_assistant">Home Assistant</option>
-                <option value="esphome">ESPHome</option>
-              </select>
-              <small className="field-hint">Used only when the primary provider is technically unavailable.</small>
-            </label>
+    <section className="view-stack settings-page access-device-settings-page">
+      <div className="access-device-hero">
+        <div className="access-device-hero-main">
+          <span className="access-device-hero-icon"><Icon size={22} /></span>
+          <div>
+            <h1>{title}</h1>
+            <p>{kind === "gate" ? "Manage physical gate controllers, routing, and access behavior." : "Manage garage door command routing, schedules, and cover mappings."}</p>
           </div>
         </div>
-        <div className="card span-2">
-          <CardHeader
-            icon={Icon}
-            title={`${title} Source Of Truth`}
-            action={<button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add</button>}
-          />
+        <div className="access-device-hero-metrics" aria-label={`${title} summary`}>
+          <AccessDeviceSummaryStat label="Configured" value={String(devices.length)} />
+          <AccessDeviceSummaryStat label="Enabled" value={String(enabledCount)} tone={enabledCount === devices.length && devices.length ? "green" : "gray"} />
+          {kind === "gate" ? (
+            <>
+              <AccessDeviceSummaryStat label="Access opens" value={String(accessOpenCount)} tone={accessOpenCount ? "green" : "gray"} />
+              <AccessDeviceSummaryStat label="Mapped" value={`${mappedCount}/${devices.length || 0}`} />
+            </>
+          ) : (
+            <>
+              <AccessDeviceSummaryStat label="HA mapped" value={`${haMappedCount}/${devices.length || 0}`} />
+              <AccessDeviceSummaryStat label="ESPHome mapped" value={`${esphomeMappedCount}/${devices.length || 0}`} />
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="access-device-settings-grid">
+        <section className="access-settings-panel access-provider-panel">
+          <div className="access-section-head">
+            <div className="access-section-title">
+              <span className="access-section-icon"><SlidersHorizontal size={17} /></span>
+              <div>
+                <h2>Command route</h2>
+                <p>{providerLabel(primaryProvider)} sends {deviceNoun} commands first{failoverProvider === "none" ? "." : `, then ${providerLabel(failoverProvider)} only if needed.`}</p>
+              </div>
+            </div>
+            <Badge tone={accessSettings.loading || providerSavingKey ? "gray" : "blue"}>{providerSavingKey ? "Saving" : "Global"}</Badge>
+          </div>
+          <div className="access-provider-route">
+            <AccessProviderChoice
+              disabled={accessSettings.loading || Boolean(providerSavingKey)}
+              helper="Used for every normal open or close command."
+              label="Primary"
+              value={primaryProvider}
+              onChange={(value) => saveProviderSetting("gate_control_provider", value)}
+            />
+            <div className="access-provider-route-join" aria-hidden="true">then</div>
+            <AccessProviderChoice
+              allowNone
+              disabled={accessSettings.loading || Boolean(providerSavingKey)}
+              helper="Only used when the primary integration is unavailable."
+              label="Failover"
+              value={failoverProvider}
+              onChange={(value) => saveProviderSetting("gate_failover_provider", value)}
+            />
+          </div>
+        </section>
+
+        <section className="access-settings-panel access-device-source-panel">
+          <div className="access-section-head access-device-source-head">
+            <div className="access-section-title">
+              <span className="access-section-icon"><Icon size={17} /></span>
+              <div>
+                <h2>{title}</h2>
+                <p>One saved device per physical {deviceNoun}. Bind either integration, or both for resilience.</p>
+              </div>
+            </div>
+            <button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
+          </div>
           {(devicesLoading || discoveryLoading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
           {error ? <div className="auth-error inline-error">{error}</div> : null}
           {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
           {message ? <div className="success-note">{message}</div> : null}
-          <div className="settings-list access-device-list">
+          <div className="access-device-list">
             {devices.length ? devices.map((device) => (
               <AccessDeviceEditor
                 device={device}
+                deviceIcon={Icon}
                 homeAssistantCovers={homeAssistantCovers}
                 esphomeCovers={esphomeCovers}
                 key={device.id}
                 schedules={schedules}
+                scheduleLabel={device.schedule_id ? scheduleNameById.get(device.schedule_id) ?? "Custom schedule" : "Default policy"}
                 saving={savingKey === device.id}
                 onDelete={() => deleteDevice(device)}
                 onSave={() => saveDevice(device)}
@@ -575,12 +617,53 @@ export function AccessDevicesSettingsView({
                 onUpdateBinding={(provider, externalId) => updateBinding(device.id, provider, externalId)}
               />
             )) : !devicesLoading ? (
-              <div className="empty-state compact">No {kind === "gate" ? "gates" : "garage doors"} configured</div>
+              <div className="empty-state compact">No {deviceNounPlural} configured</div>
             ) : null}
           </div>
-        </div>
+        </section>
       </div>
     </section>
+  );
+}
+
+function AccessDeviceSummaryStat({ label, value, tone = "blue" }: { label: string; value: string; tone?: "blue" | "green" | "gray" }) {
+  return (
+    <div className={`access-device-summary-stat ${tone}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function AccessProviderChoice({
+  allowNone = false,
+  disabled,
+  helper,
+  label,
+  value,
+  onChange
+}: {
+  allowNone?: boolean;
+  disabled: boolean;
+  helper: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const Icon = value === "esphome" ? Zap : value === "home_assistant" ? Home : CircleDot;
+  return (
+    <label className="access-provider-choice">
+      <span className="access-provider-choice-label">{label}</span>
+      <span className="access-provider-choice-control">
+        <Icon size={16} />
+        <select disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
+          {allowNone ? <option value="none">None</option> : null}
+          <option value="home_assistant">Home Assistant</option>
+          <option value="esphome">ESPHome</option>
+        </select>
+      </span>
+      <small>{helper}</small>
+    </label>
   );
 }
 
@@ -597,8 +680,10 @@ function AccessDeviceLoadingBar({ label }: { label: string }) {
 
 function AccessDeviceEditor({
   device,
+  deviceIcon: DeviceIcon,
   homeAssistantCovers,
   esphomeCovers,
+  scheduleLabel,
   schedules,
   saving,
   onDelete,
@@ -607,8 +692,10 @@ function AccessDeviceEditor({
   onUpdateBinding
 }: {
   device: AccessDevice;
+  deviceIcon: React.ElementType;
   homeAssistantCovers: AccessDeviceDiscoveryItem[];
   esphomeCovers: AccessDeviceDiscoveryItem[];
+  scheduleLabel: string;
   schedules: Schedule[];
   saving: boolean;
   onDelete: () => void;
@@ -618,42 +705,104 @@ function AccessDeviceEditor({
 }) {
   const haBinding = device.bindings.find((binding) => binding.provider === "home_assistant");
   const esphomeBinding = device.bindings.find((binding) => binding.provider === "esphome");
+  const haMapped = Boolean(haBinding?.external_id);
+  const esphomeMapped = Boolean(esphomeBinding?.external_id);
   return (
-    <div className="access-device-editor">
-      <div className="settings-form-grid">
-        <SettingField field={{ key: "name", label: "Name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
-        <SettingField field={{ key: "key", label: "IACS key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} />
-        <SettingField field={{ key: "enabled", label: "Enabled", type: "select", options: ["true", "false"] }} value={device.enabled ? "true" : "false"} onChange={(value) => onUpdate({ enabled: value === "true" })} />
-        {device.kind === "gate" ? (
-          <SettingField field={{ key: "open_for_access", label: "Open for access", type: "select", options: ["true", "false"] }} value={device.open_for_access ? "true" : "false"} onChange={(value) => onUpdate({ open_for_access: value === "true" })} />
-        ) : null}
-        <label className="field">
-          <span>Schedule</span>
-          <select value={device.schedule_id ?? ""} onChange={(event) => onUpdate({ schedule_id: event.target.value || null })}>
-            <option value="">Default policy</option>
-            {schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name}</option>)}
-          </select>
-        </label>
-        <ProviderBindingField label="Home Assistant entity" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
-        <ProviderBindingField label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
+    <article className={device.enabled ? "access-device-editor" : "access-device-editor disabled"}>
+      <header className="access-device-editor-head">
+        <div className="access-device-title-row">
+          <span className="access-device-symbol"><DeviceIcon size={18} /></span>
+          <div>
+            <h3>{device.name || "Unnamed device"}</h3>
+            <span>{device.key || "No internal key set"}</span>
+          </div>
+        </div>
+        <div className="access-device-badges">
+          <Badge tone={device.enabled ? "green" : "gray"}>{device.enabled ? "Enabled" : "Disabled"}</Badge>
+          <Badge tone="gray">{scheduleLabel}</Badge>
+          {device.kind === "gate" ? <Badge tone={device.open_for_access ? "blue" : "gray"}>{device.open_for_access ? "Access opens" : "Manual only"}</Badge> : null}
+          <Badge tone={haMapped || esphomeMapped ? "blue" : "amber"}>{haMapped || esphomeMapped ? "Mapped" : "Needs mapping"}</Badge>
+        </div>
+      </header>
+      <div className="access-device-editor-body">
+        <div className="access-device-block identity">
+          <div className="access-device-block-title">
+            <Key size={15} />
+            <h4>Identity</h4>
+          </div>
+          <div className="settings-form-grid access-device-fields">
+            <SettingField field={{ key: "name", label: "Display name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
+            <SettingField field={{ key: "key", label: "Internal key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} />
+          </div>
+        </div>
+
+        <div className="access-device-block policy">
+          <div className="access-device-block-title">
+            <CalendarDays size={15} />
+            <h4>Policy</h4>
+          </div>
+          <div className="access-device-policy-grid">
+            <AccessDeviceSwitch checked={device.enabled} label="Device enabled" onChange={(checked) => onUpdate({ enabled: checked })} />
+            {device.kind === "gate" ? (
+              <AccessDeviceSwitch checked={device.open_for_access} label="Open for access events" onChange={(checked) => onUpdate({ open_for_access: checked })} />
+            ) : null}
+            <label className="field">
+              <span>Schedule</span>
+              <select value={device.schedule_id ?? ""} onChange={(event) => onUpdate({ schedule_id: event.target.value || null })}>
+                <option value="">Default policy</option>
+                {schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div className="access-device-block providers">
+          <div className="access-device-block-title">
+            <PlugZap size={15} />
+            <h4>Provider bindings</h4>
+          </div>
+          <div className="settings-form-grid access-device-fields">
+            <ProviderBindingField provider="home_assistant" label="Home Assistant cover" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
+            <ProviderBindingField provider="esphome" label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
+          </div>
+        </div>
       </div>
-      <div className="modal-actions">
+      <div className="access-device-actions">
         <button className="secondary-button danger" onClick={onDelete} type="button"><Trash2 size={15} /> Remove</button>
         <button className="primary-button" disabled={saving} onClick={onSave} type="button">{saving ? "Saving..." : "Save Device"}</button>
       </div>
-    </div>
+    </article>
   );
 }
 
-function ProviderBindingField({ label, options, value, onChange }: { label: string; options: AccessDeviceDiscoveryItem[]; value: string; onChange: (value: string) => void }) {
-  const listId = React.useId();
+function AccessDeviceSwitch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
   return (
-    <label className="field">
-      <span>{label}</span>
-      <input list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="Select or enter an external ID" />
+    <label className="access-device-switch">
+      <input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
+      <span aria-hidden="true" />
+      <strong>{label}</strong>
+    </label>
+  );
+}
+
+function ProviderBindingField({ label, options, provider, value, onChange }: { label: string; options: AccessDeviceDiscoveryItem[]; provider: "home_assistant" | "esphome"; value: string; onChange: (value: string) => void }) {
+  const listId = React.useId();
+  const mapped = Boolean(value.trim());
+  const Icon = provider === "esphome" ? Zap : Home;
+  return (
+    <label className={mapped ? "field access-binding-field mapped" : "field access-binding-field"}>
+      <span className="field-label-row">
+        <span>{label}</span>
+        <span className="access-binding-state">{mapped ? "Mapped" : "Not mapped"}</span>
+      </span>
+      <span className="field-control access-binding-control">
+        <Icon size={16} />
+        <input list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="Select or enter an external ID" />
+      </span>
       <datalist id={listId}>
         {options.map((option) => <option key={option.entity_id} value={option.entity_id}>{option.name || option.entity_id}</option>)}
       </datalist>
+      <small className="field-hint">{options.length ? `${options.length} discovered ${options.length === 1 ? "cover" : "covers"}` : "No discovered covers for this provider."}</small>
     </label>
   );
 }
@@ -673,6 +822,20 @@ function coverMatchesKind(cover: AccessDeviceDiscoveryItem, kind: AccessDeviceKi
   if (cover.kind === kind) return true;
   const label = `${cover.entity_id} ${cover.name ?? ""} ${cover.device_class ?? ""}`.toLowerCase();
   return kind === "garage_door" ? label.includes("garage") || label.includes("door") : label.includes("gate");
+}
+
+function deviceHasProviderBinding(device: AccessDevice, provider: string) {
+  return device.bindings.some((binding) => binding.provider === provider && Boolean(binding.external_id));
+}
+
+function deviceHasAnyProviderBinding(device: AccessDevice) {
+  return device.bindings.some((binding) => Boolean(binding.external_id));
+}
+
+function providerLabel(provider: string) {
+  if (provider === "esphome") return "ESPHome";
+  if (provider === "home_assistant") return "Home Assistant";
+  return "No failover";
 }
 
 function bindingConfigForDiscovery(provider: string, selection: string, options: AccessDeviceDiscoveryItem[]) {

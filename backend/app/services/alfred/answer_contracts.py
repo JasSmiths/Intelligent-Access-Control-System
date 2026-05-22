@@ -41,7 +41,7 @@ class AnswerArtifact(BaseModel):
     source_records: list[dict[str, Any]] = Field(default_factory=list)
     uncertainty: str | None = None
     display: dict[str, Any] = Field(default_factory=dict)
-    fallback_text: str | None = None
+    canonical_text: str | None = None
 
 
 class AnswerDraft(BaseModel):
@@ -59,7 +59,7 @@ class AnswerVerifierResult(BaseModel):
     approved: bool
     reasons: list[str] = Field(default_factory=list)
     repair_count: int = 0
-    fallback_required: bool = False
+    fail_closed_required: bool = False
 
 
 ANSWER_DRAFT_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -101,7 +101,7 @@ def artifact_payload(
     source_records: list[dict[str, Any]] | None = None,
     uncertainty: str | None = None,
     display: dict[str, Any] | None = None,
-    fallback_text: str | None = None,
+    canonical_text: str | None = None,
 ) -> dict[str, Any]:
     artifact = AnswerArtifact(
         domain=domain,
@@ -113,7 +113,7 @@ def artifact_payload(
         source_records=source_records or [],
         uncertainty=uncertainty,
         display=display or {},
-        fallback_text=fallback_text,
+        canonical_text=canonical_text,
     )
     return artifact.model_dump(mode="json", exclude_none=True)
 
@@ -176,14 +176,14 @@ def verify_answer_draft(draft: AnswerDraft | None, artifacts: list[AnswerArtifac
         return AnswerVerifierResult(
             approved=False,
             reasons=["Composer did not return valid answer JSON."],
-            fallback_required=True,
+            fail_closed_required=True,
         )
     text = draft.answer_text.strip()
     if not text and not draft.needs_clarification:
         return AnswerVerifierResult(
             approved=False,
             reasons=["Composer returned an empty answer."],
-            fallback_required=True,
+            fail_closed_required=True,
         )
     fact_map = _facts_by_id(artifacts)
     used_ids = set(draft.fact_ids_used or [])
@@ -214,7 +214,7 @@ def verify_answer_draft(draft: AnswerDraft | None, artifacts: list[AnswerArtifac
     return AnswerVerifierResult(
         approved=not reasons,
         reasons=reasons,
-        fallback_required=bool(reasons),
+        fail_closed_required=bool(reasons),
     )
 
 
@@ -231,8 +231,8 @@ def render_answer_from_artifacts(artifacts: list[AnswerArtifact]) -> str:
 
 
 def render_answer_artifact(artifact: AnswerArtifact) -> str:
-    if artifact.fallback_text:
-        return artifact.fallback_text.strip()
+    if artifact.canonical_text:
+        return artifact.canonical_text.strip()
     if artifact.domain == "access_logs":
         return _render_access_artifact(artifact)
     if artifact.domain == "alerts":
