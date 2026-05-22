@@ -88,6 +88,8 @@ GATE_MALFUNCTION_PAYLOAD_KEY = "_iacs_gate_malfunction"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
 PROCESSING_ATTEMPT_PAYLOAD_KEY = "_iacs_processing_attempt"
+INGEST_METADATA_PAYLOAD_KEY = "_iacs_ingest"
+WEBHOOK_TRACE_PAYLOAD_KEY = "webhook_trace"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
 VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
@@ -347,6 +349,7 @@ class AccessEventService:
         if await is_maintenance_mode_active():
             return
         received_at = datetime.now(tz=UTC)
+        read = self._read_with_webhook_trace(read, received_at)
         read = await self._read_with_gate_observation(read)
         gate_observation = self._gate_observation_from_read(read)
         logger.info(
@@ -372,6 +375,77 @@ class AccessEventService:
                 "gate_state": gate_observation.get("state"),
             },
         )
+
+    def _read_with_webhook_trace(self, read: PlateRead, received_at: datetime) -> PlateRead:
+        raw_payload = dict(read.raw_payload or {})
+        existing = raw_payload.get(WEBHOOK_TRACE_PAYLOAD_KEY)
+        existing = existing if isinstance(existing, dict) else {}
+        ingest = raw_payload.get(INGEST_METADATA_PAYLOAD_KEY)
+        ingest = ingest if isinstance(ingest, dict) else {}
+        webhook_received_at = (
+            self._datetime_from_payload(existing.get("received_at"))
+            or self._datetime_from_payload(existing.get("webhook_received_at"))
+            or self._datetime_from_payload(ingest.get("webhook_received_at"))
+            or received_at
+        )
+        captured_to_webhook_ms = (
+            self._float_from_payload(existing.get("captured_to_webhook_ms"))
+            if "captured_to_webhook_ms" in existing
+            else self._float_from_payload(ingest.get("captured_to_webhook_ms"))
+        )
+        if captured_to_webhook_ms is None:
+            captured_to_webhook_ms = _datetime_delta_ms(webhook_received_at, read.captured_at)
+        raw_payload[WEBHOOK_TRACE_PAYLOAD_KEY] = {
+            "request_id": ingest.get("request_id"),
+            "webhook_trace_id": ingest.get("webhook_trace_id"),
+            "path": ingest.get("path"),
+            "payload_shape_version": ingest.get("payload_shape_version"),
+            **existing,
+            "source": read.source,
+            "registration_number": read.registration_number,
+            "captured_at": read.captured_at.isoformat(),
+            "received_at": webhook_received_at.astimezone(UTC).isoformat(),
+            "webhook_received_at": webhook_received_at.astimezone(UTC).isoformat(),
+            "captured_to_webhook_ms": captured_to_webhook_ms,
+        }
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
+        )
+
+    def _webhook_trace_from_read(self, read: PlateRead) -> dict[str, Any]:
+        payload = (read.raw_payload or {}).get(WEBHOOK_TRACE_PAYLOAD_KEY)
+        if isinstance(payload, dict):
+            return dict(payload)
+        return {
+            "source": read.source,
+            "registration_number": read.registration_number,
+            "captured_at": read.captured_at.isoformat(),
+            "received_at": None,
+            "captured_to_webhook_ms": None,
+        }
+
+    def _webhook_trace_for_window(self, window: DebounceWindow) -> dict[str, Any]:
+        first_read = getattr(window, "first_read", None)
+        if first_read is None:
+            first_read = min(window.reads, key=lambda read: read.captured_at)
+        trace = self._webhook_trace_from_read(first_read)
+        trace["candidate_count"] = len(window.reads)
+        trace["window_first_seen"] = window.first_seen.isoformat()
+        trace["window_updated_at"] = window.updated_at.isoformat()
+        return trace
+
+    def _float_from_payload(self, value: Any) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     async def _read_with_gate_observation(self, read: PlateRead) -> PlateRead:
         if self._should_preserve_supplied_gate_observation(read):
@@ -1783,6 +1857,16 @@ class AccessEventService:
         read = window.best_read
         direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
+        webhook_trace = self._webhook_trace_for_window(window)
+        webhook_received_at = (
+            self._datetime_from_payload(webhook_trace.get("received_at"))
+            or self._datetime_from_payload(webhook_trace.get("captured_at"))
+            or window.first_seen
+        )
+        captured_to_webhook_ms = self._float_from_payload(webhook_trace.get("captured_to_webhook_ms"))
+        if captured_to_webhook_ms is None:
+            captured_to_webhook_ms = _datetime_delta_ms(webhook_received_at, window.first_read.captured_at)
+        webhook_to_finalize_ms = _datetime_delta_ms(finalize_started_at, webhook_received_at)
         logger.info(
             "plate_read_finalize_started",
             extra={
@@ -1794,6 +1878,8 @@ class AccessEventService:
                 "finalize_started_at": finalize_started_at.isoformat(),
                 "first_seen_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.first_seen),
                 "last_read_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.updated_at),
+                "captured_to_webhook_ms": captured_to_webhook_ms,
+                "webhook_to_finalize_ms": webhook_to_finalize_ms,
                 "exact_known_vehicle": _is_exact_known_vehicle_plate_match(read),
                 "visitor_pass_match": _is_visitor_pass_plate_match(read) is not None,
             },
@@ -1809,27 +1895,39 @@ class AccessEventService:
                 "source": read.source,
                 "first_seen": window.first_seen.isoformat(),
                 "finalize_started_at": finalize_started_at.isoformat(),
+                "webhook_received_at": webhook_received_at.isoformat(),
+                "captured_to_webhook_ms": captured_to_webhook_ms,
+                "webhook_to_finalize_ms": webhook_to_finalize_ms,
+                WEBHOOK_TRACE_PAYLOAD_KEY: webhook_trace,
             },
         )
         trace.record_span(
-            "Webhook Received",
-            started_at=window.first_seen,
-            ended_at=window.first_seen,
-            attributes={"source": window.first_read.source},
+            "Camera Capture to Webhook Receipt",
+            started_at=window.first_read.captured_at,
+            ended_at=webhook_received_at,
+            attributes={
+                "source": window.first_read.source,
+                "captured_to_webhook_ms": captured_to_webhook_ms,
+            },
             output_payload={
                 "registration_number": window.first_read.registration_number,
                 "confidence": window.first_read.confidence,
                 "captured_at": window.first_read.captured_at.isoformat(),
+                "received_at": webhook_received_at.isoformat(),
+                "captured_to_webhook_ms": captured_to_webhook_ms,
             },
         )
         trace.record_span(
-            "Debounce & Confidence Aggregation",
-            started_at=window.first_seen,
+            "Webhook Receipt to Debounce Finalization",
+            started_at=webhook_received_at,
             ended_at=finalize_started_at,
             attributes={
                 "candidate_count": len(window.reads),
                 "selected_registration_number": read.registration_number,
                 "selected_confidence": read.confidence,
+                "first_seen": window.first_seen.isoformat(),
+                "updated_at": window.updated_at.isoformat(),
+                "webhook_to_finalize_ms": webhook_to_finalize_ms,
             },
             output_payload={
                 "candidates": [
@@ -1839,6 +1937,7 @@ class AccessEventService:
                         "confidence": item.confidence,
                         "captured_at": item.captured_at.isoformat(),
                         "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
+                        WEBHOOK_TRACE_PAYLOAD_KEY: self._webhook_trace_from_read(item),
                     }
                     for item in window.reads
                 ],
@@ -1958,6 +2057,8 @@ class AccessEventService:
                     visitor_pass=visitor_pass,
                     visitor_pass_mode=visitor_pass_mode,
                     trace_id=trace.trace_id,
+                    finalize_started_at=finalize_started_at,
+                    webhook_trace=webhook_trace,
                 ),
             )
             session.add(event)
@@ -2374,12 +2475,18 @@ class AccessEventService:
         visitor_pass: VisitorPass | None,
         visitor_pass_mode: str | None,
         trace_id: str,
+        finalize_started_at: datetime,
+        webhook_trace: dict[str, Any],
     ) -> dict[str, Any]:
         return {
             "best": read.raw_payload,
+            WEBHOOK_TRACE_PAYLOAD_KEY: webhook_trace,
             "schedule": self._schedule_evaluation_payload(schedule_evaluation),
             "debounce": {
                 "candidate_count": len(window.reads),
+                "first_seen": window.first_seen.isoformat(),
+                "updated_at": window.updated_at.isoformat(),
+                "finalize_started_at": finalize_started_at.isoformat(),
                 "candidates": [
                     {
                         "registration_number": item.registration_number,
@@ -2389,6 +2496,7 @@ class AccessEventService:
                         "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
                         "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(item),
                         "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(item),
+                        WEBHOOK_TRACE_PAYLOAD_KEY: self._webhook_trace_from_read(item),
                     }
                     for item in window.reads
                 ],

@@ -1,78 +1,41 @@
 import React from "react";
 
 import {
-api,
-AuditLog,
-createActionConfirmation,
-isAbortError,
-RealtimeMessage
+  api,
+  createActionConfirmation
 } from "../../shared";
 import {
-ClearLogsConfirmModal,
-exportVisible,
-LiveStreamDrawer,
-LogsDetailInspector,
-LogsExplorerTable,
-LogsFilterBar,
-LogsMetricStrip,
-LogsSourceTabs,
-LogsTopBar,
-SaveFilterModal
+  ClearLogsConfirmModal,
+  exportVisible,
+  SaveFilterModal
 } from "./components";
 import { defaultLogsFilters } from "./constants";
+import { LogsControls } from "./LogsControls";
 import {
-GateMalfunctionRecord,
-LogRecord,
-LogsFilters,
-LogSourceKey,
-PaginatedResponse,
-SavedLogsFilter,
-TelemetrySummary,
-TelemetryTrace,
-TelemetryTraceDetail,
-TraceDetailState
+  sortRecordsByNewest,
+  useLogsData,
+  useSelectedLogRecord,
+  useTraceDetail
+} from "./hooks";
+import { NarrativeFeed } from "./NarrativeFeed";
+import {
+  LogsFilters,
+  LogSourceKey,
+  SavedLogsFilter
 } from "./types";
 import {
-applyLocalFilters,
-auditLogFromRealtimePayload,
-auditRecord,
-buildAuditParams,
-buildSummaryParams,
-buildTraceParams,
-firstRecord,
-gateMalfunctionRecordToTrace,
-gateMalfunctionRecordToTraceDetail,
-liveRecord,
-loadSavedFilters,
-realtimeLogKey,
-saveSavedFilters,
-sourceUsesAudit,
-sourceUsesTraces,
-timeRangeFrom,
-traceRecord
+  applyLocalFilters,
+  loadSavedFilters,
+  saveSavedFilters
 } from "./utils";
 
 export function LogsWorkspace({
-  logs,
-  onClearRealtime,
   refreshToken
 }: {
-  logs: RealtimeMessage[];
-  onClearRealtime: () => void;
   refreshToken: number;
 }) {
   const [activeSource, setActiveSource] = React.useState<LogSourceKey>("all");
   const [filters, setFilters] = React.useState<LogsFilters>(defaultLogsFilters);
-  const [traceRecords, setTraceRecords] = React.useState<LogRecord[]>([]);
-  const [auditRecords, setAuditRecords] = React.useState<LogRecord[]>([]);
-  const [traceCursor, setTraceCursor] = React.useState<string | null>(null);
-  const [auditCursor, setAuditCursor] = React.useState<string | null>(null);
-  const [summary, setSummary] = React.useState<TelemetrySummary | null>(null);
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
-  const [traceDetails, setTraceDetails] = React.useState<Record<string, TraceDetailState>>({});
-  const [loading, setLoading] = React.useState(false);
-  const [loadingMore, setLoadingMore] = React.useState(false);
-  const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
   const [clearing, setClearing] = React.useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = React.useState(false);
@@ -80,195 +43,43 @@ export function LogsWorkspace({
   const [savedFilters, setSavedFilters] = React.useState<SavedLogsFilter[]>(() => loadSavedFilters());
   const [saveFilterOpen, setSaveFilterOpen] = React.useState(false);
   const [saveFilterError, setSaveFilterError] = React.useState("");
-  const [liveOpen, setLiveOpen] = React.useState(true);
-  const [livePaused, setLivePaused] = React.useState(false);
-  const [displayedLiveRecords, setDisplayedLiveRecords] = React.useState<LogRecord[]>([]);
-  const reloadTimerRef = React.useRef<number | null>(null);
-  const processedRealtimeKeysRef = React.useRef<Set<string>>(new Set());
-  const lastRefreshTokenRef = React.useRef(refreshToken);
-  const summaryLoadSequenceRef = React.useRef(0);
-  const summaryLoadAbortRef = React.useRef<AbortController | null>(null);
-  const logsLoadSequenceRef = React.useRef(0);
-  const logsLoadAbortRef = React.useRef<AbortController | null>(null);
 
-  const normalizedLiveRecords = React.useMemo(
-    () => logs.map((log, index) => liveRecord(log, index)),
-    [logs]
-  );
+  const resetKey = React.useMemo(() => [
+    activeSource,
+    filters.query,
+    filters.timeRange,
+    filters.level,
+    filters.status,
+    filters.actor,
+    filters.subject,
+    filters.slowOnly ? "slow" : "all"
+  ].join("|"), [activeSource, filters.actor, filters.level, filters.query, filters.slowOnly, filters.status, filters.subject, filters.timeRange]);
 
-  React.useEffect(() => {
-    if (!livePaused) setDisplayedLiveRecords(normalizedLiveRecords);
-  }, [livePaused, normalizedLiveRecords]);
+  const {
+    auditRecords,
+    clearRecords,
+    error,
+    hasNextCursor,
+    loading,
+    loadingMore,
+    loadMore,
+    refresh,
+    setError,
+    summary,
+    traceRecords
+  } = useLogsData({ activeSource, filters, refreshToken });
 
   const combinedRecords = React.useMemo(() => {
-    const relevantLiveRecords = activeSource === "live" || activeSource === "all"
-      ? displayedLiveRecords
-      : displayedLiveRecords.filter((record) => record.source === activeSource);
-    const records = activeSource === "live"
-      ? relevantLiveRecords
-      : [...traceRecords, ...auditRecords, ...relevantLiveRecords];
-    return sortRecordsByNewest(records);
-  }, [activeSource, auditRecords, displayedLiveRecords, traceRecords]);
-
-  const liveSourceCounts = React.useMemo(() => {
-    const counts = {} as Partial<Record<LogSourceKey, number>>;
-    displayedLiveRecords.forEach((record) => {
-      counts[record.source] = (counts[record.source] || 0) + 1;
-    });
-    counts.all = displayedLiveRecords.length;
-    counts.live = displayedLiveRecords.length;
-    return counts;
-  }, [displayedLiveRecords]);
+    return sortRecordsByNewest([...traceRecords, ...auditRecords]);
+  }, [auditRecords, traceRecords]);
 
   const visibleRecords = React.useMemo(
     () => applyLocalFilters(combinedRecords, filters, activeSource),
     [activeSource, combinedRecords, filters]
   );
 
-  const selectedRecord = React.useMemo(
-    () => firstRecord(visibleRecords, selectedId),
-    [selectedId, visibleRecords]
-  );
-
-  const selectedTraceDetail = selectedRecord?.traceId
-    ? traceDetails[selectedRecord.traceId] || { loading: false, error: "", detail: null }
-    : { loading: false, error: "", detail: null };
-
-  const hasNextCursor = activeSource !== "live" && Boolean(
-    (sourceUsesTraces(activeSource) && traceCursor) ||
-    (sourceUsesAudit(activeSource) && auditCursor)
-  );
-
-  const clearScheduledReload = React.useCallback(() => {
-    if (reloadTimerRef.current === null) return;
-    window.clearTimeout(reloadTimerRef.current);
-    reloadTimerRef.current = null;
-  }, []);
-
-  const loadSummary = React.useCallback(async () => {
-    const sequence = summaryLoadSequenceRef.current + 1;
-    summaryLoadSequenceRef.current = sequence;
-    summaryLoadAbortRef.current?.abort();
-    const controller = new AbortController();
-    summaryLoadAbortRef.current = controller;
-    const params = buildSummaryParams(filters);
-    const path = params.toString() ? `/api/v1/telemetry/summary?${params}` : "/api/v1/telemetry/summary";
-    try {
-      const nextSummary = await api.get<TelemetrySummary>(path, { signal: controller.signal });
-      if (summaryLoadSequenceRef.current !== sequence) return;
-      setSummary(nextSummary);
-    } catch (summaryError) {
-      if (isAbortError(summaryError)) return;
-      if (summaryLoadSequenceRef.current !== sequence) return;
-      throw summaryError;
-    } finally {
-      if (summaryLoadSequenceRef.current === sequence && summaryLoadAbortRef.current === controller) {
-        summaryLoadAbortRef.current = null;
-      }
-    }
-  }, [filters]);
-
-  const loadLogs = React.useCallback(async (mode: "reset" | "append" = "reset") => {
-    const sequence = logsLoadSequenceRef.current + 1;
-    logsLoadSequenceRef.current = sequence;
-    logsLoadAbortRef.current?.abort();
-    const controller = new AbortController();
-    logsLoadAbortRef.current = controller;
-    if (activeSource === "live") {
-      setLoading(false);
-      setLoadingMore(false);
-      if (logsLoadAbortRef.current === controller) {
-        logsLoadAbortRef.current = null;
-      }
-      return;
-    }
-    setError("");
-    mode === "reset" ? setLoading(true) : setLoadingMore(true);
-    try {
-      const nextTraceRecords: LogRecord[] = [];
-      const nextAuditRecords: LogRecord[] = [];
-      let nextTraceCursor = mode === "append" ? traceCursor : null;
-      let nextAuditCursor = mode === "append" ? auditCursor : null;
-
-      if (sourceUsesTraces(activeSource) && (mode === "reset" || traceCursor)) {
-        if (activeSource === "gate") {
-          const params = new URLSearchParams({ limit: "60" });
-          const from = timeRangeFrom(filters);
-          if (from) params.set("from", from);
-          if (filters.status !== "all") params.set("status", filters.status);
-          if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
-          const response = await api.get<PaginatedResponse<GateMalfunctionRecord>>(
-            `/api/v1/gate-malfunctions/history?${params}`,
-            { signal: controller.signal }
-          );
-          nextTraceRecords.push(...response.items.map((record) => traceRecord(gateMalfunctionRecordToTrace(record))));
-          nextTraceCursor = response.next_cursor;
-        } else {
-          const response = await api.get<PaginatedResponse<TelemetryTrace>>(
-            `/api/v1/telemetry/traces?${buildTraceParams(activeSource, filters, mode === "append" ? traceCursor : null)}`,
-            { signal: controller.signal }
-          );
-          nextTraceRecords.push(...response.items.map(traceRecord));
-          nextTraceCursor = response.next_cursor;
-        }
-      }
-
-      if (sourceUsesAudit(activeSource) && (mode === "reset" || auditCursor)) {
-        const response = await api.get<PaginatedResponse<AuditLog>>(
-          `/api/v1/telemetry/audit?${buildAuditParams(activeSource, filters, mode === "append" ? auditCursor : null)}`,
-          { signal: controller.signal }
-        );
-        nextAuditRecords.push(...response.items.map(auditRecord));
-        nextAuditCursor = response.next_cursor;
-      }
-
-      if (logsLoadSequenceRef.current !== sequence) return;
-      setTraceRecords((current) => mode === "append" ? mergeRecords(current, nextTraceRecords) : nextTraceRecords);
-      setAuditRecords((current) => mode === "append" ? mergeRecords(current, nextAuditRecords) : nextAuditRecords);
-      setTraceCursor(nextTraceCursor);
-      setAuditCursor(nextAuditCursor);
-    } catch (loadError) {
-      if (isAbortError(loadError)) return;
-      if (logsLoadSequenceRef.current !== sequence) return;
-      setError(loadError instanceof Error ? loadError.message : "Unable to load logs");
-    } finally {
-      if (logsLoadSequenceRef.current === sequence) {
-        setLoading(false);
-        setLoadingMore(false);
-        if (logsLoadAbortRef.current === controller) {
-          logsLoadAbortRef.current = null;
-        }
-      }
-    }
-  }, [activeSource, auditCursor, filters, traceCursor]);
-
-  const refreshLogs = React.useCallback(() => {
-    loadLogs("reset").catch(() => undefined);
-    loadSummary().catch(() => undefined);
-  }, [loadLogs, loadSummary]);
-
-  React.useEffect(() => {
-    setSelectedId(null);
-    setTraceDetails({});
-    clearScheduledReload();
-    loadLogs("reset").catch(() => undefined);
-    loadSummary().catch(() => undefined);
-  }, [activeSource, filters, clearScheduledReload]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadLogs("reset").catch(() => undefined);
-    loadSummary().catch(() => undefined);
-  }, [loadLogs, loadSummary, refreshToken]);
-
-  React.useEffect(() => () => {
-    clearScheduledReload();
-    summaryLoadSequenceRef.current += 1;
-    summaryLoadAbortRef.current?.abort();
-    logsLoadSequenceRef.current += 1;
-    logsLoadAbortRef.current?.abort();
-  }, [clearScheduledReload]);
+  const { selectedId, selectedRecord, setSelectedId } = useSelectedLogRecord(visibleRecords, resetKey);
+  const { clearTraceDetails, selectedTraceDetail } = useTraceDetail(selectedRecord, resetKey);
 
   React.useEffect(() => {
     if (!notice) return undefined;
@@ -276,109 +87,24 @@ export function LogsWorkspace({
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  React.useEffect(() => {
-    if (!visibleRecords.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedId || !visibleRecords.some((record) => record.id === selectedId)) {
-      setSelectedId(visibleRecords[0].id);
-    }
-  }, [selectedId, visibleRecords]);
-
-  React.useEffect(() => {
-    if (!selectedRecord || selectedRecord.kind !== "trace" || !selectedRecord.traceId || traceDetails[selectedRecord.traceId]) return;
-    const traceId = selectedRecord.traceId;
-    setTraceDetails((current) => ({ ...current, [traceId]: { loading: true, error: "", detail: null } }));
-    const malfunctionId = selectedRecord.rawTrace?.category === "gate_malfunction"
-      ? String(selectedRecord.rawTrace.context.malfunction_id || selectedRecord.rawTrace.context.id || "")
-      : "";
-    const controller = new AbortController();
-    const request = malfunctionId
-      ? api.get<GateMalfunctionRecord>(`/api/v1/gate-malfunctions/${malfunctionId}/trace`, {
-        signal: controller.signal
-      }).then(gateMalfunctionRecordToTraceDetail)
-      : api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`, { signal: controller.signal });
-    request
-      .then((detail) => {
-        setTraceDetails((current) => ({ ...current, [traceId]: { loading: false, error: "", detail } }));
-      })
-      .catch((detailError) => {
-        if (isAbortError(detailError)) return;
-        setTraceDetails((current) => ({
-          ...current,
-          [traceId]: {
-            loading: false,
-            error: detailError instanceof Error ? detailError.message : "Unable to load trace detail",
-            detail: null
-          }
-        }));
-      });
-    return () => controller.abort();
-  }, [selectedRecord]);
-
-  React.useEffect(() => {
-    if (!logs.length || activeSource === "live") return;
-    let shouldReload = false;
-    const nextAuditLogs: LogRecord[] = [];
-    const recentLogs = logs.slice(0, 20).reverse();
-    for (const realtimeLog of recentLogs) {
-      const realtimeKey = realtimeLogKey(realtimeLog);
-      if (processedRealtimeKeysRef.current.has(realtimeKey)) continue;
-      processedRealtimeKeysRef.current.add(realtimeKey);
-      if (
-        realtimeLog.type.startsWith("telemetry.") ||
-        realtimeLog.type.startsWith("gate_malfunction.") ||
-        realtimeLog.type === "maintenance_mode.changed"
-      ) {
-        shouldReload = true;
-      }
-      if (realtimeLog.type === "audit.log.created") {
-        shouldReload = true;
-        const liveAuditLog = auditLogFromRealtimePayload(realtimeLog.payload);
-        if (liveAuditLog) nextAuditLogs.push(auditRecord(liveAuditLog));
-      }
-    }
-    if (processedRealtimeKeysRef.current.size > 240) {
-      const staleKeys = Array.from(processedRealtimeKeysRef.current).slice(0, processedRealtimeKeysRef.current.size - 240);
-      staleKeys.forEach((key) => processedRealtimeKeysRef.current.delete(key));
-    }
-    if (nextAuditLogs.length && sourceUsesAudit(activeSource)) {
-      setAuditRecords((current) => mergeRecords(nextAuditLogs, current).slice(0, 120));
-    }
-    if (!shouldReload) return;
-    clearScheduledReload();
-    reloadTimerRef.current = window.setTimeout(() => {
-      reloadTimerRef.current = null;
-      loadLogs("reset").catch(() => undefined);
-      loadSummary().catch(() => undefined);
-    }, 900);
-  }, [activeSource, clearScheduledReload, loadLogs, loadSummary, logs]);
-
   async function clearLogs() {
     setClearing(true);
     setError("");
     setClearError("");
     setNotice("");
     try {
-      const payload = { scope: "telemetry" };
+      const payload = { scope: "full" };
       const confirmation = await createActionConfirmation("telemetry.purge", payload, {
         target_entity: "Telemetry",
-        target_label: "Telemetry traces and artifacts",
-        reason: "Clear telemetry traces and artifacts"
+        target_label: "All logs",
+        reason: "Clear telemetry, audit history, artifacts, and file logs"
       });
-      await api.delete(`/api/v1/telemetry/purge?confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
-      setTraceRecords([]);
-      setAuditRecords([]);
-      setTraceCursor(null);
-      setAuditCursor(null);
-      setTraceDetails({});
-      processedRealtimeKeysRef.current.clear();
-      onClearRealtime();
-      await loadLogs("reset");
-      await loadSummary();
+      await api.delete(`/api/v1/telemetry/purge?scope=full&confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
+      clearRecords();
+      clearTraceDetails();
+      await refresh();
       setClearConfirmOpen(false);
-      setNotice("Telemetry traces and artifacts cleared. Audit history was preserved.");
+      setNotice("Logs cleared. Audit history, telemetry traces, artifacts, and file logs were purged.");
     } catch (clearError) {
       const message = clearError instanceof Error ? clearError.message : "Unable to clear logs";
       setClearError(message);
@@ -409,70 +135,48 @@ export function LogsWorkspace({
 
   return (
     <section className="view-stack logs-workspace">
-      <LogsTopBar
+      <LogsControls
+        activeSource={activeSource}
         clearing={clearing}
+        filters={filters}
+        onApplySaved={(filter) => {
+          setActiveSource(filter.source === "live" ? "all" : filter.source);
+          setFilters({ ...defaultLogsFilters, ...filter.filters });
+        }}
+        onChange={setFilters}
         onClear={() => {
           setClearError("");
           setClearConfirmOpen(true);
         }}
         onExportCsv={() => exportVisible(visibleRecords, "csv")}
         onExportJson={() => exportVisible(visibleRecords, "json")}
-        onRefresh={refreshLogs}
-        storage={summary?.storage || null}
-      />
-
-      <LogsMetricStrip liveCount={displayedLiveRecords.length} storage={summary?.storage || null} summary={summary} />
-      <LogsSourceTabs
-        activeSource={activeSource}
-        liveCount={displayedLiveRecords.length}
-        liveSourceCounts={liveSourceCounts}
-        onChange={setActiveSource}
-        summary={summary}
-      />
-      <LogsFilterBar
-        activeSource={activeSource}
-        filters={filters}
-        onApplySaved={(filter) => {
-          setActiveSource(filter.source);
-          setFilters(filter.filters);
-        }}
-        onChange={setFilters}
+        onRefresh={() => refresh().catch(() => undefined)}
         onReset={() => setFilters(defaultLogsFilters)}
         onSave={() => {
           setSaveFilterError("");
           setSaveFilterOpen(true);
         }}
+        onSourceChange={setActiveSource}
         savedFilters={savedFilters}
+        storage={summary?.storage || null}
+        summary={summary}
       />
 
       {error ? <div className="error-banner">{error}</div> : null}
       {notice ? <div className="success-banner">{notice}</div> : null}
 
-      <div className="logs-main-grid">
-        <LogsExplorerTable
+      <div className="logs-main-grid logs-ledger-layout">
+        <NarrativeFeed
           loading={loading}
           loadingMore={loadingMore}
           nextCursor={hasNextCursor}
-          onLoadMore={() => loadLogs("append").catch(() => undefined)}
-          onSelect={(record) => setSelectedId(record.id)}
+          onLoadMore={() => loadMore().catch(() => undefined)}
+          onSelect={(record) => setSelectedId((current) => current === record.id ? null : record.id)}
           records={visibleRecords}
-          selectedId={selectedRecord?.id || null}
-        />
-        <LogsDetailInspector
-          onClose={() => setSelectedId(null)}
-          record={selectedRecord}
+          selectedId={selectedRecord?.id || selectedId}
           traceDetail={selectedTraceDetail}
         />
       </div>
-
-      <LiveStreamDrawer
-        logs={displayedLiveRecords}
-        onClear={onClearRealtime}
-        onToggleOpen={() => setLiveOpen((current) => !current)}
-        onTogglePaused={() => setLivePaused((current) => !current)}
-        open={liveOpen}
-        paused={livePaused}
-      />
 
       {clearConfirmOpen ? (
         <ClearLogsConfirmModal
@@ -496,17 +200,4 @@ export function LogsWorkspace({
       ) : null}
     </section>
   );
-}
-
-function mergeRecords(left: LogRecord[], right: LogRecord[]) {
-  const byId = new Map<string, LogRecord>();
-  [...left, ...right].forEach((record) => byId.set(record.id, record));
-  return sortRecordsByNewest(Array.from(byId.values()));
-}
-
-function sortRecordsByNewest(records: LogRecord[]) {
-  return records
-    .map((record, index) => ({ record, index, timestamp: Date.parse(record.timestamp) || 0 }))
-    .sort((left, right) => right.timestamp - left.timestamp || left.index - right.index)
-    .map((item) => item.record);
 }

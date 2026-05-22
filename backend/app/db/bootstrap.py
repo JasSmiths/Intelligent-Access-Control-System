@@ -28,6 +28,7 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS pronouns VARCHAR(24)"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_photo_data_url TEXT"))
             await conn.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS schedule_id UUID"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_people_group_id ON people (group_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_people_schedule_id ON people (schedule_id)"))
             await conn.execute(
                 text(
@@ -73,6 +74,7 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mot_expiry DATE"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tax_expiry DATE"))
             await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_dvla_lookup_date DATE"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicles_person_id ON vehicles (person_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicles_schedule_id ON vehicles (schedule_id)"))
             await conn.execute(
                 text(
@@ -102,6 +104,9 @@ async def init_database() -> None:
                 )
             )
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicle_person_assignments_person_id ON vehicle_person_assignments (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_presence_last_event_id ON presence (last_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id ON chat_messages (session_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_dependencies_latest_analysis_id ON external_dependencies (latest_analysis_id)"))
             await conn.execute(
                 text(
                     """
@@ -201,36 +206,50 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_next_run ON automation_rules (is_active, next_run_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_created ON automation_rules (is_active, created_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_runs_rule_started ON automation_runs (rule_id, started_at DESC)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_category ON audit_logs (category)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_actor ON audit_logs (actor)"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_timestamp"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_category"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_action"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_actor"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_target_entity"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_target_id"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_outcome"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_level"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_request_id"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_user_id ON audit_logs (actor_user_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_target_entity ON audit_logs (target_entity)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_target_id ON audit_logs (target_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_outcome ON audit_logs (outcome)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_level ON audit_logs (level)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_trace_id ON audit_logs (trace_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_request_id ON audit_logs (request_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_name ON telemetry_traces (name)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_category ON telemetry_traces (category)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_status ON telemetry_traces (status)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_level ON telemetry_traces (level)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_started_at ON telemetry_traces (started_at)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_ended_at ON telemetry_traces (ended_at)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_duration_ms ON telemetry_traces (duration_ms)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_actor ON telemetry_traces (actor)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_source ON telemetry_traces (source)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_registration_number ON telemetry_traces (registration_number)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_access_event_id ON telemetry_traces (access_event_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_span_id ON telemetry_spans (span_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_trace_id ON telemetry_spans (trace_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_parent_span_id ON telemetry_spans (parent_span_id)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_name ON telemetry_spans (name)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_category ON telemetry_spans (category)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_step_order ON telemetry_spans (step_order)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_started_at ON telemetry_spans (started_at)"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_status ON telemetry_spans (status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp_id ON audit_logs (timestamp DESC, id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_category_timestamp ON audit_logs (category, timestamp DESC, id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_target_entity_timestamp ON audit_logs (target_entity, timestamp DESC, id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_target_entity_target_id_timestamp ON audit_logs (target_entity, target_id, timestamp, id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_level_timestamp ON audit_logs (level, timestamp DESC, id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_outcome_timestamp ON audit_logs (outcome, timestamp DESC, id DESC)"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_name"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_category"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_status"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_level"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_started_at"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_ended_at"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_duration_ms"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_actor"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_source"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_registration_number"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_traces_access_event_id"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_trace_id"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_parent_span_id"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_name"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_category"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_step_order"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_started_at"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_ended_at"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_duration_ms"))
+            await conn.execute(text("DROP INDEX IF EXISTS ix_telemetry_spans_status"))
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_telemetry_spans_span_id ON telemetry_spans (span_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_started_trace ON telemetry_traces (started_at DESC, trace_id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_category_started ON telemetry_traces (category, started_at DESC, trace_id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_status_started ON telemetry_traces (status, started_at DESC, trace_id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_level_started ON telemetry_traces (level, started_at DESC, trace_id DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_traces_access_event_started ON telemetry_traces (access_event_id, started_at DESC) WHERE access_event_id IS NOT NULL"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_telemetry_spans_trace_step_started ON telemetry_spans (trace_id, step_order, started_at)"))
             await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_path VARCHAR(512)"))
             await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_content_type VARCHAR(80)"))
             await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_bytes INTEGER"))
@@ -239,6 +258,8 @@ async def init_database() -> None:
             await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_captured_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE access_events ADD COLUMN IF NOT EXISTS snapshot_camera VARCHAR(120)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_access_events_created_at ON access_events (created_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_access_events_person_id ON access_events (person_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_access_events_vehicle_id ON access_events (vehicle_id)"))
             await conn.execute(
                 text(
                     """
@@ -253,6 +274,38 @@ async def init_database() -> None:
                     CREATE INDEX IF NOT EXISTS ix_access_events_snapshot_created_at
                     ON access_events (created_at)
                     WHERE snapshot_path IS NOT NULL
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_access_events_snapshot_registration_occurred
+                    ON access_events (registration_number, occurred_at DESC)
+                    WHERE snapshot_path IS NOT NULL
+                        AND snapshot_bytes IS NOT NULL
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_access_events_granted_person_direction_time
+                    ON access_events (person_id, direction, occurred_at DESC)
+                    WHERE decision = 'GRANTED'
+                        AND person_id IS NOT NULL
+                        AND direction IN ('ENTRY', 'EXIT')
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_access_events_granted_vehicle_direction_time
+                    ON access_events (vehicle_id, direction, occurred_at DESC)
+                    WHERE decision = 'GRANTED'
+                        AND vehicle_id IS NOT NULL
+                        AND direction IN ('ENTRY', 'EXIT')
                     """
                 )
             )
@@ -467,6 +520,7 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_gate_malfunction_timeline_events_status ON gate_malfunction_timeline_events (status)"))
             await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolved_by_user_id UUID"))
             await conn.execute(text("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS resolution_note TEXT"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_event_id ON anomalies (event_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_resolved_at ON anomalies (resolved_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_resolved_by_user_id ON anomalies (resolved_by_user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_anomalies_anomaly_type ON anomalies (anomaly_type)"))
@@ -573,6 +627,7 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_user_id ON messaging_identities (user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_person_id ON messaging_identities (person_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messaging_identities_last_seen_at ON messaging_identities (last_seen_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alfred_memories_source_message_id ON alfred_memories (source_message_id)"))
             await _ensure_alfred_semantic_schema(conn)
         logger.info("database_schema_ready")
 

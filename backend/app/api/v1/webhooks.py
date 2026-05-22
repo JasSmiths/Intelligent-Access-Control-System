@@ -1,5 +1,6 @@
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -16,9 +17,16 @@ from app.modules.lpr.ubiquiti import (
 from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
-from app.services.settings import get_runtime_config
 from app.services.lpr_timing import get_lpr_timing_recorder
-from app.services.telemetry import TELEMETRY_CATEGORY_LPR, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry
+from app.services.settings import get_runtime_config
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_LPR,
+    TELEMETRY_CATEGORY_WEBHOOKS_API,
+    current_request_id,
+    current_trace_id,
+    telemetry,
+    utc_now,
+)
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
@@ -30,6 +38,9 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 SMART_ZONE_EVIDENCE_PAYLOAD_KEY = "_iacs_smart_zone_evidence"
+INGEST_METADATA_PAYLOAD_KEY = "_iacs_ingest"
+INGEST_METADATA_VERSION = 1
+PAYLOAD_SHAPE_VERSION = 1
 
 
 @router.get("/whatsapp", response_class=PlainTextResponse)
@@ -195,12 +206,14 @@ async def receive_ubiquiti_lpr(
     the access event service.
     """
 
+    webhook_received_at = utc_now()
     raw_payload = await request.json()
+    payload_shape = _payload_shape(raw_payload)
     telemetry.record_span(
         "Webhook payload received",
         category=TELEMETRY_CATEGORY_WEBHOOKS_API,
         attributes={"source": "ubiquiti_lpr"},
-        output_payload={"payload_shape": _payload_shape(raw_payload)},
+        output_payload={"payload_shape": payload_shape},
     )
     try:
         payload = UbiquitiLprPayload.model_validate(raw_payload)
@@ -211,7 +224,7 @@ async def receive_ubiquiti_lpr(
                 "alarm_manager_test_webhook_received",
                 extra={
                     "event_id": event_id,
-                    "payload_shape": _payload_shape(raw_payload),
+                    "payload_shape": payload_shape,
                 },
             )
             await event_bus.publish(
@@ -233,7 +246,7 @@ async def receive_ubiquiti_lpr(
         logger.warning(
             "ubiquiti_lpr_payload_invalid",
             extra={
-                "payload_shape": _payload_shape(raw_payload),
+                "payload_shape": payload_shape,
                 "errors": exc.errors(include_url=False, include_input=False),
             },
         )
@@ -242,7 +255,7 @@ async def receive_ubiquiti_lpr(
             category=TELEMETRY_CATEGORY_WEBHOOKS_API,
             status="error",
             output_payload={
-                "payload_shape": _payload_shape(raw_payload),
+                "payload_shape": payload_shape,
                 "errors": exc.errors(include_url=False, include_input=False),
             },
         )
@@ -250,13 +263,19 @@ async def receive_ubiquiti_lpr(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "message": "Ubiquiti LPR webhook did not include a recognizable plate.",
-                "payload_shape": _payload_shape(raw_payload),
+                "payload_shape": payload_shape,
                 "errors": exc.errors(include_url=False, include_input=False),
             },
         ) from exc
 
     read = UbiquitiLprAdapter().to_plate_read(payload)
-    await get_lpr_timing_recorder().record_webhook_plate(read)
+    read = _read_with_ingest_metadata(
+        read,
+        request=request,
+        webhook_received_at=webhook_received_at,
+        payload_shape=payload_shape,
+    )
+    await get_lpr_timing_recorder().record_webhook_plate(read, received_at=webhook_received_at)
     zone_evidence = extract_plate_smart_zone_evidence(raw_payload, read.registration_number)
     raw_smart_zones = zone_evidence.smart_zones
     smart_zones = raw_smart_zones
@@ -359,6 +378,34 @@ def _read_with_smart_zone_evidence_metadata(
     )
 
 
+def _read_with_ingest_metadata(
+    read: PlateRead,
+    *,
+    request: Request,
+    webhook_received_at: datetime,
+    payload_shape: Any,
+) -> PlateRead:
+    raw_payload = dict(read.raw_payload or {})
+    raw_payload[INGEST_METADATA_PAYLOAD_KEY] = {
+        "version": INGEST_METADATA_VERSION,
+        "webhook_received_at": _as_utc(webhook_received_at).isoformat(),
+        "request_id": _request_id(request),
+        "webhook_trace_id": current_trace_id(),
+        "captured_to_webhook_ms": _datetime_delta_ms(webhook_received_at, read.captured_at),
+        "path": _request_path(request),
+        "payload_shape_version": PAYLOAD_SHAPE_VERSION,
+        "payload_shape": payload_shape,
+    }
+    return PlateRead(
+        registration_number=read.registration_number,
+        confidence=read.confidence,
+        source=read.source,
+        captured_at=read.captured_at,
+        raw_payload=raw_payload,
+        candidate_registration_numbers=read.candidate_registration_numbers,
+    )
+
+
 async def _record_lpr_diagnostic_payloads(raw_payload: Any, read: PlateRead) -> None:
     failures: list[dict[str, str]] = []
     recorders = (
@@ -427,6 +474,30 @@ def _payload_shape(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_payload_shape(value[0], depth + 1)] if value else []
     return type(value).__name__
+
+
+def _request_id(request: Request) -> str | None:
+    return (
+        current_request_id()
+        or request.headers.get("x-request-id")
+        or request.headers.get("x-iacs-request-id")
+    )
+
+
+def _request_path(request: Request) -> str:
+    return str(request.scope.get("path") or request.url.path)
+
+
+def _datetime_delta_ms(end: datetime, start: datetime) -> float:
+    end = _as_utc(end)
+    start = _as_utc(start)
+    return round(max(0.0, (end - start).total_seconds()) * 1000.0, 3)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _log_whatsapp_webhook_hit(

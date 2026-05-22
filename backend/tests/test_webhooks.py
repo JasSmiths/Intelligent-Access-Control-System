@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,7 +66,11 @@ def multi_plate_alarm_payload(first_plate: str, second_plate: str, zones: list[i
 
 
 class FakeLprTimingRecorder:
-    async def record_webhook_plate(self, _read):
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, datetime | None]] = []
+
+    async def record_webhook_plate(self, read, *, received_at=None):
+        self.calls.append((read, received_at))
         return None
 
 
@@ -105,6 +110,7 @@ class FakeAccessEventService:
 @pytest.fixture
 def webhook_runtime(monkeypatch):
     published = []
+    timing_recorder = FakeLprTimingRecorder()
     visual_recorder = FakeUnifiPayloadRecorder()
     presence_tracker = FakeUnifiPayloadRecorder()
 
@@ -115,7 +121,7 @@ def webhook_runtime(monkeypatch):
         published.append((event_type, payload))
 
     monkeypatch.setattr(webhooks, "get_runtime_config", runtime_config)
-    monkeypatch.setattr(webhooks, "get_lpr_timing_recorder", lambda: FakeLprTimingRecorder())
+    monkeypatch.setattr(webhooks, "get_lpr_timing_recorder", lambda: timing_recorder)
     monkeypatch.setattr(webhooks, "get_unifi_protect_service", lambda: FakeUnifiProtectService())
     monkeypatch.setattr(webhooks, "get_vehicle_visual_detection_recorder", lambda: visual_recorder)
     monkeypatch.setattr(webhooks, "get_vehicle_presence_tracker", lambda: presence_tracker)
@@ -125,6 +131,7 @@ def webhook_runtime(monkeypatch):
     return SimpleNamespace(
         presence_tracker=presence_tracker,
         published=published,
+        timing_recorder=timing_recorder,
         visual_recorder=visual_recorder,
     )
 
@@ -158,6 +165,49 @@ async def test_lpr_webhook_preserves_secondary_plate_candidate(webhook_runtime) 
     assert result == {"status": "accepted", "plate": "DX66TUA"}
     assert len(service.enqueued) == 1
     assert service.enqueued[0].candidate_registration_numbers == ("DX66TUA", "MD25VNO")
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_persists_ingest_metadata_and_timing_received_at(webhook_runtime, monkeypatch) -> None:
+    service = FakeAccessEventService()
+    webhook_received_at = datetime(2026, 5, 22, 12, 0, 1, 234000, tzinfo=UTC)
+    monkeypatch.setattr(webhooks, "utc_now", lambda: webhook_received_at)
+    monkeypatch.setattr(webhooks, "current_request_id", lambda: "req-test")
+    monkeypatch.setattr(webhooks, "current_trace_id", lambda: "trace-test")
+
+    result = await webhooks.receive_ubiquiti_lpr(
+        make_json_request(
+            {
+                "registrationNumber": "ags7x",
+                "confidence": 99,
+                "capturedAt": "2026-05-22T12:00:00+00:00",
+            }
+        ),
+        service,
+    )
+
+    assert result == {"status": "accepted", "plate": "AGS7X"}
+    assert len(service.enqueued) == 1
+    ingest = service.enqueued[0].raw_payload[webhooks.INGEST_METADATA_PAYLOAD_KEY]
+    assert ingest == {
+        "version": 1,
+        "webhook_received_at": "2026-05-22T12:00:01.234000+00:00",
+        "request_id": "req-test",
+        "webhook_trace_id": "trace-test",
+        "captured_to_webhook_ms": 1234.0,
+        "path": "/api/v1/webhooks/ubiquiti/lpr",
+        "payload_shape_version": 1,
+        "payload_shape": {
+            "registrationNumber": "str",
+            "confidence": "int",
+            "capturedAt": "str",
+        },
+    }
+    assert webhook_runtime.timing_recorder.calls[0][1] is webhook_received_at
+    assert (
+        webhook_runtime.timing_recorder.calls[0][0].raw_payload[webhooks.INGEST_METADATA_PAYLOAD_KEY]
+        == ingest
+    )
 
 
 @pytest.mark.asyncio

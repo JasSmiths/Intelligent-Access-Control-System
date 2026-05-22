@@ -926,7 +926,7 @@ export function ClearLogsConfirmModal({
             </span>
             <div>
               <h2 id="clear-logs-confirm-title">Clear Logs?</h2>
-              <p>Telemetry traces and artifacts will be purged. Audit history will be preserved.</p>
+              <p>Audit history, telemetry traces, artifacts, and file logs will be purged. People, vehicles, access events, and movement history are kept.</p>
             </div>
           </div>
         </div>

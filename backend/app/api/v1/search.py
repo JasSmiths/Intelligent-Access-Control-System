@@ -5,9 +5,9 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import String, cast, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.api.dependencies import current_user
 from app.db.session import get_db_session
@@ -112,6 +112,7 @@ async def global_search(
     candidates = await collect_global_search_results(
         session,
         include_admin=user.role == UserRole.ADMIN,
+        query=query,
     )
     return rank_search_results(candidates, query, limit=limit)
 
@@ -120,19 +121,20 @@ async def collect_global_search_results(
     session: AsyncSession,
     *,
     include_admin: bool,
+    query: str = "",
 ) -> list[SearchCandidate]:
     candidates: list[SearchCandidate] = []
-    candidates.extend(await _person_candidates(session))
-    candidates.extend(await _vehicle_candidates(session))
-    candidates.extend(await _group_candidates(session))
-    candidates.extend(await _schedule_candidates(session))
-    candidates.extend(await _visitor_pass_candidates(session))
-    candidates.extend(await _access_event_candidates(session))
-    candidates.extend(await _alert_candidates(session))
+    candidates.extend(await _person_candidates(session, query))
+    candidates.extend(await _vehicle_candidates(session, query))
+    candidates.extend(await _group_candidates(session, query))
+    candidates.extend(await _schedule_candidates(session, query))
+    candidates.extend(await _visitor_pass_candidates(session, query))
+    candidates.extend(await _access_event_candidates(session, query))
+    candidates.extend(await _alert_candidates(session, query))
     if include_admin:
-        candidates.extend(await _user_candidates(session))
-        candidates.extend(await _automation_rule_candidates(session))
-        candidates.extend(await _notification_rule_candidates(session))
+        candidates.extend(await _user_candidates(session, query))
+        candidates.extend(await _automation_rule_candidates(session, query))
+        candidates.extend(await _notification_rule_candidates(session, query))
     return candidates
 
 
@@ -151,18 +153,53 @@ def rank_search_results(
     return [item[2] for item in scored[:limit]]
 
 
-async def _person_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _person_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    plate_pattern = _plate_like_pattern(query)
+    filters = [
+        Person.display_name.ilike(pattern),
+        Person.first_name.ilike(pattern),
+        Person.last_name.ilike(pattern),
+        Person.notes.ilike(pattern),
+        Person.home_assistant_mobile_app_notify_service.ilike(pattern),
+        cast(Person.home_assistant_presence_input_boolean_entity_ids, String).ilike(pattern),
+        Person.group.has(
+            or_(
+                Group.name.ilike(pattern),
+                Group.subtype.ilike(pattern),
+                Group.description.ilike(pattern),
+                cast(Group.category, String).ilike(pattern),
+            )
+        ),
+        Person.schedule.has(or_(Schedule.name.ilike(pattern), Schedule.description.ilike(pattern))),
+    ]
+    if plate_pattern:
+        filters.extend(
+            [
+                Person.vehicles.any(Vehicle.registration_number.ilike(plate_pattern)),
+                Person.vehicle_assignments.any(
+                    VehiclePersonAssignment.vehicle.has(
+                        Vehicle.registration_number.ilike(plate_pattern)
+                    )
+                ),
+            ]
+        )
     rows = (
         await session.scalars(
             select(Person)
             .options(
+                defer(Person.profile_photo_data_url),
                 selectinload(Person.group),
                 selectinload(Person.schedule),
-                selectinload(Person.vehicles).selectinload(Vehicle.schedule),
+                selectinload(Person.vehicles)
+                .defer(Vehicle.vehicle_photo_data_url)
+                .selectinload(Vehicle.schedule),
                 selectinload(Person.vehicle_assignments)
                 .selectinload(VehiclePersonAssignment.vehicle)
+                .defer(Vehicle.vehicle_photo_data_url)
                 .selectinload(Vehicle.schedule),
             )
+            .where(or_(*filters))
             .order_by(Person.display_name)
             .limit(300)
         )
@@ -218,17 +255,47 @@ def _person_candidate(person: Person) -> SearchCandidate:
     )
 
 
-async def _vehicle_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _vehicle_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    plate_pattern = _plate_like_pattern(query)
+    plate_filter = Vehicle.registration_number.ilike(plate_pattern) if plate_pattern else false()
+    filters = [
+        plate_filter,
+        Vehicle.registration_number.ilike(pattern),
+        Vehicle.make.ilike(pattern),
+        Vehicle.model.ilike(pattern),
+        Vehicle.color.ilike(pattern),
+        Vehicle.description.ilike(pattern),
+        Vehicle.owner.has(
+            or_(
+                Person.display_name.ilike(pattern),
+                Person.first_name.ilike(pattern),
+                Person.last_name.ilike(pattern),
+            )
+        ),
+        Vehicle.person_assignments.any(
+            VehiclePersonAssignment.person.has(
+                or_(
+                    Person.display_name.ilike(pattern),
+                    Person.first_name.ilike(pattern),
+                    Person.last_name.ilike(pattern),
+                )
+            )
+        ),
+        Vehicle.schedule.has(or_(Schedule.name.ilike(pattern), Schedule.description.ilike(pattern))),
+    ]
     rows = (
         await session.scalars(
             select(Vehicle)
             .options(
-                selectinload(Vehicle.owner),
+                defer(Vehicle.vehicle_photo_data_url),
+                selectinload(Vehicle.owner).defer(Person.profile_photo_data_url),
                 selectinload(Vehicle.schedule),
                 selectinload(Vehicle.person_assignments).selectinload(
                     VehiclePersonAssignment.person
-                ),
+                ).defer(Person.profile_photo_data_url),
             )
+            .where(or_(*filters))
             .order_by(Vehicle.registration_number)
             .limit(300)
         )
@@ -279,10 +346,29 @@ def _vehicle_candidate(vehicle: Vehicle) -> SearchCandidate:
     )
 
 
-async def _group_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _group_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
     rows = (
         await session.scalars(
-            select(Group).options(selectinload(Group.people)).order_by(Group.name).limit(150)
+            select(Group)
+            .options(selectinload(Group.people).load_only(Person.id))
+            .where(
+                or_(
+                    Group.name.ilike(pattern),
+                    Group.subtype.ilike(pattern),
+                    Group.description.ilike(pattern),
+                    cast(Group.category, String).ilike(pattern),
+                    Group.people.any(
+                        or_(
+                            Person.display_name.ilike(pattern),
+                            Person.first_name.ilike(pattern),
+                            Person.last_name.ilike(pattern),
+                        )
+                    ),
+                )
+            )
+            .order_by(Group.name)
+            .limit(150)
         )
     ).all()
     return [_group_candidate(row) for row in rows]
@@ -314,8 +400,22 @@ def _group_candidate(group: Group) -> SearchCandidate:
     )
 
 
-async def _schedule_candidates(session: AsyncSession) -> list[SearchCandidate]:
-    rows = (await session.scalars(select(Schedule).order_by(Schedule.name).limit(150))).all()
+async def _schedule_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    rows = (
+        await session.scalars(
+            select(Schedule)
+            .where(
+                or_(
+                    Schedule.name.ilike(pattern),
+                    Schedule.description.ilike(pattern),
+                    cast(Schedule.time_blocks, String).ilike(pattern),
+                )
+            )
+            .order_by(Schedule.name)
+            .limit(150)
+        )
+    ).all()
     return [_schedule_candidate(row) for row in rows]
 
 
@@ -345,10 +445,23 @@ def _schedule_candidate(schedule: Schedule) -> SearchCandidate:
     )
 
 
-async def _visitor_pass_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _visitor_pass_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    plate_pattern = _plate_like_pattern(query)
     rows = (
         await session.scalars(
             select(VisitorPass)
+            .where(
+                or_(
+                    VisitorPass.visitor_name.ilike(pattern),
+                    VisitorPass.visitor_phone.ilike(pattern),
+                    VisitorPass.number_plate.ilike(plate_pattern) if plate_pattern else false(),
+                    VisitorPass.vehicle_make.ilike(pattern),
+                    VisitorPass.vehicle_colour.ilike(pattern),
+                    cast(VisitorPass.status, String).ilike(pattern),
+                    cast(VisitorPass.pass_type, String).ilike(pattern),
+                )
+            )
             .order_by(VisitorPass.expected_time.desc(), VisitorPass.created_at.desc())
             .limit(300)
         )
@@ -405,10 +518,24 @@ def _visitor_pass_candidate(visitor_pass: VisitorPass) -> SearchCandidate:
     )
 
 
-async def _access_event_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _access_event_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    plate_pattern = _plate_like_pattern(query)
     rows = (
         await session.scalars(
             select(AccessEvent)
+            .where(
+                or_(
+                    AccessEvent.registration_number.ilike(plate_pattern)
+                    if plate_pattern
+                    else false(),
+                    AccessEvent.registration_number.ilike(pattern),
+                    AccessEvent.source.ilike(pattern),
+                    cast(AccessEvent.decision, String).ilike(pattern),
+                    cast(AccessEvent.direction, String).ilike(pattern),
+                    cast(AccessEvent.timing_classification, String).ilike(pattern),
+                )
+            )
             .order_by(AccessEvent.occurred_at.desc())
             .limit(250)
         )
@@ -460,11 +587,26 @@ def _access_event_candidate(event: AccessEvent) -> SearchCandidate:
     )
 
 
-async def _alert_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _alert_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
+    plate_pattern = _plate_like_pattern(query)
     rows = (
         await session.scalars(
             select(Anomaly)
             .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+            .where(
+                or_(
+                    Anomaly.message.ilike(pattern),
+                    cast(Anomaly.anomaly_type, String).ilike(pattern),
+                    cast(Anomaly.severity, String).ilike(pattern),
+                    cast(Anomaly.context, String).ilike(pattern),
+                    Anomaly.event.has(
+                        AccessEvent.registration_number.ilike(plate_pattern)
+                        if plate_pattern
+                        else false()
+                    ),
+                )
+            )
             .order_by(Anomaly.created_at.desc())
             .limit(250)
         )
@@ -511,9 +653,26 @@ def _alert_candidate(alert: Anomaly) -> SearchCandidate:
     )
 
 
-async def _user_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _user_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
     rows = (
-        await session.scalars(select(User).order_by(User.first_name, User.last_name).limit(200))
+        await session.scalars(
+            select(User)
+            .options(defer(User.profile_photo_data_url), defer(User.password_hash))
+            .where(
+                or_(
+                    User.full_name.ilike(pattern),
+                    User.first_name.ilike(pattern),
+                    User.last_name.ilike(pattern),
+                    User.username.ilike(pattern),
+                    User.email.ilike(pattern),
+                    User.mobile_phone_number.ilike(pattern),
+                    cast(User.role, String).ilike(pattern),
+                )
+            )
+            .order_by(User.first_name, User.last_name)
+            .limit(200)
+        )
     ).all()
     return [_user_candidate(row) for row in rows]
 
@@ -557,10 +716,19 @@ def _user_candidate(user: User) -> SearchCandidate:
     )
 
 
-async def _automation_rule_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _automation_rule_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
     rows = (
         await session.scalars(
             select(AutomationRule)
+            .where(
+                or_(
+                    AutomationRule.name.ilike(pattern),
+                    AutomationRule.description.ilike(pattern),
+                    cast(AutomationRule.trigger_keys, String).ilike(pattern),
+                    AutomationRule.last_run_status.ilike(pattern),
+                )
+            )
             .order_by(AutomationRule.created_at.desc(), AutomationRule.name)
             .limit(200)
         )
@@ -599,10 +767,17 @@ def _automation_rule_candidate(rule: AutomationRule) -> SearchCandidate:
     )
 
 
-async def _notification_rule_candidates(session: AsyncSession) -> list[SearchCandidate]:
+async def _notification_rule_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+    pattern = _like_pattern(query)
     rows = (
         await session.scalars(
             select(NotificationRule)
+            .where(
+                or_(
+                    NotificationRule.name.ilike(pattern),
+                    NotificationRule.trigger_event.ilike(pattern),
+                )
+            )
             .order_by(NotificationRule.created_at.desc(), NotificationRule.name)
             .limit(200)
         )
@@ -720,6 +895,15 @@ def _text_type_bias(result_type: SearchResultType) -> int:
         "notification_rule": 9,
     }
     return order.get(result_type, 20)
+
+
+def _like_pattern(query: str) -> str:
+    return f"%{query.strip()}%"
+
+
+def _plate_like_pattern(query: str) -> str | None:
+    normalized = _normalize_plate(query)
+    return f"%{normalized}%" if normalized else None
 
 
 def _assigned_vehicles_for_person(person: Person) -> list[Vehicle]:

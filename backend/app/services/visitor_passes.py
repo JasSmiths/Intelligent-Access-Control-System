@@ -499,26 +499,21 @@ class VisitorPassService:
     ) -> VisitorPass | None:
         checked_at = _ensure_aware(occurred_at)
         await self.refresh_statuses(session=session, now=checked_at, actor=actor, publish=False)
+        normalized_registration = normalize_registration_number(registration_number)
         rows = (
             await session.scalars(
                 select(VisitorPass)
-                .where(VisitorPass.status == VisitorPassStatus.ACTIVE)
+                .where(
+                    VisitorPass.status == VisitorPassStatus.ACTIVE,
+                    or_(
+                        VisitorPass.pass_type != VisitorPassType.DURATION,
+                        VisitorPass.number_plate == normalized_registration,
+                    ),
+                )
                 .order_by(VisitorPass.expected_time, VisitorPass.created_at)
-                .with_for_update()
+                .with_for_update(skip_locked=True)
             )
         ).all()
-        normalized_registration = normalize_registration_number(registration_number)
-        rows = [
-            visitor_pass
-            for visitor_pass in rows
-            if (
-                visitor_pass.pass_type != VisitorPassType.DURATION
-                or (
-                    bool(visitor_pass.number_plate)
-                    and visitor_pass.number_plate == normalized_registration
-                )
-            )
-        ]
         visitor_pass = self.select_best_active_match(rows, checked_at)
         if not visitor_pass:
             return None

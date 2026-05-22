@@ -119,7 +119,7 @@ export type LogSourceKey =
   | "updates"
   | "live";
 
-type LogRecordKind = "trace" | "audit" | "live";
+export type LogRecordKind = "trace" | "audit" | "live";
 
 export type LogRecord = {
   id: string;
@@ -155,6 +155,156 @@ export type LogsFilters = {
   status: string;
   actor: string;
   subject: string;
+  slowOnly: boolean;
+};
+
+export type SimplifiedLogsFilters = {
+  source: LogSourceKey;
+  query: string;
+  timeRange: string;
+  level: string;
+  status: string;
+  actor: string;
+  subject: string;
+  slowOnly: boolean;
+  from: string | null;
+};
+
+export type NarrativeLogItem = {
+  id: string;
+  recordId: string;
+  kind: LogRecordKind;
+  source: LogSourceKey;
+  timestamp: string;
+  title: string;
+  what: string;
+  reason: string;
+  why: string;
+  supportingDetail: string;
+  details: string;
+  summary: string;
+  subject: string;
+  actor: string;
+  status: string;
+  level: string;
+  outcome: string;
+  tone: BadgeTone;
+  durationMs: number | null;
+  traceId: string | null;
+  requestId: string | null;
+  sourceLabel: string;
+  sourceDetail: string;
+  searchText: string;
+  raw: LogRecord;
+};
+
+export type LprWaterfallPhase =
+  | "capture"
+  | "webhook"
+  | "debounce"
+  | "identity"
+  | "schedule"
+  | "direction"
+  | "presence"
+  | "persistence"
+  | "snapshot"
+  | "gate"
+  | "garage"
+  | "notification"
+  | "integration"
+  | "complete"
+  | "diagnostic";
+
+export type LprWaterfallStepStatus = "ok" | "warning" | "error" | "pending" | "skipped";
+
+export type SlowStepWarning = {
+  stepId: string;
+  severity: "warning" | "critical";
+  title: string;
+  reason: string;
+  durationMs: number;
+  thresholdMs: number;
+};
+
+export type LprTimingObservation = {
+  id?: string | null;
+  source?: string | null;
+  source_detail?: string | null;
+  registration_number?: string | null;
+  raw_value?: string | null;
+  candidate_kind?: string | null;
+  received_at?: string | null;
+  captured_at?: string | null;
+  captured_to_received_ms?: number | null;
+  ms_from_access_event_time?: number | null;
+  event_id?: string | null;
+  camera_id?: string | null;
+  camera_name?: string | null;
+  confidence?: number | null;
+  confidence_scale?: string | null;
+  protect_action?: string | null;
+  protect_model?: string | null;
+  payload_path?: string | null;
+  [key: string]: unknown;
+};
+
+export type LprWaterfallResponse = {
+  trace_id?: string | null;
+  registration_number?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  reason?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+  timezone?: string | null;
+  observations?: unknown[];
+  slowest_observations?: unknown[];
+  latest_observation?: unknown;
+  steps?: unknown[];
+  waterfall?: unknown;
+  count?: number;
+  filters?: Record<string, unknown>;
+  note?: string | null;
+  [key: string]: unknown;
+};
+
+export type LprWaterfallStep = {
+  id: string;
+  phase: LprWaterfallPhase;
+  label: string;
+  source: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  offsetMs: number;
+  durationMs: number | null;
+  status: LprWaterfallStepStatus;
+  tone: BadgeTone;
+  reason: string;
+  detail: string;
+  warning?: SlowStepWarning;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  raw?: unknown;
+};
+
+export type LprWaterfallModel = {
+  id: string;
+  traceId: string | null;
+  registrationNumber: string | null;
+  title: string;
+  reason: string;
+  source: string;
+  decision: string | null;
+  direction: string | null;
+  status: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  totalDurationMs: number;
+  steps: LprWaterfallStep[];
+  warnings: SlowStepWarning[];
+  observations: LprTimingObservation[];
+  summary: string;
 };
 
 export type SavedLogsFilter = {

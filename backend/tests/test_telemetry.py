@@ -5,8 +5,15 @@ import uuid
 from app.api.v1 import telemetry as telemetry_api
 from app.ai.providers import ToolCall
 from app.ai.tools import set_chat_tool_context
-from app.models import AuditLog, TelemetrySpan, TelemetryTrace
-from app.models.enums import UserRole
+from app.models import AccessEvent, AuditLog, GateCommandRecord, MovementSagaRecord, TelemetrySpan, TelemetryTrace
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+    GateCommandState,
+    MovementSagaState,
+    TimingClassification,
+    UserRole,
+)
 from app.services.chat import ChatService
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_ALFRED,
@@ -136,6 +143,27 @@ class CapturingAuditSession:
         return FakeScalarResult([])
 
 
+class WaterfallSession:
+    def __init__(self, *, trace, access_event, spans, movement_saga) -> None:
+        self.trace = trace
+        self.access_event = access_event
+        self.spans = spans
+        self.movement_saga = movement_saga
+
+    async def get(self, model, key):
+        if model is TelemetryTrace and str(key) == self.trace.trace_id:
+            return self.trace
+        if model is AccessEvent and str(key) == str(self.access_event.id):
+            return self.access_event
+        return None
+
+    async def scalar(self, _statement):
+        return self.movement_saga
+
+    async def scalars(self, _statement):
+        return FakeScalarResult(self.spans)
+
+
 def make_admin_user():
     now = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
     return type(
@@ -171,6 +199,202 @@ async def test_audit_log_endpoint_applies_level_and_outcome_filters() -> None:
     assert response == {"items": [], "next_cursor": None}
     assert "audit_logs.level = 'warning'" in compiled
     assert "audit_logs.outcome = 'failed'" in compiled
+
+
+async def test_lpr_waterfall_can_be_loaded_by_access_event_id(monkeypatch) -> None:
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    webhook_received_at = captured_at + timedelta(milliseconds=275)
+    finalized_at = captured_at + timedelta(seconds=2)
+    created_at = finalized_at + timedelta(milliseconds=250)
+    trace_id_value = "a" * 32
+    event_id = uuid.uuid4()
+    movement_saga_id = uuid.uuid4()
+    command_id = uuid.uuid4()
+
+    trace = TelemetryTrace(
+        trace_id=trace_id_value,
+        name="Plate Detection - AGS7X",
+        category=TELEMETRY_CATEGORY_LPR,
+        status="ok",
+        level="info",
+        started_at=captured_at,
+        ended_at=created_at,
+        duration_ms=2250,
+        source="test",
+        registration_number="AGS7X",
+        access_event_id=event_id,
+        summary="Granted entry for plate AGS7X",
+        context={
+            "first_seen": captured_at.isoformat(),
+            "finalize_started_at": finalized_at.isoformat(),
+            "webhook_received_at": webhook_received_at.isoformat(),
+            "captured_to_webhook_ms": 275.0,
+            "webhook_trace": {
+                "source": "test",
+                "registration_number": "AGS7X",
+                "captured_at": captured_at.isoformat(),
+                "received_at": webhook_received_at.isoformat(),
+                "captured_to_webhook_ms": 275.0,
+            },
+        },
+    )
+    spans = [
+        TelemetrySpan(
+            span_id="1" * 16,
+            trace_id=trace_id_value,
+            name="Camera Capture to Webhook Receipt",
+            category=TELEMETRY_CATEGORY_LPR,
+            step_order=1,
+            started_at=captured_at,
+            ended_at=webhook_received_at,
+            duration_ms=275,
+            status="ok",
+        ),
+        TelemetrySpan(
+            span_id="2" * 16,
+            trace_id=trace_id_value,
+            name="Webhook Receipt to Debounce Finalization",
+            category=TELEMETRY_CATEGORY_LPR,
+            step_order=2,
+            started_at=webhook_received_at,
+            ended_at=finalized_at,
+            duration_ms=1725,
+            status="ok",
+        ),
+    ]
+    access_event = AccessEvent(
+        id=event_id,
+        registration_number="AGS7X",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        confidence=0.91,
+        source="test",
+        occurred_at=captured_at,
+        timing_classification=TimingClassification.NORMAL,
+        raw_payload={
+            "telemetry": {"trace_id": trace_id_value},
+            "webhook_trace": {
+                "source": "test",
+                "registration_number": "AGS7X",
+                "captured_at": captured_at.isoformat(),
+                "received_at": webhook_received_at.isoformat(),
+                "captured_to_webhook_ms": 275.0,
+            },
+            "debounce": {
+                "first_seen": captured_at.isoformat(),
+                "updated_at": captured_at.isoformat(),
+                "finalize_started_at": finalized_at.isoformat(),
+                "candidates": [],
+            },
+        },
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    command = GateCommandRecord(
+        id=command_id,
+        idempotency_key="gate-command:open:default:event:test",
+        movement_saga_id=movement_saga_id,
+        access_event_id=event_id,
+        state=GateCommandState.ACCEPTED,
+        action="open",
+        source="lpr_access",
+        gate_key="default",
+        controller="access_device",
+        reason="automatic_lpr_grant",
+        registration_number="AGS7X",
+        bypass_schedule=False,
+        accepted=True,
+        mechanically_confirmed=True,
+        requires_reconciliation=False,
+        command_metadata={"provider": "home_assistant"},
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    movement_saga = MovementSagaRecord(
+        id=movement_saga_id,
+        idempotency_key="movement:test:AGS7X",
+        source="test",
+        state=MovementSagaState.COMPLETED,
+        access_event_id=event_id,
+        registration_number="AGS7X",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        occurred_at=captured_at,
+        gate_command_required=True,
+        presence_committed=True,
+        reconciliation_required=False,
+        intent_payload={"source": "test"},
+        decision_payload={"direction": "entry"},
+        state_history=[],
+        gate_commands=[command],
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    session = WaterfallSession(
+        trace=trace,
+        access_event=access_event,
+        spans=spans,
+        movement_saga=movement_saga,
+    )
+
+    async def flush_noop():
+        return None
+
+    class FakeTimingRecorder:
+        async def recent(self, *, limit):
+            assert limit == 200
+            return [
+                {
+                    "source": "webhook",
+                    "source_detail": "ubiquiti_lpr_webhook",
+                    "registration_number": "AGS7X",
+                    "received_at": webhook_received_at.isoformat(),
+                },
+                {
+                    "source": "webhook",
+                    "source_detail": "ubiquiti_lpr_webhook",
+                    "registration_number": "OTHER",
+                    "received_at": webhook_received_at.isoformat(),
+                },
+            ]
+
+    monkeypatch.setattr(telemetry_api.telemetry, "flush", flush_noop)
+    monkeypatch.setattr(telemetry_api, "get_lpr_timing_recorder", lambda: FakeTimingRecorder())
+
+    response = await telemetry_api.get_lpr_waterfall(
+        str(event_id),
+        _=make_admin_user(),
+        session=session,
+    )
+
+    assert response["trace"]["trace_id"] == trace_id_value
+    assert response["access_event"]["id"] == str(event_id)
+    assert response["movement_saga"]["id"] == str(movement_saga_id)
+    assert response["gate_commands"][0]["id"] == str(command_id)
+    assert response["webhook_trace"]["captured_to_webhook_ms"] == 275.0
+    assert response["durable_latency"]["captured_to_webhook_ms"] == 275.0
+    assert response["durable_latency"]["webhook_to_debounce_finalize_ms"] == 1725.0
+    assert response["durable_latency"]["captured_to_access_event_created_ms"] == 2250.0
+    assert [span["name"] for span in response["spans"]] == [
+        "Camera Capture to Webhook Receipt",
+        "Webhook Receipt to Debounce Finalization",
+    ]
+    assert response["recent_lpr_timing_observations"] == [
+        {
+            "source": "webhook",
+            "source_detail": "ubiquiti_lpr_webhook",
+            "registration_number": "AGS7X",
+            "received_at": webhook_received_at.isoformat(),
+        }
+    ]
+
+    query_response = await telemetry_api.get_lpr_waterfall_by_access_event(
+        access_event_id=event_id,
+        _=make_admin_user(),
+        session=session,
+    )
+    assert query_response["trace"]["trace_id"] == trace_id_value
+    assert query_response["access_event"]["id"] == str(event_id)
 
 
 def test_lpr_trace_captures_ordered_spans(monkeypatch) -> None:

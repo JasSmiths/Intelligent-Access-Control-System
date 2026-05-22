@@ -824,16 +824,22 @@ class AutomationService:
             "rule": rule_payload,
         }
         await event_bus.publish(f"automation.run.{status}", event_payload)
+        trace_context: dict[str, Any] = {
+            "run_id": str(run_payload["id"]),
+            "status": status,
+            "condition_count": len(condition_results),
+            "action_count": len(action_results),
+            "condition_results": condition_results,
+            "action_results": action_results,
+        }
+        skip_reason = automation_skip_reason(status, condition_results, action_results, error)
+        if skip_reason:
+            trace_context["skip_reason"] = skip_reason
         trace.finish(
             status="error" if status == "failed" else "ok",
             level="error" if status == "failed" else "info",
             summary=f"{rule_name} {status} for {trigger_key}",
-            context={
-                "run_id": str(run_payload["id"]),
-                "status": status,
-                "condition_count": len(condition_results),
-                "action_count": len(action_results),
-            },
+            context=trace_context,
             error=error,
         )
         return {"executed": status == "success", "status": status, "run": run_payload}
@@ -1561,6 +1567,37 @@ def serialize_run(run: AutomationRun) -> dict[str, Any]:
         "actor": run.actor,
         "source": run.source,
     }
+
+
+def automation_skip_reason(
+    status: str,
+    condition_results: list[dict[str, Any]],
+    action_results: list[dict[str, Any]],
+    error: str | None = None,
+) -> str:
+    if error:
+        return error
+    if status != "skipped":
+        return ""
+    for result in condition_results:
+        if result.get("passed") is False:
+            reason = automation_result_reason(result)
+            if reason:
+                return reason
+    for result in action_results:
+        if str(result.get("status") or "").lower() in {"skipped", "failed"}:
+            reason = automation_result_reason(result)
+            if reason:
+                return reason
+    return "Automation run was skipped."
+
+
+def automation_result_reason(result: dict[str, Any]) -> str:
+    for key in ("disabled_reason", "reason", "error", "detail", "message", "description"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def variable_groups() -> list[dict[str, Any]]:

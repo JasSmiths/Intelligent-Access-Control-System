@@ -70,7 +70,7 @@ class Person(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     pronouns: Mapped[str | None] = mapped_column(String(24))
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
-    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
+    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), index=True)
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedules.id", ondelete="SET NULL"), index=True
     )
@@ -148,7 +148,7 @@ class Vehicle(Base, TimestampMixin):
     __tablename__ = "vehicles"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
+    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedules.id", ondelete="SET NULL"), index=True
     )
@@ -269,7 +269,8 @@ class ExternalDependency(Base, TimestampMixin):
     risk_status: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False, index=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     latest_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("dependency_update_analyses.id", ondelete="SET NULL")
+        ForeignKey("dependency_update_analyses.id", ondelete="SET NULL"),
+        index=True,
     )
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
 
@@ -413,41 +414,60 @@ class AuditLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    category: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
-    action: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
-    actor: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    action: Mapped[str] = mapped_column(String(120), nullable=False)
+    actor: Mapped[str] = mapped_column(String(160), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
-    target_entity: Mapped[str | None] = mapped_column(String(120), index=True)
-    target_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    target_entity: Mapped[str | None] = mapped_column(String(120))
+    target_id: Mapped[str | None] = mapped_column(String(160))
     target_label: Mapped[str | None] = mapped_column(String(240))
     diff: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
-    outcome: Mapped[str] = mapped_column(String(80), default="success", nullable=False, index=True)
-    level: Mapped[str] = mapped_column(String(40), default="info", nullable=False, index=True)
+    outcome: Mapped[str] = mapped_column(String(80), default="success", nullable=False)
+    level: Mapped[str] = mapped_column(String(40), default="info", nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
-    request_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    request_id: Mapped[str | None] = mapped_column(String(80))
+
+
+Index("ix_audit_logs_timestamp_id", AuditLog.timestamp.desc(), AuditLog.id.desc())
+Index("ix_audit_logs_category_timestamp", AuditLog.category, AuditLog.timestamp.desc(), AuditLog.id.desc())
+Index(
+    "ix_audit_logs_target_entity_timestamp",
+    AuditLog.target_entity,
+    AuditLog.timestamp.desc(),
+    AuditLog.id.desc(),
+)
+Index(
+    "ix_audit_logs_target_entity_target_id_timestamp",
+    AuditLog.target_entity,
+    AuditLog.target_id,
+    AuditLog.timestamp,
+    AuditLog.id,
+)
+Index("ix_audit_logs_level_timestamp", AuditLog.level, AuditLog.timestamp.desc(), AuditLog.id.desc())
+Index("ix_audit_logs_outcome_timestamp", AuditLog.outcome, AuditLog.timestamp.desc(), AuditLog.id.desc())
 
 
 class TelemetryTrace(Base):
     __tablename__ = "telemetry_traces"
 
     trace_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
-    category: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(40), default="ok", nullable=False, index=True)
-    level: Mapped[str] = mapped_column(String(40), default="info", nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    duration_ms: Mapped[float | None] = mapped_column(Float, index=True)
-    actor: Mapped[str | None] = mapped_column(String(160), index=True)
-    source: Mapped[str | None] = mapped_column(String(120), index=True)
-    registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ok", nullable=False)
+    level: Mapped[str] = mapped_column(String(40), default="info", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[float | None] = mapped_column(Float)
+    actor: Mapped[str | None] = mapped_column(String(160))
+    source: Mapped[str | None] = mapped_column(String(120))
+    registration_number: Mapped[str | None] = mapped_column(String(32))
     access_event_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("access_events.id", ondelete="SET NULL"), index=True
+        ForeignKey("access_events.id", ondelete="SET NULL")
     )
     summary: Mapped[str | None] = mapped_column(Text)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -459,19 +479,52 @@ class TelemetrySpan(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     span_id: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
-    trace_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    parent_span_id: Mapped[str | None] = mapped_column(String(16), index=True)
-    name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
-    category: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
-    step_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    duration_ms: Mapped[float | None] = mapped_column(Float, index=True)
-    status: Mapped[str] = mapped_column(String(40), default="ok", nullable=False, index=True)
+    trace_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    parent_span_id: Mapped[str | None] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    category: Mapped[str] = mapped_column(String(80), nullable=False)
+    step_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(40), default="ok", nullable=False)
     attributes: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     input_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     output_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+Index("ix_telemetry_traces_started_trace", TelemetryTrace.started_at.desc(), TelemetryTrace.trace_id.desc())
+Index(
+    "ix_telemetry_traces_category_started",
+    TelemetryTrace.category,
+    TelemetryTrace.started_at.desc(),
+    TelemetryTrace.trace_id.desc(),
+)
+Index(
+    "ix_telemetry_traces_status_started",
+    TelemetryTrace.status,
+    TelemetryTrace.started_at.desc(),
+    TelemetryTrace.trace_id.desc(),
+)
+Index(
+    "ix_telemetry_traces_level_started",
+    TelemetryTrace.level,
+    TelemetryTrace.started_at.desc(),
+    TelemetryTrace.trace_id.desc(),
+)
+Index(
+    "ix_telemetry_traces_access_event_started",
+    TelemetryTrace.access_event_id,
+    TelemetryTrace.started_at.desc(),
+    postgresql_where=TelemetryTrace.access_event_id.is_not(None),
+)
+Index(
+    "ix_telemetry_spans_trace_step_started",
+    TelemetrySpan.trace_id,
+    TelemetrySpan.step_order,
+    TelemetrySpan.started_at,
+)
 
 
 class GateMalfunctionState(Base, TimestampMixin):
@@ -775,7 +828,7 @@ class Presence(Base, TimestampMixin):
     state: Mapped[PresenceState] = mapped_column(
         Enum(PresenceState), default=PresenceState.UNKNOWN, nullable=False
     )
-    last_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id"))
+    last_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id"), index=True)
     last_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     person: Mapped[Person] = relationship(back_populates="presence")
@@ -785,8 +838,8 @@ class AccessEvent(Base, TimestampMixin):
     __tablename__ = "access_events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
     registration_number: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     direction: Mapped[AccessDirection] = mapped_column(Enum(AccessDirection), nullable=False)
     decision: Mapped[AccessDecision] = mapped_column(Enum(AccessDecision), nullable=False)
@@ -822,6 +875,34 @@ Index(
     "ix_access_events_snapshot_created_at",
     AccessEvent.created_at,
     postgresql_where=AccessEvent.snapshot_path.is_not(None),
+)
+Index(
+    "ix_access_events_snapshot_registration_occurred",
+    AccessEvent.registration_number,
+    AccessEvent.occurred_at.desc(),
+    postgresql_where=AccessEvent.snapshot_path.is_not(None) & AccessEvent.snapshot_bytes.is_not(None),
+)
+Index(
+    "ix_access_events_granted_person_direction_time",
+    AccessEvent.person_id,
+    AccessEvent.direction,
+    AccessEvent.occurred_at.desc(),
+    postgresql_where=(
+        (AccessEvent.decision == AccessDecision.GRANTED)
+        & AccessEvent.person_id.is_not(None)
+        & AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT])
+    ),
+)
+Index(
+    "ix_access_events_granted_vehicle_direction_time",
+    AccessEvent.vehicle_id,
+    AccessEvent.direction,
+    AccessEvent.occurred_at.desc(),
+    postgresql_where=(
+        (AccessEvent.decision == AccessDecision.GRANTED)
+        & AccessEvent.vehicle_id.is_not(None)
+        & AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT])
+    ),
 )
 
 
@@ -1135,12 +1216,12 @@ class Anomaly(Base, TimestampMixin):
     __tablename__ = "anomalies"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="CASCADE"))
-    anomaly_type: Mapped[AnomalyType] = mapped_column(Enum(AnomalyType), nullable=False)
-    severity: Mapped[AnomalySeverity] = mapped_column(Enum(AnomalySeverity), nullable=False)
+    event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="CASCADE"), index=True)
+    anomaly_type: Mapped[AnomalyType] = mapped_column(Enum(AnomalyType), nullable=False, index=True)
+    severity: Mapped[AnomalySeverity] = mapped_column(Enum(AnomalySeverity), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     resolution_note: Mapped[str | None] = mapped_column(Text)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
@@ -1172,7 +1253,7 @@ class ChatMessage(Base, TimestampMixin):
     __tablename__ = "chat_messages"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"))
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tool_name: Mapped[str | None] = mapped_column(String(120))
@@ -1192,7 +1273,10 @@ class AlfredMemory(Base, TimestampMixin):
     content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     source_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
-    source_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"))
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        index=True,
+    )
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

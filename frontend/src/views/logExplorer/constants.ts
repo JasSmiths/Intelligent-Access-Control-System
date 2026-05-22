@@ -9,12 +9,11 @@ GitBranch,
 PlugZap,
 RefreshCcw,
 ShieldCheck,
-Terminal,
 Workflow
 } from "lucide-react";
 import type React from "react";
 
-import { LogSourceKey,LogsFilters } from "./types";
+import { LogSourceKey,LogsFilters,LprWaterfallPhase } from "./types";
 
 export const defaultLogsFilters: LogsFilters = {
   query: "",
@@ -22,7 +21,8 @@ export const defaultLogsFilters: LogsFilters = {
   level: "all",
   status: "all",
   actor: "",
-  subject: ""
+  subject: "",
+  slowOnly: false
 };
 
 export const savedFiltersStorageKey = "iacs.logs.savedFilters";
@@ -44,8 +44,7 @@ export const sourceTabs: Array<{
   { key: "crud", label: "CRUD", shortLabel: "CRUD", icon: Database, description: "Users, directory, schedules, settings." },
   { key: "api", label: "API/Webhooks", shortLabel: "API", icon: GitBranch, description: "Inbound API and webhook traces." },
   { key: "integrations", label: "Integrations", shortLabel: "Integr.", icon: PlugZap, description: "HA, DVLA, notification providers." },
-  { key: "updates", label: "Updates", shortLabel: "Updates", icon: RefreshCcw, description: "Dependency updates and rollbacks." },
-  { key: "live", label: "Live", shortLabel: "Live", icon: Terminal, description: "Current realtime websocket stream." }
+  { key: "updates", label: "Updates", shortLabel: "Updates", icon: RefreshCcw, description: "Dependency updates and rollbacks." }
 ];
 
 export const traceCategories: Partial<Record<LogSourceKey, string>> = {
@@ -100,6 +99,7 @@ export const levelOptions = [
 export const statusOptions = [
   { value: "all", label: "All statuses" },
   { value: "ok", label: "OK / Success" },
+  { value: "skipped", label: "Skipped" },
   { value: "warning", label: "Warning" },
   { value: "error", label: "Error / Failed" },
   { value: "pending_confirmation", label: "Pending confirmation" },
@@ -107,3 +107,30 @@ export const statusOptions = [
   { value: "resolved", label: "Resolved" },
   { value: "fubar", label: "FUBAR" }
 ];
+
+export const lprWaterfallPhaseLabels: Record<LprWaterfallPhase, string> = {
+  capture: "Camera Capture",
+  webhook: "Webhook",
+  debounce: "Debounce",
+  identity: "Identity",
+  schedule: "Schedule",
+  direction: "Direction",
+  presence: "Presence",
+  persistence: "Save Decision",
+  snapshot: "Snapshot",
+  gate: "Gate",
+  garage: "Garage",
+  notification: "Notification",
+  integration: "Integration",
+  complete: "Complete",
+  diagnostic: "Diagnostic"
+};
+
+export const lprWaterfallSlowThresholdsMs = {
+  default: 1500,
+  observation: 750,
+  debounce: 500,
+  integration: 2000,
+  gate: 2000,
+  critical: 5000
+} as const;

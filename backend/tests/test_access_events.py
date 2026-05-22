@@ -19,6 +19,7 @@ from app.services.access_events import (
     FinalizedPlateEvent,
     GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
+    INGEST_METADATA_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     PROCESSING_ATTEMPT_PAYLOAD_KEY,
@@ -349,6 +350,85 @@ def plate_read(registration_number: str, captured_at: datetime) -> PlateRead:
         captured_at=captured_at,
         raw_payload={},
     )
+
+
+def test_plate_read_webhook_trace_records_capture_to_receipt_latency() -> None:
+    service = AccessEventService()
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    received_at = captured_at + timedelta(milliseconds=875)
+    read = plate_read("AGS7X", captured_at)
+
+    annotated = service._read_with_webhook_trace(read, received_at)
+
+    webhook_trace = annotated.raw_payload["webhook_trace"]
+    assert webhook_trace["source"] == "test"
+    assert webhook_trace["registration_number"] == "AGS7X"
+    assert webhook_trace["captured_at"] == "2026-05-10T08:00:00+00:00"
+    assert webhook_trace["received_at"] == "2026-05-10T08:00:00.875000+00:00"
+    assert webhook_trace["captured_to_webhook_ms"] == 875.0
+
+
+def test_plate_read_webhook_trace_prefers_route_ingest_timestamp() -> None:
+    service = AccessEventService()
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    route_received_at = captured_at + timedelta(milliseconds=125)
+    service_received_at = captured_at + timedelta(milliseconds=875)
+    read = PlateRead(
+        registration_number="AGS7X",
+        confidence=0.9,
+        source="test",
+        captured_at=captured_at,
+        raw_payload={
+            INGEST_METADATA_PAYLOAD_KEY: {
+                "webhook_received_at": route_received_at.isoformat(),
+                "request_id": "req-test",
+                "webhook_trace_id": "trace-test",
+                "captured_to_webhook_ms": 125.0,
+            }
+        },
+    )
+
+    annotated = service._read_with_webhook_trace(read, service_received_at)
+
+    webhook_trace = annotated.raw_payload["webhook_trace"]
+    assert webhook_trace["received_at"] == "2026-05-10T08:00:00.125000+00:00"
+    assert webhook_trace["webhook_received_at"] == "2026-05-10T08:00:00.125000+00:00"
+    assert webhook_trace["captured_to_webhook_ms"] == 125.0
+    assert webhook_trace["request_id"] == "req-test"
+    assert webhook_trace["webhook_trace_id"] == "trace-test"
+
+
+def test_access_event_raw_payload_includes_webhook_trace_and_debounce_timestamps() -> None:
+    service = AccessEventService()
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    received_at = captured_at + timedelta(milliseconds=250)
+    finalized_at = captured_at + timedelta(seconds=2)
+    read = service._read_with_webhook_trace(plate_read("AGS7X", captured_at), received_at)
+    window = SimpleNamespace(
+        reads=[read],
+        first_seen=captured_at,
+        updated_at=captured_at,
+    )
+    webhook_trace = service._webhook_trace_for_window(window)
+
+    payload = service._access_event_raw_payload(
+        window=window,
+        read=read,
+        schedule_evaluation=None,
+        direction_resolution={"source": "gate_state"},
+        vehicle_visual_detection=None,
+        visitor_pass=None,
+        visitor_pass_mode=None,
+        trace_id="0" * 32,
+        finalize_started_at=finalized_at,
+        webhook_trace=webhook_trace,
+    )
+
+    assert payload["webhook_trace"]["captured_to_webhook_ms"] == 250.0
+    assert payload["debounce"]["first_seen"] == "2026-05-10T08:00:00+00:00"
+    assert payload["debounce"]["updated_at"] == "2026-05-10T08:00:00+00:00"
+    assert payload["debounce"]["finalize_started_at"] == "2026-05-10T08:00:02+00:00"
+    assert payload["debounce"]["candidates"][0]["webhook_trace"]["received_at"] == "2026-05-10T08:00:00.250000+00:00"
 
 
 def plate_read_with_gate_state_at(registration_number: str, captured_at: datetime, state: str) -> PlateRead:
@@ -1705,7 +1785,7 @@ async def test_person_presence_input_boolean_commands_apply_to_all_entities(monk
             return SimpleNamespace(entity_id=entity_id, state="on")
 
     monkeypatch.setattr(presence_input_booleans_module, "is_maintenance_mode_active", fake_maintenance_mode)
-    monkeypatch.setattr(presence_input_booleans_module, "HomeAssistantClient", lambda: FakeClient())
+    monkeypatch.setattr(presence_input_booleans_module, "get_home_assistant_client", lambda: FakeClient())
     monkeypatch.setattr(presence_input_booleans_module, "_record_input_boolean_result", fake_record)
 
     await presence_input_booleans_module.apply_person_presence_input_boolean_actions(

@@ -2218,13 +2218,15 @@ function App() {
               </div>
             ) : null}
           </div>
-          <div className="sidebar-status" aria-live="polite" title={`${realtimeConnection.title}: ${realtimeConnection.detail}`}>
-            <span className={`dot ${realtimeConnectionStatus}`} aria-hidden="true" />
-            <span className="sidebar-status-copy">
-              <strong>{realtimeConnection.title}</strong>
-              <small>{realtimeConnection.detail}</small>
-            </span>
-          </div>
+          {view === "logs" ? null : (
+            <div className="sidebar-status" aria-live="polite" title={`${realtimeConnection.title}: ${realtimeConnection.detail}`}>
+              <span className={`dot ${realtimeConnectionStatus}`} aria-hidden="true" />
+              <span className="sidebar-status-copy">
+                <strong>{realtimeConnection.title}</strong>
+                <small>{realtimeConnection.detail}</small>
+              </span>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -2305,7 +2307,6 @@ function App() {
             maintenanceStatus={maintenanceStatus}
             realtime={realtime}
             dataRefreshToken={dataRefreshToken}
-            onClearRealtime={() => setRealtime([])}
             refresh={refresh}
             currentUser={currentUser}
             navigateToView={navigateToView}
@@ -2348,7 +2349,6 @@ function View(props: {
   maintenanceStatus: MaintenanceStatus | null;
   realtime: RealtimeMessage[];
   dataRefreshToken: number;
-  onClearRealtime: () => void;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
@@ -2391,7 +2391,7 @@ function View(props: {
       content = <IntegrationsView people={props.people} realtime={props.realtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
-      content = <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} refreshToken={props.dataRefreshToken} />;
+      content = <LogsView refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_general":
       content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;

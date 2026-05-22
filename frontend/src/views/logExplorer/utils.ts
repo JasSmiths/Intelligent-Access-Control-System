@@ -34,6 +34,7 @@ TelemetrySummary,
 TelemetryTrace,
 TelemetryTraceDetail
 } from "./types";
+import { deriveNarrativeLogItem as deriveNarrativeLogItemForSearch } from "./narrative";
 
 export function formatLogMegabytes(size: number) {
   const value = Math.max(0, size);
@@ -143,6 +144,9 @@ function auditOutcomeParam(status: string) {
 export function traceRecord(trace: TelemetryTrace): LogRecord {
   const source = traceCategorySources[trace.category] ?? "all";
   const display = traceDisplay(trace);
+  const effectiveStatus = trace.category === "automation_engine"
+    ? stringPayload(trace.context.status) || trace.status
+    : trace.status;
   const subject = trace.registration_number || stringPayload(trace.context.target_label) || stringPayload(trace.context.vehicle) || trace.source || "System";
   const subjectDetail =
     stringPayload(trace.context.display_vehicle) ||
@@ -164,7 +168,7 @@ export function traceRecord(trace: TelemetryTrace): LogRecord {
     actionDetail: trace.name,
     subject,
     subjectDetail,
-    status: trace.status,
+    status: effectiveStatus,
     level: trace.level,
     outcome: trace.status,
     durationMs: trace.duration_ms,
@@ -281,13 +285,20 @@ export function liveRecord(message: RealtimeMessage, index: number): LogRecord {
 }
 
 export function applyLocalFilters(records: LogRecord[], filters: LogsFilters, source: LogSourceKey) {
-  const query = filters.query.trim().toLowerCase();
+  const rawQuery = filters.query.trim().toLowerCase();
+  const wantsSlow = filters.slowOnly || /\b(slow|latency|high latency|high-latency|took too long)\b/.test(rawQuery);
+  const query = rawQuery
+    .replace(/\b(high latency|high-latency|slow|latency|took too long)\b/g, "")
+    .replace(wantsSlow ? /\bevents?\b/g : /$^/, "")
+    .replace(/\s+/g, " ")
+    .trim();
   const actor = filters.actor.trim().toLowerCase();
   const subject = filters.subject.trim().toLowerCase();
   return records.filter((record) => {
     if (source !== "all" && source !== record.source && source !== "live") return false;
     if (source === "live" && record.kind !== "live") return false;
-    if (query && !record.searchText.includes(query)) return false;
+    if (wantsSlow && !recordLooksSlow(record)) return false;
+    if (query && !searchableRecordText(record).includes(query)) return false;
     if (actor && !record.actor.toLowerCase().includes(actor) && !record.sourceLabel.toLowerCase().includes(actor)) return false;
     if (
       subject &&
@@ -301,6 +312,31 @@ export function applyLocalFilters(records: LogRecord[], filters: LogsFilters, so
     if (filters.status !== "all" && !recordMatchesStatus(record, filters.status)) return false;
     return true;
   });
+}
+
+function searchableRecordText(record: LogRecord) {
+  return `${record.searchText} ${deriveNarrativeLogItemForSearch(record).searchText}`;
+}
+
+function recordLooksSlow(record: LogRecord) {
+  if (record.level === "warning" || record.level === "error" || record.status === "warning") return true;
+  const context = record.rawTrace?.context || {};
+  const webhookLatency = firstNumberPayload(
+    context.captured_to_webhook_ms,
+    context.webhook_to_finalize_ms,
+    isRecord(context.webhook_trace) ? context.webhook_trace.captured_to_webhook_ms : null
+  );
+  if (webhookLatency !== null && webhookLatency >= 750) return true;
+  const threshold = record.source === "lpr" ? 1500 : 3000;
+  return Boolean(record.durationMs !== null && record.durationMs >= threshold);
+}
+
+function firstNumberPayload(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = numberPayload(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
 }
 
 function recordMatchesStatus(record: LogRecord, status: string) {
@@ -434,6 +470,8 @@ function traceDisplay(trace: TelemetryTrace): { title: string; tone: BadgeTone }
     return { title: trace.summary || trace.name, tone: trace.status === "error" ? "red" : "blue" };
   }
   if (trace.category === "automation_engine") {
+    const status = stringPayload(trace.context.status || trace.status).toLowerCase();
+    if (status === "skipped") return { title: trace.summary || trace.name, tone: "amber" };
     return { title: trace.summary || trace.name, tone: trace.status === "error" ? "red" : "purple" };
   }
   const decision = stringPayload(trace.context.decision).toLowerCase();
@@ -625,3 +663,19 @@ export function sourceUsesAudit(source: LogSourceKey) {
 export function firstRecord(records: LogRecord[], selectedId: string | null) {
   return records.find((record) => record.id === selectedId) || records[0] || null;
 }
+
+export {
+  deriveNarrativeLogItem,
+  deriveNarrativeLogItems,
+  narrativeReasonForRecord,
+  narrativeSupportingDetailForRecord,
+  narrativeTitleForRecord,
+  simplifyLogsFilters
+} from "./narrative";
+
+export {
+  deriveLprWaterfallModel,
+  deriveLprWaterfallSteps,
+  lprWaterfallFromResponse,
+  lprWaterfallStepsFromResponse
+} from "./lprWaterfall";
