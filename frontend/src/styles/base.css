@@ -412,7 +412,8 @@ h2 {
 }
 
 .dot.connecting,
-.dot.reconnecting {
+.dot.reconnecting,
+.dot.degraded {
   background: var(--amber);
 }
 

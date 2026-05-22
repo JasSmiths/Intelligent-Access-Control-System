@@ -457,13 +457,17 @@ class ESPHomeAccessDeviceProvider:
             try:
                 queue.put_nowait(state)
             except asyncio.QueueFull:
-                pass
+                logger.debug("esphome_state_sample_queue_full", extra={"key": key})
 
         try:
             client.subscribe_states(on_state)
             state = await asyncio.wait_for(queue.get(), timeout=timeout)
             return _cover_state_label(state)
-        except Exception:
+        except asyncio.TimeoutError:
+            logger.debug("esphome_state_sample_timeout", extra={"key": key, "timeout": timeout})
+            return GateState.UNKNOWN
+        except Exception as exc:
+            logger.warning("esphome_state_sample_failed", extra={"key": key, "error": str(exc)})
             return GateState.UNKNOWN
 
 
@@ -834,14 +838,21 @@ class _ESPHomeDeviceSession:
         try:
             self.events.put_nowait(event)
         except asyncio.QueueFull:
-            pass
+            logger.warning(
+                "esphome_state_event_queue_full",
+                extra={
+                    "provider": event.get("provider"),
+                    "device_id": event.get("device_id"),
+                    "type": event.get("type"),
+                },
+            )
 
 
 async def _disconnect(client: Any) -> None:
     try:
         await client.disconnect()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("esphome_disconnect_failed", extra={"error": str(exc)})
 
 
 def _is_cover_info(aio: Any, entity: Any) -> bool:

@@ -618,6 +618,64 @@ async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_alfred_v3_planner_failure_does_not_fall_back_to_keyword_routing(monkeypatch) -> None:
+    service = ChatService()
+    statuses: list[dict[str, object]] = []
+
+    class Memory:
+        async def recall(self, **_kwargs):
+            return {}
+
+        async def semantic_search(self, *_args, **_kwargs):
+            return []
+
+    class Feedback:
+        async def recall_active_lessons(self, **_kwargs):
+            return []
+
+    async def failing_plan(*_args, **_kwargs):
+        raise RuntimeError("planner offline")
+
+    async def fake_direct_response(session_id, text, **kwargs):
+        return ChatTurnResult(str(session_id), kwargs.get("provider", "provider_error"), text, kwargs.get("tool_results", []), [])
+
+    async def fail_execute(*_args, **_kwargs):
+        raise AssertionError("planner failure must not execute deterministic fallback tools")
+
+    def fail_legacy_helper(*_args, **_kwargs):
+        raise AssertionError("planner failure must not use visitor-pass keyword routing")
+
+    async def status_callback(status):
+        statuses.append(status)
+
+    monkeypatch.setattr("app.services.chat.alfred_memory_service", Memory())
+    monkeypatch.setattr("app.services.chat.alfred_feedback_service", Feedback())
+    monkeypatch.setattr("app.services.chat.plan_with_llm", failing_plan)
+    monkeypatch.setattr(service, "_direct_response", fake_direct_response)
+    monkeypatch.setattr(service, "_execute_tool_batch", fail_execute)
+    monkeypatch.setattr(service, "_looks_like_visitor_pass_request", fail_legacy_helper)
+    monkeypatch.setattr(service, "_looks_like_device_action_request", fail_legacy_helper)
+
+    result = await service._handle_message_v3(
+        SimpleNamespace(name="openai"),
+        SimpleNamespace(llm_provider="openai", openai_api_key="key"),
+        uuid.uuid4(),
+        "create a visitor pass for Alex tomorrow",
+        {},
+        [],
+        {"user": {"id": "user-1", "role": "admin"}},
+        status_callback=status_callback,
+    )
+
+    assert result.provider == "provider_error"
+    assert "I cannot use the configured openai provider right now" in result.text
+    assert "I did not run any system action" in result.text
+    assert result.tool_results[0]["name"] == "llm_provider"
+    assert statuses[-1]["phase"] == "provider_error"
+    assert statuses[-1]["agents_running"] == 0
+
+
+@pytest.mark.asyncio
 async def test_alfred_v3_persona_answers_chit_chat_with_new_concierge_voice(monkeypatch) -> None:
     provider = V3SimulatedSemanticProvider(
         planner_json=(

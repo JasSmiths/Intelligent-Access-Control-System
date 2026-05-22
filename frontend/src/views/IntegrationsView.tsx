@@ -1949,6 +1949,32 @@ export function DependencyUpdateDeepDive({
 
   React.useEffect(() => () => closeJobSocket(), [closeJobSocket]);
 
+  const appendJobEvent = React.useCallback((event: DependencyJobEvent) => {
+    setJobEvents((events) => [...events, compactDependencyJobEvent(event)].slice(-DEPENDENCY_JOB_EVENT_LIMIT));
+  }, []);
+
+  const refreshJobAfterStreamIssue = React.useCallback(async (jobId: string, context: string) => {
+    try {
+      const [nextJob] = await Promise.all([
+        api.get<DependencyJob>(`/api/v1/dependency-updates/jobs/${jobId}`),
+        onChanged(),
+        loadCurrentDependency(),
+        loadBackups()
+      ]);
+      setJob(nextJob);
+    } catch (refreshError) {
+      const message = refreshError instanceof Error ? refreshError.message : "Unable to refresh dependency job state.";
+      setError(message);
+      appendJobEvent({
+        type: "refresh_failed",
+        job_id: jobId,
+        created_at: new Date().toISOString(),
+        phase: "refresh",
+        message: `${context}: ${message}`
+      });
+    }
+  }, [appendJobEvent, loadBackups, loadCurrentDependency, onChanged]);
+
   const openJobSocket = React.useCallback((jobId: string) => {
     closeJobSocket();
     const socket = new WebSocket(wsUrl(`/api/v1/dependency-updates/jobs/${jobId}/ws`));
@@ -1957,12 +1983,25 @@ export function DependencyUpdateDeepDive({
       let parsed: DependencyJobEvent;
       try {
         parsed = JSON.parse(event.data) as DependencyJobEvent;
-      } catch {
+      } catch (parseError) {
+        console.warn("Ignored malformed dependency job stream event", {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          bytes: typeof event.data === "string" ? event.data.length : undefined
+        });
+        appendJobEvent({
+          type: "stream_error",
+          job_id: jobId,
+          created_at: new Date().toISOString(),
+          phase: "stream",
+          message: "Dependency update stream sent malformed JSON; refreshing job state."
+        });
+        void refreshJobAfterStreamIssue(jobId, "Malformed dependency job stream");
+        closeJobSocket(socket);
         return;
       }
       const next = compactDependencyJobEvent(parsed);
       if (next.type === "connection.ready") return;
-      setJobEvents((events) => [...events, next].slice(-DEPENDENCY_JOB_EVENT_LIMIT));
+      appendJobEvent(next);
       if (next.phase) {
         setJob((currentJob) => currentJob ? { ...currentJob, phase: next.phase || currentJob.phase } : currentJob);
       }
@@ -1983,19 +2022,25 @@ export function DependencyUpdateDeepDive({
           }));
         }
         closeJobSocket(socket);
-        Promise.all([
-          api.get<DependencyJob>(`/api/v1/dependency-updates/jobs/${jobId}`).then(setJob),
-          onChanged(),
-          loadCurrentDependency(),
-          loadBackups()
-        ]).catch(() => undefined);
+        void refreshJobAfterStreamIssue(jobId, "Dependency job finished");
       }
     };
-    socket.onerror = () => closeJobSocket(socket);
+    socket.onerror = () => {
+      console.warn("Dependency job websocket error; refreshing job state", { jobId });
+      appendJobEvent({
+        type: "stream_error",
+        job_id: jobId,
+        created_at: new Date().toISOString(),
+        phase: "stream",
+        message: "Dependency update live stream failed; refreshing job state."
+      });
+      void refreshJobAfterStreamIssue(jobId, "Dependency job stream failed");
+      closeJobSocket(socket);
+    };
     socket.onclose = () => {
       if (jobSocketRef.current === socket) jobSocketRef.current = null;
     };
-  }, [closeJobSocket, loadBackups, loadCurrentDependency, onChanged]);
+  }, [appendJobEvent, closeJobSocket, refreshJobAfterStreamIssue]);
 
   const startApplyUpdate = async () => {
     setLoading(true);

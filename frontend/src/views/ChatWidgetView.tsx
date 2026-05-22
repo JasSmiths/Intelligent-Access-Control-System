@@ -715,6 +715,50 @@ export function ChatWidget({
       if (reconnectTimerId) window.clearTimeout(reconnectTimerId);
       reconnectTimerId = null;
     };
+    const failActiveTurn = (text: string, idPrefix: string) => {
+      const responseDurationMs = finishTurnDuration();
+      const retryAction = lastUserRequestRef.current
+        ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+        : null;
+      awaitingResponseRef.current = false;
+      activeTurnStartedAtRef.current = null;
+      const activeAssistantMessageId = activeAssistantMessageRef.current;
+      activeAssistantMessageRef.current = null;
+      activeTurnPhaseRef.current = "idle";
+      lastUserRequestRef.current = null;
+      setThinking(false);
+      setToolStatus("");
+      setToolActivities([]);
+      setRunActivity(null);
+      setMessages((current) => {
+        if (activeAssistantMessageId && current.some((message) => message.id === activeAssistantMessageId)) {
+          return current.map((message) =>
+            message.id === activeAssistantMessageId
+              ? {
+                ...message,
+                text: message.text ? `${message.text}\n\n${text}` : text,
+                streaming: false,
+                status: "failed",
+                retryAction,
+                responseDurationMs
+              }
+              : message
+          );
+        }
+        return [
+          ...current,
+          {
+            id: clientId(idPrefix),
+            role: "assistant",
+            text,
+            createdAt: Date.now(),
+            status: "failed",
+            retryAction,
+            responseDurationMs
+          }
+        ];
+      });
+    };
     const socket = new WebSocket(wsUrl("/api/v1/ai/chat/ws"));
     setConnected(false);
     connectionTimeoutId = window.setTimeout(() => {
@@ -728,7 +772,15 @@ export function ChatWidget({
       let data: { type: string; payload?: Record<string, unknown> };
       try {
         data = JSON.parse(event.data) as { type: string; payload?: Record<string, unknown> };
-      } catch {
+      } catch (parseError) {
+        console.warn("Ignored malformed Alfred websocket message", {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          bytes: typeof event.data === "string" ? event.data.length : undefined
+        });
+        if (awaitingResponseRef.current) {
+          failActiveTurn("Alfred sent a malformed stream message. Please try again.", "alfred-malformed-stream");
+          socket.close(4000, "malformed_chat_stream");
+        }
         return;
       }
       const payload = data.payload ?? {};
@@ -915,61 +967,30 @@ export function ChatWidget({
         return;
       }
       if (data.type === "chat.error") {
-        awaitingResponseRef.current = false;
-        const responseDurationMs = finishTurnDuration();
-        const retryAction = lastUserRequestRef.current
-          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
-          : null;
-        setMessages((current) => [
-          ...current,
-          {
-            id: clientId("alfred-error"),
-            role: "assistant",
-            text: typeof payload.message === "string" ? payload.message : "Alfred could not complete that request.",
-            createdAt: Date.now(),
-            status: "failed",
-            retryAction,
-            responseDurationMs
-          }
-        ]);
-        activeTurnPhaseRef.current = "idle";
-        lastUserRequestRef.current = null;
-        setThinking(false);
-        setToolStatus("");
-        setToolActivities([]);
-        setRunActivity(null);
+        failActiveTurn(
+          typeof payload.message === "string" ? payload.message : "Alfred could not complete that request.",
+          "alfred-error"
+        );
       }
     };
     socket.onerror = () => {
+      console.warn("Alfred websocket error; reconnecting");
       socket.close();
     };
     socket.onclose = () => {
       clearConnectionTimeout();
       if (socketRef.current === socket) socketRef.current = null;
       const interruptedTurn = awaitingResponseRef.current;
-      awaitingResponseRef.current = false;
-      activeTurnStartedAtRef.current = null;
       setConnected(false);
-      setThinking(false);
-      setToolStatus("");
-      setToolActivities([]);
-      setRunActivity(null);
       if (!cancelled && interruptedTurn) {
-        const retryAction = lastUserRequestRef.current
-          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
-          : null;
-        activeAssistantMessageRef.current = null;
-        setMessages((current) => [
-          ...current,
-          {
-            id: clientId("alfred-disconnect"),
-            role: "assistant",
-            text: "Alfred disconnected while answering. I logged the failure for review; please try again.",
-            createdAt: Date.now(),
-            status: "failed",
-            retryAction
-          }
-        ]);
+        failActiveTurn("Alfred disconnected while answering. I logged the failure for review; please try again.", "alfred-disconnect");
+      } else {
+        awaitingResponseRef.current = false;
+        activeTurnStartedAtRef.current = null;
+        setThinking(false);
+        setToolStatus("");
+        setToolActivities([]);
+        setRunActivity(null);
       }
       activeTurnPhaseRef.current = "idle";
       lastUserRequestRef.current = null;

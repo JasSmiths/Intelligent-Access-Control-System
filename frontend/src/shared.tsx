@@ -485,11 +485,22 @@ export function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+async function parseApiResponse<T>(response: Response, path: string): Promise<T> {
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (!text.trim()) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    throw new Error(`Malformed JSON response from ${path}: ${error instanceof Error ? error.message : "unable to parse response"}`);
+  }
+}
+
 export const api = {
   async get<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, { credentials: "include", signal: options.signal });
     if (!response.ok) throw await apiError(response);
-    return response.json() as Promise<T>;
+    return parseApiResponse<T>(response, path);
   },
   async post<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
@@ -500,7 +511,7 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
-    return response.json() as Promise<T>;
+    return parseApiResponse<T>(response, path);
   },
   async patch<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
@@ -511,7 +522,7 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
-    return response.json() as Promise<T>;
+    return parseApiResponse<T>(response, path);
   },
   async put<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
@@ -522,7 +533,7 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
-    return response.json() as Promise<T>;
+    return parseApiResponse<T>(response, path);
   },
   async delete<T = void>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
@@ -533,9 +544,7 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
-    if (response.status === 204) return undefined as T;
-    const text = await response.text();
-    return (text ? JSON.parse(text) : undefined) as T;
+    return parseApiResponse<T>(response, path);
   }
 };
 
@@ -1017,13 +1026,17 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
     ) {
       if (!value.trim()) continue;
     }
-  if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
+    if (key === "home_assistant_gate_entities" || key === "home_assistant_garage_door_entities") {
+      let parsed: unknown;
       try {
-        const parsed = value.trim() ? JSON.parse(value) : [];
-        payload[key] = Array.isArray(parsed) ? parsed : [];
+        parsed = value.trim() ? JSON.parse(value) : [];
       } catch {
-        payload[key] = [];
+        throw new Error(`${key} must be valid JSON array syntax.`);
       }
+      if (!Array.isArray(parsed)) {
+        throw new Error(`${key} must be a JSON array.`);
+      }
+      payload[key] = parsed;
     } else if (listSettingKeys.has(key)) {
       payload[key] = value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "discord_allow_direct_messages", "discord_require_mention", "whatsapp_enabled"].includes(key)) {

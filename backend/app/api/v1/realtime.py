@@ -4,11 +4,13 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.services.auth import authenticate_websocket
 from app.services.event_bus import event_bus
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 @router.websocket("/ws")
@@ -40,7 +42,18 @@ async def realtime_websocket(websocket: WebSocket) -> None:
 async def _handle_client_realtime_message(websocket: WebSocket, message: str) -> None:
     try:
         parsed = json.loads(message)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning("realtime_client_message_malformed_json", extra={"error": str(exc), "bytes": len(message)})
+        try:
+            await websocket.send_json(
+                {
+                    "type": "connection.error",
+                    "payload": {"detail": "Malformed realtime control message ignored."},
+                    "created_at": datetime.now(tz=UTC).isoformat(),
+                }
+            )
+        except Exception:
+            logger.debug("realtime_client_error_send_failed", exc_info=True)
         return
     if not isinstance(parsed, dict) or parsed.get("type") != "client.ping":
         return

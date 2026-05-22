@@ -201,6 +201,7 @@ export function DynamicSettingsView({
   const { values, loading, error, save, reload } = useSettings(category);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
+  const [submitError, setSubmitError] = React.useState("");
   const fields = settingsFields(category);
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
   const lastRefreshTokenRef = React.useRef(refreshToken);
@@ -222,8 +223,13 @@ export function DynamicSettingsView({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaved("");
-    await save(coerceSettingsPayload(form));
-    setSaved("Settings saved.");
+    setSubmitError("");
+    try {
+      await save(coerceSettingsPayload(form));
+      setSaved("Settings saved.");
+    } catch (saveError) {
+      setSubmitError(saveError instanceof Error ? saveError.message : "Unable to save settings.");
+    }
   };
 
   return (
@@ -263,7 +269,7 @@ export function DynamicSettingsView({
               );
             })}
           </div>
-          {error ? <div className="auth-error inline-error">{error}</div> : null}
+          {submitError || error ? <div className="auth-error inline-error">{submitError || error}</div> : null}
           {saved ? <div className="success-note">{saved}</div> : null}
           <div className="modal-actions">
             <button className="primary-button" type="submit">Save Settings</button>

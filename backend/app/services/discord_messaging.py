@@ -129,8 +129,8 @@ class DiscordMessagingService:
                 await asyncio.wait_for(task, timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 task.cancel()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("discord_bot_task_stop_failed", extra={"error": str(exc)})
         logger.info("discord_bot_stopped")
 
     async def restart(self) -> None:

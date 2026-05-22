@@ -221,7 +221,7 @@ type AuthStatus = {
 
 type ThemeMode = "system" | "light" | "dark";
 
-type RealtimeConnectionStatus = "connecting" | "checking" | "live" | "refreshing" | "reconnecting" | "offline";
+type RealtimeConnectionStatus = "connecting" | "checking" | "live" | "refreshing" | "reconnecting" | "offline" | "degraded";
 
 type RealtimeConnectionState = {
   status: RealtimeConnectionStatus;
@@ -235,7 +235,8 @@ const REALTIME_STATUS_TITLES: Record<RealtimeConnectionStatus, string> = {
   live: "Realtime live",
   refreshing: "Syncing data",
   reconnecting: "Reconnecting",
-  offline: "Network offline"
+  offline: "Network offline",
+  degraded: "Stream degraded"
 };
 
 function realtimeStatus(status: RealtimeConnectionStatus, detail: string): RealtimeConnectionState {
@@ -1642,7 +1643,12 @@ function App() {
       let parsed: RealtimeMessage;
       try {
         parsed = JSON.parse(event.data) as RealtimeMessage;
-      } catch {
+      } catch (parseError) {
+        console.warn("Ignored malformed realtime stream message", {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          bytes: typeof event.data === "string" ? event.data.length : undefined
+        });
+        setRealtimeStatus("degraded", "Ignored malformed stream data; waiting for next event");
         return;
       }
       if (parsed.type === "connection.pong") {
@@ -1746,6 +1752,7 @@ function App() {
         }, REALTIME_PROBE_TIMEOUT_MS);
         return true;
       } catch {
+        console.warn("Realtime probe send failed; reconnecting stream", { reason });
         try {
           target.close();
         } catch {
@@ -1864,6 +1871,7 @@ function App() {
       nextSocket.onmessage = (event) => handleMessage(event, nextSocket);
       nextSocket.onclose = () => scheduleReconnect(nextSocket);
       nextSocket.onerror = () => {
+        console.warn("Realtime stream socket error; reconnecting");
         if (socket === nextSocket) {
           nextSocket.close();
         }

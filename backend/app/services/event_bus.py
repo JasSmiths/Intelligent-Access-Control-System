@@ -274,7 +274,8 @@ class EventBus:
     async def _initial_stream_id(self, redis: redis_asyncio.Redis) -> str:
         try:
             info = await redis.xinfo_stream(self._stream_key)
-        except Exception:
+        except Exception as exc:
+            logger.warning("event_bus_redis_stream_info_failed", extra={"stream": self._stream_key, "error": str(exc)})
             return "0-0"
         stream_id = _dict_get(info, "last-generated-id") or _dict_get(info, b"last-generated-id")
         return _decode_text(stream_id) or "0-0"
@@ -397,17 +398,32 @@ def _event_json(event: RealtimeEvent) -> str:
 def _stream_record_from_fields(fields: dict[Any, Any]) -> _StreamRecord | None:
     raw = _dict_get(fields, "event") or _dict_get(fields, b"event")
     if raw is None:
+        logger.warning("event_bus_redis_record_missing_event_field")
         return None
     try:
-        payload = json.loads(_decode_text(raw))
-    except (TypeError, json.JSONDecodeError):
+        raw_text = _decode_text(raw)
+        payload = json.loads(raw_text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "event_bus_redis_record_malformed_json",
+            extra={"error": str(exc), "raw_bytes": len(_decode_text(raw))},
+        )
         return None
     if not isinstance(payload, dict):
+        logger.warning("event_bus_redis_record_invalid_payload", extra={"payload_type": type(payload).__name__})
         return None
     event_type = payload.get("type")
     event_payload = payload.get("payload")
     created_at = payload.get("created_at")
     if not isinstance(event_type, str) or not isinstance(event_payload, dict) or not isinstance(created_at, str):
+        logger.warning(
+            "event_bus_redis_record_invalid_shape",
+            extra={
+                "event_type_type": type(event_type).__name__,
+                "payload_type": type(event_payload).__name__,
+                "created_at_type": type(created_at).__name__,
+            },
+        )
         return None
     origin_id = _dict_get(fields, "origin") or _dict_get(fields, b"origin")
     return _StreamRecord(
