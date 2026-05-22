@@ -29,6 +29,7 @@ STATE_STREAM_INITIAL_RECONNECT_SECONDS = 0.5
 STATE_STREAM_MAX_RECONNECT_SECONDS = 5.0
 COMMAND_LIVE_STATE_WAIT_SECONDS = 0.25
 COLD_COMMAND_CONNECT_BUDGET_SECONDS = 0.75
+STATE_EVENT_QUEUE_MAX_SIZE = 1000
 
 logger = get_logger(__name__)
 
@@ -47,7 +48,7 @@ class ESPHomeAccessDeviceProvider:
     state_subscription_supported = True
 
     def __init__(self) -> None:
-        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=STATE_EVENT_QUEUE_MAX_SIZE)
         self._sessions: dict[str, _ESPHomeDeviceSession] = {}
         self._sessions_lock = asyncio.Lock()
 
@@ -715,10 +716,10 @@ class _ESPHomeDeviceSession:
             expected_disconnect = False
             stopped = asyncio.Event()
 
-            async def on_stop(was_expected: bool) -> None:
+            async def on_stop(was_expected: bool, stopped_event: asyncio.Event = stopped) -> None:
                 nonlocal expected_disconnect
                 expected_disconnect = was_expected
-                stopped.set()
+                stopped_event.set()
 
             try:
                 if not self.cover_metadata:

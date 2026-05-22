@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from app.db.session import AsyncSessionLocal
 from app.modules.gate.base import GateCommandResult, GateController, GateState
 from app.modules.home_assistant.covers import command_cover, enabled_cover_entities, legacy_gate_entities, normalize_cover_entities
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
+from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
 from app.services.schedules import evaluate_schedule_id
 from app.services.settings import get_runtime_config
 
@@ -12,7 +12,7 @@ class HomeAssistantGateController(GateController):
     """Home Assistant-backed gate controller."""
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
-        self._client = client or HomeAssistantClient()
+        self._client = client or get_home_assistant_client()
 
     async def open_gate(self, reason: str, *, bypass_schedule: bool = False) -> GateCommandResult:
         config = await get_runtime_config()

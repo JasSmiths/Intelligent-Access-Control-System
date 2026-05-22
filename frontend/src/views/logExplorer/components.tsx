@@ -1,98 +1,89 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  SortingState,
-  useReactTable
+ColumnDef,
+flexRender,
+getCoreRowModel,
+getSortedRowModel,
+SortingState,
+useReactTable
 } from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { diff as jsonDiff } from "jsondiffpatch";
 import {
-  Activity,
-  AlertTriangle,
-  Archive,
-  BarChart3,
-  CalendarDays,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Clock3,
-  Copy,
-  Database,
-  Download,
-  ExternalLink,
-  FileJson,
-  FileText,
-  Filter,
-  Gauge,
-  HardDrive,
-  Layers3,
-  Loader2,
-  Pause,
-  Play,
-  RefreshCcw,
-  RotateCcw,
-  Save,
-  Search,
-  ShieldCheck,
-  Signal,
-  SlidersHorizontal,
-  Terminal,
-  Trash2,
-  X
+AlertTriangle,
+Archive,
+CalendarDays,
+Check,
+ChevronDown,
+ChevronRight,
+Clock3,
+Copy,
+Download,
+ExternalLink,
+FileJson,
+Filter,
+Gauge,
+HardDrive,
+Layers3,
+Loader2,
+Pause,
+Play,
+RefreshCcw,
+RotateCcw,
+Save,
+Search,
+ShieldCheck,
+Signal,
+SlidersHorizontal,
+Terminal,
+Trash2,
+X
 } from "lucide-react";
+import React from "react";
+import { createPortal } from "react-dom";
 
 import {
-  api,
-  Badge,
-  EmptyState,
-  formatFileSize,
-  isRecord,
-  levelTone,
-  numberPayload,
-  RealtimeMessage,
-  stringPayload,
-  titleCase
+Badge,
+EmptyState,
+formatFileSize,
+isRecord,
+levelTone,
+numberPayload,
+stringPayload,
+titleCase
 } from "../../shared";
 import {
-  defaultLogsFilters,
-  levelOptions,
-  sourceTabs,
-  statusOptions,
-  timeRangeOptions
+levelOptions,
+sourceTabs,
+statusOptions,
+timeRangeOptions
 } from "./constants";
 import {
-  LogRecord,
-  LogsFilters,
-  LogSourceKey,
-  SavedLogsFilter,
-  TelemetrySpan,
-  TelemetryStorageSummary,
-  TelemetrySummary,
-  TelemetryTraceDetail,
-  TraceDetailState
+LogRecord,
+LogsFilters,
+LogSourceKey,
+SavedLogsFilter,
+TelemetryStorageSummary,
+TelemetrySummary,
+TelemetryTraceDetail,
+TraceDetailState
 } from "./types";
 import {
-  artifactFromSpan,
-  copyText,
-  exportRecords,
-  formatDuration,
-  formattedTimestamp,
-  formatLogMegabytes,
-  formatSecondsDuration,
-  gateMalfunctionCountdownLabel,
-  gateTimelineSummary,
-  levelLabel,
-  metricFromSummary,
-  outcomeTone,
-  sourceLabel,
-  statusLabel,
-  stringifyJson,
-  summaryMetricCards,
-  traceIcon
+artifactFromSpan,
+copyText,
+exportRecords,
+formatDuration,
+formatLogMegabytes,
+formatSecondsDuration,
+formattedTimestamp,
+gateMalfunctionCountdownLabel,
+gateTimelineSummary,
+levelLabel,
+metricFromSummary,
+sourceLabel,
+statusLabel,
+stringifyJson,
+summaryMetricCards,
+traceIcon
 } from "./utils";
 
 const MonacoDiffEditor = React.lazy(() => import("@monaco-editor/react").then((module) => ({ default: module.DiffEditor })));
@@ -958,5 +949,3 @@ export function ClearLogsConfirmModal({
 export function exportVisible(records: LogRecord[], format: "json" | "csv") {
   exportRecords(records, format);
 }
-
-export { defaultLogsFilters };

@@ -4,7 +4,7 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Person
 from app.models.enums import AccessDirection
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.home_assistant.input_booleans import (
     INPUT_BOOLEAN_ACTIONS,
     command_input_boolean,
@@ -80,7 +80,7 @@ async def apply_person_presence_input_boolean_actions(
             )
         return
 
-    client = HomeAssistantClient()
+    client = get_home_assistant_client()
     for entity_id in entity_ids:
         result = await command_input_boolean(client, entity_id, action)
         await _record_input_boolean_result(

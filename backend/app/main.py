@@ -42,6 +42,7 @@ from app.services.telemetry import (
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.visitor_passes import get_visitor_pass_service
+from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 logger = get_logger(__name__)
 
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
         await get_access_event_service().stop()
         await get_access_device_service().stop()
         await get_visitor_pass_service().stop()
+        await get_whatsapp_messaging_service().stop()
         await get_discord_messaging_service().stop()
         await get_automation_service().stop()
         await get_notification_service().stop()

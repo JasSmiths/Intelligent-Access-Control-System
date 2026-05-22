@@ -213,6 +213,21 @@ class WhatsAppMessagingService:
         self._last_error: str | None = None
         self._visitor_message_tasks: dict[str, asyncio.Task[None]] = {}
         self._visitor_message_debounce_seconds = VISITOR_TEXT_DEBOUNCE_SECONDS
+        self._http_client: httpx.AsyncClient | None = None
+        self._http_client_lock = asyncio.Lock()
+
+    async def stop(self) -> None:
+        tasks = list(self._visitor_message_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._visitor_message_tasks.clear()
+        async with self._http_client_lock:
+            client = self._http_client
+            self._http_client = None
+        if client is not None:
+            await client.aclose()
 
     async def status(self) -> dict[str, Any]:
         config = await load_whatsapp_config()
@@ -237,12 +252,12 @@ class WhatsAppMessagingService:
             raise ValueError("WhatsApp access token and phone number ID are required.")
         url = self._graph_url(config, config.phone_number_id)
         headers = {"Authorization": f"Bearer {config.access_token}"}
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            response = await client.get(
-                url,
-                headers=headers,
-                params={"fields": "id,display_phone_number,verified_name"},
-            )
+        client = await self._request_client()
+        response = await client.get(
+            url,
+            headers=headers,
+            params={"fields": "id,display_phone_number,verified_name"},
+        )
         if response.status_code >= 400:
             raise ValueError(f"WhatsApp API test failed with HTTP {response.status_code}: {response.text[:240]}")
 
@@ -3100,8 +3115,8 @@ class WhatsAppMessagingService:
             "Authorization": f"Bearer {config.access_token}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            response = await client.post(url, headers=headers, json=payload)
+        client = await self._request_client()
+        response = await client.post(url, headers=headers, json=payload)
         if response.status_code >= 400:
             self._last_error = f"HTTP {response.status_code}: {response.text[:240]}"
             raise NotificationDeliveryError(f"WhatsApp API send failed with HTTP {response.status_code}: {response.text[:240]}")
@@ -3114,6 +3129,12 @@ class WhatsAppMessagingService:
     def _graph_url(self, config: WhatsAppIntegrationConfig, path: str) -> str:
         version = normalize_graph_api_version(config.graph_api_version)
         return f"https://graph.facebook.com/{version}/{path.lstrip('/')}"
+
+    async def _request_client(self) -> httpx.AsyncClient:
+        async with self._http_client_lock:
+            if self._http_client is None:
+                self._http_client = httpx.AsyncClient(timeout=15, trust_env=False)
+            return self._http_client
 
 
 async def load_whatsapp_config(values: dict[str, Any] | None = None) -> WhatsAppIntegrationConfig:

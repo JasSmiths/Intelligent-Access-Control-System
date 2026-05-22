@@ -11,7 +11,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import GateStateObservation
 from app.modules.gate.base import GateState
 from app.modules.gate.home_assistant import map_home_assistant_gate_state
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import HomeAssistantClient, get_home_assistant_client
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
     legacy_gate_entities,
@@ -41,7 +41,7 @@ class HomeAssistantIntegrationService:
     """Keeps Home Assistant state synchronized with IACS realtime state."""
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
-        self._client = client or HomeAssistantClient()
+        self._client = client or get_home_assistant_client()
         self._listener: asyncio.Task | None = None
         self._state_refresh_task: asyncio.Task | None = None
         self._state_refresh_lock = asyncio.Lock()
@@ -81,6 +81,8 @@ class HomeAssistantIntegrationService:
                 pass
         self._listener = None
         self._state_refresh_task = None
+        if hasattr(self._client, "close"):
+            await self._client.close()
         logger.info("home_assistant_listener_stopped")
 
     async def status(self, *, refresh: bool = False) -> dict:

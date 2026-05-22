@@ -1,106 +1,70 @@
+import {
+AlertTriangle,
+ArrowLeft,
+Bell,
+Bot,
+CalendarDays,
+Camera,
+Car,
+Check,
+CheckCircle2,
+ChevronDown,
+ChevronRight,
+CircleDot,
+Clock3,
+Construction,
+Copy,
+DoorOpen,
+GitBranch,
+Home,
+MessageCircle,
+Monitor,
+MoreHorizontal,
+Pencil,
+Play,
+PlugZap,
+Plus,
+Save,
+Search,
+Send,
+ShieldCheck,
+Smartphone,
+Sparkles,
+Split,
+Trash2,
+Trophy,
+UserPlus,
+UserRound,
+Users,
+Volume2,
+Warehouse,
+X,
+Zap
+} from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
-} from "lucide-react";
 
 import {
-  api,
-  Badge,
-  BadgeTone,
-  createActionConfirmation,
-  displayUserName,
-  formatDate,
-  fromDateTimeLocal,
-  NotificationChannelId,
-  notificationChannelMeta,
-  notificationEventLabel,
-  NotificationTriggerOption,
-  Person,
-  Schedule,
-  titleCase,
-  toDateTimeLocal,
-  Toolbar,
-  TooltipPositionState,
-  UnifiProtectCamera,
-  UserAccount,
-  Vehicle
+api,
+Badge,
+BadgeTone,
+createActionConfirmation,
+displayUserName,
+formatDate,
+fromDateTimeLocal,
+NotificationChannelId,
+notificationChannelMeta,
+notificationEventLabel,
+NotificationTriggerOption,
+Person,
+Schedule,
+titleCase,
+toDateTimeLocal,
+Toolbar,
+TooltipPositionState,
+UnifiProtectCamera,
+UserAccount,
+Vehicle
 } from "../shared";
 
 
@@ -637,7 +601,6 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
   const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [dryRun, setDryRun] = React.useState<Record<string, unknown> | null>(null);
   const [error, setError] = React.useState("");
-  const prefersReducedMotion = useReducedMotion();
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const triggerByType = React.useMemo(() => new Map((catalog?.triggers ?? []).flatMap((group) => (group.triggers ?? []).map((item) => [item.type, item]))), [catalog]);
@@ -901,14 +864,10 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
       {draft ? (
         <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
           <div className={modal ? "modal-card workflow-editor-modal selector-mode" : "modal-card workflow-editor-modal"} role="dialog" aria-modal="true">
-            <AnimatePresence mode="popLayout" initial={false}>
-              <motion.div
-                animate={{ y: 0 }}
+            <>
+              <div
                 className={modal ? "workflow-modal-panel selector" : "workflow-modal-panel editor"}
-                exit={prefersReducedMotion ? undefined : { y: -6, transition: { duration: 0.06, ease: "easeOut" } }}
-                initial={prefersReducedMotion ? false : { y: 8 }}
                 key={modal ?? "editor"}
-                transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.13, ease: [0.2, 0, 0, 1] }}
               >
                 {modal ? (
                   <AutomationSelectionModal
@@ -1020,8 +979,8 @@ export function AutomationsView({ people, refreshToken, vehicles }: { people: Pe
                     </div>
                   </>
                 )}
-              </motion.div>
-            </AnimatePresence>
+              </div>
+            </>
           </div>
         </div>
       ) : null}
@@ -1935,7 +1894,6 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   const [ruleStatusFeedback, setRuleStatusFeedback] = React.useState<WorkflowRuleStatusFeedback | null>(null);
   const [feedback, setFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [error, setError] = React.useState("");
-  const prefersReducedMotion = useReducedMotion();
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const triggerGroups = notificationTriggerGroupsForDisplay(
@@ -2248,14 +2206,10 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
             aria-modal="true"
             aria-labelledby={workflowModalMode === "editor" ? "workflow-editor-title" : "two-pane-selection-title"}
           >
-            <AnimatePresence mode="popLayout" initial={false}>
-              <motion.div
-                animate={{ y: 0 }}
+            <>
+              <div
                 className={workflowModalMode === "editor" ? "workflow-modal-panel editor" : "workflow-modal-panel selector"}
-                exit={prefersReducedMotion ? undefined : { y: -6, transition: { duration: 0.06, ease: "easeOut" } }}
-                initial={prefersReducedMotion ? false : { y: 8 }}
                 key={workflowModalMode}
-                transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.13, ease: [0.2, 0, 0, 1] }}
               >
                 {workflowModalMode === "trigger" ? (
                   <NotificationTriggerModal
@@ -2322,8 +2276,8 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                     />
                   </>
                 )}
-              </motion.div>
-            </AnimatePresence>
+              </div>
+            </>
           </div>
         </div>
       ) : null}
@@ -3582,7 +3536,6 @@ export function NotificationActionModal({
   const [selectedMethodId, setSelectedMethodId] = React.useState<string | null>(null);
   const [selectedTargetIds, setSelectedTargetIds] = React.useState<Set<string>>(() => new Set());
   const [searchQuery, setSearchQuery] = React.useState("");
-  const prefersReducedMotion = useReducedMotion();
   const query = searchQuery.trim().toLowerCase();
   const currentUserPerson = React.useMemo(() => findCurrentUserPerson(people, currentUser), [currentUser, people]);
   const methodsByCategory = React.useMemo(
@@ -3678,14 +3631,10 @@ export function NotificationActionModal({
       title="Add Action"
       wide
     >
-      <AnimatePresence mode="popLayout" initial={false}>
-        <motion.div
-          animate={{ x: 0 }}
+      <>
+        <div
           className="two-pane-selection-panel"
-          exit={prefersReducedMotion ? undefined : { x: selectedMethod ? 6 : -6, transition: { duration: 0.06, ease: "easeOut" } }}
-          initial={prefersReducedMotion ? false : { x: selectedMethod ? 8 : -8 }}
           key={selectedMethod ? "targets" : "methods"}
-          transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.11, ease: [0.2, 0, 0, 1] }}
         >
           {selectedMethod ? (
             <div className="action-target-step">
@@ -3757,8 +3706,8 @@ export function NotificationActionModal({
               {query ? "No action methods match this search." : "No methods are configured for this notification channel."}
             </div>
           )}
-        </motion.div>
-      </AnimatePresence>
+        </div>
+      </>
     </TwoPaneSelectionModal>
   );
 }

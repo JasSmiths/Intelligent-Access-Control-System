@@ -1,105 +1,51 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  Eye,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  ThumbsDown,
-  ThumbsUp,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  WifiOff,
-  X,
-  Zap
+Activity,
+AlertTriangle,
+Bot,
+Check,
+CheckCircle2,
+CircleDot,
+Clock3,
+Copy,
+Download,
+Eye,
+File as FileIcon,
+FileImage,
+FileText,
+HardHat,
+Loader2,
+MessageCircle,
+Paperclip,
+RefreshCcw,
+Send,
+ShieldCheck,
+Sparkles,
+Terminal,
+ThumbsDown,
+ThumbsUp,
+Trash2,
+UserRound,
+WifiOff,
+X
 } from "lucide-react";
+import React from "react";
 
 import {
-  api,
-  apiError,
-  displayUserName,
-  formatFileSize,
-  isLlmProviderConfigured,
-  isRecord,
-  llmProviderDefinitions,
-  LlmProviderKey,
-  MaintenanceStatus,
-  normalizeLlmProvider,
-  SettingsMap,
-  UserAccount,
-  useSettings,
-  userInitials,
-  wsUrl
+api,
+apiError,
+displayUserName,
+formatFileSize,
+isLlmProviderConfigured,
+isRecord,
+llmProviderDefinitions,
+LlmProviderKey,
+MaintenanceStatus,
+normalizeLlmProvider,
+SettingsMap,
+UserAccount,
+userInitials,
+useSettings,
+wsUrl
 } from "../shared";
 
 
@@ -561,15 +507,17 @@ export function chatConfirmationAction(toolResults: unknown): ChatConfirmationAc
   return null;
 }
 
-export const chatMessageVariants = {
-  hidden: { opacity: 0, y: 14, scale: 0.98 },
-  visible: { opacity: 1, y: 0, scale: 1 },
-  exit: { opacity: 0, y: 8, scale: 0.98 }
-};
-
-export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: UserAccount; maintenanceStatus: MaintenanceStatus | null }) {
+export function ChatWidget({
+  currentUser,
+  initialOpen = false,
+  maintenanceStatus
+}: {
+  currentUser: UserAccount;
+  initialOpen?: boolean;
+  maintenanceStatus: MaintenanceStatus | null;
+}) {
   const llmSettings = useSettings("llm");
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(initialOpen);
   const teaserStorageKey = `iacs-chat-teaser-dismissed:${currentUser.id}`;
   const [showTeaser, setShowTeaser] = React.useState(() => sessionStorage.getItem(teaserStorageKey) !== "true");
   const [sessionId, setSessionId] = React.useState<string | null>(null);
@@ -1328,14 +1276,10 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
 
   return (
     <div className={open ? "chat-widget open" : "chat-widget"} style={widgetStyle}>
-      <AnimatePresence>
+      <>
         {open ? (
-          <motion.div
+          <div
             className={dragActive ? "chat-panel drag-active" : "chat-panel"}
-            initial={{ opacity: 0, scale: 0.86, y: 28 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9, y: 24 }}
-            transition={{ type: "spring", stiffness: 360, damping: 32 }}
             onDragOver={(event) => {
               event.preventDefault();
               setDragActive(true);
@@ -1371,10 +1315,9 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                   onPrompt={(prompt) => sendMessage(prompt, [])}
                 />
               ) : null}
-              <AnimatePresence initial={false}>
-                {messages.map((message, index) => (
+              <>
+                {messages.map((message) => (
                   <ChatMessageBubble
-                    index={index}
                     key={message.id}
                     message={message}
                     onConfirm={sendConfirmationAction}
@@ -1396,12 +1339,12 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                     senderName={message.role === "assistant" ? "Alfred" : firstName}
                   />
                 ))}
-              </AnimatePresence>
+              </>
               {thinking ? <TypingIndicator activities={toolActivities} runActivity={runActivity} slow={slowResponse} status={toolStatus} /> : null}
             </div>
 
             <div className="chat-composer">
-              <AnimatePresence>
+              <>
                 {llmPickerOpen ? (
                   <ChatLlmProviderPopover
                     activeProvider={activeLlmProvider}
@@ -1417,7 +1360,7 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                     onSelect={selectLlmProvider}
                   />
                 ) : null}
-              </AnimatePresence>
+              </>
               {pendingAttachments.length ? (
                 <div className="chat-composer-attachments" aria-label="Pending attachments">
                   {pendingAttachments.map((attachment) => (
@@ -1458,37 +1401,33 @@ export function ChatWidget({ currentUser, maintenanceStatus }: { currentUser: Us
                 </div>
               ) : null}
             </div>
-          </motion.div>
+          </div>
         ) : null}
-      </AnimatePresence>
+      </>
 
-      <AnimatePresence>
+      <>
         {!open && showTeaser ? (
-          <motion.div
+          <div
             className="chat-teaser"
-            initial={{ opacity: 0, y: 10, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.96 }}
           >
             <button className="teaser-close" onClick={dismissTeaser} type="button" aria-label="Dismiss chat prompt">
               <X size={16} />
             </button>
             <strong>Alfred is ready</strong>
             <p>Hi {firstName}, how can I help?</p>
-          </motion.div>
+          </div>
         ) : null}
-      </AnimatePresence>
+      </>
       {!open ? (
-        <motion.button
+        <button
           className="chat-pill"
           onClick={() => setOpen(true)}
           type="button"
           aria-label="Open Alfred"
-          whileTap={{ scale: 0.97 }}
         >
           <MessageCircle size={18} />
           <span>Alfred</span>
-        </motion.button>
+        </button>
       ) : null}
       {copyMenu ? (
         <ChatCopyMenu
@@ -1558,12 +1497,8 @@ export function ChatLlmProviderPopover({
   onSelect: (provider: LlmProviderKey) => Promise<void>;
 }) {
   return (
-    <motion.div
+    <div
       className="chat-llm-popover"
-      initial={{ opacity: 0, y: 10, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 8, scale: 0.98 }}
-      transition={{ type: "spring", stiffness: 420, damping: 34 }}
     >
       <div className="chat-llm-popover-head">
         <span>
@@ -1605,13 +1540,12 @@ export function ChatLlmProviderPopover({
         })}
       </div>
       {error ? <p className="chat-llm-feedback" role="status">{error}</p> : null}
-    </motion.div>
+    </div>
   );
 }
 
 export function ChatMessageBubble({
   message,
-  index,
   senderName,
   feedbackDraft,
   onFeedback,
@@ -1625,7 +1559,6 @@ export function ChatMessageBubble({
   onConfirm
 }: {
   message: ChatMessageItem;
-  index: number;
   senderName: string;
   feedbackDraft: ChatFeedbackDraft | null;
   onFeedback: (message: ChatMessageItem, rating: "up" | "down") => void;
@@ -1674,15 +1607,9 @@ export function ChatMessageBubble({
   }, [isAssistant, message.id, message.localSeenAt, onDisplayed]);
 
   return (
-    <motion.div
+    <div
       className={`chat-message ${message.role} ${message.status || ""}`}
       ref={messageRef}
-      variants={chatMessageVariants}
-      initial="hidden"
-      animate="visible"
-      exit="exit"
-      transition={{ type: "spring", stiffness: 420, damping: 34, delay: Math.min(index * 0.025, 0.18) }}
-      layout
     >
       {isAssistant ? (
         <span className={isFailed ? "chat-message-avatar failed" : "chat-message-avatar assistant"}>
@@ -1791,7 +1718,7 @@ export function ChatMessageBubble({
           {senderName ? userInitials({ first_name: senderName, last_name: "", full_name: senderName }) : <UserRound size={15} />}
         </span>
       ) : null}
-    </motion.div>
+    </div>
   );
 }
 
@@ -1982,11 +1909,8 @@ export function TypingIndicator({
     runActivity?.awaitingConfirmation ? "warning" : ""
   ].filter(Boolean).join(" ");
   return (
-    <motion.div
+    <div
       className="typing-row"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 8 }}
     >
       {runActivity ? (
         <span className={liveActivityClass}>
@@ -2020,7 +1944,7 @@ export function TypingIndicator({
         <i />
         <i />
       </span>
-    </motion.div>
+    </div>
   );
 }
 

@@ -78,7 +78,7 @@ def test_serialize_vehicle_exposes_multiple_assigned_people_without_legacy_owner
     vehicle = SimpleNamespace(
         id=uuid.uuid4(),
         registration_number="SHARED1",
-        vehicle_photo_data_url=None,
+        vehicle_photo_data_url="data:image/png;base64,vehicle",
         description="Shared car",
         make="Tesla",
         model="Model Y",
@@ -106,6 +106,44 @@ def test_serialize_vehicle_exposes_multiple_assigned_people_without_legacy_owner
     assert payload["owner"] is None
     assert payload["owners"] == ["Ash Smith", "Zoe Smith"]
     assert payload["person_ids"] == [str(right.id), str(left.id)]
+    assert payload["vehicle_photo_data_url"] == "data:image/png;base64,vehicle"
+    assert payload["vehicle_photo_url"] == f"/api/v1/vehicles/{vehicle.id}/photo"
+    compact_payload = serialize_vehicle(vehicle, include_media=False)
+    assert compact_payload["vehicle_photo_data_url"] is None
+    assert compact_payload["vehicle_photo_url"] == f"/api/v1/vehicles/{vehicle.id}/photo"
+
+
+def test_serialize_vehicle_uses_snapshot_fallback_when_photo_missing() -> None:
+    vehicle = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="AGS7X",
+        vehicle_photo_data_url=None,
+        description=None,
+        make="Tesla",
+        model="Model Y",
+        color="Blue",
+        fuel_type="Electric",
+        mot_status="Valid",
+        tax_status="Taxed",
+        mot_expiry=None,
+        tax_expiry=None,
+        last_dvla_lookup_date=None,
+        person_id=None,
+        owner=None,
+        person_assignments=[],
+        schedule_id=None,
+        schedule=None,
+        is_active=True,
+    )
+
+    payload = serialize_vehicle(
+        vehicle,
+        include_media=False,
+        fallback_photo_urls={"AGS7X": "/api/v1/events/event-id/snapshot"},
+    )
+
+    assert payload["vehicle_photo_data_url"] is None
+    assert payload["vehicle_photo_url"] == "/api/v1/events/event-id/snapshot"
 
 
 def test_serialize_person_uses_vehicle_assignment_rows() -> None:
@@ -113,7 +151,7 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         id=uuid.uuid4(),
         registration_number="SHARED1",
         description="Shared car",
-        vehicle_photo_data_url=None,
+        vehicle_photo_data_url="data:image/png;base64,vehicle",
         make="Tesla",
         model="Model Y",
         color="Blue",
@@ -149,7 +187,7 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         last_name="Smith",
         display_name="Ash Smith",
         pronouns=None,
-        profile_photo_data_url=None,
+        profile_photo_data_url="data:image/png;base64,person",
         group_id=None,
         group=None,
         schedule_id=None,
@@ -171,3 +209,12 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
     assert payload["home_assistant_presence_input_boolean_entity_ids"] == ["input_boolean.ash_home"]
     assert payload["home_assistant_presence_input_boolean_entry_action"] == "turn_on"
     assert payload["home_assistant_presence_input_boolean_exit_action"] == "turn_off"
+    assert payload["profile_photo_data_url"] == "data:image/png;base64,person"
+    assert payload["profile_photo_url"] == f"/api/v1/people/{person.id}/photo"
+    assert payload["vehicles"][0]["vehicle_photo_data_url"] == "data:image/png;base64,vehicle"
+    assert payload["vehicles"][0]["vehicle_photo_url"] == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"
+    compact_payload = serialize_person(person, include_media=False)
+    assert compact_payload["profile_photo_data_url"] is None
+    assert compact_payload["profile_photo_url"] == f"/api/v1/people/{person.id}/photo"
+    assert compact_payload["vehicles"][0]["vehicle_photo_data_url"] is None
+    assert compact_payload["vehicles"][0]["vehicle_photo_url"] == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"

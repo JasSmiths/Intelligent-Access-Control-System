@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -44,8 +45,21 @@ class HomeAssistantClient:
     stay consistent across the system.
     """
 
+    def __init__(self) -> None:
+        self._http_client: httpx.AsyncClient | None = None
+        self._http_client_signature: tuple[str, str] | None = None
+        self._http_client_lock = asyncio.Lock()
+
     async def config(self) -> RuntimeConfig:
         return await get_runtime_config()
+
+    async def close(self) -> None:
+        async with self._http_client_lock:
+            client = self._http_client
+            self._http_client = None
+            self._http_client_signature = None
+        if client is not None:
+            await client.aclose()
 
     async def call_service(self, service_name: str, service_data: dict[str, Any]) -> dict[str, Any]:
         domain, service = self._split_service_name(service_name)
@@ -157,17 +171,18 @@ class HomeAssistantClient:
         if not (base_url and token):
             raise HomeAssistantError("Home Assistant URL/token are not configured.")
 
+        client = await self._request_client(base_url=base_url, token=token)
+
         try:
-            async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-                response = await client.request(
-                    method,
-                    f"{base_url}{path}",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json=json,
-                )
+            response = await client.request(
+                method,
+                f"{base_url}{path}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=json,
+            )
         except httpx.RequestError as exc:
             raise HomeAssistantError(f"Unable to reach Home Assistant: {exc}") from exc
 
@@ -179,6 +194,21 @@ class HomeAssistantClient:
             return {}
         return response.json()
 
+    async def _request_client(self, *, base_url: str, token: str) -> httpx.AsyncClient:
+        signature = (base_url, token)
+        async with self._http_client_lock:
+            if self._http_client is not None and self._http_client_signature == signature:
+                return self._http_client
+
+            old_client = self._http_client
+            new_client = httpx.AsyncClient(timeout=15, trust_env=False)
+            self._http_client = new_client
+            self._http_client_signature = signature
+
+        if old_client is not None:
+            await old_client.aclose()
+        return new_client
+
     def _websocket_url(self, base_url: str) -> str:
         parsed = urlparse(base_url.rstrip("/"))
         scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -189,3 +219,8 @@ class HomeAssistantClient:
             raise HomeAssistantError(f"Invalid Home Assistant service name: {service_name}")
         domain, service = service_name.split(".", 1)
         return domain, service
+
+
+@lru_cache
+def get_home_assistant_client() -> HomeAssistantClient:
+    return HomeAssistantClient()

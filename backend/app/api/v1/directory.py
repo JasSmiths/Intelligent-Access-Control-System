@@ -1,22 +1,28 @@
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import current_user
+from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import Group, Person, Schedule, User, Vehicle, VehiclePersonAssignment
+from app.models import AccessEvent, Group, Person, Schedule, User, Vehicle, VehiclePersonAssignment
 from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, friendly_vehicle_text
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
-from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
+from app.services.profile_photos import (
+    ProfilePhotoError,
+    normalize_profile_photo_data_url,
+    stored_image_url,
+)
 from app.services.person_presence_input_booleans import (
     DEFAULT_INPUT_BOOLEAN_ACTION,
     normalize_input_boolean_action,
@@ -39,6 +45,7 @@ class PersonVehicleResponse(BaseModel):
     registration_number: str
     description: str | None
     vehicle_photo_data_url: str | None
+    vehicle_photo_url: str | None = None
     make: str | None
     model: str | None
     color: str | None
@@ -59,6 +66,7 @@ class PersonResponse(BaseModel):
     display_name: str
     pronouns: str | None
     profile_photo_data_url: str | None
+    profile_photo_url: str | None = None
     group_id: str | None
     group: str | None
     category: str | None
@@ -124,6 +132,7 @@ class VehicleResponse(BaseModel):
     id: str
     registration_number: str
     vehicle_photo_data_url: str | None
+    vehicle_photo_url: str | None = None
     description: str | None
     make: str | None
     model: str | None
@@ -329,13 +338,73 @@ def assigned_vehicles_for_person(person: Person) -> list[Vehicle]:
     return list(person.vehicles or [])
 
 
-def serialize_vehicle(vehicle: Vehicle) -> dict:
+def vehicle_photo_url(
+    vehicle: Vehicle,
+    fallback_photo_urls: Mapping[str, str] | None = None,
+) -> str | None:
+    return stored_image_url(
+        vehicle.vehicle_photo_data_url,
+        f"/api/v1/vehicles/{vehicle.id}/photo",
+        getattr(vehicle, "updated_at", None),
+    ) or (fallback_photo_urls or {}).get(vehicle.registration_number)
+
+
+async def latest_vehicle_snapshot_urls(
+    session: AsyncSession,
+    vehicles: Sequence[Vehicle],
+) -> dict[str, str]:
+    registrations = sorted(
+        {
+            vehicle.registration_number
+            for vehicle in vehicles
+            if not vehicle.vehicle_photo_data_url
+        }
+    )
+    if not registrations:
+        return {}
+
+    ranked_snapshots = (
+        select(
+            AccessEvent.registration_number.label("registration_number"),
+            AccessEvent.id.label("event_id"),
+            func.row_number()
+            .over(
+                partition_by=AccessEvent.registration_number,
+                order_by=AccessEvent.occurred_at.desc(),
+            )
+            .label("rank"),
+        )
+        .where(
+            AccessEvent.registration_number.in_(registrations),
+            AccessEvent.snapshot_path.is_not(None),
+            AccessEvent.snapshot_bytes.is_not(None),
+        )
+        .subquery()
+    )
+    rows = await session.execute(
+        select(ranked_snapshots.c.registration_number, ranked_snapshots.c.event_id).where(
+            ranked_snapshots.c.rank == 1
+        )
+    )
+    return {
+        registration_number: f"/api/v1/events/{event_id}/snapshot"
+        for registration_number, event_id in rows
+    }
+
+
+def serialize_vehicle(
+    vehicle: Vehicle,
+    *,
+    include_media: bool = True,
+    fallback_photo_urls: Mapping[str, str] | None = None,
+) -> dict:
     assigned_people = assigned_people_for_vehicle(vehicle)
     owners = [person.display_name for person in assigned_people]
     return {
         "id": str(vehicle.id),
         "registration_number": vehicle.registration_number,
-        "vehicle_photo_data_url": vehicle.vehicle_photo_data_url,
+        "vehicle_photo_data_url": vehicle.vehicle_photo_data_url if include_media else None,
+        "vehicle_photo_url": vehicle_photo_url(vehicle, fallback_photo_urls),
         "description": vehicle.description,
         "make": vehicle.make,
         "model": vehicle.model,
@@ -356,7 +425,12 @@ def serialize_vehicle(vehicle: Vehicle) -> dict:
     }
 
 
-def serialize_person(person: Person) -> dict:
+def serialize_person(
+    person: Person,
+    *,
+    include_media: bool = True,
+    fallback_vehicle_photo_urls: Mapping[str, str] | None = None,
+) -> dict:
     assigned_vehicles = assigned_vehicles_for_person(person)
     return {
         "id": str(person.id),
@@ -364,7 +438,12 @@ def serialize_person(person: Person) -> dict:
         "last_name": person.last_name,
         "display_name": person.display_name,
         "pronouns": person.pronouns,
-        "profile_photo_data_url": person.profile_photo_data_url,
+        "profile_photo_data_url": person.profile_photo_data_url if include_media else None,
+        "profile_photo_url": stored_image_url(
+            person.profile_photo_data_url,
+            f"/api/v1/people/{person.id}/photo",
+            getattr(person, "updated_at", None),
+        ),
         "group_id": str(person.group_id) if person.group_id else None,
         "group": person.group.name if person.group else None,
         "category": person.group.category.value if person.group else None,
@@ -388,7 +467,8 @@ def serialize_person(person: Person) -> dict:
                     "id": str(vehicle.id),
                     "registration_number": vehicle.registration_number,
                     "description": vehicle.description,
-                    "vehicle_photo_data_url": vehicle.vehicle_photo_data_url,
+                    "vehicle_photo_data_url": vehicle.vehicle_photo_data_url if include_media else None,
+                    "vehicle_photo_url": vehicle_photo_url(vehicle, fallback_vehicle_photo_urls),
                     "make": vehicle.make,
                     "model": vehicle.model,
                     "color": vehicle.color,
@@ -462,7 +542,7 @@ def group_audit_snapshot(group: Group) -> dict:
 
 
 @router.get("/people")
-async def list_people() -> list[PersonResponse]:
+async def list_people(include_media: bool = Query(default=False)) -> list[PersonResponse]:
     async with AsyncSessionLocal() as session:
         people = (
             await session.scalars(
@@ -478,8 +558,36 @@ async def list_people() -> list[PersonResponse]:
                 .order_by(Person.display_name)
             )
         ).all()
+        assigned_vehicles = [
+            vehicle
+            for person in people
+            for vehicle in assigned_vehicles_for_person(person)
+        ]
+        fallback_vehicle_photo_urls = await latest_vehicle_snapshot_urls(session, assigned_vehicles)
 
-    return [PersonResponse(**serialize_person(person)) for person in people]
+    return [
+        PersonResponse(
+            **serialize_person(
+                person,
+                include_media=include_media,
+                fallback_vehicle_photo_urls=fallback_vehicle_photo_urls,
+            )
+        )
+        for person in people
+    ]
+
+
+@router.get("/people/{person_id}/photo")
+async def person_photo(
+    person_id: uuid.UUID,
+    variant: PhotoVariant = Query(default="full"),
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    person = await session.get(Person, person_id)
+    if not person:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+    return data_url_media_response(person.profile_photo_data_url, variant=variant)
 
 
 async def get_group_or_404(session: AsyncSession, group_id: uuid.UUID | None) -> Group | None:
@@ -681,7 +789,7 @@ async def add_person(
     if not refreshed_person:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved person")
 
-    return PersonResponse(**serialize_person(refreshed_person))
+    return PersonResponse(**serialize_person(refreshed_person, include_media=False))
 
 
 @router.patch("/people/{person_id}", response_model=PersonResponse)
@@ -780,11 +888,11 @@ async def update_person(
     if not refreshed_person:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved person")
 
-    return PersonResponse(**serialize_person(refreshed_person))
+    return PersonResponse(**serialize_person(refreshed_person, include_media=False))
 
 
 @router.get("/vehicles")
-async def list_vehicles() -> list[VehicleResponse]:
+async def list_vehicles(include_media: bool = Query(default=False)) -> list[VehicleResponse]:
     async with AsyncSessionLocal() as session:
         vehicles = (
             await session.scalars(
@@ -797,8 +905,31 @@ async def list_vehicles() -> list[VehicleResponse]:
                 .order_by(Vehicle.registration_number)
             )
         ).all()
+        fallback_photo_urls = await latest_vehicle_snapshot_urls(session, vehicles)
 
-    return [VehicleResponse(**serialize_vehicle(vehicle)) for vehicle in vehicles]
+    return [
+        VehicleResponse(
+            **serialize_vehicle(
+                vehicle,
+                include_media=include_media,
+                fallback_photo_urls=fallback_photo_urls,
+            )
+        )
+        for vehicle in vehicles
+    ]
+
+
+@router.get("/vehicles/{vehicle_id}/photo")
+async def vehicle_photo(
+    vehicle_id: uuid.UUID,
+    variant: PhotoVariant = Query(default="full"),
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    vehicle = await session.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    return data_url_media_response(vehicle.vehicle_photo_data_url, variant=variant)
 
 
 @router.post("/vehicles", response_model=VehicleResponse, status_code=status.HTTP_201_CREATED)
@@ -815,7 +946,7 @@ async def add_vehicle(
         person_id=derived_vehicle_person_id([person.id for person in people]),
         schedule_id=schedule.id if schedule else None,
         registration_number=normalize_registration_number(request.registration_number),
-        vehicle_photo_data_url=request.vehicle_photo_data_url,
+        vehicle_photo_data_url=normalize_profile_photo_or_400(request.vehicle_photo_data_url),
         make=normalize_vehicle_text(request.make),
         model=normalize_vehicle_text(request.model),
         color=normalize_vehicle_text(request.color),
@@ -860,7 +991,7 @@ async def add_vehicle(
     if not refreshed_vehicle:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved vehicle")
 
-    return VehicleResponse(**serialize_vehicle(refreshed_vehicle))
+    return VehicleResponse(**serialize_vehicle(refreshed_vehicle, include_media=False))
 
 
 @router.patch("/vehicles/{vehicle_id}", response_model=VehicleResponse)
@@ -887,7 +1018,7 @@ async def update_vehicle(
     if request.registration_number is not None:
         vehicle.registration_number = normalize_registration_number(request.registration_number)
     if "vehicle_photo_data_url" in request.model_fields_set:
-        vehicle.vehicle_photo_data_url = request.vehicle_photo_data_url
+        vehicle.vehicle_photo_data_url = normalize_profile_photo_or_400(request.vehicle_photo_data_url)
     if "make" in request.model_fields_set:
         vehicle.make = normalize_vehicle_text(request.make)
     if "model" in request.model_fields_set:
@@ -940,7 +1071,7 @@ async def update_vehicle(
     if not refreshed_vehicle:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved vehicle")
 
-    return VehicleResponse(**serialize_vehicle(refreshed_vehicle))
+    return VehicleResponse(**serialize_vehicle(refreshed_vehicle, include_media=False))
 
 
 @router.post("/vehicles/{vehicle_id}/dvla-refresh", response_model=VehicleResponse)
@@ -988,7 +1119,7 @@ async def refresh_vehicle_dvla(
     if not refreshed_vehicle:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load saved vehicle")
 
-    return VehicleResponse(**serialize_vehicle(refreshed_vehicle))
+    return VehicleResponse(**serialize_vehicle(refreshed_vehicle, include_media=False))
 
 
 @router.delete("/vehicles/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)

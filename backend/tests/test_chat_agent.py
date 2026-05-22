@@ -1493,7 +1493,7 @@ def test_pending_visitor_pass_create_abandons_clear_new_gate_command() -> None:
 async def test_guided_visitor_pass_flow_does_not_preempt_router_for_new_requests() -> None:
     service = ChatService()
 
-    result = await service._handle_guided_visitor_pass_flow(  # noqa: SLF001
+    result = await service._handle_guided_visitor_pass_flow(
         uuid.uuid4(),
         "Chris Starkey is coming tomorrow at approx 11am, create a pass for him",
         {},
@@ -1509,7 +1509,7 @@ async def test_guided_visitor_pass_flow_does_not_preempt_router_for_new_requests
 async def test_guided_schedule_flow_does_not_preempt_router_for_new_requests() -> None:
     service = ChatService()
 
-    result = await service._handle_guided_schedule_flow(  # noqa: SLF001
+    result = await service._handle_guided_schedule_flow(
         uuid.uuid4(),
         "Create a gardener schedule for weekdays 8am to 5pm",
         {},
@@ -3339,7 +3339,7 @@ async def test_query_anomalies_can_search_resolved_delivery_alert_notes_and_visu
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
+        async def __aexit__(self, _exc_type, exc, _traceback):
             return None
 
         async def scalars(self, _query):
@@ -3397,7 +3397,7 @@ async def test_query_anomalies_matches_compacted_hello_fresh_supplier_search(mon
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
+        async def __aexit__(self, _exc_type, exc, _traceback):
             return None
 
         async def scalars(self, _query):
@@ -3513,7 +3513,7 @@ async def test_resolve_human_entity_resolves_fuzzy_vehicle(monkeypatch) -> None:
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
+        async def __aexit__(self, _exc_type, exc, _traceback):
             return None
 
         async def scalars(self, _query):
@@ -3543,7 +3543,7 @@ async def test_resolve_human_entity_resolves_visitor_pass(monkeypatch) -> None:
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
+        async def __aexit__(self, _exc_type, exc, _traceback):
             return None
 
     class VisitorPassService:
@@ -3588,7 +3588,7 @@ async def test_resolve_human_entity_resolves_friendly_device(monkeypatch) -> Non
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
+        async def __aexit__(self, _exc_type, exc, _traceback):
             return None
 
         async def scalars(self, _query):
@@ -3708,7 +3708,7 @@ async def test_close_device_executes_close_cover_command(monkeypatch) -> None:
         return SimpleNamespace(accepted=True, state="closed", detail=reason)
 
     monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(ai_tools, "HomeAssistantClient", lambda: object())
+    monkeypatch.setattr(ai_tools, "get_home_assistant_client", lambda: object())
     monkeypatch.setattr(ai_tools, "command_cover", fake_command_cover)
 
     result = await ai_tools.open_device(

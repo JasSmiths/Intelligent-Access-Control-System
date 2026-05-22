@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
+from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 
 
@@ -14,7 +14,7 @@ class HomeAssistantMobileAppNotifier:
     """Home Assistant mobile_app notify sender."""
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
-        self._client = client or HomeAssistantClient()
+        self._client = client or get_home_assistant_client()
 
     async def send(
         self,

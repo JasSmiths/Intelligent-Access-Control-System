@@ -1,13 +1,14 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import current_user
+from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import get_db_session
 from app.models import User
 from app.models.enums import UserRole
@@ -61,6 +62,7 @@ class UserResponse(BaseModel):
     last_name: str
     full_name: str
     profile_photo_data_url: str | None
+    profile_photo_url: str | None = None
     email: str | None
     mobile_phone_number: str | None
     role: str
@@ -81,6 +83,7 @@ class AuthStatusResponse(BaseModel):
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(
     request: Request,
+    include_photo: bool = Query(default=False),
     session: AsyncSession = Depends(get_db_session),
 ) -> AuthStatusResponse:
     setup_required = await count_users(session) == 0
@@ -91,7 +94,13 @@ async def auth_status(
     return AuthStatusResponse(
         setup_required=False,
         authenticated=bool(user),
-        user=UserResponse(**serialize_user(user)) if user else None,
+        user=UserResponse(
+            **serialize_user(
+                user,
+                include_photo=include_photo,
+                photo_url_path="/api/v1/auth/me/photo",
+            )
+        ) if user else None,
     )
 
 
@@ -130,7 +139,7 @@ async def first_run_setup(
 
     token, expires_at = await create_access_token(user, remember_me=True)
     await set_session_cookie(response, token, expires_at)
-    return UserResponse(**serialize_user(user))
+    return UserResponse(**serialize_user(user, photo_url_path="/api/v1/auth/me/photo"))
 
 
 @router.post("/login", response_model=UserResponse)
@@ -150,7 +159,7 @@ async def login(
     await session.refresh(user)
     token, expires_at = await create_access_token(user, remember_me=request.remember_me)
     await set_session_cookie(response, token, expires_at)
-    return UserResponse(**serialize_user(user))
+    return UserResponse(**serialize_user(user, photo_url_path="/api/v1/auth/me/photo"))
 
 
 @router.post("/logout")
@@ -161,7 +170,15 @@ async def logout(response: Response) -> dict[str, str]:
 
 @router.get("/me", response_model=UserResponse)
 async def me(user: User = Depends(current_user)) -> UserResponse:
-    return UserResponse(**serialize_user(user))
+    return UserResponse(**serialize_user(user, photo_url_path="/api/v1/auth/me/photo"))
+
+
+@router.get("/me/photo")
+async def my_photo(
+    user: User = Depends(current_user),
+    variant: PhotoVariant = Query(default="full"),
+) -> Response:
+    return data_url_media_response(user.profile_photo_data_url, variant=variant)
 
 
 @router.patch("/me/preferences", response_model=UserResponse)
@@ -176,4 +193,4 @@ async def update_my_preferences(
     db_user.preferences = {**(db_user.preferences or {}), **preferences}
     await session.commit()
     await session.refresh(db_user)
-    return UserResponse(**serialize_user(db_user))
+    return UserResponse(**serialize_user(db_user, photo_url_path="/api/v1/auth/me/photo"))

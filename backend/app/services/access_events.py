@@ -294,7 +294,7 @@ class AccessEventService:
         self._last_heartbeat_at = self._started_at
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
         self._worker.add_done_callback(self._handle_worker_done)
-        event_bus.subscribe(self._handle_realtime_event)
+        event_bus.subscribe(self._handle_realtime_event, scope="all_workers")
         logger.info("access_event_service_started")
 
     async def stop(self) -> None:

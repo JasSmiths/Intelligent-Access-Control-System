@@ -485,7 +485,7 @@ class ActiveSpan:
     def __enter__(self) -> "ActiveSpan":
         return self
 
-    def __exit__(self, exc_type, exc, _traceback) -> None:
+    def __exit__(self, _exc_type, exc, _traceback) -> None:
         self.finish(status="error" if exc else "ok", error=exc)
 
 

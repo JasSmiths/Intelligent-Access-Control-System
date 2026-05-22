@@ -11,7 +11,6 @@ from sqlalchemy import select
 
 from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.auth_secret import get_auth_secret
-from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import GateMalfunctionState, NotificationActionContext, Person, User

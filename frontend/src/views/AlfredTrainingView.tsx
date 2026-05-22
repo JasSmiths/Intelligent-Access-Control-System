@@ -1,7 +1,7 @@
+import { Bot,Check,Download,Link2,Loader2,RefreshCw,ThumbsDown,ThumbsUp,X } from "lucide-react";
 import React from "react";
-import { Bot, Check, Download, Link2, Loader2, RefreshCw, ThumbsDown, ThumbsUp, X } from "lucide-react";
 
-import { api, Badge, titleCase, useSettings } from "../shared";
+import { api,Badge,titleCase,useSettings } from "../shared";
 
 type AlfredTrainingSource = {
   kind: "user_feedback" | "self_learning" | "manual_training" | "seed" | "system" | string;

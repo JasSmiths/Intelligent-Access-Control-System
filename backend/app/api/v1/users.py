@@ -1,13 +1,14 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user
+from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import get_db_session
 from app.models import Person, User
 from app.models.enums import UserRole
@@ -64,6 +65,7 @@ class UserResponse(BaseModel):
     last_name: str
     full_name: str
     profile_photo_data_url: str | None
+    profile_photo_url: str | None = None
     email: str | None
     mobile_phone_number: str | None
     role: str
@@ -118,11 +120,25 @@ class ResetPasswordResponse(BaseModel):
 
 @router.get("", response_model=list[UserResponse])
 async def list_users(
+    include_photo: bool = Query(default=False),
     _: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[UserResponse]:
     users = (await session.scalars(select(User).order_by(User.first_name, User.last_name))).all()
-    return [UserResponse(**serialize_user(user)) for user in users]
+    return [UserResponse(**serialize_user(user, include_photo=include_photo)) for user in users]
+
+
+@router.get("/{user_id}/photo")
+async def user_photo(
+    user_id: uuid.UUID,
+    variant: PhotoVariant = Query(default="full"),
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    user = await session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return data_url_media_response(user.profile_photo_data_url, variant=variant)
 
 
 @router.post("", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)

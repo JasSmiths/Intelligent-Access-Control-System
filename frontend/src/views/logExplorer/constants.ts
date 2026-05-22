@@ -1,20 +1,20 @@
 import {
-  Activity,
-  Bot,
-  Car,
-  Construction,
-  Database,
-  DoorOpen,
-  GitBranch,
-  PlugZap,
-  RefreshCcw,
-  ShieldCheck,
-  Terminal,
-  Workflow
+Activity,
+Bot,
+Car,
+Construction,
+Database,
+DoorOpen,
+GitBranch,
+PlugZap,
+RefreshCcw,
+ShieldCheck,
+Terminal,
+Workflow
 } from "lucide-react";
 import type React from "react";
 
-import { LogSourceKey, LogsFilters } from "./types";
+import { LogSourceKey,LogsFilters } from "./types";
 
 export const defaultLogsFilters: LogsFilters = {
   query: "",
@@ -62,10 +62,6 @@ export const auditCategories: Partial<Record<LogSourceKey, string>> = {
   crud: "entity_management",
   integrations: "integrations",
   maintenance: "maintenance_mode"
-};
-
-export const auditActionPrefixes: Partial<Record<LogSourceKey, string>> = {
-  maintenance: "maintenance_mode."
 };
 
 export const traceCategorySources: Record<string, LogSourceKey> = {

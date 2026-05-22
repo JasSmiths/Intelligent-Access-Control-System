@@ -1,107 +1,47 @@
-import React from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
+AlertTriangle,
+CalendarDays,
+Car,
+Check,
+CheckCircle2,
+Clock3,
+Construction,
+DoorClosed,
+DoorOpen,
+HardHat,
+Lock,
+LogOut,
+ShieldCheck,
+Warehouse
 } from "lucide-react";
+import React from "react";
 
 import {
-  AccessEvent,
-  activeManagedCovers,
-  AlertSeverity,
-  Anomaly,
-  api,
-  Badge,
-  BadgeTone,
-  createActionConfirmation,
-  displayUserName,
-  EmptyState,
-  ExpectedPresencePerson,
-  ExpectedPresenceSummary,
-  HomeAssistantManagedCover,
-  IntegrationStatus,
-  isActionableAlert,
-  MaintenanceStatus,
-  NavigateToView,
-  PanelHeader,
-  Person,
-  Presence,
-  titleCase,
-  UserAccount,
-  Vehicle,
-  visitorEventDisplayName
+AccessEvent,
+activeManagedCovers,
+AlertSeverity,
+Anomaly,
+api,
+Badge,
+BadgeTone,
+createActionConfirmation,
+displayUserName,
+EmptyState,
+ExpectedPresencePerson,
+ExpectedPresenceSummary,
+HomeAssistantManagedCover,
+IntegrationStatus,
+isActionableAlert,
+MaintenanceStatus,
+mediaSource,
+NavigateToView,
+PanelHeader,
+Person,
+Presence,
+titleCase,
+UserAccount,
+Vehicle,
+visitorEventDisplayName
 } from "../shared";
 
 
@@ -173,15 +113,21 @@ export function Dashboard({
     [people]
   );
   const expectedTooltipPeople = React.useMemo(
-    () => (expectedPresence?.people ?? []).map((person) => ({
-      ...person,
-      profilePhotoDataUrl: peopleById.get(person.person_id)?.profile_photo_data_url ?? null
-    })),
+    () => (expectedPresence?.people ?? []).map((person) => {
+      const directoryPerson = peopleById.get(person.person_id);
+      return {
+        ...person,
+        profilePhotoDataUrl: mediaSource(
+          directoryPerson?.profile_photo_url,
+          directoryPerson?.profile_photo_data_url,
+          "thumb"
+        ) || null
+      };
+    }),
     [expectedPresence?.people, peopleById]
   );
   const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
   const exitedToday = todayEvents.filter((event) => event.direction === "exit").length;
-  const deniedToday = todayEvents.filter((event) => event.decision === "denied").length;
   const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
   const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
 
@@ -417,16 +363,18 @@ export function Dashboard({
           <div className="event-feed">
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
-              const snapshotInteractive = Boolean(event.snapshot_url && inlineEventSnapshotLayout);
-              const snapshotOpen = snapshotInteractive && openSnapshotEventId === event.id;
+              const hasSnapshot = Boolean(event.snapshot_url);
+              const snapshotInteractive = hasSnapshot && inlineEventSnapshotLayout;
+              const snapshotOpen = hasSnapshot && openSnapshotEventId === event.id;
               const toggleSnapshot = () => setOpenSnapshotEventId((current) => current === event.id ? null : event.id);
+              const clearSnapshot = () => setOpenSnapshotEventId((current) => current === event.id ? null : current);
               return (
                 <div
                   aria-expanded={snapshotInteractive ? snapshotOpen : undefined}
                   aria-label={snapshotInteractive ? `Toggle ${event.snapshotLabel}` : undefined}
-                  className={`${event.snapshot_url ? "event-feed-row has-snapshot" : "event-feed-row"}${snapshotOpen ? " snapshot-open" : ""}`}
+                  className={`${hasSnapshot ? "event-feed-row has-snapshot" : "event-feed-row"}${snapshotOpen ? " snapshot-open" : ""}`}
                   key={event.id}
-                  onBlur={snapshotInteractive ? () => setOpenSnapshotEventId(null) : undefined}
+                  onBlur={snapshotInteractive ? clearSnapshot : undefined}
                   onClick={snapshotInteractive ? toggleSnapshot : undefined}
                   onKeyDown={snapshotInteractive ? (keyboardEvent) => {
                     if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
@@ -436,6 +384,8 @@ export function Dashboard({
                       setOpenSnapshotEventId(null);
                     }
                   } : undefined}
+                  onMouseEnter={hasSnapshot && !inlineEventSnapshotLayout ? () => setOpenSnapshotEventId(event.id) : undefined}
+                  onMouseLeave={hasSnapshot && !inlineEventSnapshotLayout ? clearSnapshot : undefined}
                   role={snapshotInteractive ? "button" : undefined}
                   tabIndex={snapshotInteractive ? 0 : undefined}
                 >
@@ -449,7 +399,7 @@ export function Dashboard({
                     <span>{event.subtitle}</span>
                   </div>
                   <EventStatusBadge event={event} />
-                  <DashboardEventSnapshotPreview event={event} />
+                  <DashboardEventSnapshotPreview event={event} visible={snapshotOpen} />
                 </div>
               );
             }) : <EmptyState icon={CalendarDays} label="No recent events" />}
@@ -881,11 +831,11 @@ export function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], p
   });
 }
 
-export function DashboardEventSnapshotPreview({ event }: { event: DashboardEvent }) {
-  if (!event.snapshot_url) return null;
+export function DashboardEventSnapshotPreview({ event, visible }: { event: DashboardEvent; visible: boolean }) {
+  if (!event.snapshot_url || !visible) return null;
   return (
     <span className="dashboard-event-snapshot-preview" aria-hidden="true">
-      <img alt="" loading="lazy" src={event.snapshot_url} />
+      <img alt="" decoding="async" loading="lazy" src={event.snapshot_url} />
     </span>
   );
 }

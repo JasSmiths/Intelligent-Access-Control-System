@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_, select
@@ -18,6 +18,7 @@ from app.models.enums import AnomalySeverity, AnomalyType
 from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.event_bus import event_bus
 from app.services.expected_presence import expected_presence_today
+from app.services.profile_photos import compact_image_bytes
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
@@ -76,12 +77,13 @@ def _serialize_event(event: AccessEvent, movement_saga: MovementSagaRecord | Non
     return payload
 
 
-@router.get("/events/{event_id}/snapshot")
+@router.get("/events/{event_id}/snapshot", response_model=None)
 async def event_snapshot(
     event_id: uuid.UUID,
     _: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> FileResponse:
+    variant: Literal["thumb", "full"] = Query(default="full"),
+):
     row = await session.get(AccessEvent, event_id)
     if not row or not row.snapshot_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event snapshot was not found.")
@@ -92,6 +94,20 @@ async def event_snapshot(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Event snapshot was not found.",
         ) from exc
+    if variant == "thumb":
+        try:
+            content_type, content = compact_image_bytes(
+                path.read_bytes(),
+                row.snapshot_content_type or "image/jpeg",
+                max_edge_px=96,
+            )
+            return Response(
+                content=content,
+                media_type=content_type,
+                headers={"Cache-Control": "private, no-store"},
+            )
+        except OSError:
+            pass
     return FileResponse(
         path,
         media_type=row.snapshot_content_type or "image/jpeg",

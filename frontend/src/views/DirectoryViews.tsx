@@ -1,106 +1,47 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
+Camera,
+Car,
+Check,
+ChevronDown,
+ChevronRight,
+CircleDot,
+Home,
+Plus,
+RefreshCw,
+Send,
+ShieldCheck,
+Trash2,
+Type,
+UserPlus,
+UserRound,
+Users,
+X,
+Zap
 } from "lucide-react";
+import React from "react";
 
 import {
-  activeManagedCovers,
-  api,
-  Badge,
-  BadgeTone,
-  createActionConfirmation,
-  EmptyState,
-  fileToDataUrl,
-  Group,
-  HomeAssistantDiscovery,
-  HomeAssistantManagedCover,
-  HomeAssistantMobileAppService,
-  initials,
-  matches,
-  PanelHeader,
-  Person,
-  Schedule,
-  titleCase,
-  titleFromEntityId,
-  useScheduleDefaultPolicyOptionLabel,
-  Vehicle
+activeManagedCovers,
+api,
+Badge,
+BadgeTone,
+createActionConfirmation,
+EmptyState,
+fileToDataUrl,
+Group,
+HomeAssistantDiscovery,
+HomeAssistantManagedCover,
+HomeAssistantMobileAppService,
+initials,
+matches,
+mediaSource,
+PanelHeader,
+Person,
+Schedule,
+titleCase,
+titleFromEntityId,
+useScheduleDefaultPolicyOptionLabel,
+Vehicle
 } from "../shared";
 
 type PersonPronouns = NonNullable<Person["pronouns"]>;
@@ -885,6 +826,9 @@ export function PersonModal({
     notes: person?.notes ?? "",
     is_active: person?.is_active ?? true
   });
+  const existingProfilePhotoSource = mediaSource(person?.profile_photo_url, person?.profile_photo_data_url);
+  const [profilePhotoChanged, setProfilePhotoChanged] = React.useState(false);
+  const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");
   const [haDiscovery, setHaDiscovery] = React.useState<HomeAssistantDiscovery | null>(null);
   const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
@@ -910,6 +854,7 @@ export function PersonModal({
       return;
     }
     setError("");
+    setProfilePhotoChanged(true);
     update("profile_photo_data_url", await fileToDataUrl(file));
   };
 
@@ -1053,11 +998,10 @@ export function PersonModal({
     setError("");
     setPageError("");
     setSubmitting(true);
-    const payload = {
+    const payload: Record<string, unknown> = {
       first_name: form.first_name,
       last_name: form.last_name,
       pronouns: form.pronouns || null,
-      profile_photo_data_url: form.profile_photo_data_url || null,
       group_id: form.group_id || null,
       schedule_id: form.schedule_id || null,
       vehicle_ids: form.vehicle_ids,
@@ -1072,6 +1016,9 @@ export function PersonModal({
       notes: form.notes || null,
       is_active: form.is_active
     };
+    if (mode === "create" || profilePhotoChanged) {
+      payload.profile_photo_data_url = form.profile_photo_data_url || null;
+    }
     try {
       if (mode === "edit" && person) {
         await api.patch<Person>(`/api/v1/people/${person.id}`, payload);
@@ -1094,7 +1041,8 @@ export function PersonModal({
     last_name: form.last_name,
     display_name: `${form.first_name} ${form.last_name}`.trim() || "New person",
     pronouns: form.pronouns || null,
-    profile_photo_data_url: form.profile_photo_data_url || null,
+    profile_photo_data_url: profilePhotoPreview.startsWith("data:") ? profilePhotoPreview : null,
+    profile_photo_url: profilePhotoPreview && !profilePhotoPreview.startsWith("data:") ? profilePhotoPreview : null,
     group_id: form.group_id || null,
     group: groups.find((group) => group.id === form.group_id)?.name ?? null,
     category: groups.find((group) => group.id === form.group_id)?.category ?? null,
@@ -1130,11 +1078,18 @@ export function PersonModal({
           <PersonAvatar person={previewPerson} size="large" />
           <label className="upload-button">
             <Camera size={16} />
-            <span>{form.profile_photo_data_url ? "Change photo" : "Upload profile picture"}</span>
+            <span>{profilePhotoPreview ? "Change photo" : "Upload profile picture"}</span>
             <input accept="image/*" onChange={uploadPhoto} type="file" />
           </label>
-          {form.profile_photo_data_url ? (
-            <button className="secondary-button" onClick={() => update("profile_photo_data_url", "")} type="button">
+          {profilePhotoPreview ? (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setProfilePhotoChanged(true);
+                update("profile_photo_data_url", "");
+              }}
+              type="button"
+            >
               Remove
             </button>
           ) : null}
@@ -1788,6 +1743,9 @@ export function VehicleModal({
     schedule_id: vehicle?.schedule_id ?? "",
     is_active: vehicle?.is_active ?? true
   });
+  const existingVehiclePhotoSource = mediaSource(vehicle?.vehicle_photo_url, vehicle?.vehicle_photo_data_url);
+  const [vehiclePhotoChanged, setVehiclePhotoChanged] = React.useState(false);
+  const vehiclePhotoPreview = form.vehicle_photo_data_url || (!vehiclePhotoChanged ? existingVehiclePhotoSource : "");
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [complianceRefreshing, setComplianceRefreshing] = React.useState(false);
@@ -1878,6 +1836,7 @@ export function VehicleModal({
         return;
       }
       setError("");
+      setVehiclePhotoChanged(true);
       update("vehicle_photo_data_url", await fileToDataUrl(file));
     };
 
@@ -1914,9 +1873,8 @@ export function VehicleModal({
     setError("");
     setPageError("");
     setSubmitting(true);
-      const payload = {
+      const payload: Record<string, unknown> = {
         registration_number: form.registration_number,
-        vehicle_photo_data_url: form.vehicle_photo_data_url || null,
         make: form.make || null,
         model: form.model || null,
         color: form.color || null,
@@ -1931,6 +1889,9 @@ export function VehicleModal({
         schedule_id: form.schedule_id || null,
       is_active: form.is_active
     };
+    if (mode === "create" || vehiclePhotoChanged) {
+      payload.vehicle_photo_data_url = form.vehicle_photo_data_url || null;
+    }
     try {
       if (mode === "edit" && vehicle) {
         await api.patch<Vehicle>(`/api/v1/vehicles/${vehicle.id}`, payload);
@@ -1950,7 +1911,8 @@ export function VehicleModal({
   const previewVehicle: Vehicle = {
     id: vehicle?.id ?? "preview",
     registration_number: form.registration_number || "NEW",
-    vehicle_photo_data_url: form.vehicle_photo_data_url || null,
+    vehicle_photo_data_url: vehiclePhotoPreview.startsWith("data:") ? vehiclePhotoPreview : null,
+    vehicle_photo_url: vehiclePhotoPreview && !vehiclePhotoPreview.startsWith("data:") ? vehiclePhotoPreview : null,
     description: form.description || null,
     make: form.make || null,
     model: form.model || null,
@@ -1990,11 +1952,18 @@ export function VehicleModal({
           <VehiclePhoto vehicle={previewVehicle} size="large" />
           <label className="upload-button">
             <Camera size={16} />
-            <span>{form.vehicle_photo_data_url ? "Change photo" : "Upload vehicle photo"}</span>
+            <span>{vehiclePhotoPreview ? "Change photo" : "Upload vehicle photo"}</span>
             <input accept="image/*" onChange={uploadPhoto} type="file" />
           </label>
-          {form.vehicle_photo_data_url ? (
-            <button className="secondary-button" onClick={() => update("vehicle_photo_data_url", "")} type="button">
+          {vehiclePhotoPreview ? (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setVehiclePhotoChanged(true);
+                update("vehicle_photo_data_url", "");
+              }}
+              type="button"
+            >
               Remove
             </button>
           ) : null}
@@ -2239,17 +2208,19 @@ export function personInitials(person: Pick<Person, "first_name" | "last_name" |
 }
 
 export function PersonAvatar({ person, size = "normal" }: { person: Person; size?: "normal" | "large" }) {
+  const imageSource = mediaSource(person.profile_photo_url, person.profile_photo_data_url, "thumb");
   return (
     <span className={size === "large" ? "profile-photo large" : "profile-photo"} aria-label={person.display_name}>
-      {person.profile_photo_data_url ? <img alt="" src={person.profile_photo_data_url} /> : personInitials(person)}
+      {imageSource ? <img alt="" decoding="async" loading="lazy" src={imageSource} /> : personInitials(person)}
     </span>
   );
 }
 
 export function VehiclePhoto({ vehicle, size = "normal" }: { vehicle: Vehicle; size?: "normal" | "large" }) {
+  const imageSource = mediaSource(vehicle.vehicle_photo_url, vehicle.vehicle_photo_data_url, "thumb");
   return (
     <span className={size === "large" ? "vehicle-photo large" : "vehicle-photo"} aria-label={vehicle.registration_number}>
-      {vehicle.vehicle_photo_data_url ? <img alt="" src={vehicle.vehicle_photo_data_url} /> : <Car size={size === "large" ? 24 : 18} />}
+      {imageSource ? <img alt="" decoding="async" loading="lazy" src={imageSource} /> : <Car size={size === "large" ? 24 : 18} />}
     </span>
   );
 }

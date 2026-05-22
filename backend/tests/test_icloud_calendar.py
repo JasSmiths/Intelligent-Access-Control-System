@@ -175,6 +175,7 @@ def test_icloud_fetch_keeps_raw_events_so_notes_are_not_dropped() -> None:
             return [{"title": "Lossy wrapper path"}]
 
         def get_events(self, *, from_dt, to_dt, as_objs):
+            _ = (from_dt, to_dt)
             self.as_objs = as_objs
             return [{"title": "Chris Starkey", "privateComments": "Open Gate"}]
 
@@ -195,6 +196,7 @@ def test_icloud_fetch_prefers_raw_refresh_payload_when_available() -> None:
             return [{"title": "Lossy wrapper path"}]
 
         def get_events(self, *, from_dt, to_dt, as_objs):
+            _ = (from_dt, to_dt)
             return [{"title": "Still not the raw refresh path"}]
 
         def refresh_client(self, starts_at, ends_at):

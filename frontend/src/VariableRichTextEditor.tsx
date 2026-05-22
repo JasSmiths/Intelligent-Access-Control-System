@@ -1,8 +1,8 @@
-import React from "react";
-import { computePosition, flip, offset, shift, size, type Placement, type VirtualElement } from "@floating-ui/dom";
+import { computePosition,flip,offset,shift,size,type Placement,type VirtualElement } from "@floating-ui/dom";
 import { Mention } from "@tiptap/extension-mention";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent,useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import React from "react";
 import { createPortal } from "react-dom";
 
 type NotificationVariable = {
@@ -22,7 +22,7 @@ type FloatingLayout = {
   y: number;
 };
 
-export function VariableRichTextEditor({
+function VariableRichTextEditor({
   label,
   multiline = false,
   value,

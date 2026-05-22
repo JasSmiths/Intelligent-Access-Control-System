@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import HomeAssistantClient, get_home_assistant_client
 from app.services.settings import get_runtime_config
 
 
@@ -13,7 +13,7 @@ class HomeAssistantTtsAnnouncer:
     """Announcer for Home Assistant TTS service calls."""
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
-        self._client = client or HomeAssistantClient()
+        self._client = client or get_home_assistant_client()
 
     async def announce(self, target: AnnouncementTarget, message: str) -> None:
         config = await get_runtime_config()

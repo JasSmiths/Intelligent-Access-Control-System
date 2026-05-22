@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import MaintenanceModeState
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
@@ -245,7 +245,7 @@ async def _notify_maintenance_changed(active: bool, payload: dict[str, Any]) -> 
 async def _sync_home_assistant(active: bool, *, actor: str, source: str, reason: str) -> None:
     service = "input_boolean.turn_on" if active else "input_boolean.turn_off"
     try:
-        await HomeAssistantClient().call_service(service, {"entity_id": MAINTENANCE_HA_ENTITY_ID})
+        await get_home_assistant_client().call_service(service, {"entity_id": MAINTENANCE_HA_ENTITY_ID})
     except Exception as exc:
         emit_audit_log(
             category=TELEMETRY_CATEGORY_MAINTENANCE,

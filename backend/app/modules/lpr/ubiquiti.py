@@ -77,7 +77,7 @@ class UbiquitiLprPayload(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_alarm_manager_payload(cls, value: Any) -> Any:
+    def normalize_alarm_manager_payload(_cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
 
@@ -100,7 +100,7 @@ class UbiquitiLprPayload(BaseModel):
 
     @field_validator("registration_number")
     @classmethod
-    def normalize_plate(cls, value: str) -> str:
+    def normalize_plate(_cls, value: str) -> str:
         plate = _normalize_plate(value)
         if not plate:
             raise ValueError("Ubiquiti LPR webhook did not include a registration number.")
@@ -108,7 +108,7 @@ class UbiquitiLprPayload(BaseModel):
 
     @field_validator("confidence", mode="before")
     @classmethod
-    def normalize_confidence(cls, value: Any) -> float:
+    def normalize_confidence(_cls, value: Any) -> float:
         if value is None or value == "":
             return 1.0
         if isinstance(value, str):

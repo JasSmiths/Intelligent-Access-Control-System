@@ -1,124 +1,78 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
+Activity,
+AlertTriangle,
+Bell,
+Bot,
+CalendarDays,
+Camera,
+Check,
+CheckCircle2,
+ChevronDown,
+ChevronRight,
+CircleDot,
+Clock3,
+Copy,
+Database,
+Download,
+Home,
+Key,
+Loader2,
+Lock,
+LogIn,
+MessageCircle,
+Play,
+PlugZap,
+Plus,
+RefreshCcw,
+RefreshCw,
+Save,
+Search,
+Send,
+Settings,
+ShieldCheck,
+SlidersHorizontal,
+Trash2,
+UserRound,
+X,
+Zap
 } from "lucide-react";
+import React from "react";
 
 import {
-  api,
-  AccessDeviceStreamDeviceStatus,
-  Badge,
-  BadgeTone,
-  coerceSettingsPayload,
-  createActionConfirmation,
-  discordListSettingKeys,
-  EmptyState,
-  formatDate,
-  formatFileSize,
-  HomeAssistantDiscovery,
-  HomeAssistantEntity,
-  HomeAssistantManagedCover,
-  IntegrationStatus,
-  isLlmProviderConfigured,
-  isRecord,
-  llmProviderDefinitions,
-  LlmProviderKey,
-  normalizeLlmProvider,
-  NotificationChannelId,
-  notificationChannelMeta,
-  Person,
-  RealtimeMessage,
-  Schedule,
-  secretSettingKeys,
-  SettingField,
-  SettingFieldDefinition,
-  SettingsMap,
-  stringifySetting,
-  stringPayload,
-  titleCase,
-  titleFromEntityId,
-  Toolbar,
-  UnifiProtectCamera,
-  UserAccount,
-  useScheduleDefaultPolicyOptionLabel,
-  useSettings,
-  wsUrl
+AccessDeviceStreamDeviceStatus,
+api,
+Badge,
+BadgeTone,
+coerceSettingsPayload,
+createActionConfirmation,
+discordListSettingKeys,
+EmptyState,
+formatDate,
+formatFileSize,
+HomeAssistantDiscovery,
+HomeAssistantEntity,
+IntegrationStatus,
+isLlmProviderConfigured,
+isRecord,
+llmProviderDefinitions,
+LlmProviderKey,
+normalizeLlmProvider,
+NotificationChannelId,
+notificationChannelMeta,
+Person,
+RealtimeMessage,
+secretSettingKeys,
+SettingField,
+SettingFieldDefinition,
+SettingsMap,
+stringifySetting,
+stringPayload,
+titleCase,
+Toolbar,
+UnifiProtectCamera,
+UserAccount,
+useSettings,
+wsUrl
 } from "../shared";
 
 
@@ -496,7 +450,7 @@ export type DependencyConfirmAction =
   | { kind: "apply" }
   | { kind: "restore"; backup: DependencyBackup };
 
-export function IntegrationsView({ people, realtime, refreshToken, schedules, status }: { people: Person[]; realtime: RealtimeMessage[]; refreshToken: number; schedules: Schedule[]; status: IntegrationStatus | null }) {
+export function IntegrationsView({ people, realtime, refreshToken, status }: { people: Person[]; realtime: RealtimeMessage[]; refreshToken: number; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
   const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
@@ -526,23 +480,34 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
   const [dependencyStorage, setDependencyStorage] = React.useState<DependencyStorageStatus | null>(null);
   const [dependencyLoading, setDependencyLoading] = React.useState(false);
   const [dependencyError, setDependencyError] = React.useState("");
+  const [protectCamerasLoaded, setProtectCamerasLoaded] = React.useState(false);
+  const dependencyUpdatesLoadedRef = React.useRef(false);
+  const protectCamerasLoadedRef = React.useRef(false);
   const processedIcloudRealtimeRef = React.useRef(new Set<string>());
   const lastRefreshTokenRef = React.useRef(refreshToken);
-  const loadProtect = React.useCallback(async (forceRefresh = false) => {
+  const loadProtect = React.useCallback(async (forceRefresh = false, includeCameras = protectCamerasLoadedRef.current) => {
     setProtectLoading(true);
     setProtectError("");
     try {
       const refreshSuffix = forceRefresh ? "?refresh=true" : "";
       const nextStatus = await api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status");
       setProtectStatus(nextStatus);
-      if (nextStatus.configured) {
+      if (nextStatus.configured && includeCameras) {
         const result = await api.get<{ cameras: UnifiProtectCamera[] }>(`/api/v1/integrations/unifi-protect/cameras${refreshSuffix}`);
         setProtectCameras(result.cameras);
+        protectCamerasLoadedRef.current = true;
+        setProtectCamerasLoaded(true);
         setProtectSnapshotRefreshToken(Date.now());
-      } else {
+      } else if (!nextStatus.configured) {
         setProtectCameras([]);
+        protectCamerasLoadedRef.current = true;
+        setProtectCamerasLoaded(true);
       }
     } catch (error) {
+      if (includeCameras) {
+        protectCamerasLoadedRef.current = true;
+        setProtectCamerasLoaded(true);
+      }
       setProtectError(error instanceof Error ? error.message : "Unable to load UniFi Protect cameras.");
     } finally {
       setProtectLoading(false);
@@ -584,6 +549,15 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
   React.useEffect(() => {
     setAccessDeviceStatus(status);
   }, [status]);
+
+  React.useEffect(() => {
+    const latest = realtime[0];
+    if (!latest || latest.type !== "access_device.status") return;
+    const payload = isRecord(latest.payload.status) ? latest.payload.status : latest.payload;
+    setAccessDeviceStatus((current) => current
+      ? { ...current, ...(payload as Partial<IntegrationStatus>) }
+      : payload as IntegrationStatus);
+  }, [realtime]);
 
   React.useEffect(() => {
     for (const message of realtime.slice(0, 20).reverse()) {
@@ -635,6 +609,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
   const loadDependencyUpdates = React.useCallback(async () => {
     setDependencyLoading(true);
     setDependencyError("");
+    dependencyUpdatesLoadedRef.current = true;
     try {
       const [packagesResult, storageResult] = await Promise.all([
         api.get<{ packages: DependencyPackage[] }>("/api/v1/dependency-updates/packages"),
@@ -643,6 +618,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
       setDependencyPackages(packagesResult.packages);
       setDependencyStorage(storageResult);
     } catch (error) {
+      dependencyUpdatesLoadedRef.current = false;
       setDependencyError(error instanceof Error ? error.message : "Unable to load dependency updates.");
     } finally {
       setDependencyLoading(false);
@@ -657,7 +633,7 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
     await loadICloudCalendar();
     await loadDiscord();
     await loadWhatsApp();
-    await loadDependencyUpdates();
+    if (dependencyUpdatesLoadedRef.current) await loadDependencyUpdates();
   }, [loadAccessDeviceStatus, loadDependencyUpdates, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp, reload]);
 
   React.useEffect(() => {
@@ -668,14 +644,18 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
     loadICloudCalendar().catch(() => undefined);
     loadDiscord().catch(() => undefined);
     loadWhatsApp().catch(() => undefined);
-    loadDependencyUpdates().catch(() => undefined);
-  }, [loadAccessDeviceStatus, loadDependencyUpdates, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
+  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
 
   React.useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
     lastRefreshTokenRef.current = refreshToken;
     reloadSettingsAndProtect().catch(() => undefined);
   }, [refreshToken, reloadSettingsAndProtect]);
+
+  React.useEffect(() => {
+    if (pageTab !== "updates" || dependencyUpdatesLoadedRef.current) return;
+    loadDependencyUpdates().catch(() => undefined);
+  }, [loadDependencyUpdates, pageTab]);
 
   const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
   const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
@@ -793,7 +773,6 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
           whatsappLoading={whatsappLoading}
           whatsappStatus={whatsappStatus}
           people={people}
-          schedules={schedules}
           values={values}
           onClose={() => setActive(null)}
           onICloudChanged={loadICloudCalendar}
@@ -801,17 +780,17 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
           onWhatsAppChanged={loadWhatsApp}
           onProtectUpdateChanged={async () => {
             await loadProtectUpdateStatus();
-            await loadProtect(true);
+            await loadProtect(true, protectCamerasLoadedRef.current);
             await loadDependencyUpdates();
           }}
-          onProtectRefresh={() => loadProtect(true)}
+          onProtectRefresh={() => loadProtect(true, true)}
           onSettingsChanged={reloadSettingsAndProtect}
           onAccessDeviceStatusChanged={setAccessDeviceStatus}
           onSaved={async (updates) => {
             await save(updates);
-            await loadProtect(true);
+            await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
             await loadWhatsApp();
-            await loadDependencyUpdates();
+            if (dependencyUpdatesLoadedRef.current) await loadDependencyUpdates();
             setActive(null);
           }}
         />
@@ -827,8 +806,10 @@ export function IntegrationsView({ people, realtime, refreshToken, schedules, st
       <UnifiProtectCameraSection
         cameras={protectCameras}
         error={protectError || protectStatus?.last_error || ""}
+        loaded={protectCamerasLoaded}
         loading={protectLoading}
-        onRefresh={() => loadProtect(true)}
+        onLoad={() => loadProtect(false, true)}
+        onRefresh={() => loadProtect(true, true)}
         refreshToken={protectSnapshotRefreshToken}
         status={protectStatus}
       />
@@ -1211,14 +1192,18 @@ export function integrationDefinitions(
 export function UnifiProtectCameraSection({
   cameras,
   error,
+  loaded,
   loading,
+  onLoad,
   onRefresh,
   refreshToken,
   status
 }: {
   cameras: UnifiProtectCamera[];
   error: string;
+  loaded: boolean;
   loading: boolean;
+  onLoad: () => Promise<void>;
   onRefresh: () => Promise<void>;
   refreshToken: number;
   status: UnifiProtectStatus | null;
@@ -1287,6 +1272,12 @@ export function UnifiProtectCameraSection({
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {!configured ? (
         <div className="empty-state">Configure UniFi Protect to load cameras</div>
+      ) : !loaded ? (
+        <div className="empty-state">
+          <button className="secondary-button" onClick={onLoad} disabled={loading} type="button">
+            <Camera size={15} /> {loading ? "Loading cameras..." : "Load cameras"}
+          </button>
+        </div>
       ) : loading && !cameras.length ? (
         <div className="empty-state">Loading cameras</div>
       ) : cameras.length ? (
@@ -1295,11 +1286,11 @@ export function UnifiProtectCameraSection({
             const events = eventsByCamera[camera.id] ?? [];
             const analysis = analysisByCamera[camera.id];
             const detectionLabels = camera.detections.active.length ? camera.detections.active : camera.is_motion_detected ? ["motion"] : [];
-            const snapshotUrl = `${camera.snapshot_url}?width=640&height=360&_=${snapshotNonce[camera.id] ?? refreshToken}`;
+            const snapshotUrl = `${camera.snapshot_url}?width=320&height=180&_=${snapshotNonce[camera.id] ?? refreshToken}`;
             return (
               <article className="protect-camera-card" key={camera.id}>
                 <div className="protect-camera-media">
-                  <img alt="" src={snapshotUrl} />
+                  <img alt="" decoding="async" loading="lazy" src={snapshotUrl} />
                   <div className="protect-camera-badges">
                     <Badge tone={camera.is_video_ready ? "green" : "amber"}>{camera.is_video_ready ? "Video Ready" : "Video Pending"}</Badge>
                     {camera.is_recording ? <Badge tone="blue">Recording</Badge> : null}
@@ -1342,7 +1333,7 @@ export function UnifiProtectCameraSection({
                     <div className="protect-event-list">
                       {events.map((event) => (
                         <div className="protect-event-row" key={event.id}>
-                          <img alt="" src={`${event.thumbnail_url}?width=96&height=54`} />
+                          <img alt="" decoding="async" loading="lazy" src={`${event.thumbnail_url}?width=96&height=54`} />
                           <div>
                             <strong>{titleCase(event.type)}</strong>
                             <span>{event.start ? formatDate(event.start) : "Time pending"} · {event.smart_detect_types.map(titleCase).join(", ") || "motion"}</span>
@@ -2986,7 +2977,6 @@ export function IntegrationModal({
   whatsappLoading,
   whatsappStatus,
   people,
-  schedules,
   onClose,
   onDiscordChanged,
   onWhatsAppChanged,
@@ -3022,7 +3012,6 @@ export function IntegrationModal({
   whatsappLoading?: boolean;
   whatsappStatus?: WhatsAppStatus | null;
   people: Person[];
-  schedules: Schedule[];
   onClose: () => void;
   onDiscordChanged?: () => Promise<void>;
   onWhatsAppChanged?: () => Promise<void>;
@@ -3376,7 +3365,6 @@ export function IntegrationModal({
             form={form}
             onChange={update}
             onReload={loadHomeAssistantDiscovery}
-            schedules={schedules}
             status={homeAssistantStatus ?? null}
           />
         ) : isApprise ? (
@@ -4060,11 +4048,9 @@ export function ESPHomeSettingsFields({
       refreshStreamStatus(false).catch(() => undefined);
     };
     const firstRefresh = window.setTimeout(refresh, 750);
-    const interval = window.setInterval(refresh, 2500);
     return () => {
       cancelled = true;
       window.clearTimeout(firstRefresh);
-      window.clearInterval(interval);
     };
   }, [refreshStreamStatus, streamDeviceRefreshKey]);
 
@@ -4516,7 +4502,6 @@ export function HomeAssistantSettingsFields({
   form,
   onChange,
   onReload,
-  schedules,
   status
 }: {
   discovery: HomeAssistantDiscovery | null;
@@ -4525,7 +4510,6 @@ export function HomeAssistantSettingsFields({
   form: Record<string, string>;
   onChange: (key: string, value: string) => void;
   onReload: () => Promise<void>;
-  schedules: Schedule[];
   status: IntegrationStatus | null;
 }) {
   type HomeAssistantTab = "setup";
@@ -4621,124 +4605,6 @@ export function HomeAssistantSettingsFields({
   );
 }
 
-export function HomeAssistantCoverTable({
-  addLabel,
-  autoDetectLabel,
-  availableEntities,
-  emptyLabel,
-  entities,
-  icon: Icon,
-  description,
-  onAutoDetect,
-  onChange,
-  schedules,
-  title
-}: {
-  addLabel: string;
-  autoDetectLabel: string;
-  availableEntities: HomeAssistantEntity[];
-  emptyLabel: string;
-  entities: HomeAssistantManagedCover[];
-  icon: React.ElementType;
-  description: string;
-  onAutoDetect: () => void;
-  onChange: (entities: HomeAssistantManagedCover[]) => void;
-  schedules: Schedule[];
-  title: string;
-}) {
-  const [selectedEntityId, setSelectedEntityId] = React.useState("");
-  const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
-  const selectedIds = React.useMemo(() => new Set(entities.map((entity) => entity.entity_id)), [entities]);
-  const addableEntities = availableEntities.filter((entity) => entity.entity_id.startsWith("cover.") && !selectedIds.has(entity.entity_id));
-
-  const addSelectedEntity = () => {
-    if (!selectedEntityId) return;
-    const entity = availableEntities.find((item) => item.entity_id === selectedEntityId);
-    if (!entity) return;
-    onChange([...entities, managedCoverFromEntity(entity)]);
-    setSelectedEntityId("");
-  };
-
-  const updateEntity = (entityId: string, updates: Partial<HomeAssistantManagedCover>) => {
-    onChange(entities.map((entity) => entity.entity_id === entityId ? { ...entity, ...updates } : entity));
-  };
-
-  const removeEntity = (entityId: string) => {
-    onChange(entities.filter((entity) => entity.entity_id !== entityId));
-  };
-
-  return (
-    <section className="ha-device-panel">
-      <div className="ha-device-title">
-        <span className="ha-device-icon"><Icon size={17} /></span>
-        <div>
-          <strong>{title}</strong>
-          <span>{entities.length} configured - {description}</span>
-        </div>
-        <button className="secondary-button ha-auto-button" onClick={onAutoDetect} type="button">
-          <RefreshCcw size={15} /> {autoDetectLabel}
-        </button>
-      </div>
-
-      <div className="ha-entity-composer">
-        <select value={selectedEntityId} onChange={(event) => setSelectedEntityId(event.target.value)}>
-          <option value="">Select discovered cover entity</option>
-          {addableEntities.map((entity) => (
-            <option key={entity.entity_id} value={entity.entity_id}>
-              {entity.name ? `${entity.name} - ${entity.entity_id}` : entity.entity_id}
-            </option>
-          ))}
-        </select>
-        <button className="primary-button ha-add-button" onClick={addSelectedEntity} disabled={!selectedEntityId} type="button">
-          <Plus size={15} /> {addLabel}
-        </button>
-      </div>
-
-      <div className="ha-cover-list">
-        {entities.length ? entities.map((entity) => (
-          <div className="ha-cover-row" key={entity.entity_id}>
-            <div className="ha-cover-identity">
-              <input
-                value={entity.name}
-                onChange={(event) => updateEntity(entity.entity_id, { name: event.target.value })}
-                aria-label={`${entity.entity_id} name`}
-              />
-              <code>{entity.entity_id}</code>
-            </div>
-            <select
-              aria-label={`${entity.name || entity.entity_id} schedule`}
-              className="ha-cover-schedule-select"
-              value={entity.schedule_id ?? ""}
-              onChange={(event) => updateEntity(entity.entity_id, { schedule_id: event.target.value || null })}
-            >
-              <option value="">{defaultPolicyOptionLabel}</option>
-              {schedules.map((schedule) => (
-                <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
-              ))}
-            </select>
-            <label className={entity.enabled === false ? "entity-toggle" : "entity-toggle active"}>
-              <input
-                checked={entity.enabled !== false}
-                onChange={(event) => updateEntity(entity.entity_id, { enabled: event.target.checked })}
-                type="checkbox"
-              />
-              <span>{entity.enabled === false ? "Disabled" : "Enabled"}</span>
-            </label>
-            <button className="icon-button danger" onClick={() => removeEntity(entity.entity_id)} type="button" aria-label={`Remove ${entity.name || entity.entity_id}`}>
-              <Trash2 size={15} />
-            </button>
-          </div>
-        )) : (
-          <div className="ha-entity-empty">
-            <Icon size={18} />
-            <span>{emptyLabel}</span>
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
 export function EntitySelectField({
   label,
   value,
@@ -4820,90 +4686,4 @@ export function integrationInitialValues(definition: IntegrationDefinition, valu
 
 export function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-export function parseManagedCovers(value: unknown): HomeAssistantManagedCover[] {
-  const raw = parseJsonArray(value);
-  const seen = new Set<string>();
-  const covers: HomeAssistantManagedCover[] = [];
-  for (const item of raw) {
-    const cover = normalizeManagedCover(item);
-    if (!cover || seen.has(cover.entity_id)) continue;
-    covers.push(cover);
-    seen.add(cover.entity_id);
-  }
-  return covers;
-}
-
-export function parseJsonArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== "string" || !value.trim()) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export function normalizeManagedCover(value: unknown): HomeAssistantManagedCover | null {
-  if (typeof value === "string") {
-    const entityId = value.trim();
-    return entityId.startsWith("cover.")
-      ? { entity_id: entityId, name: titleFromEntityId(entityId), enabled: true, open_service: "cover.open_cover", close_service: "cover.close_cover" }
-      : null;
-  }
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Partial<HomeAssistantManagedCover>;
-  const entityId = String(raw.entity_id ?? "").trim();
-  if (!entityId.startsWith("cover.")) return null;
-  return {
-    entity_id: entityId,
-    name: String(raw.name || titleFromEntityId(entityId)),
-    enabled: raw.enabled !== false,
-    schedule_id: raw.schedule_id ? String(raw.schedule_id) : null,
-    open_service: String(raw.open_service || "cover.open_cover"),
-    close_service: String(raw.close_service || "cover.close_cover"),
-    state: raw.state ?? null
-  };
-}
-
-export function normalizeManagedCoversForSave(entities: HomeAssistantManagedCover[]) {
-  return entities.map((entity) => ({
-    entity_id: entity.entity_id,
-    name: entity.name || titleFromEntityId(entity.entity_id),
-    enabled: entity.enabled !== false,
-    schedule_id: entity.schedule_id || null
-  }));
-}
-
-export function managedCoverFromEntity(entity: HomeAssistantEntity): HomeAssistantManagedCover {
-  return {
-    entity_id: entity.entity_id,
-    name: entity.name || titleFromEntityId(entity.entity_id),
-    enabled: true,
-    open_service: "cover.open_cover",
-    close_service: "cover.close_cover",
-    state: entity.state
-  };
-}
-
-export function mergeManagedCovers(current: HomeAssistantManagedCover[], incoming: HomeAssistantManagedCover[]) {
-  const byEntityId = new Map(current.map((entity) => [entity.entity_id, entity]));
-  for (const entity of incoming) {
-    if (!byEntityId.has(entity.entity_id)) {
-      byEntityId.set(entity.entity_id, entity);
-    }
-  }
-  return Array.from(byEntityId.values());
-}
-
-export function isGarageDoorCandidate(entity: HomeAssistantEntity) {
-  const label = `${entity.entity_id} ${entity.name ?? ""}`.toLowerCase();
-  return entity.device_class === "garage" || label.includes("garage");
-}
-
-export function isGateCandidate(entity: HomeAssistantEntity) {
-  const label = `${entity.entity_id} ${entity.name ?? ""}`.toLowerCase();
-  return entity.device_class === "gate" || label.includes("gate");
 }

@@ -1,110 +1,54 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
+CalendarDays,
+Camera,
+CircleDot,
+Construction,
+Database,
+Home,
+Key,
+Loader2,
+MessageCircle,
+PlugZap,
+Plus,
+RefreshCw,
+ShieldCheck,
+SlidersHorizontal,
+Smartphone,
+Trash2,
+UserPlus,
+UserRound,
+Users,
+X,
+Zap
 } from "lucide-react";
+import React from "react";
 
 import {
-  api,
-  AccessDevice,
-  Badge,
-  CardHeader,
-  coerceSettingsPayload,
-  createActionConfirmation,
-  displayUserName,
-  fileToDataUrl,
-  formatDate,
-  Group,
-  MaintenanceStatus,
-  PanelHeader,
-  Person,
-  Schedule,
-  SettingField,
-  SettingFieldDefinition,
-  stringifySetting,
-  Toolbar,
-  UnifiProtectCamera,
-  UserAccount,
-  UserAvatar,
-  UserRole,
-  useSettings,
-  Vehicle
+AccessDevice,
+api,
+Badge,
+CardHeader,
+coerceSettingsPayload,
+createActionConfirmation,
+displayUserName,
+fileToDataUrl,
+formatDate,
+Group,
+MaintenanceStatus,
+mediaSource,
+PanelHeader,
+Person,
+Schedule,
+SettingField,
+SettingFieldDefinition,
+stringifySetting,
+Toolbar,
+UnifiProtectCamera,
+UserAccount,
+UserAvatar,
+UserRole,
+useSettings,
+Vehicle
 } from "../shared";
 
 
@@ -1225,6 +1169,9 @@ export function UserModal({
     temporary_password: "",
     generate_password: mode === "create"
   });
+  const existingProfilePhotoSource = mediaSource(user?.profile_photo_url, user?.profile_photo_data_url);
+  const [profilePhotoChanged, setProfilePhotoChanged] = React.useState(false);
+  const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -1242,6 +1189,7 @@ export function UserModal({
       return;
     }
     setError("");
+    setProfilePhotoChanged(true);
     update("profile_photo_data_url", await fileToDataUrl(file));
   };
 
@@ -1251,32 +1199,36 @@ export function UserModal({
     setSubmitting(true);
     try {
       if (mode === "create") {
-        const result = await api.post<{ user: UserAccount; temporary_password: string | null }>("/api/v1/users", {
+        const payload: Record<string, unknown> = {
           username: form.username,
           first_name: form.first_name,
           last_name: form.last_name,
           email: form.email || null,
           mobile_phone_number: form.mobile_phone_number || null,
-          profile_photo_data_url: form.profile_photo_data_url || null,
           person_id: form.person_id || null,
           role: form.role,
           is_active: form.is_active,
           temporary_password: form.generate_password ? null : form.temporary_password,
           generate_password: form.generate_password
-        });
+        };
+        payload.profile_photo_data_url = form.profile_photo_data_url || null;
+        const result = await api.post<{ user: UserAccount; temporary_password: string | null }>("/api/v1/users", payload);
         await onSaved(result.temporary_password, result.user);
       } else if (user) {
-        const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, {
+        const payload: Record<string, unknown> = {
           username: form.username,
           first_name: form.first_name,
           last_name: form.last_name,
           email: form.email || null,
           mobile_phone_number: form.mobile_phone_number || null,
-          profile_photo_data_url: form.profile_photo_data_url || null,
           person_id: form.person_id || null,
           role: form.role,
           is_active: form.is_active
-        });
+        };
+        if (profilePhotoChanged) {
+          payload.profile_photo_data_url = form.profile_photo_data_url || null;
+        }
+        const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, payload);
         await onSaved(null, savedUser);
       }
     } catch (saveError) {
@@ -1307,7 +1259,8 @@ export function UserModal({
               first_name: String(form.first_name),
               last_name: String(form.last_name),
               full_name: `${form.first_name} ${form.last_name}`.trim(),
-              profile_photo_data_url: String(form.profile_photo_data_url || "") || null,
+              profile_photo_data_url: profilePhotoPreview.startsWith("data:") ? profilePhotoPreview : null,
+              profile_photo_url: profilePhotoPreview && !profilePhotoPreview.startsWith("data:") ? profilePhotoPreview : null,
               email: form.email || null,
               mobile_phone_number: String(form.mobile_phone_number || "") || null,
               role: form.role as UserRole,
@@ -1322,11 +1275,18 @@ export function UserModal({
           />
           <label className="upload-button">
             <Camera size={16} />
-            <span>{form.profile_photo_data_url ? "Change photo" : "Upload profile picture"}</span>
+            <span>{profilePhotoPreview ? "Change photo" : "Upload profile picture"}</span>
             <input accept="image/*" onChange={uploadPhoto} type="file" />
           </label>
-          {form.profile_photo_data_url ? (
-            <button className="secondary-button" onClick={() => update("profile_photo_data_url", "")} type="button">
+          {profilePhotoPreview ? (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setProfilePhotoChanged(true);
+                update("profile_photo_data_url", "");
+              }}
+              type="button"
+            >
               Remove
             </button>
           ) : null}

@@ -35,7 +35,7 @@ from app.models import (
 )
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification, VisitorPassStatus, VisitorPassType
 from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.home_assistant.covers import command_cover, cover_entity_state_payload
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
@@ -990,7 +990,7 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
     reason = str(arguments.get("reason") or "").strip()
     action_label = "opening" if action == "open" else "closing"
     audit_reason = reason or f"Alfred agent requested {action_label} {target['entity'].get('name') or target['entity']['entity_id']}"
-    outcome = await command_cover(HomeAssistantClient(), target["entity"], action, f"Alfred agent: {audit_reason}")
+    outcome = await command_cover(get_home_assistant_client(), target["entity"], action, f"Alfred agent: {audit_reason}")
     audit_payload = _agent_device_audit_payload(
         target,
         action=action,

@@ -20,10 +20,11 @@ from app.modules.home_assistant.covers import (
     normalize_cover_entities,
 )
 from app.modules.home_assistant.client import (
-    HomeAssistantClient,
+    HomeAssistantClient as DefaultHomeAssistantClient,
     HomeAssistantError,
     HomeAssistantService,
     HomeAssistantState,
+    get_home_assistant_client,
 )
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.apprise_client import (
@@ -57,6 +58,13 @@ from app.services.telemetry import (
 )
 
 router = APIRouter()
+HomeAssistantClient = DefaultHomeAssistantClient
+
+
+def _home_assistant_client() -> DefaultHomeAssistantClient:
+    if HomeAssistantClient is DefaultHomeAssistantClient:
+        return get_home_assistant_client()
+    return HomeAssistantClient()
 
 GARAGE_COVER_ENTITIES = {
     "main_garage_door": "cover.main_garage_door",
@@ -331,7 +339,7 @@ async def home_assistant_entities(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     try:
-        client = HomeAssistantClient()
+        client = _home_assistant_client()
         states = await client.list_states()
         services = await client.list_services()
     except HomeAssistantError as exc:
@@ -372,7 +380,7 @@ async def home_assistant_entities(
 @router.post("/home-assistant/gates/auto-detect")
 async def auto_detect_home_assistant_gates(user: User = Depends(admin_user)) -> dict:
     try:
-        states = await HomeAssistantClient().list_states()
+        states = await _home_assistant_client().list_states()
     except HomeAssistantError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -397,7 +405,7 @@ async def auto_detect_home_assistant_gates(user: User = Depends(admin_user)) -> 
 @router.post("/home-assistant/garage-doors/auto-detect")
 async def auto_detect_home_assistant_garage_doors(user: User = Depends(admin_user)) -> dict:
     try:
-        states = await HomeAssistantClient().list_states()
+        states = await _home_assistant_client().list_states()
     except HomeAssistantError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

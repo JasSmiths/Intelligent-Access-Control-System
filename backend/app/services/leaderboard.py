@@ -19,6 +19,7 @@ from app.modules.notifications.base import NotificationContext
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
+from app.services.profile_photos import stored_image_url
 from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
 from app.services.type_helpers import as_dict
 
@@ -358,12 +359,22 @@ class LeaderboardService:
                 "first_name": person.first_name if person else "",
                 "last_name": person.last_name if person else "",
                 "display_name": person.display_name if person else registration_number,
-                "profile_photo_data_url": person.profile_photo_data_url if person else None,
+                "profile_photo_data_url": None,
+                "profile_photo_url": stored_image_url(
+                    person.profile_photo_data_url,
+                    f"/api/v1/people/{person.id}/photo",
+                    person.updated_at,
+                ) if person else None,
             },
             "vehicle": {
                 "id": _uuid_text(vehicle.id) if vehicle else _uuid_text(vehicle_id),
                 "registration_number": vehicle.registration_number if vehicle else registration_number,
-                "vehicle_photo_data_url": vehicle.vehicle_photo_data_url if vehicle else None,
+                "vehicle_photo_data_url": None,
+                "vehicle_photo_url": stored_image_url(
+                    vehicle.vehicle_photo_data_url,
+                    f"/api/v1/vehicles/{vehicle.id}/photo",
+                    vehicle.updated_at,
+                ) if vehicle else None,
                 "make": vehicle.make if vehicle else "",
                 "model": vehicle.model if vehicle else "",
                 "color": vehicle.color if vehicle else "",

@@ -1,23 +1,43 @@
-import React from "react";
 import {
-  Clock3,
-  FileImage,
+Clock3,
+FileImage,
 } from "lucide-react";
+import React from "react";
 
 import {
-  AccessEvent,
-  Badge,
-  formatDate,
-  matches,
-  movementSagaDisplay,
-  Toolbar,
-  visitorEventDisplayName
+AccessEvent,
+Badge,
+formatDate,
+matches,
+mediaVariantUrl,
+movementSagaDisplay,
+Toolbar,
+visitorEventDisplayName
 } from "../shared";
 
 
 
 export const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event }: { event: AccessEvent }) {
+  const thumbRef = React.useRef<HTMLSpanElement | null>(null);
+  const [thumbVisible, setThumbVisible] = React.useState(false);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
   const label = `Snapshot for ${visitorEventDisplayName(event) || event.registration_number}`;
+  React.useEffect(() => {
+    if (!event.snapshot_url || thumbVisible) return undefined;
+    const target = thumbRef.current;
+    if (!target || typeof IntersectionObserver === "undefined") {
+      setThumbVisible(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setThumbVisible(true);
+      observer.disconnect();
+    }, { rootMargin: "180px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [event.snapshot_url, thumbVisible]);
+
   if (!event.snapshot_url) {
     return (
       <span className="event-snapshot-placeholder" aria-hidden="true">
@@ -26,11 +46,31 @@ export const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event
     );
   }
   return (
-    <span className="event-snapshot-thumb" tabIndex={0}>
-      <img alt={label} loading="lazy" src={event.snapshot_url} />
-      <span className="event-snapshot-preview" aria-hidden="true">
-        <img alt="" loading="lazy" src={event.snapshot_url} />
-      </span>
+    <span
+      className="event-snapshot-thumb"
+      ref={thumbRef}
+      onBlur={() => setPreviewOpen(false)}
+      onFocus={() => {
+        setThumbVisible(true);
+        setPreviewOpen(true);
+      }}
+      onMouseEnter={() => {
+        setThumbVisible(true);
+        setPreviewOpen(true);
+      }}
+      onMouseLeave={() => setPreviewOpen(false)}
+      tabIndex={0}
+    >
+      {thumbVisible ? (
+        <img alt={label} decoding="async" loading="lazy" src={mediaVariantUrl(event.snapshot_url, "thumb")} />
+      ) : (
+        <FileImage size={16} aria-hidden="true" />
+      )}
+      {previewOpen ? (
+        <span className="event-snapshot-preview" aria-hidden="true">
+          <img alt="" decoding="async" loading="lazy" src={event.snapshot_url} />
+        </span>
+      ) : null}
     </span>
   );
 });

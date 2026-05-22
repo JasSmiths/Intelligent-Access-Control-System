@@ -9,6 +9,7 @@ from app.api.v1 import users as users_api
 from app.db.session import get_db_session
 from app.models import User
 from app.models.enums import UserRole
+from app.services.auth import serialize_user
 
 
 def make_user(role: UserRole, *, username: str | None = None) -> User:
@@ -30,6 +31,15 @@ def make_user(role: UserRole, *, username: str | None = None) -> User:
         created_at=now,
         updated_at=now,
     )
+
+
+def test_serialize_user_can_omit_profile_photo() -> None:
+    user = make_user(UserRole.ADMIN, username="admin")
+    user.profile_photo_data_url = "data:image/png;base64,avatar"
+
+    assert serialize_user(user)["profile_photo_data_url"] is None
+    assert serialize_user(user)["profile_photo_url"] == f"/api/v1/users/{user.id}/photo?v={int(user.updated_at.timestamp())}"
+    assert serialize_user(user, include_photo=True)["profile_photo_data_url"] == "data:image/png;base64,avatar"
 
 
 class FakeScalarResult:

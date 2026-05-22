@@ -1,4 +1,4 @@
-import { AuditLog, BadgeTone, RealtimeMessage } from "../../shared";
+import { AuditLog,BadgeTone,RealtimeMessage } from "../../shared";
 
 export type TelemetrySpan = {
   id: string;
@@ -66,7 +66,7 @@ export type TelemetrySummary = {
   updated_at: string;
 };
 
-export type GateMalfunctionTimelineEvent = {
+type GateMalfunctionTimelineEvent = {
   id: string;
   kind: string;
   occurred_at: string;
@@ -119,7 +119,7 @@ export type LogSourceKey =
   | "updates"
   | "live";
 
-export type LogRecordKind = "trace" | "audit" | "live";
+type LogRecordKind = "trace" | "audit" | "live";
 
 export type LogRecord = {
   id: string;

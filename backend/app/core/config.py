@@ -78,14 +78,14 @@ class Settings(BaseSettings):
 
     @field_validator("cors_origins", mode="before")
     @classmethod
-    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
+    def parse_cors_origins(_cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
     @field_validator("trusted_hosts", mode="before")
     @classmethod
-    def parse_trusted_hosts(cls, value: str | list[str]) -> list[str]:
+    def parse_trusted_hosts(_cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [host.strip() for host in value.split(",") if host.strip()]
         return value
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def empty_string_as_none(cls, value: str | None) -> str | None:
+    def empty_string_as_none(_cls, value: str | None) -> str | None:
         if value == "":
             return None
         return value

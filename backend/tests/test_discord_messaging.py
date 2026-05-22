@@ -202,13 +202,13 @@ async def test_discord_channel_resolution_accepts_names_when_visible_and_allowli
     monkeypatch.setattr("app.services.discord_messaging.load_discord_config", fake_config)
     service = DiscordMessagingService()
     alerts = SimpleNamespace(id=123, name="alerts")
-    service._client = SimpleNamespace(  # noqa: SLF001
+    service._client = SimpleNamespace(
         guilds=[SimpleNamespace(id="guild-1", text_channels=[alerts, SimpleNamespace(id=456, name="general")])],
         get_channel=lambda _channel_id: None,
     )
 
-    assert await service._resolve_channel("alerts") is alerts  # noqa: SLF001
-    assert await service._resolve_channel("#alerts") is alerts  # noqa: SLF001
+    assert await service._resolve_channel("alerts") is alerts
+    assert await service._resolve_channel("#alerts") is alerts
 
 
 def test_discord_channel_identifier_extracts_mentions_and_urls() -> None:
@@ -221,7 +221,7 @@ def test_slash_followup_omits_none_view_for_plain_answers() -> None:
     service = DiscordMessagingService()
     result = SimpleNamespace(response_text="Alfred says hello.", pending_action=None)
 
-    kwargs = service._slash_followup_kwargs(result, "Jason")  # noqa: SLF001
+    kwargs = service._slash_followup_kwargs(result, "Jason")
 
     assert kwargs["content"] == "Alfred says hello."
     assert "view" not in kwargs
@@ -258,7 +258,7 @@ async def test_provider_message_shows_typing_while_alfred_works(monkeypatch) -> 
         async def __aenter__(self):
             events.append("typing_enter")
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, _exc_type, exc, _tb):
             events.append("typing_exit")
 
     class FakeChannel:

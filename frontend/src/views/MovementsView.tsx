@@ -1,23 +1,23 @@
-import React from "react";
 import {
-  AlertTriangle,
-  CheckCircle2,
-  Clock3,
-  MoveHorizontal,
-  RefreshCw,
-  ShieldAlert
+AlertTriangle,
+CheckCircle2,
+Clock3,
+MoveHorizontal,
+RefreshCw,
+ShieldAlert
 } from "lucide-react";
+import React from "react";
 
 import {
-  api,
-  Badge,
-  BadgeTone,
-  EmptyState,
-  formatDate,
-  matches,
-  movementSagaDisplay,
-  Toolbar,
-  titleCase
+api,
+Badge,
+BadgeTone,
+EmptyState,
+formatDate,
+matches,
+movementSagaDisplay,
+titleCase,
+Toolbar
 } from "../shared";
 
 type GateCommand = {

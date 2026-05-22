@@ -1,38 +1,38 @@
-import { AlertTriangle, CheckCircle2, DoorOpen, LogIn, LogOut, RefreshCcw, Terminal } from "lucide-react";
+import { AlertTriangle,CheckCircle2,DoorOpen,LogIn,LogOut,RefreshCcw,Terminal } from "lucide-react";
 
 import {
-  AuditLog,
-  BadgeTone,
-  formatDate,
-  formatFileSize,
-  isRecord,
-  levelTone,
-  nullableString,
-  numberPayload,
-  RealtimeMessage,
-  stringPayload,
-  titleCase
+AuditLog,
+BadgeTone,
+formatDate,
+isRecord,
+levelTone,
+nullableString,
+numberPayload,
+RealtimeMessage,
+stringPayload,
+titleCase
 } from "../../shared";
 import {
-  auditCategorySources,
-  auditCategories,
-  sourceTabs,
-  statusOptions,
-  timeRangeOptions,
-  traceCategories,
-  traceCategorySources
+auditCategories,
+auditCategorySources,
+savedFiltersStorageKey,
+sourceTabs,
+statusOptions,
+timeRangeOptions,
+traceCategories,
+traceCategorySources
 } from "./constants";
 import {
-  GateMalfunctionRecord,
-  LogRecord,
-  LogsFilters,
-  LogSourceKey,
-  SavedLogsFilter,
-  TelemetrySpan,
-  TelemetryStorageSummary,
-  TelemetrySummary,
-  TelemetryTrace,
-  TelemetryTraceDetail
+GateMalfunctionRecord,
+LogRecord,
+LogsFilters,
+LogSourceKey,
+SavedLogsFilter,
+TelemetrySpan,
+TelemetryStorageSummary,
+TelemetrySummary,
+TelemetryTrace,
+TelemetryTraceDetail
 } from "./types";
 
 export function formatLogMegabytes(size: number) {
@@ -69,7 +69,7 @@ export function levelLabel(level: string | null | undefined) {
   return normalized.toUpperCase();
 }
 
-export function outcomeTone(outcome: string): BadgeTone {
+function outcomeTone(outcome: string): BadgeTone {
   if (outcome === "success" || outcome === "ok") return "green";
   if (outcome === "failed" || outcome === "error") return "red";
   if (outcome === "pending_confirmation" || outcome === "warning") return "amber";
@@ -127,13 +127,13 @@ export function buildSummaryParams(filters: LogsFilters) {
   return params;
 }
 
-export function traceStatusParam(status: string) {
+function traceStatusParam(status: string) {
   if (["ok", "error", "active", "resolved", "fubar"].includes(status)) return status;
   if (status === "warning") return "";
   return "";
 }
 
-export function auditOutcomeParam(status: string) {
+function auditOutcomeParam(status: string) {
   if (status === "ok") return "success";
   if (status === "error") return "failed";
   if (status === "pending_confirmation") return "pending_confirmation";
@@ -303,7 +303,7 @@ export function applyLocalFilters(records: LogRecord[], filters: LogsFilters, so
   });
 }
 
-export function recordMatchesStatus(record: LogRecord, status: string) {
+function recordMatchesStatus(record: LogRecord, status: string) {
   if (status === "ok") return ["ok", "success"].includes(record.status) || record.outcome === "success";
   if (status === "warning") return record.level === "warning";
   if (status === "error") return record.status === "error" || record.level === "error" || record.outcome === "failed";
@@ -352,11 +352,11 @@ export function realtimeLogKey(log: RealtimeMessage) {
   ].join("|");
 }
 
-export function gateMalfunctionTraceId(record: GateMalfunctionRecord) {
+function gateMalfunctionTraceId(record: GateMalfunctionRecord) {
   return record.telemetry_trace_id || record.id;
 }
 
-export function gateMalfunctionLevel(status: string) {
+function gateMalfunctionLevel(status: string) {
   if (status === "fubar") return "error";
   if (status === "active") return "warning";
   return "info";
@@ -422,7 +422,7 @@ export function gateMalfunctionRecordToTraceDetail(record: GateMalfunctionRecord
   };
 }
 
-export function traceDisplay(trace: TelemetryTrace): { title: string; tone: BadgeTone } {
+function traceDisplay(trace: TelemetryTrace): { title: string; tone: BadgeTone } {
   if (trace.category === "gate_malfunction") {
     const status = stringPayload(trace.context.status || trace.status).toLowerCase();
     const gate = stringPayload(trace.context.gate_name || trace.source || "Primary gate");
@@ -507,7 +507,7 @@ export function exportRecords(records: LogRecord[], format: "json" | "csv") {
   URL.revokeObjectURL(url);
 }
 
-export function exportableRecord(record: LogRecord) {
+function exportableRecord(record: LogRecord) {
   return {
     timestamp: record.timestamp,
     source: record.source,
@@ -525,7 +525,7 @@ export function exportableRecord(record: LogRecord) {
   };
 }
 
-export function recordsToCsv(records: LogRecord[]) {
+function recordsToCsv(records: LogRecord[]) {
   const headers = ["timestamp", "source", "category", "action", "subject", "status", "level", "outcome", "duration_ms", "actor", "trace_id", "request_id", "summary"];
   const rows = records.map((record) => exportableRecord(record));
   return [
@@ -534,14 +534,14 @@ export function recordsToCsv(records: LogRecord[]) {
   ].join("\n");
 }
 
-export function csvCell(value: unknown) {
+function csvCell(value: unknown) {
   const text = String(value ?? "");
   return `"${text.replaceAll("\"", "\"\"")}"`;
 }
 
 export function loadSavedFilters(): SavedLogsFilter[] {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem("iacs.logs.savedFilters") || "[]") as unknown;
+    const parsed = JSON.parse(window.localStorage.getItem(savedFiltersStorageKey) || "[]") as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(isSavedFilter);
   } catch {
@@ -550,10 +550,10 @@ export function loadSavedFilters(): SavedLogsFilter[] {
 }
 
 export function saveSavedFilters(filters: SavedLogsFilter[]) {
-  window.localStorage.setItem("iacs.logs.savedFilters", JSON.stringify(filters));
+  window.localStorage.setItem(savedFiltersStorageKey, JSON.stringify(filters));
 }
 
-export function isSavedFilter(value: unknown): value is SavedLogsFilter {
+function isSavedFilter(value: unknown): value is SavedLogsFilter {
   return Boolean(
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -563,7 +563,7 @@ export function isSavedFilter(value: unknown): value is SavedLogsFilter {
   );
 }
 
-export function liveCategory(type: string) {
+function liveCategory(type: string) {
   if (type.startsWith("telemetry.")) return "telemetry";
   if (type.startsWith("audit.")) return "audit";
   if (type.includes("gate")) return "gate_malfunction";
@@ -572,14 +572,14 @@ export function liveCategory(type: string) {
   return "realtime";
 }
 
-export function liveSource(type: string, category: string): LogSourceKey {
+function liveSource(type: string, category: string): LogSourceKey {
   if (category in traceCategorySources) return traceCategorySources[category];
   if (category in auditCategorySources) return auditCategorySources[category];
   if (type.includes("chat") || type.includes("alfred")) return "ai";
   return "live";
 }
 
-export function auditSource(log: AuditLog): LogSourceKey {
+function auditSource(log: AuditLog): LogSourceKey {
   if (log.action.startsWith("maintenance_mode.")) return "maintenance";
   return auditCategorySources[log.category] ?? "crud";
 }

@@ -1,97 +1,28 @@
+import {
+ArrowLeft,
+ArrowRight,
+FileImage,
+RefreshCcw,
+Search,
+Trophy
+} from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
-} from "lucide-react";
 
 import {
-  api,
-  Badge,
-  BadgeTone,
-  EmptyState,
-  formatDate,
-  initials,
-  matches,
-  RealtimeMessage,
-  titleCase,
-  Toolbar,
-  TooltipPositionState
+api,
+Badge,
+BadgeTone,
+EmptyState,
+formatDate,
+initials,
+matches,
+mediaSource,
+mediaVariantUrl,
+RealtimeMessage,
+titleCase,
+Toolbar,
+TooltipPositionState
 } from "../shared";
 
 
@@ -102,12 +33,14 @@ export type LeaderboardPerson = {
   last_name: string;
   display_name: string;
   profile_photo_data_url: string | null;
+  profile_photo_url?: string | null;
 };
 
 export type LeaderboardVehicle = {
   id: string | null;
   registration_number: string;
   vehicle_photo_data_url: string | null;
+  vehicle_photo_url?: string | null;
   make: string;
   model: string;
   color: string;
@@ -327,7 +260,10 @@ export function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry })
   return (
     <article className="top-charts-row">
       <span className={rankBadgeClass(entry.rank)}>{entry.rank}</span>
-      <LeaderboardAvatar imageUrl={entry.person.profile_photo_data_url} name={entry.person.display_name || firstName} />
+      <LeaderboardAvatar
+        imageUrl={mediaSource(entry.person.profile_photo_url, entry.person.profile_photo_data_url, "thumb")}
+        name={entry.person.display_name || firstName}
+      />
       <div className="top-charts-row-main">
         <strong>{firstName}</strong>
         <span>{entry.vehicle_name || entry.vehicle.display_name || "Vehicle details pending"}</span>
@@ -416,7 +352,7 @@ export function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownE
       onMouseLeave={() => setTooltipPosition(null)}
       type="button"
     >
-      <img alt="" loading="lazy" src={snapshot.url} />
+      <img alt="" decoding="async" loading="lazy" src={mediaVariantUrl(snapshot.url, "thumb")} />
       {tooltipPosition ? createPortal(
         <div
           className={`iacs-tooltip top-charts-snapshot-tooltip ${tooltipPosition.placement}`}
@@ -478,7 +414,7 @@ export function TopChartsPagination({
 export function LeaderboardAvatar({ imageUrl, name }: { imageUrl: string | null; name: string }) {
   return (
     <span className="top-charts-avatar" aria-label={name}>
-      {imageUrl ? <img alt="" src={imageUrl} /> : initials(name).toUpperCase()}
+      {imageUrl ? <img alt="" decoding="async" loading="lazy" src={imageUrl} /> : initials(name).toUpperCase()}
     </span>
   );
 }

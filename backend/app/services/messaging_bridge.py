@@ -321,7 +321,7 @@ def _first_output(outputs: list[tuple[str, dict[str, Any]]], tool_name: str, key
 def _generic_output_summary(outputs: list[tuple[str, dict[str, Any]]]) -> str | None:
     safe_fields: list[str] = []
     blocked_fragments = ("id", "token", "secret", "raw", "payload", "metadata")
-    for name, output in outputs[:3]:
+    for _name, output in outputs[:3]:
         for key, value in output.items():
             normalized = str(key).lower()
             if any(fragment in normalized for fragment in blocked_fragments):

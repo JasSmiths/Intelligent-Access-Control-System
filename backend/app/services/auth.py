@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth_secret import get_auth_secret
 from app.models import User
 from app.models.enums import UserRole
+from app.services.profile_photos import stored_image_url
 from app.services.settings import get_runtime_config
 
 password_hasher = PasswordHasher()
@@ -69,16 +70,18 @@ def normalize_mobile_phone_number(mobile_phone_number: str | None) -> str | None
     return mobile_phone_number.strip() or None
 
 
-def serialize_user(user: User) -> dict[str, Any]:
+def serialize_user(user: User, *, include_photo: bool = False, photo_url_path: str | None = None) -> dict[str, Any]:
     first_name = user.first_name or split_full_name(user.full_name)[0]
     last_name = user.last_name or split_full_name(user.full_name)[1]
+    photo_path = photo_url_path or f"/api/v1/users/{user.id}/photo"
     return {
         "id": str(user.id),
         "username": user.username,
         "first_name": first_name,
         "last_name": last_name,
         "full_name": compose_full_name(first_name, last_name) or user.full_name,
-        "profile_photo_data_url": user.profile_photo_data_url,
+        "profile_photo_data_url": user.profile_photo_data_url if include_photo else None,
+        "profile_photo_url": stored_image_url(user.profile_photo_data_url, photo_path, getattr(user, "updated_at", None)),
         "email": user.email,
         "mobile_phone_number": user.mobile_phone_number,
         "role": user.role.value,

@@ -1,123 +1,87 @@
+import {
+AlertTriangle,
+ArrowRight,
+BarChart3,
+Bell,
+Bot,
+CalendarDays,
+Car,
+Check,
+CheckCircle2,
+ChevronDown,
+ChevronRight,
+ClipboardPaste,
+Clock3,
+Command,
+DoorOpen,
+FileText,
+Gauge,
+GitBranch,
+Home,
+Key,
+Loader2,
+Lock,
+LogIn,
+LogOut,
+Menu,
+MessageCircle,
+Monitor,
+Moon,
+MoveHorizontal,
+PlugZap,
+RefreshCcw,
+Search,
+Settings,
+Shield,
+ShieldCheck,
+SlidersHorizontal,
+Sun,
+Trophy,
+UserRound,
+Users,
+Warehouse,
+X
+} from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
 import ReactDOM from "react-dom/client";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MoveHorizontal,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
-} from "lucide-react";
 import "./styles.css";
 
 import {
-  AccessEvent,
-  alertSeverityLabel,
-  alertSeverityTone,
-  Anomaly,
-  api,
-  apiError,
-  Badge,
-  displayUserName,
-  EmptyState,
-  ExpectedPresenceSummary,
-  formatDate,
-  Group,
-  HomeAssistantManagedCover,
-  IntegrationStatus,
-  isActionableAlert,
-  isRecord,
-  MaintenanceStatus,
-  MovementSagaSummary,
-  NavigateToView,
-  notificationEventLabel,
-  nullableString,
-  numberPayload,
-  Person,
-  Presence,
-  ProfilePreferences,
-  RealtimeMessage,
-  Schedule,
-  stringPayload,
-  titleCase,
-  UserAccount,
-  UserAvatar,
-  Vehicle,
-  ViewKey,
-  wsUrl
+AccessEvent,
+alertSeverityLabel,
+alertSeverityTone,
+Anomaly,
+api,
+apiError,
+Badge,
+displayUserName,
+EmptyState,
+ExpectedPresenceSummary,
+formatDate,
+Group,
+HomeAssistantManagedCover,
+IntegrationStatus,
+isActionableAlert,
+isRecord,
+MaintenanceStatus,
+MovementSagaSummary,
+NavigateToView,
+notificationEventLabel,
+nullableString,
+numberPayload,
+Person,
+Presence,
+ProfilePreferences,
+RealtimeMessage,
+Schedule,
+stringPayload,
+titleCase,
+UserAccount,
+UserAvatar,
+Vehicle,
+ViewKey,
+wsUrl
 } from "./shared";
 
 const Dashboard = React.lazy(() => import("./views/DashboardView").then((module) => ({ default: module.Dashboard })));
@@ -140,7 +104,8 @@ const SettingsView = React.lazy(() => import("./views/SettingsViews").then((modu
 const DynamicSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.DynamicSettingsView })));
 const AccessDevicesSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
 const UsersView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.UsersView })));
-const ChatWidget = React.lazy(() => import("./views/ChatWidgetView").then((module) => ({ default: module.ChatWidget })));
+const loadChatWidgetModule = () => import("./views/ChatWidgetView").then((module) => ({ default: module.ChatWidget }));
+const ChatWidget = React.lazy(loadChatWidgetModule);
 
 function RouteLoading() {
   return <div className="loading-panel">Loading view</div>;
@@ -180,6 +145,55 @@ const REALTIME_AUDIT_REFRESH_ACTION_PREFIXES = [
   "vehicle.",
   "visitor_pass."
 ];
+
+type ShellDataKey =
+  | "presence"
+  | "expectedPresence"
+  | "events"
+  | "anomalies"
+  | "people"
+  | "vehicles"
+  | "groups"
+  | "schedules"
+  | "integrationStatus"
+  | "maintenanceStatus";
+
+const UNIVERSAL_SHELL_DATA_KEYS: ShellDataKey[] = ["anomalies", "maintenanceStatus"];
+
+const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
+  dashboard: ["presence", "expectedPresence", "events", "people", "vehicles", "integrationStatus"],
+  people: ["people", "vehicles", "groups", "schedules", "integrationStatus"],
+  groups: ["people", "groups"],
+  schedules: ["schedules"],
+  passes: [],
+  vehicles: ["people", "vehicles", "groups", "schedules"],
+  top_charts: [],
+  events: ["events"],
+  movements: [],
+  alerts: [],
+  reports: ["people", "presence"],
+  integrations: ["people", "integrationStatus"],
+  logs: [],
+  settings: ["groups", "schedules", "vehicles"],
+  settings_general: [],
+  settings_gates: ["schedules"],
+  settings_garage_doors: ["schedules"],
+  settings_auth: [],
+  alfred_training: [],
+  settings_automations: ["people", "vehicles"],
+  settings_notifications: ["people", "schedules"],
+  settings_lpr: [],
+  users: []
+};
+
+function shellDataKeysForView(view: ViewKey, currentUser: UserAccount | null) {
+  const keys = new Set<ShellDataKey>(UNIVERSAL_SHELL_DATA_KEYS);
+  (ROUTE_SHELL_DATA_KEYS[view] ?? ROUTE_SHELL_DATA_KEYS.dashboard).forEach((key) => keys.add(key));
+  if ((view === "users" || view === "alfred_training") && currentUser?.role !== "admin") {
+    ROUTE_SHELL_DATA_KEYS.settings.forEach((key) => keys.add(key));
+  }
+  return keys;
+}
 
 type NotificationToast = {
   id: string;
@@ -386,6 +400,12 @@ function applyIntegrationRealtimeEvent(
   if (event.type === "home_assistant.status") {
     const payload = event.payload as Partial<IntegrationStatus>;
     setIntegrationStatus((current) => current ? { ...current, ...payload } : current);
+    return true;
+  }
+
+  if (event.type === "access_device.status") {
+    const payload = isRecord(event.payload.status) ? event.payload.status : event.payload;
+    setIntegrationStatus((current) => current ? { ...current, ...(payload as Partial<IntegrationStatus>) } : current);
     return true;
   }
 
@@ -1265,6 +1285,78 @@ function clearChatTeaserDismissals() {
   }
 }
 
+function DeferredChatWidget({
+  currentUser,
+  maintenanceStatus
+}: {
+  currentUser: UserAccount;
+  maintenanceStatus: MaintenanceStatus | null;
+}) {
+  const [loaded, setLoaded] = React.useState(false);
+  const teaserStorageKey = `iacs-chat-teaser-dismissed:${currentUser.id}`;
+  const [showTeaser, setShowTeaser] = React.useState(() => sessionStorage.getItem(teaserStorageKey) !== "true");
+  const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
+
+  React.useEffect(() => {
+    setShowTeaser(sessionStorage.getItem(teaserStorageKey) !== "true");
+  }, [teaserStorageKey]);
+
+  const preloadChat = React.useCallback(() => {
+    void loadChatWidgetModule();
+  }, []);
+
+  const openChat = React.useCallback(() => {
+    setLoaded(true);
+  }, []);
+
+  const dismissTeaser = React.useCallback(() => {
+    sessionStorage.setItem(teaserStorageKey, "true");
+    setShowTeaser(false);
+  }, [teaserStorageKey]);
+
+  if (loaded) {
+    return (
+      <React.Suspense
+        fallback={(
+          <div className="chat-widget">
+            <button className="chat-pill" disabled type="button" aria-label="Opening Alfred">
+              <Loader2 className="spin" size={18} />
+              <span>Alfred</span>
+            </button>
+          </div>
+        )}
+      >
+        <ChatWidget currentUser={currentUser} initialOpen maintenanceStatus={maintenanceStatus} />
+      </React.Suspense>
+    );
+  }
+
+  return (
+    <div className="chat-widget">
+      {showTeaser ? (
+        <div className="chat-teaser">
+          <button className="teaser-close" onClick={dismissTeaser} type="button" aria-label="Dismiss chat prompt">
+            <X size={16} />
+          </button>
+          <strong>Alfred is ready</strong>
+          <p>Hi {firstName}, how can I help?</p>
+        </div>
+      ) : null}
+      <button
+        className="chat-pill"
+        onClick={openChat}
+        onFocus={preloadChat}
+        onPointerEnter={preloadChat}
+        type="button"
+        aria-label="Open Alfred"
+      >
+        <MessageCircle size={18} />
+        <span>Alfred</span>
+      </button>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = React.useState<ViewKey>(() => initialViewFromLocation());
   const [theme, setTheme] = useTheme();
@@ -1336,8 +1428,8 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  const refreshAuth = React.useCallback(async () => {
-    const status = await api.get<AuthStatus>("/api/v1/auth/status");
+  const refreshAuth = React.useCallback(async (includePhoto = false) => {
+    const status = await api.get<AuthStatus>(`/api/v1/auth/status?include_photo=${includePhoto ? "true" : "false"}`);
     setAuthStatus(status);
   }, []);
 
@@ -1345,57 +1437,57 @@ function App() {
     refreshAuth().catch(() => setAuthStatus({ setup_required: false, authenticated: false, user: null }));
   }, [refreshAuth]);
 
-  const refresh = React.useCallback(async () => {
-    const [
-      nextPresence,
-      nextExpectedPresence,
-      nextEvents,
-      nextAnomalies,
-      nextPeople,
-      nextVehicles,
-      nextGroups,
-      nextSchedules,
-      nextStatus,
-      nextMaintenanceStatus
-    ] =
-      await Promise.all([
-        api.get<Presence[]>("/api/v1/presence"),
-        api.get<ExpectedPresenceSummary>("/api/v1/presence/expected-today"),
-        api.get<AccessEvent[]>("/api/v1/events?limit=40"),
-        api.get<Anomaly[]>("/api/v1/alerts?status=open&limit=100"),
-        api.get<Person[]>("/api/v1/people"),
-        api.get<Vehicle[]>("/api/v1/vehicles"),
-        api.get<Group[]>("/api/v1/groups"),
-        api.get<Schedule[]>("/api/v1/schedules"),
-        api.get<IntegrationStatus>("/api/v1/integrations/gate/status"),
-        api.get<MaintenanceStatus>("/api/v1/maintenance/status")
-      ]);
-    setPresence(nextPresence);
-    setExpectedPresence(nextExpectedPresence);
-    setEvents(nextEvents);
-    setAnomalies(nextAnomalies);
-    setPeople(nextPeople);
-    setVehicles(nextVehicles);
-    setGroups(nextGroups);
-    setSchedules(nextSchedules);
-    setIntegrationStatus(nextStatus);
-    setMaintenanceStatus(nextMaintenanceStatus);
-    setDataRefreshToken((current) => current + 1);
-    setLoading(false);
-  }, []);
+  const refreshPromiseRef = React.useRef<Promise<void> | null>(null);
+  const refreshPromiseKeyRef = React.useRef<string | null>(null);
+  const refreshLastStartedAtRef = React.useRef(0);
+  const loadedShellDataRef = React.useRef(new Set<ShellDataKey>());
 
-  const refreshIntegrationStatus = React.useCallback(async () => {
-    try {
-      setIntegrationStatus(await api.get<IntegrationStatus>("/api/v1/integrations/gate/status?refresh=true"));
-    } catch (error) {
-      setIntegrationStatus((current) => current ? {
-        ...current,
-        connected: false,
-        degraded: true,
-        last_error: error instanceof Error ? error.message : "Unable to refresh Home Assistant status."
-      } : current);
+  const refresh = React.useCallback(async () => {
+    const keys = shellDataKeysForView(view, currentUser);
+    const refreshKey = `${view}:${currentUser?.role ?? "unknown"}`;
+    if (refreshPromiseRef.current && refreshPromiseKeyRef.current === refreshKey) {
+      return refreshPromiseRef.current;
     }
-  }, []);
+    if ([...keys].some((key) => !loadedShellDataRef.current.has(key))) {
+      setLoading(true);
+    }
+    refreshLastStartedAtRef.current = Date.now();
+    const tasks: Promise<void>[] = [];
+    const addTask = <T,>(key: ShellDataKey, path: string, setter: (value: T) => void) => {
+      if (!keys.has(key)) return;
+      tasks.push(
+        api.get<T>(path).then((value) => {
+          setter(value);
+          loadedShellDataRef.current.add(key);
+        })
+      );
+    };
+    addTask<Presence[]>("presence", "/api/v1/presence", setPresence);
+    addTask<ExpectedPresenceSummary>("expectedPresence", "/api/v1/presence/expected-today", setExpectedPresence);
+    addTask<AccessEvent[]>("events", "/api/v1/events?limit=40", setEvents);
+    addTask<Anomaly[]>("anomalies", "/api/v1/alerts?status=open&limit=100", setAnomalies);
+    addTask<Person[]>("people", "/api/v1/people?include_media=false", setPeople);
+    addTask<Vehicle[]>("vehicles", "/api/v1/vehicles?include_media=false", setVehicles);
+    addTask<Group[]>("groups", "/api/v1/groups", setGroups);
+    addTask<Schedule[]>("schedules", "/api/v1/schedules", setSchedules);
+    addTask<IntegrationStatus>("integrationStatus", "/api/v1/integrations/gate/status", setIntegrationStatus);
+    addTask<MaintenanceStatus>("maintenanceStatus", "/api/v1/maintenance/status", setMaintenanceStatus);
+
+    const run = Promise.all(tasks)
+      .then(() => {
+        setDataRefreshToken((current) => current + 1);
+        if (refreshPromiseRef.current === run) setLoading(false);
+      })
+      .finally(() => {
+        if (refreshPromiseRef.current === run) {
+          refreshPromiseRef.current = null;
+          refreshPromiseKeyRef.current = null;
+        }
+      });
+    refreshPromiseRef.current = run;
+    refreshPromiseKeyRef.current = refreshKey;
+    return run;
+  }, [currentUser, view]);
 
   const refreshDashboard = React.useCallback(async () => {
     setDashboardRefreshing(true);
@@ -1429,6 +1521,7 @@ function App() {
   const refreshFromRealtimeLifecycle = React.useCallback(() => {
     const now = Date.now();
     if (now - realtimeLifecycleRefreshLastRunRef.current < REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS) return;
+    if (now - refreshLastStartedAtRef.current < REALTIME_REFRESH_MIN_INTERVAL_MS) return;
     realtimeLifecycleRefreshLastRunRef.current = now;
     realtimeRefreshLastRunRef.current = now;
     setRealtimeStatus("refreshing", "Pulling current site state");
@@ -1441,14 +1534,6 @@ function App() {
     if (!authStatus?.authenticated) return;
     refresh().catch(() => setLoading(false));
   }, [authStatus?.authenticated, refresh]);
-
-  React.useEffect(() => {
-    if (!authStatus?.authenticated) return;
-    const timer = window.setInterval(() => {
-      refreshIntegrationStatus().catch(() => undefined);
-    }, 15000);
-    return () => window.clearInterval(timer);
-  }, [authStatus?.authenticated, refreshIntegrationStatus]);
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
@@ -1839,6 +1924,9 @@ function App() {
       setSchedules([]);
       setIntegrationStatus(null);
       setMaintenanceStatus(null);
+      refreshPromiseRef.current = null;
+      refreshPromiseKeyRef.current = null;
+      loadedShellDataRef.current.clear();
       setRealtime([]);
       setNotificationToasts([]);
       setLoading(true);
@@ -2152,9 +2240,7 @@ function App() {
         onAction={handleNotificationAction}
         onDismiss={(id) => setNotificationToasts((current) => current.filter((item) => item.id !== id))}
       />
-      <React.Suspense fallback={null}>
-        <ChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
-      </React.Suspense>
+      <DeferredChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
     </div>
   );
 }
@@ -2214,7 +2300,7 @@ function View(props: {
       content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
       break;
     case "integrations":
-      content = <IntegrationsView people={props.people} realtime={props.realtime} refreshToken={props.dataRefreshToken} schedules={props.schedules} status={props.integrationStatus} />;
+      content = <IntegrationsView people={props.people} realtime={props.realtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
       content = <LogsView logs={props.realtime} onClearRealtime={props.onClearRealtime} refreshToken={props.dataRefreshToken} />;

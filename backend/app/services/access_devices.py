@@ -343,6 +343,7 @@ class AccessDeviceService:
         event_type = str(event.get("type") or "state")
         if event_type in {"connected", "disconnected"}:
             self._record_subscription_status(provider_name, event)
+            await self._publish_status_snapshot(reason=f"{provider_name}.{event_type}")
             return
         state = self._gate_state_from_event(event.get("state"))
         if state is None:
@@ -737,11 +738,19 @@ class AccessDeviceService:
                         "last_error": str(exc)[:500],
                     },
                 )
+                await self._publish_status_snapshot(reason=f"{provider_name}.stream_failed")
                 logger.warning(
                     "access_device_state_stream_failed",
                     extra={"provider": provider_name, "error": str(exc)},
                 )
                 await asyncio.sleep(STATE_POLL_INTERVAL_SECONDS)
+
+    async def _publish_status_snapshot(self, *, reason: str) -> None:
+        try:
+            status = await self.status(refresh=False)
+            await event_bus.publish("access_device.status", {"reason": reason, "status": status})
+        except Exception as exc:
+            logger.debug("access_device_status_publish_failed", extra={"reason": reason, "error": str(exc)})
 
     def _record_subscription_status(self, provider_name: str, event: dict[str, Any]) -> None:
         status = self._subscription_status.setdefault(

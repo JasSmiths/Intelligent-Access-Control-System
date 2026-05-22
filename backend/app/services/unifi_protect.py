@@ -3,7 +3,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine
 
 from app.core.logging import get_logger
 from app.modules.unifi_protect.client import (
@@ -52,6 +52,8 @@ class UnifiProtectIntegrationService:
         self._last_update_publish_at: dict[str, float] = {}
         self._lpr_track_probe_event_ids: set[str] = set()
         self._lpr_track_probe_finished_event_ids: set[str] = set()
+        self._lpr_track_probe_semaphore = asyncio.Semaphore(4)
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def configured(self) -> bool:
         return is_unifi_protect_configured(await get_runtime_config())
@@ -236,6 +238,13 @@ class UnifiProtectIntegrationService:
             return api
 
     async def _stop_locked(self) -> None:
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
         for unsubscribe in self._unsubscribers:
             try:
                 unsubscribe()
@@ -249,16 +258,18 @@ class UnifiProtectIntegrationService:
         self._connected = False
 
     def _handle_websocket_message(self, message: Any) -> None:
-        loop: asyncio.AbstractEventLoop | None = None
         try:
             received_at = datetime.now(tz=UTC)
-            loop = asyncio.get_running_loop()
-            loop.create_task(get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at))
-            loop.create_task(
+            self._spawn_background(
+                get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at),
+                name="unifi-protect-lpr-timing-message",
+            )
+            self._spawn_background(
                 get_vehicle_visual_detection_recorder().record_unifi_protect_message(
                     message,
                     received_at=received_at,
-                )
+                ),
+                name="unifi-protect-vehicle-visual-message",
             )
             event_id = self._lpr_track_probe_event_id(message)
             if (
@@ -267,7 +278,10 @@ class UnifiProtectIntegrationService:
                 and event_id not in self._lpr_track_probe_finished_event_ids
             ):
                 self._lpr_track_probe_event_ids.add(event_id)
-                loop.create_task(self._probe_lpr_track(event_id, getattr(message, "new_obj", None)))
+                self._spawn_background(
+                    self._probe_lpr_track(event_id, getattr(message, "new_obj", None)),
+                    name=f"unifi-protect-lpr-track-probe:{event_id}",
+                )
         except RuntimeError:
             logger.debug("unifi_protect_lpr_timing_without_loop")
         except Exception as exc:
@@ -279,8 +293,9 @@ class UnifiProtectIntegrationService:
             logger.debug("unifi_protect_ws_payload_failed", extra={"error": str(exc)})
             return
         try:
-            (loop or asyncio.get_running_loop()).create_task(
-                get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at)
+            self._spawn_background(
+                get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at),
+                name="unifi-protect-vehicle-presence-message",
             )
         except RuntimeError:
             logger.debug("unifi_protect_vehicle_presence_without_loop")
@@ -293,7 +308,7 @@ class UnifiProtectIntegrationService:
         if event_type in {"protect.updated", "protect.camera.updated"} and not self._should_publish_update(event_type, payload):
             return
         try:
-            (loop or asyncio.get_running_loop()).create_task(event_bus.publish(event_type, payload))
+            self._spawn_background(event_bus.publish(event_type, payload), name=f"unifi-protect-publish:{event_type}")
         except RuntimeError:
             logger.debug("unifi_protect_ws_without_loop")
 
@@ -301,14 +316,26 @@ class UnifiProtectIntegrationService:
         connected = str(getattr(state, "value", state)).upper() == "CONNECTED"
         self._connected = connected
         try:
-            asyncio.get_running_loop().create_task(
+            self._spawn_background(
                 event_bus.publish(
                     "protect.connection.changed",
                     {"configured": True, "connected": connected, "state": str(getattr(state, "value", state))},
-                )
+                ),
+                name="unifi-protect-publish:connection",
             )
         except RuntimeError:
             logger.debug("unifi_protect_state_without_loop")
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            coro.close()
+            raise
+        task = loop.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(_log_background_task_error)
 
     def _should_publish_update(self, event_type: str, payload: dict[str, Any]) -> bool:
         object_id = str(payload.get("object_id") or payload.get("model") or "global")
@@ -322,43 +349,44 @@ class UnifiProtectIntegrationService:
 
     async def _probe_lpr_track(self, event_id: str, event: Any) -> None:
         try:
-            api = await self._ensure_api(subscribe=True)
-            for attempt, delay in enumerate(LPR_TRACK_PROBE_DELAYS_SECONDS, start=1):
-                if delay:
-                    await asyncio.sleep(delay)
-                try:
-                    track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
-                except Exception as exc:
-                    logger.debug(
-                        "unifi_protect_lpr_track_probe_failed",
-                        extra={"event_id": event_id, "attempt": attempt, "error": str(exc)},
-                    )
-                    continue
+            async with self._lpr_track_probe_semaphore:
+                api = await self._ensure_api(subscribe=True)
+                for attempt, delay in enumerate(LPR_TRACK_PROBE_DELAYS_SECONDS, start=1):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    try:
+                        track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
+                    except Exception as exc:
+                        logger.debug(
+                            "unifi_protect_lpr_track_probe_failed",
+                            extra={"event_id": event_id, "attempt": attempt, "error": str(exc)},
+                        )
+                        continue
 
-                count = await get_lpr_timing_recorder().record_unifi_protect_track(
-                    track,
-                    event=event,
-                    event_id=event_id,
-                    received_at=datetime.now(tz=UTC),
-                    probe_attempt=attempt,
-                )
-                await get_vehicle_visual_detection_recorder().record_unifi_protect_track(
-                    track,
-                    event=event,
-                    event_id=event_id,
-                    received_at=datetime.now(tz=UTC),
-                    probe_attempt=attempt,
-                )
-                await get_vehicle_presence_tracker().record_unifi_protect_track(
-                    track,
-                    event=event,
-                    event_id=event_id,
-                    received_at=datetime.now(tz=UTC),
-                    probe_attempt=attempt,
-                )
-                if count:
-                    self._lpr_track_probe_finished_event_ids.add(event_id)
-                    return
+                    count = await get_lpr_timing_recorder().record_unifi_protect_track(
+                        track,
+                        event=event,
+                        event_id=event_id,
+                        received_at=datetime.now(tz=UTC),
+                        probe_attempt=attempt,
+                    )
+                    await get_vehicle_visual_detection_recorder().record_unifi_protect_track(
+                        track,
+                        event=event,
+                        event_id=event_id,
+                        received_at=datetime.now(tz=UTC),
+                        probe_attempt=attempt,
+                    )
+                    await get_vehicle_presence_tracker().record_unifi_protect_track(
+                        track,
+                        event=event,
+                        event_id=event_id,
+                        received_at=datetime.now(tz=UTC),
+                        probe_attempt=attempt,
+                    )
+                    if count:
+                        self._lpr_track_probe_finished_event_ids.add(event_id)
+                        return
         finally:
             self._lpr_track_probe_event_ids.discard(event_id)
 
@@ -518,6 +546,15 @@ def _enum_value(value: Any) -> str | None:
     if value is None:
         return None
     return str(getattr(value, "value", value))
+
+
+def _log_background_task_error(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception("unifi_protect_background_task_failed")
 
 
 @lru_cache

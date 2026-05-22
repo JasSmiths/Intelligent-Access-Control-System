@@ -1,84 +1,13 @@
-import React from "react";
-import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
+ChevronDown,
+Key,
+MessageCircle,
+Monitor,
+SlidersHorizontal,
+Smartphone,
+Volume2
 } from "lucide-react";
+import React from "react";
 
 
 
@@ -173,9 +102,9 @@ export type MovementSagaSummary = {
 
 export type AlertSeverity = "info" | "warning" | "critical";
 
-export type AlertStatus = "open" | "resolved";
+type AlertStatus = "open" | "resolved";
 
-export type AlertResolver = {
+type AlertResolver = {
   id: string;
   username: string;
   display_name: string;
@@ -212,6 +141,7 @@ export type Person = {
   display_name: string;
   pronouns: "he/him" | "she/her" | null;
   profile_photo_data_url: string | null;
+  profile_photo_url?: string | null;
   group_id: string | null;
   group: string | null;
   category: string | null;
@@ -231,6 +161,7 @@ export type Vehicle = {
   id: string;
   registration_number: string;
   vehicle_photo_data_url?: string | null;
+  vehicle_photo_url?: string | null;
   description: string | null;
   make: string | null;
   model: string | null;
@@ -282,7 +213,7 @@ export type IntegrationStatus = {
   mums_garage_door_state?: string;
 };
 
-export type AccessDeviceProviderRuntimeStatus = {
+type AccessDeviceProviderRuntimeStatus = {
   provider: string;
   configured?: boolean;
   connected?: boolean;
@@ -291,7 +222,7 @@ export type AccessDeviceProviderRuntimeStatus = {
   metadata?: Record<string, unknown>;
 };
 
-export type AccessDeviceStreamStatus = {
+type AccessDeviceStreamStatus = {
   provider: string;
   connected?: boolean;
   running?: boolean;
@@ -389,7 +320,7 @@ export type HomeAssistantManagedCover = {
   close_service?: string;
 };
 
-export type AccessDeviceProviderBinding = {
+type AccessDeviceProviderBinding = {
   provider: "home_assistant" | "esphome" | string;
   external_id: string;
   enabled: boolean;
@@ -414,7 +345,7 @@ export type HomeAssistantMobileAppService = {
   description: string | null;
 };
 
-export type HomeAssistantMobileAppSuggestion = {
+type HomeAssistantMobileAppSuggestion = {
   person_id: string;
   first_name: string;
   last_name: string;
@@ -497,6 +428,7 @@ export type UserAccount = {
   last_name: string;
   full_name: string;
   profile_photo_data_url: string | null;
+  profile_photo_url?: string | null;
   email: string | null;
   mobile_phone_number: string | null;
   role: UserRole;
@@ -537,7 +469,7 @@ export type ViewKey =
   | "settings_lpr"
   | "users";
 
-export type NavigateOptions = {
+type NavigateOptions = {
   replace?: boolean;
   search?: string;
   hash?: string;
@@ -632,7 +564,7 @@ export async function apiError(response: Response) {
   return new Error(detail && detail !== statusLabel ? `${statusLabel}: ${detail}` : statusLabel);
 }
 
-export function describeApiErrorDetail(value: unknown): string | null {
+function describeApiErrorDetail(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -756,7 +688,7 @@ export function CardHeader({ icon: Icon, title, action }: { icon: React.ElementT
 
 export const scheduleDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-export function scheduleDefaultPolicyDisplay(value: unknown) {
+function scheduleDefaultPolicyDisplay(value: unknown) {
   return String(value ?? "allow").trim().toLowerCase() === "deny" ? "Never Allow" : "Always Allow";
 }
 
@@ -946,7 +878,7 @@ export const discordListSettingKeys = new Set([
   "discord_admin_role_ids"
 ]);
 
-export const listSettingKeys = new Set([
+const listSettingKeys = new Set([
   ...discordListSettingKeys,
   "lpr_allowed_smart_zones"
 ]);
@@ -1118,10 +1050,22 @@ export function userInitials(user: Pick<UserAccount, "first_name" | "last_name" 
   return (first + last || initials(user.full_name)).toUpperCase();
 }
 
+export function mediaSource(url?: string | null, dataUrl?: string | null, variant: "thumb" | "full" = "full") {
+  if (!url) return dataUrl || "";
+  if (variant === "full") return url;
+  return mediaVariantUrl(url, variant);
+}
+
+export function mediaVariantUrl(url: string, variant: "thumb" | "full") {
+  if (variant === "full") return url;
+  return `${url}${url.includes("?") ? "&" : "?"}variant=${variant}`;
+}
+
 export function UserAvatar({ user, size = "normal" }: { user: UserAccount; size?: "normal" | "large" }) {
+  const imageSource = mediaSource(user.profile_photo_url, user.profile_photo_data_url, "thumb");
   return (
     <span className={size === "large" ? "profile-photo large" : "profile-photo"} aria-label={displayUserName(user)}>
-      {user.profile_photo_data_url ? <img alt="" src={user.profile_photo_data_url} /> : userInitials(user)}
+      {imageSource ? <img alt="" decoding="async" loading="lazy" src={imageSource} /> : userInitials(user)}
     </span>
   );
 }

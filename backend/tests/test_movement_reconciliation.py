@@ -251,7 +251,7 @@ async def test_reconcile_uses_open_observation_after_command_even_if_current_gat
     async def fake_current_gate_state():
         return GateState.CLOSED
 
-    async def fake_publish_reconciled(row, command_row, state):
+    async def fake_publish_reconciled(row, _command_row, state):
         published.append((str(row.id), state.value))
 
     monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)

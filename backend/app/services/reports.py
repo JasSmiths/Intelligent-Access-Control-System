@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.models import AccessEvent, Person, Presence, ReportExport, User, Vehicle, VisitorPass
 from app.models.enums import AccessDecision, AccessDirection
+from app.services.profile_photos import stored_image_url
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
@@ -175,6 +176,13 @@ def report_export_payload(row: ReportExport) -> dict[str, Any]:
 
 def public_report_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     public = copy.deepcopy(snapshot)
+    person = public.get("person")
+    if isinstance(person, dict):
+        person.pop("profile_photo_data_url", None)
+        person.pop("pdf_profile_photo_data_url", None)
+        for vehicle in person.get("vehicles", []):
+            if isinstance(vehicle, dict):
+                vehicle.pop("vehicle_photo_data_url", None)
     for event in public.get("events", []):
         if isinstance(event, dict):
             event.pop("_snapshot_path", None)
@@ -211,59 +219,15 @@ async def build_person_movement_report_snapshot(
     vehicle_ids = [vehicle.id for vehicle in person.vehicles]
     selected_plates = {_normalize_plate(vehicle.registration_number) for vehicle in person.vehicles}
     selected_filter = _selected_event_filter(person.id, vehicle_ids, selected_plates)
-
-    report_events = (
-        await session.scalars(
-            select(AccessEvent)
-            .options(selectinload(AccessEvent.anomalies))
-            .where(
-                selected_filter,
-                AccessEvent.occurred_at >= period_start,
-                AccessEvent.occurred_at <= period_end,
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-    if not options["include_denied"]:
-        report_events = [event for event in report_events if event.decision != AccessDecision.DENIED]
-
-    selected_history = (
-        await session.scalars(
-            select(AccessEvent)
-            .where(
-                selected_filter,
-                AccessEvent.occurred_at <= period_end,
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-    all_timeline_events = (
-        await session.scalars(
-            select(AccessEvent)
-            .where(
-                AccessEvent.occurred_at >= period_start,
-                AccessEvent.occurred_at <= period_end,
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-
-    duration_lookup = build_duration_lookup(report_events, selected_history, timezone=timezone)
-    serialized_events = [
-        serialize_report_event(
-            event,
-            include_snapshots=options["include_snapshots"],
-            duration=duration_lookup.get(str(event.id)),
-            timezone=timezone,
-        )
-        for event in sorted(report_events, key=lambda item: item.occurred_at, reverse=True)
-    ]
+    report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
+        session,
+        selected_filter=selected_filter,
+        period_start=period_start,
+        period_end=period_end,
+        options=options,
+        timezone=timezone,
+    )
     presence = person.presence or await session.get(Presence, person.id)
-    summary = _direction_summary(report_events, timezone)
     generated_at = datetime.now(tz=UTC)
 
     return {
@@ -317,57 +281,14 @@ async def build_visitor_pass_movement_report_snapshot(
     timezone: ZoneInfo,
 ) -> dict[str, Any]:
     selected_filter = _visitor_pass_event_filter(visitor_pass)
-    report_events = (
-        await session.scalars(
-            select(AccessEvent)
-            .options(selectinload(AccessEvent.anomalies))
-            .where(
-                selected_filter,
-                AccessEvent.occurred_at >= period_start,
-                AccessEvent.occurred_at <= period_end,
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-    if not options["include_denied"]:
-        report_events = [event for event in report_events if event.decision != AccessDecision.DENIED]
-
-    selected_history = (
-        await session.scalars(
-            select(AccessEvent)
-            .where(
-                selected_filter,
-                AccessEvent.occurred_at <= period_end,
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-    all_timeline_events = (
-        await session.scalars(
-            select(AccessEvent)
-            .where(
-                AccessEvent.occurred_at >= period_start,
-                AccessEvent.occurred_at <= period_end,
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-            )
-            .order_by(AccessEvent.occurred_at.asc())
-        )
-    ).all()
-
-    duration_lookup = build_duration_lookup(report_events, selected_history, timezone=timezone)
-    serialized_events = [
-        serialize_report_event(
-            event,
-            include_snapshots=options["include_snapshots"],
-            duration=duration_lookup.get(str(event.id)),
-            timezone=timezone,
-        )
-        for event in sorted(report_events, key=lambda item: item.occurred_at, reverse=True)
-    ]
-    summary = _direction_summary(report_events, timezone)
+    report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
+        session,
+        selected_filter=selected_filter,
+        period_start=period_start,
+        period_end=period_end,
+        options=options,
+        timezone=timezone,
+    )
     generated_at = datetime.now(tz=UTC)
 
     return {
@@ -405,6 +326,65 @@ async def build_visitor_pass_movement_report_snapshot(
             ],
         },
     }
+
+
+async def _collect_movement_report_events(
+    session: AsyncSession,
+    *,
+    selected_filter: Any,
+    period_start: datetime,
+    period_end: datetime,
+    options: dict[str, bool],
+    timezone: ZoneInfo,
+) -> tuple[list[AccessEvent], list[dict[str, Any]], list[AccessEvent], dict[str, Any]]:
+    movement_filters = (
+        AccessEvent.decision == AccessDecision.GRANTED,
+        AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
+    )
+    report_events = await _load_report_events(
+        session,
+        selected_filter,
+        AccessEvent.occurred_at >= period_start,
+        AccessEvent.occurred_at <= period_end,
+        include_anomalies=True,
+    )
+    if not options["include_denied"]:
+        report_events = [event for event in report_events if event.decision != AccessDecision.DENIED]
+
+    selected_history = await _load_report_events(
+        session,
+        selected_filter,
+        AccessEvent.occurred_at <= period_end,
+        *movement_filters,
+    )
+    all_timeline_events = await _load_report_events(
+        session,
+        AccessEvent.occurred_at >= period_start,
+        AccessEvent.occurred_at <= period_end,
+        *movement_filters,
+    )
+    duration_lookup = build_duration_lookup(report_events, selected_history, timezone=timezone)
+    serialized_events = [
+        serialize_report_event(
+            event,
+            include_snapshots=options["include_snapshots"],
+            duration=duration_lookup.get(str(event.id)),
+            timezone=timezone,
+        )
+        for event in sorted(report_events, key=lambda item: item.occurred_at, reverse=True)
+    ]
+    return report_events, serialized_events, all_timeline_events, _direction_summary(report_events, timezone)
+
+
+async def _load_report_events(
+    session: AsyncSession,
+    *filters: Any,
+    include_anomalies: bool = False,
+) -> list[AccessEvent]:
+    query = select(AccessEvent).where(*filters).order_by(AccessEvent.occurred_at.asc())
+    if include_anomalies:
+        query = query.options(selectinload(AccessEvent.anomalies))
+    return list((await session.scalars(query)).all())
 
 
 def build_duration_lookup(
@@ -487,6 +467,11 @@ def serialize_report_person(person: Person) -> dict[str, Any]:
         "display_name": person.display_name,
         "pronouns": person.pronouns,
         "profile_photo_data_url": person.profile_photo_data_url,
+        "profile_photo_url": stored_image_url(
+            person.profile_photo_data_url,
+            f"/api/v1/people/{person.id}/photo",
+            person.updated_at,
+        ),
         "group": person.group.name if person.group else None,
         "category": person.group.category.value if person.group else None,
         "vehicles": [
@@ -496,6 +481,11 @@ def serialize_report_person(person: Person) -> dict[str, Any]:
                 "description": vehicle.description,
                 "title": _vehicle_title(vehicle),
                 "vehicle_photo_data_url": vehicle.vehicle_photo_data_url,
+                "vehicle_photo_url": stored_image_url(
+                    vehicle.vehicle_photo_data_url,
+                    f"/api/v1/vehicles/{vehicle.id}/photo",
+                    vehicle.updated_at,
+                ),
                 "make": vehicle.make,
                 "model": vehicle.model,
                 "color": vehicle.color,
@@ -526,6 +516,7 @@ def serialize_report_visitor_pass(visitor_pass: VisitorPass) -> dict[str, Any]:
         "display_name": visitor_pass.visitor_name,
         "pronouns": None,
         "profile_photo_data_url": None,
+        "profile_photo_url": None,
         "group": "Visitor Pass",
         "category": visitor_pass.pass_type.value,
         "vehicles": [
@@ -535,6 +526,7 @@ def serialize_report_visitor_pass(visitor_pass: VisitorPass) -> dict[str, Any]:
                 "description": "Visitor Pass Vehicle",
                 "title": vehicle_title,
                 "vehicle_photo_data_url": None,
+                "vehicle_photo_url": None,
                 "make": visitor_pass.vehicle_make,
                 "model": None,
                 "color": visitor_pass.vehicle_colour,

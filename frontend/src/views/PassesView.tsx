@@ -1,103 +1,54 @@
+import {
+Activity,
+AlertTriangle,
+ArrowRight,
+CalendarDays,
+Car,
+Check,
+CheckCircle2,
+ChevronDown,
+ChevronRight,
+CircleDot,
+ClipboardPaste,
+Clock3,
+GitBranch,
+Loader2,
+MessageCircle,
+Pencil,
+Plus,
+RefreshCw,
+Save,
+Send,
+ShieldCheck,
+Smartphone,
+Smile,
+Ticket,
+Trash2,
+Unlock,
+UserPlus,
+UserRound,
+X
+} from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { diff as jsonDiff } from "jsondiffpatch";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  Bell,
-  Bot,
-  Camera,
-  CalendarDays,
-  Car,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleDot,
-  Clock3,
-  Command,
-  ClipboardPaste,
-  Construction,
-  Copy,
-  Database,
-  DoorClosed,
-  DoorOpen,
-  Download,
-  File as FileIcon,
-  FileImage,
-  FileText,
-  Gauge,
-  GitBranch,
-  HardHat,
-  Home,
-  Key,
-  LayoutDashboard,
-  Lock,
-  LogIn,
-  LogOut,
-  Loader2,
-  MessageCircle,
-  Menu,
-  Moon,
-  Monitor,
-  MoreHorizontal,
-  Play,
-  PlugZap,
-  Plus,
-  Paperclip,
-  Pencil,
-  RefreshCcw,
-  RefreshCw,
-  Search,
-  Send,
-  Smile,
-  Smartphone,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Save,
-  Split,
-  Sparkles,
-  Sun,
-  Terminal,
-  Ticket,
-  Trash2,
-  Trophy,
-  Type,
-  Unlock,
-  UserPlus,
-  UserRound,
-  Users,
-  Volume2,
-  Warehouse,
-  X,
-  Zap
-} from "lucide-react";
 
 import {
-  api,
-  AuditLog,
-  BadgeTone,
-  EmptyState,
-  formatDate,
-  fromDateTimeLocal,
-  initials,
-  isRecord,
-  levelTone,
-  matches,
-  numberPayload,
-  RealtimeMessage,
-  scheduleDays,
-  stringPayload,
-  titleCase,
-  toDateTimeLocal,
-  TooltipPositionState
+api,
+AuditLog,
+BadgeTone,
+EmptyState,
+formatDate,
+fromDateTimeLocal,
+isRecord,
+levelTone,
+matches,
+numberPayload,
+RealtimeMessage,
+scheduleDays,
+stringPayload,
+titleCase,
+toDateTimeLocal,
+TooltipPositionState
 } from "../shared";
 
 
@@ -168,6 +119,22 @@ export const visitorPassTypes: VisitorPassType[] = ["one-time", "duration"];
 export const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "scheduled"]);
 
 export const visitorPassWindowOptions = [30, 60, 90, 120, 180];
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+
+  React.useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setPrefersReducedMotion(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return prefersReducedMotion;
+}
 
 export function PassesView({ query, realtime, refreshToken }: { query: string; realtime: RealtimeMessage[]; refreshToken: number }) {
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
@@ -327,7 +294,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
         </div>
       ) : visiblePasses.length ? (
         <div className="visitor-pass-grid">
-          <AnimatePresence initial={false}>
+          <>
             {visiblePasses.map((visitorPass) => (
               <VisitorPassCard
                 key={visitorPass.id}
@@ -335,7 +302,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
                 visitorPass={visitorPass}
               />
             ))}
-          </AnimatePresence>
+          </>
         </div>
       ) : (
         <div className="card passes-empty-card">
@@ -365,6 +332,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
             openEdit(visitorPass);
           }}
           onUpdated={handlePassUpdated}
+          realtime={realtime}
           visitorPass={detailPass}
         />
       ) : null}
@@ -430,12 +398,8 @@ export function VisitorPassCard({
   const vehiclePrimary = visitorPass.number_plate || vehicleSummary || "Pending";
   const vehicleSecondary = vehicleMeta || "Vehicle";
   return (
-    <motion.article
+    <article
       className={`card visitor-pass-card ${visitorPass.status}`}
-      layout
-      initial={{ opacity: 0, y: 8, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 8, scale: 0.985 }}
       onClick={() => onOpen(visitorPass)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -445,7 +409,6 @@ export function VisitorPassCard({
       }}
       role="button"
       tabIndex={0}
-      transition={{ duration: 0.18, ease: "easeOut", layout: { duration: 0.22 } }}
     >
       <div className="visitor-pass-card-head">
         <div className="visitor-pass-icon">
@@ -494,7 +457,7 @@ export function VisitorPassCard({
           </div>
         </div>
       </section>
-    </motion.article>
+    </article>
   );
 }
 
@@ -608,11 +571,10 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
   const Icon = state.icon;
 
   return (
-    <motion.div
+    <div
       aria-describedby={tooltip && tooltipPosition ? tooltipId : undefined}
       aria-label={tooltip ? `${state.label}. ${tooltip.body}` : state.label}
       className={`visitor-pass-more-info ${state.tone} ${visitorPass.whatsapp_status ?? ""}${tooltip ? " has-tooltip" : ""}`}
-      layout
       onClick={tooltip ? (event) => event.stopPropagation() : undefined}
       onBlur={tooltip ? () => setTooltipPosition(null) : undefined}
       onFocus={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
@@ -625,7 +587,6 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
       onMouseEnter={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
       onMouseLeave={tooltip ? () => setTooltipPosition(null) : undefined}
       tabIndex={tooltip ? 0 : undefined}
-      transition={{ duration: 0.18, ease: "easeOut", layout: { duration: 0.2 } }}
     >
       <Icon className={state.spinning ? "spin" : undefined} size={15} />
       <strong>{state.label}</strong>
@@ -642,12 +603,13 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
         </span>,
         document.body
       ) : null}
-    </motion.div>
+    </div>
   );
 }
 
 export function VisitorPassDetailsModal({
   visitorPass,
+  realtime,
   onClose,
   onEdit,
   onCancel,
@@ -655,6 +617,7 @@ export function VisitorPassDetailsModal({
   onUpdated
 }: {
   visitorPass: VisitorPass;
+  realtime: RealtimeMessage[];
   onClose: () => void;
   onEdit: (visitorPass: VisitorPass) => void;
   onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
@@ -680,7 +643,7 @@ export function VisitorPassDetailsModal({
   const threadRef = React.useRef<HTMLDivElement | null>(null);
   const latestMessageCountRef = React.useRef(0);
   const shouldStickToLatestRef = React.useRef(true);
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = usePrefersReducedMotion();
   const isDuration = visitorPass.pass_type === "duration";
   const canModify = visitorPass.status === "active" || visitorPass.status === "scheduled";
   const vehicleValue = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ") || visitorPass.number_plate || "Vehicle details pending";
@@ -752,24 +715,29 @@ export function VisitorPassDetailsModal({
   React.useEffect(() => {
     if (activeTab !== "whatsapp" || !isDuration) return undefined;
     loadWhatsAppMessages(!messagesLoaded).catch(() => undefined);
-    const interval = window.setInterval(() => {
-      loadWhatsAppMessages(false).catch(() => undefined);
-    }, 3500);
-    return () => {
-      window.clearInterval(interval);
-    };
   }, [activeTab, isDuration, loadWhatsAppMessages, messagesLoaded, visitorPass.updated_at]);
 
   React.useEffect(() => {
     if (activeTab !== "log") return undefined;
     loadLogs(!logsLoaded).catch(() => undefined);
-    const interval = window.setInterval(() => {
-      loadLogs(false).catch(() => undefined);
-    }, 5000);
-    return () => {
-      window.clearInterval(interval);
-    };
   }, [activeTab, loadLogs, logsLoaded, visitorPass.updated_at]);
+
+  React.useEffect(() => {
+    const latest = realtime[0];
+    if (!latest || activeTab !== "whatsapp" || !isDuration) return;
+    if (!isVisitorPassRealtimeEvent(latest)) return;
+    if (visitorPassIdFromRealtime(latest) !== visitorPass.id) return;
+    const source = stringPayload(latest.payload.source);
+    if (!source.startsWith("whatsapp")) return;
+    loadWhatsAppMessages(false).catch(() => undefined);
+  }, [activeTab, isDuration, loadWhatsAppMessages, realtime, visitorPass.id]);
+
+  React.useEffect(() => {
+    const latest = realtime[0];
+    if (!latest || activeTab !== "log") return;
+    if (!isVisitorPassAuditLogEvent(latest, visitorPass.id)) return;
+    loadLogs(false).catch(() => undefined);
+  }, [activeTab, loadLogs, realtime, visitorPass.id]);
 
   React.useEffect(() => {
     if (activeTab !== "whatsapp") return;
@@ -923,9 +891,9 @@ export function VisitorPassDetailsModal({
                     <Loader2 className="spin" size={17} /> Loading WhatsApp history
                   </div>
                 ) : messages.length ? (
-                  <AnimatePresence initial={false}>
+                  <>
                     {messages.map((message) => <VisitorPassWhatsAppBubble key={message.id} message={message} />)}
-                  </AnimatePresence>
+                  </>
                 ) : (
                   <div className="visitor-pass-thread-empty">No WhatsApp messages recorded for this pass yet</div>
                 )}
@@ -1057,13 +1025,8 @@ export function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWha
   const outbound = message.direction === "outbound";
   if (message.direction === "status") {
     return (
-      <motion.div
+      <div
         className="visitor-pass-whatsapp-row status"
-        layout
-        initial={{ opacity: 0, y: 8, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 8, scale: 0.98 }}
-        transition={{ duration: 0.22, ease: "easeOut" }}
       >
         <div className="visitor-pass-whatsapp-status-card">
           <MessageCircle size={24} />
@@ -1072,17 +1035,12 @@ export function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWha
             <small>{formatDate(message.created_at)}</small>
           </span>
         </div>
-      </motion.div>
+      </div>
     );
   }
   return (
-    <motion.div
+    <div
       className={`visitor-pass-whatsapp-row ${outbound ? "outbound" : "inbound"}`}
-      layout
-      initial={{ opacity: 0, y: 12, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 8, scale: 0.98 }}
-      transition={{ duration: 0.22, ease: "easeOut" }}
     >
       <span className={`visitor-pass-whatsapp-avatar ${outbound ? "iacs" : ""}`}>
         {outbound ? <ShieldCheck size={22} /> : message.actor_label.slice(0, 2).toUpperCase()}
@@ -1092,7 +1050,7 @@ export function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWha
         <p>{message.body}</p>
         <small>{formatDate(message.created_at)}{outbound ? <Check size={14} /> : null}</small>
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -1444,6 +1402,20 @@ export function visitorPassMatchesStatus(visitorPass: VisitorPass, filters: Set<
 
 export function isVisitorPassRealtimeEvent(event: RealtimeMessage) {
   return event.type.startsWith("visitor_pass.");
+}
+
+function visitorPassIdFromRealtime(event: RealtimeMessage) {
+  const candidate = event.payload.visitor_pass;
+  return isRecord(candidate) ? stringPayload(candidate.id) : "";
+}
+
+function isVisitorPassAuditLogEvent(event: RealtimeMessage, visitorPassId: string) {
+  if (event.type !== "audit.log.created") return false;
+  const log = isRecord(event.payload.log) ? event.payload.log : event.payload;
+  const targetEntity = stringPayload(log.target_entity).toLowerCase();
+  const targetId = stringPayload(log.target_id);
+  const action = stringPayload(log.action);
+  return targetId === visitorPassId || (!targetId && targetEntity === "visitorpass" && action.startsWith("visitor_pass."));
 }
 
 export function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {

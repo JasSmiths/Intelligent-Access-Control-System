@@ -12,7 +12,7 @@ from app.modules.access_devices.base import (
     AccessDeviceProviderUnavailable,
 )
 from app.modules.gate.base import GateState
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError
+from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
 from app.modules.home_assistant.covers import DEFAULT_CLOSE_SERVICE, DEFAULT_OPEN_SERVICE, normalize_cover_state, title_from_entity_id
 from app.services.settings import get_runtime_config
 
@@ -22,7 +22,7 @@ class HomeAssistantAccessDeviceProvider:
     display_name = "Home Assistant"
 
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
-        self._client = client or HomeAssistantClient()
+        self._client = client or get_home_assistant_client()
 
     async def configured(self) -> bool:
         config = await get_runtime_config()

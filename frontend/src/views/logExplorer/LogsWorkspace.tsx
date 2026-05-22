@@ -1,54 +1,54 @@
 import React from "react";
 
 import {
-  api,
-  AuditLog,
-  createActionConfirmation,
-  RealtimeMessage
+api,
+AuditLog,
+createActionConfirmation,
+RealtimeMessage
 } from "../../shared";
 import {
-  ClearLogsConfirmModal,
-  exportVisible,
-  LiveStreamDrawer,
-  LogsDetailInspector,
-  LogsExplorerTable,
-  LogsFilterBar,
-  LogsMetricStrip,
-  LogsSourceTabs,
-  LogsTopBar,
-  SaveFilterModal
+ClearLogsConfirmModal,
+exportVisible,
+LiveStreamDrawer,
+LogsDetailInspector,
+LogsExplorerTable,
+LogsFilterBar,
+LogsMetricStrip,
+LogsSourceTabs,
+LogsTopBar,
+SaveFilterModal
 } from "./components";
 import { defaultLogsFilters } from "./constants";
 import {
-  GateMalfunctionRecord,
-  LogRecord,
-  LogsFilters,
-  LogSourceKey,
-  PaginatedResponse,
-  SavedLogsFilter,
-  TelemetrySummary,
-  TelemetryTrace,
-  TelemetryTraceDetail,
-  TraceDetailState
+GateMalfunctionRecord,
+LogRecord,
+LogsFilters,
+LogSourceKey,
+PaginatedResponse,
+SavedLogsFilter,
+TelemetrySummary,
+TelemetryTrace,
+TelemetryTraceDetail,
+TraceDetailState
 } from "./types";
 import {
-  applyLocalFilters,
-  auditLogFromRealtimePayload,
-  auditRecord,
-  buildAuditParams,
-  buildSummaryParams,
-  buildTraceParams,
-  firstRecord,
-  gateMalfunctionRecordToTrace,
-  gateMalfunctionRecordToTraceDetail,
-  liveRecord,
-  loadSavedFilters,
-  realtimeLogKey,
-  saveSavedFilters,
-  sourceUsesAudit,
-  sourceUsesTraces,
-  timeRangeFrom,
-  traceRecord
+applyLocalFilters,
+auditLogFromRealtimePayload,
+auditRecord,
+buildAuditParams,
+buildSummaryParams,
+buildTraceParams,
+firstRecord,
+gateMalfunctionRecordToTrace,
+gateMalfunctionRecordToTraceDetail,
+liveRecord,
+loadSavedFilters,
+realtimeLogKey,
+saveSavedFilters,
+sourceUsesAudit,
+sourceUsesTraces,
+timeRangeFrom,
+traceRecord
 } from "./utils";
 
 export function LogsWorkspace({

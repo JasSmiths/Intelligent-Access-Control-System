@@ -15,7 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import NotificationRule, Person, Presence, Schedule
 from app.models.enums import PresenceState
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
-from app.modules.home_assistant.client import HomeAssistantClient
+from app.modules.home_assistant.client import HomeAssistantClient as DefaultHomeAssistantClient, get_home_assistant_client
 from app.modules.notifications.apprise_client import (
     AppriseNotificationSender,
     normalize_apprise_url,
@@ -55,6 +55,7 @@ from app.services.whatsapp_messaging import (
 )
 
 logger = get_logger(__name__)
+HomeAssistantClient = DefaultHomeAssistantClient
 
 AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 LEGACY_TOKEN_PATTERN = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
@@ -71,6 +72,12 @@ LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES = {
     "gate_malfunction_2hrs": "2hrs",
     "gate_malfunction_fubar": "fubar",
 }
+
+
+def _home_assistant_client() -> DefaultHomeAssistantClient:
+    if HomeAssistantClient is DefaultHomeAssistantClient:
+        return get_home_assistant_client()
+    return HomeAssistantClient()
 GATE_MALFUNCTION_STAGE_LABELS = {
     "initial": "Initial malfunction",
     "30m": "30 minutes stuck",
@@ -1469,7 +1476,7 @@ class NotificationService:
 
     async def _voice_announcements_preflight(self) -> NotificationActionOutcome | None:
         try:
-            state = await HomeAssistantClient().get_state(HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID)
+            state = await _home_assistant_client().get_state(HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID)
         except Exception as exc:
             logger.warning(
                 "voice_notification_announcements_state_unavailable",
@@ -1702,7 +1709,7 @@ class NotificationService:
         if not (config.home_assistant_url and config.home_assistant_token):
             return configured_targets
         try:
-            services = await HomeAssistantClient().list_services()
+            services = await _home_assistant_client().list_services()
         except Exception as exc:
             logger.debug("notification_mobile_app_discovery_failed", extra={"error": str(exc)})
             return configured_targets
@@ -1732,7 +1739,7 @@ class NotificationService:
         if not (config.home_assistant_url and config.home_assistant_token):
             return []
         try:
-            states = await HomeAssistantClient().list_states()
+            states = await _home_assistant_client().list_states()
         except Exception as exc:
             logger.debug("notification_media_player_discovery_failed", extra={"error": str(exc)})
             return []

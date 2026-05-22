@@ -200,6 +200,37 @@ def test_pdf_report_uses_pdf_safe_profile_photo(monkeypatch) -> None:
     assert report["person"]["pdf_profile_photo_data_url"] == "safe:data:image/heic;base64,abc"
 
 
+def test_public_report_snapshot_strips_embedded_media() -> None:
+    public = reports_service.public_report_snapshot(
+        {
+            "person": {
+                "profile_photo_data_url": "data:image/jpeg;base64,person",
+                "profile_photo_url": "/api/v1/people/person-id/photo",
+                "pdf_profile_photo_data_url": "data:image/jpeg;base64,pdf",
+                "vehicles": [
+                    {
+                        "vehicle_photo_data_url": "data:image/jpeg;base64,vehicle",
+                        "vehicle_photo_url": "/api/v1/vehicles/vehicle-id/photo",
+                    }
+                ],
+            },
+            "events": [
+                {
+                    "_snapshot_path": "snapshots/access-events/example.jpg",
+                    "_snapshot_content_type": "image/jpeg",
+                    "pdf_snapshot_data_url": "data:image/jpeg;base64,snapshot",
+                }
+            ],
+        }
+    )
+
+    assert "profile_photo_data_url" not in public["person"]
+    assert public["person"]["profile_photo_url"] == "/api/v1/people/person-id/photo"
+    assert "vehicle_photo_data_url" not in public["person"]["vehicles"][0]
+    assert public["person"]["vehicles"][0]["vehicle_photo_url"] == "/api/v1/vehicles/vehicle-id/photo"
+    assert "_snapshot_path" not in public["events"][0]
+
+
 def test_visitor_pass_serializes_as_report_subject() -> None:
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),

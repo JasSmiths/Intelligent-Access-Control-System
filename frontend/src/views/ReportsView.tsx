@@ -1,35 +1,36 @@
+import {
+AlertTriangle,
+BarChart3,
+CalendarDays,
+Camera,
+Car,
+CheckCircle2,
+ChevronLeft,
+ChevronRight,
+Clock3,
+Download,
+HelpCircle,
+LogIn,
+LogOut,
+Search,
+ShieldCheck,
+UserRound
+} from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
-import {
-  AlertTriangle,
-  BarChart3,
-  CalendarDays,
-  Camera,
-  Car,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Download,
-  HelpCircle,
-  LogIn,
-  LogOut,
-  Search,
-  ShieldCheck,
-  UserRound
-} from "lucide-react";
 
 import {
-  AccessEvent,
-  api,
-  Badge,
-  formatDate,
-  initials,
-  matches,
-  Person,
-  Presence,
-  TooltipPositionState,
-  titleCase
+AccessEvent,
+api,
+Badge,
+formatDate,
+initials,
+matches,
+mediaSource,
+Person,
+Presence,
+titleCase,
+TooltipPositionState
 } from "../shared";
 import type { VisitorPass } from "./PassesView";
 
@@ -56,7 +57,8 @@ type ReportSnapshotVehicle = Person["vehicles"][number] & {
   tax_tone?: "green" | "red" | "muted";
 };
 
-type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "vehicles"> & {
+type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "profile_photo_data_url" | "vehicles"> & {
+  profile_photo_data_url?: string | null;
   vehicles: ReportSnapshotVehicle[];
 };
 
@@ -735,6 +737,8 @@ export function ReportsView({
   const [isExportingReport, setIsExportingReport] = React.useState(false);
   const [isLoadingReportId, setIsLoadingReportId] = React.useState(false);
   const [reportActionError, setReportActionError] = React.useState<string | null>(null);
+  const visitorPassesRequestedRef = React.useRef(false);
+  const reportEventsRequestedRef = React.useRef(false);
 
   React.useEffect(() => {
     if (selectedPersonId && reportablePeople.some((person) => person.id === selectedPersonId)) return;
@@ -751,26 +755,6 @@ export function ReportsView({
       setPersonQuery("");
     }
   }, [selectedVisitorPassId, visitorPasses]);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      api.get<AccessEvent[]>("/api/v1/events?limit=250"),
-      api.get<VisitorPass[]>("/api/v1/visitor-passes?limit=500")
-    ])
-      .then(([nextEvents, nextVisitorPasses]) => {
-        if (!cancelled) {
-          setReportSourceEvents(nextEvents);
-          setVisitorPasses(nextVisitorPasses);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setReportSourceEvents(events);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [events]);
 
   const selectedPerson = reportablePeople.find((person) => person.id === selectedPersonId) ?? null;
   const selectedVisitorPass = visitorPasses.find((visitorPass) => visitorPass.id === selectedVisitorPassId) ?? null;
@@ -791,6 +775,52 @@ export function ReportsView({
     [selectedVisitorPass]
   );
   const selectedSubject = selectedPerson || selectedVisitorPass;
+  React.useEffect(() => {
+    setReportSourceEvents((current) => {
+      if (!reportEventsRequestedRef.current) return events;
+      const byId = new Map(current.map((event) => [event.id, event]));
+      events.forEach((event) => byId.set(event.id, event));
+      return [...byId.values()]
+        .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
+        .slice(0, 250);
+    });
+  }, [events]);
+
+  React.useEffect(() => {
+    const shouldLoadVisitorPasses = isPersonSearchOpen || Boolean(personQuery.trim()) || Boolean(selectedVisitorPassId);
+    if (!shouldLoadVisitorPasses || visitorPassesRequestedRef.current) return undefined;
+    let cancelled = false;
+    visitorPassesRequestedRef.current = true;
+    api.get<VisitorPass[]>("/api/v1/visitor-passes?limit=500")
+      .then((nextVisitorPasses) => {
+        if (!cancelled) setVisitorPasses(nextVisitorPasses);
+      })
+      .catch(() => {
+        if (!cancelled) visitorPassesRequestedRef.current = false;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPersonSearchOpen, personQuery, selectedVisitorPassId]);
+
+  React.useEffect(() => {
+    if (!selectedSubject || reportEventsRequestedRef.current) return undefined;
+    let cancelled = false;
+    reportEventsRequestedRef.current = true;
+    api.get<AccessEvent[]>("/api/v1/events?limit=250")
+      .then((nextEvents) => {
+        if (!cancelled) setReportSourceEvents(nextEvents);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          reportEventsRequestedRef.current = false;
+          setReportSourceEvents(events);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [events, selectedSubject]);
   const eventMatchesSelectedSubject = React.useCallback((event: AccessEvent) => {
     if (selectedPerson) return selectedPlates.has(normalizePlate(event.registration_number));
     if (selectedVisitorPass) {
@@ -972,6 +1002,7 @@ export function ReportsView({
       }
     : options;
   const previewSubjectKind = activeReport?.subject_type === "visitor_pass" || selectedVisitorPass ? "Visitor Pass" : "Person";
+  const previewPersonPhoto = previewPerson ? mediaSource(previewPerson.profile_photo_url, previewPerson.profile_photo_data_url, "thumb") : "";
 
   const selectPerson = React.useCallback((person: Person) => {
     setSelectedPersonId(person.id);
@@ -1240,8 +1271,8 @@ export function ReportsView({
             </div>
             <div className="report-person-card">
               <span className="report-avatar small">
-                {previewPerson?.profile_photo_data_url
-                  ? <img alt="" src={previewPerson.profile_photo_data_url} />
+                {previewPersonPhoto
+                  ? <img alt="" decoding="async" loading="lazy" src={previewPersonPhoto} />
                   : previewPerson ? reportInitials(previewPerson) : <UserRound size={18} />}
               </span>
               <div>
@@ -1370,7 +1401,7 @@ export function ReportsView({
           <section className="report-subject-band">
             <div className="report-subject-person">
               <span className="report-avatar">
-                {previewPerson.profile_photo_data_url ? <img alt="" src={previewPerson.profile_photo_data_url} /> : reportInitials(previewPerson)}
+                {previewPersonPhoto ? <img alt="" decoding="async" loading="lazy" src={previewPersonPhoto} /> : reportInitials(previewPerson)}
               </span>
               <div>
                 <strong>{previewPerson.display_name}</strong>
