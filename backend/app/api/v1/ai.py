@@ -230,7 +230,9 @@ async def chat_stream(
                 if event["type"] == "stream.done":
                     break
         finally:
-            await task
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     return StreamingResponse(stream_events(), media_type="text/event-stream")
 
@@ -379,12 +381,13 @@ async def chat_websocket(websocket: WebSocket) -> None:
 
     await websocket.accept()
     config = await get_runtime_config()
-    await websocket.send_json(
-        {
-            "type": "connection.ready",
-            "payload": {"provider": config.llm_provider},
-        }
-    )
+    send_lock = asyncio.Lock()
+
+    async def send_chat_event(event_type: str, payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send_json({"type": event_type, "payload": payload})
+
+    await send_chat_event("connection.ready", {"provider": config.llm_provider})
 
     try:
         while True:
@@ -394,7 +397,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                 raise
             except Exception as exc:
                 _record_chat_runtime_error("websocket_receive", user, {}, exc)
-                await _send_runtime_chat_error(websocket, "Alfred could not read that chat message. Please try again.")
+                await send_chat_event("chat.error", {"message": "Alfred could not read that chat message. Please try again."})
                 continue
 
             try:
@@ -403,34 +406,29 @@ async def chat_websocket(websocket: WebSocket) -> None:
                 tool_confirmation = payload.get("tool_confirmation")
                 client_context = payload.get("client_context") if isinstance(payload.get("client_context"), dict) else {}
                 if not message and not attachments and not isinstance(tool_confirmation, dict):
-                    await websocket.send_json(
-                        {"type": "chat.error", "payload": {"message": "Message or attachment is required."}}
-                    )
+                    await send_chat_event("chat.error", {"message": "Message or attachment is required."})
                     continue
 
-                await websocket.send_json(
+                await send_chat_event(
+                    "chat.thinking",
                     {
-                        "type": "chat.thinking",
-                        "payload": {
-                            "phase": "starting",
-                            "agents_running": 1,
-                            "active_tool_calls": 0,
-                        },
-                    }
+                        "phase": "starting",
+                        "agents_running": 1,
+                        "active_tool_calls": 0,
+                    },
                 )
                 thinking_started_at = time.monotonic()
 
                 async def publish_status(status: dict[str, Any]) -> None:
-                    event_type = str(status.pop("event", "chat.tool_status"))
-                    await websocket.send_json({"type": event_type, "payload": status})
+                    item = dict(status)
+                    event_type = str(item.pop("event", "chat.tool_status"))
+                    await send_chat_event(event_type, item)
 
                 if isinstance(tool_confirmation, dict):
                     confirmation_id = str(tool_confirmation.get("id") or tool_confirmation.get("confirmation_id") or "").strip()
                     decision = str(tool_confirmation.get("decision") or "confirm").strip() or "confirm"
                     if not confirmation_id:
-                        await websocket.send_json(
-                            {"type": "chat.error", "payload": {"message": "Confirmation action is missing its ID."}}
-                        )
+                        await send_chat_event("chat.error", {"message": "Confirmation action is missing its ID."})
                         continue
                     result = await chat_service.handle_tool_confirmation(
                         confirmation_id=confirmation_id,
@@ -456,37 +454,33 @@ async def chat_websocket(websocket: WebSocket) -> None:
                 if remaining_typing > 0:
                     await asyncio.sleep(remaining_typing)
                 for chunk in _response_chunks(result.text):
-                    await websocket.send_json(
+                    await send_chat_event(
+                        "chat.response.delta",
                         {
-                            "type": "chat.response.delta",
-                            "payload": {
-                                "session_id": result.session_id,
-                                "provider": result.provider,
-                                "chunk": chunk,
-                            },
-                        }
-                    )
-                    await asyncio.sleep(CHAT_CHUNK_DELAY_SECONDS)
-                await websocket.send_json(
-                    {
-                        "type": "chat.response",
-                        "payload": {
                             "session_id": result.session_id,
                             "provider": result.provider,
-                            "text": result.text,
-                            "tool_results": result.tool_results,
-                            "attachments": result.attachments,
-                            "pending_action": result.pending_action,
-                            "user_message_id": result.user_message_id,
-                            "assistant_message_id": result.assistant_message_id,
+                            "chunk": chunk,
                         },
-                    }
+                    )
+                    await asyncio.sleep(CHAT_CHUNK_DELAY_SECONDS)
+                await send_chat_event(
+                    "chat.response",
+                    {
+                        "session_id": result.session_id,
+                        "provider": result.provider,
+                        "text": result.text,
+                        "tool_results": result.tool_results,
+                        "attachments": result.attachments,
+                        "pending_action": result.pending_action,
+                        "user_message_id": result.user_message_id,
+                        "assistant_message_id": result.assistant_message_id,
+                    },
                 )
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
                 _record_chat_runtime_error("websocket", user, payload, exc)
-                await _send_runtime_chat_error(websocket, CHAT_RUNTIME_ERROR_MESSAGE)
+                await send_chat_event("chat.error", {"message": CHAT_RUNTIME_ERROR_MESSAGE})
     except WebSocketDisconnect:
         return
 

@@ -2756,7 +2756,7 @@ async def analyze_alert_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
         result = await analyze_image_with_provider(
             provider,
             prompt=prompt,
-            image_bytes=path.read_bytes(),
+            image_bytes=await asyncio.to_thread(path.read_bytes),
             mime_type=content_type,
         )
     except (ImageAnalysisUnsupportedError, Exception) as exc:
@@ -3458,7 +3458,11 @@ async def read_chat_attachment(arguments: dict[str, Any]) -> dict[str, Any]:
 
     if attachment.kind == "image":
         try:
-            _, image_bytes = chat_attachment_store.read_bytes(file_id, owner_user_id=user_id)
+            _, image_bytes = await asyncio.to_thread(
+                chat_attachment_store.read_bytes,
+                file_id,
+                owner_user_id=user_id,
+            )
             result = await analyze_image_with_provider(
                 provider,
                 prompt=prompt,
@@ -3482,7 +3486,11 @@ async def read_chat_attachment(arguments: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        _, text = chat_attachment_store.read_text(file_id, owner_user_id=user_id)
+        _, text = await asyncio.to_thread(
+            chat_attachment_store.read_text,
+            file_id,
+            owner_user_id=user_id,
+        )
     except ChatAttachmentError as exc:
         return {
             "file_id": file_id,

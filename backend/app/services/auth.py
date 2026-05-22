@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -37,11 +38,19 @@ def hash_password(password: str) -> str:
     return password_hasher.hash(password)
 
 
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return password_hasher.verify(password_hash, password)
     except (VerifyMismatchError, VerificationError):
         return False
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash)
 
 
 def generate_temporary_password(length: int = 18) -> str:
@@ -137,7 +146,7 @@ async def create_user(
         profile_photo_data_url=profile_photo_data_url,
         email=email.strip().lower() if email else None,
         mobile_phone_number=normalize_mobile_phone_number(mobile_phone_number),
-        password_hash=hash_password(password),
+        password_hash=await hash_password_async(password),
         role=role,
         is_active=is_active,
         person_id=person_id,

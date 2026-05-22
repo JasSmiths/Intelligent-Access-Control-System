@@ -63,6 +63,7 @@ Group,
 HomeAssistantManagedCover,
 IntegrationStatus,
 isActionableAlert,
+isAbortError,
 isRecord,
 MaintenanceStatus,
 MovementSagaSummary,
@@ -1253,6 +1254,9 @@ function useProfilePreferences(user: UserAccount | null): [ProfilePreferences, (
       return { sidebarCollapsed: false };
     }
   });
+  const saveTimerRef = React.useRef<number | null>(null);
+  const saveAbortRef = React.useRef<AbortController | null>(null);
+  const saveSequenceRef = React.useRef(0);
 
   React.useEffect(() => {
     if (!user?.preferences) return;
@@ -1263,12 +1267,40 @@ function useProfilePreferences(user: UserAccount | null): [ProfilePreferences, (
     localStorage.setItem("iacs-profile-preferences", JSON.stringify(profilePreferences));
   }, [user?.id, user?.preferences]);
 
+  React.useEffect(() => () => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveAbortRef.current?.abort();
+  }, []);
+
   const updatePreferences = React.useCallback((next: Partial<ProfilePreferences>) => {
     setPreferences((current) => {
       const merged = { ...current, ...next };
       localStorage.setItem("iacs-profile-preferences", JSON.stringify(merged));
       if (user) {
-        api.patch<UserAccount>("/api/v1/auth/me/preferences", merged).catch(() => undefined);
+        if (saveTimerRef.current !== null) {
+          window.clearTimeout(saveTimerRef.current);
+        }
+        saveTimerRef.current = window.setTimeout(() => {
+          saveTimerRef.current = null;
+          saveAbortRef.current?.abort();
+          const controller = new AbortController();
+          const sequence = saveSequenceRef.current + 1;
+          saveSequenceRef.current = sequence;
+          saveAbortRef.current = controller;
+          api.patch<UserAccount>("/api/v1/auth/me/preferences", merged, { signal: controller.signal })
+            .catch((error: unknown) => {
+              if (!isAbortError(error)) {
+                console.warn("Failed to save profile preferences", error);
+              }
+            })
+            .finally(() => {
+              if (saveSequenceRef.current === sequence && saveAbortRef.current === controller) {
+                saveAbortRef.current = null;
+              }
+            });
+        }, 350);
       }
       return merged;
     });
@@ -1439,6 +1471,8 @@ function App() {
 
   const refreshPromiseRef = React.useRef<Promise<void> | null>(null);
   const refreshPromiseKeyRef = React.useRef<string | null>(null);
+  const refreshAbortRef = React.useRef<AbortController | null>(null);
+  const refreshSequenceRef = React.useRef(0);
   const refreshLastStartedAtRef = React.useRef(0);
   const loadedShellDataRef = React.useRef(new Set<ShellDataKey>());
 
@@ -1448,6 +1482,11 @@ function App() {
     if (refreshPromiseRef.current && refreshPromiseKeyRef.current === refreshKey) {
       return refreshPromiseRef.current;
     }
+    refreshAbortRef.current?.abort();
+    const controller = new AbortController();
+    const sequence = refreshSequenceRef.current + 1;
+    refreshSequenceRef.current = sequence;
+    refreshAbortRef.current = controller;
     if ([...keys].some((key) => !loadedShellDataRef.current.has(key))) {
       setLoading(true);
     }
@@ -1456,7 +1495,8 @@ function App() {
     const addTask = <T,>(key: ShellDataKey, path: string, setter: (value: T) => void) => {
       if (!keys.has(key)) return;
       tasks.push(
-        api.get<T>(path).then((value) => {
+        api.get<T>(path, { signal: controller.signal }).then((value) => {
+          if (controller.signal.aborted || refreshSequenceRef.current !== sequence) return;
           setter(value);
           loadedShellDataRef.current.add(key);
         })
@@ -1475,14 +1515,20 @@ function App() {
 
     const run = Promise.all(tasks)
       .then(() => {
+        if (controller.signal.aborted || refreshSequenceRef.current !== sequence) return;
         setDataRefreshToken((current) => current + 1);
-        if (refreshPromiseRef.current === run) setLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || refreshSequenceRef.current !== sequence || isAbortError(error)) return;
+        throw error;
       })
       .finally(() => {
         if (refreshPromiseRef.current === run) {
+          setLoading(false);
           refreshPromiseRef.current = null;
           refreshPromiseKeyRef.current = null;
         }
+        if (refreshAbortRef.current === controller) refreshAbortRef.current = null;
       });
     refreshPromiseRef.current = run;
     refreshPromiseKeyRef.current = refreshKey;
@@ -1507,28 +1553,70 @@ function App() {
 
   const realtimeRefreshLastRunRef = React.useRef(0);
   const realtimeLifecycleRefreshLastRunRef = React.useRef(0);
+  const realtimeRefreshTimerRef = React.useRef<number | null>(null);
+  const realtimeRefreshInFlightRef = React.useRef(false);
+  const realtimeRefreshPendingLifecycleRef = React.useRef(false);
+
+  const runQueuedRealtimeRefresh = React.useCallback((lifecycle: boolean) => {
+    realtimeRefreshInFlightRef.current = true;
+    realtimeRefreshPendingLifecycleRef.current = false;
+    const now = Date.now();
+    realtimeRefreshLastRunRef.current = now;
+    if (lifecycle) realtimeLifecycleRefreshLastRunRef.current = now;
+    setRealtimeStatus(
+      "refreshing",
+      lifecycle ? "Pulling current site state" : "Applying live update"
+    );
+    refresh()
+      .then(() => setRealtimeStatus(
+        "live",
+        lifecycle ? "Data refreshed just now" : "Live update applied"
+      ))
+      .catch(() => setRealtimeStatus(
+        "reconnecting",
+        lifecycle ? "Refresh failed; retrying with the stream" : "Refresh failed; waiting for the stream"
+      ))
+      .finally(() => {
+        realtimeRefreshInFlightRef.current = false;
+      });
+  }, [refresh, setRealtimeStatus]);
+
+  const queueRealtimeRefresh = React.useCallback((lifecycle = false) => {
+    const now = Date.now();
+    const minInterval = lifecycle ? REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS : REALTIME_REFRESH_MIN_INTERVAL_MS;
+    const lastRunAt = lifecycle ? realtimeLifecycleRefreshLastRunRef.current : realtimeRefreshLastRunRef.current;
+    const refreshAge = now - refreshLastStartedAtRef.current;
+    const dueIn = Math.max(
+      0,
+      minInterval - (now - lastRunAt),
+      lifecycle ? REALTIME_REFRESH_MIN_INTERVAL_MS - refreshAge : 0
+    );
+    realtimeRefreshPendingLifecycleRef.current = realtimeRefreshPendingLifecycleRef.current || lifecycle;
+    if (!realtimeRefreshInFlightRef.current && dueIn === 0) {
+      runQueuedRealtimeRefresh(realtimeRefreshPendingLifecycleRef.current);
+      return;
+    }
+    if (realtimeRefreshTimerRef.current !== null) return;
+    realtimeRefreshTimerRef.current = window.setTimeout(() => {
+      realtimeRefreshTimerRef.current = null;
+      runQueuedRealtimeRefresh(realtimeRefreshPendingLifecycleRef.current);
+    }, Math.max(50, dueIn || REALTIME_REFRESH_MIN_INTERVAL_MS));
+  }, [runQueuedRealtimeRefresh]);
 
   const refreshFromRealtime = React.useCallback(() => {
-    const now = Date.now();
-    if (now - realtimeRefreshLastRunRef.current < REALTIME_REFRESH_MIN_INTERVAL_MS) return;
-    realtimeRefreshLastRunRef.current = now;
-    setRealtimeStatus("refreshing", "Applying live update");
-    refresh()
-      .then(() => setRealtimeStatus("live", "Live update applied"))
-      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; waiting for the stream"));
-  }, [refresh, setRealtimeStatus]);
+    queueRealtimeRefresh(false);
+  }, [queueRealtimeRefresh]);
 
   const refreshFromRealtimeLifecycle = React.useCallback(() => {
-    const now = Date.now();
-    if (now - realtimeLifecycleRefreshLastRunRef.current < REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS) return;
-    if (now - refreshLastStartedAtRef.current < REALTIME_REFRESH_MIN_INTERVAL_MS) return;
-    realtimeLifecycleRefreshLastRunRef.current = now;
-    realtimeRefreshLastRunRef.current = now;
-    setRealtimeStatus("refreshing", "Pulling current site state");
-    refresh()
-      .then(() => setRealtimeStatus("live", "Data refreshed just now"))
-      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; retrying with the stream"));
-  }, [refresh, setRealtimeStatus]);
+    queueRealtimeRefresh(true);
+  }, [queueRealtimeRefresh]);
+
+  React.useEffect(() => () => {
+    if (realtimeRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimeRefreshTimerRef.current);
+    }
+    refreshAbortRef.current?.abort();
+  }, []);
 
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;

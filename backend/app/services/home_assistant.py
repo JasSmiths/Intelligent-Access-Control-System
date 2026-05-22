@@ -35,6 +35,7 @@ DOOR_ENTITY_IDS = {
     BACK_DOOR_ENTITY_ID: "back_door",
 }
 STATE_REFRESH_MIN_INTERVAL_SECONDS = 30.0
+LISTENER_RECONNECT_SECONDS = 5.0
 
 
 class HomeAssistantIntegrationService:
@@ -172,77 +173,84 @@ class HomeAssistantIntegrationService:
         return status
 
     async def _listen(self) -> None:
-        try:
-            async for message in self._client.subscribe_state_changed():
-                previous_status = (self._connected, self._last_error)
-                self._mark_connected()
-                await self._publish_connection_status_if_changed(previous_status)
-                if message.get("type") != "event":
-                    continue
+        while True:
+            try:
+                async for message in self._client.subscribe_state_changed():
+                    previous_status = (self._connected, self._last_error)
+                    self._mark_connected()
+                    await self._publish_connection_status_if_changed(previous_status)
+                    if message.get("type") != "event":
+                        continue
 
-                event = message.get("event", {})
-                event_type = str(event.get("event_type") or "")
-                if event_type == "mobile_app_notification_action":
-                    await self._handle_mobile_notification_action(event)
-                    continue
-                if event_type and event_type != "state_changed":
-                    continue
-                data = event.get("data", {})
-                entity_id = data.get("entity_id")
-                new_state = data.get("new_state") or {}
-                state_value = new_state.get("state")
-                if not entity_id or state_value is None:
-                    continue
+                    event = message.get("event", {})
+                    event_type = str(event.get("event_type") or "")
+                    if event_type == "mobile_app_notification_action":
+                        await self._handle_mobile_notification_action(event)
+                        continue
+                    if event_type and event_type != "state_changed":
+                        continue
+                    data = event.get("data", {})
+                    entity_id = data.get("entity_id")
+                    new_state = data.get("new_state") or {}
+                    state_value = new_state.get("state")
+                    if not entity_id or state_value is None:
+                        continue
 
-                previous_gate_state = self._cached_gate_state(str(entity_id))
-                last_changed = str(new_state.get("last_changed") or "") or None
-                last_updated = str(new_state.get("last_updated") or "") or None
-                self._remember_state(
-                    str(entity_id),
-                    str(state_value),
-                    last_changed=last_changed,
-                    last_updated=last_updated,
-                )
-                config = await get_runtime_config()
-                gate_entities = normalize_cover_entities(
-                    config.home_assistant_gate_entities,
-                    default_open_service=config.home_assistant_gate_open_service,
-                ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
-                gate_entity_map = {str(entity["entity_id"]): entity for entity in gate_entities}
-                garage_entity_map = {
-                    str(entity["entity_id"]): entity
-                    for entity in normalize_cover_entities(
-                        config.home_assistant_garage_door_entities,
-                        default_open_service=config.home_assistant_gate_open_service,
-                    )
-                }
-                if entity_id in gate_entity_map:
-                    await self._sync_gate_state(
-                        state_value,
-                        entity_id,
-                        str(gate_entity_map[entity_id].get("name") or entity_id),
-                        previous_state=previous_gate_state,
+                    previous_gate_state = self._cached_gate_state(str(entity_id))
+                    last_changed = str(new_state.get("last_changed") or "") or None
+                    last_updated = str(new_state.get("last_updated") or "") or None
+                    self._remember_state(
+                        str(entity_id),
+                        str(state_value),
                         last_changed=last_changed,
-                        source="home_assistant_websocket",
+                        last_updated=last_updated,
                     )
-                if entity_id in garage_entity_map:
-                    await self._sync_cover_state(
-                        state_value,
-                        entity_id,
-                        "garage_door",
-                        str(garage_entity_map[entity_id].get("name") or entity_id),
-                    )
-                if entity_id in DOOR_ENTITY_IDS:
-                    await self._sync_door_state(state_value, entity_id)
-                if entity_id == MAINTENANCE_HA_ENTITY_ID:
-                    await self._sync_maintenance_mode_state(state_value)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            previous_status = (self._connected, self._last_error)
-            self._mark_unhealthy(str(exc))
-            await self._publish_connection_status_if_changed(previous_status)
-            logger.warning("home_assistant_listener_failed", extra={"error": str(exc)})
+                    config = await get_runtime_config()
+                    gate_entities = normalize_cover_entities(
+                        config.home_assistant_gate_entities,
+                        default_open_service=config.home_assistant_gate_open_service,
+                    ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+                    gate_entity_map = {str(entity["entity_id"]): entity for entity in gate_entities}
+                    garage_entity_map = {
+                        str(entity["entity_id"]): entity
+                        for entity in normalize_cover_entities(
+                            config.home_assistant_garage_door_entities,
+                            default_open_service=config.home_assistant_gate_open_service,
+                        )
+                    }
+                    if entity_id in gate_entity_map:
+                        await self._sync_gate_state(
+                            state_value,
+                            entity_id,
+                            str(gate_entity_map[entity_id].get("name") or entity_id),
+                            previous_state=previous_gate_state,
+                            last_changed=last_changed,
+                            source="home_assistant_websocket",
+                        )
+                    if entity_id in garage_entity_map:
+                        await self._sync_cover_state(
+                            state_value,
+                            entity_id,
+                            "garage_door",
+                            str(garage_entity_map[entity_id].get("name") or entity_id),
+                        )
+                    if entity_id in DOOR_ENTITY_IDS:
+                        await self._sync_door_state(state_value, entity_id)
+                    if entity_id == MAINTENANCE_HA_ENTITY_ID:
+                        await self._sync_maintenance_mode_state(state_value)
+                previous_status = (self._connected, self._last_error)
+                self._mark_unhealthy("Home Assistant listener ended.")
+                await self._publish_connection_status_if_changed(previous_status)
+                logger.warning("home_assistant_listener_ended")
+                await asyncio.sleep(LISTENER_RECONNECT_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                previous_status = (self._connected, self._last_error)
+                self._mark_unhealthy(str(exc))
+                await self._publish_connection_status_if_changed(previous_status)
+                logger.warning("home_assistant_listener_failed", extra={"error": str(exc)})
+                await asyncio.sleep(LISTENER_RECONNECT_SECONDS)
 
     async def _handle_mobile_notification_action(self, event: dict) -> None:
         data = as_dict(event.get("data"))

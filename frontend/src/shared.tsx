@@ -477,47 +477,59 @@ type NavigateOptions = {
 
 export type NavigateToView = (nextView: ViewKey, options?: NavigateOptions) => void;
 
+type ApiRequestOptions = {
+  signal?: AbortSignal;
+};
+
+export function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 export const api = {
-  async get<T>(path: string): Promise<T> {
-    const response = await fetch(path, { credentials: "include" });
+  async get<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+    const response = await fetch(path, { credentials: "include", signal: options.signal });
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async post<T>(path: string, body?: unknown): Promise<T> {
+  async post<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
+      signal: options.signal,
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async patch<T>(path: string, body?: unknown): Promise<T> {
+  async patch<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
+      signal: options.signal,
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async put<T>(path: string, body?: unknown): Promise<T> {
+  async put<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
+      signal: options.signal,
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
     return response.json() as Promise<T>;
   },
-  async delete<T = void>(path: string, body?: unknown): Promise<T> {
+  async delete<T = void>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, {
       method: "DELETE",
       headers: body ? { "Content-Type": "application/json" } : undefined,
       credentials: "include",
+      signal: options.signal,
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) throw await apiError(response);
@@ -931,6 +943,8 @@ export function useSettings(category?: string) {
   const [settingsRows, setSettingsRows] = React.useState<SystemSetting[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const loadSequenceRef = React.useRef(0);
+  const loadAbortRef = React.useRef<AbortController | null>(null);
   const values = React.useMemo(() => {
     return settingsRows.reduce<SettingsMap>((acc, row) => {
       acc[row.key] = row.value;
@@ -939,20 +953,34 @@ export function useSettings(category?: string) {
   }, [settingsRows]);
 
   const load = React.useCallback(async () => {
+    const sequence = loadSequenceRef.current + 1;
+    loadSequenceRef.current = sequence;
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setError("");
     setLoading(true);
     try {
       const suffix = category ? `?category=${encodeURIComponent(category)}` : "";
-      setSettingsRows(await api.get<SystemSetting[]>(`/api/v1/settings${suffix}`));
+      const rows = await api.get<SystemSetting[]>(`/api/v1/settings${suffix}`, { signal: controller.signal });
+      if (loadSequenceRef.current === sequence && !controller.signal.aborted) {
+        setSettingsRows(rows);
+      }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load settings");
+      if (!isAbortError(loadError) && loadSequenceRef.current === sequence) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load settings");
+      }
     } finally {
-      setLoading(false);
+      if (loadSequenceRef.current === sequence) {
+        setLoading(false);
+        if (loadAbortRef.current === controller) loadAbortRef.current = null;
+      }
     }
   }, [category]);
 
   React.useEffect(() => {
     load().catch(() => undefined);
+    return () => loadAbortRef.current?.abort();
   }, [load]);
 
   const save = React.useCallback(async (updates: Record<string, unknown>) => {

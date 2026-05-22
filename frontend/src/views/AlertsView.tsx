@@ -18,6 +18,7 @@ Badge,
 EmptyState,
 formatDate,
 isActionableAlert,
+isAbortError,
 MetricCard,
 titleCase,
 Toolbar
@@ -55,8 +56,15 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
   const [resolutionNote, setResolutionNote] = React.useState("");
   const [actionLoading, setActionLoading] = React.useState(false);
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const loadSequenceRef = React.useRef(0);
+  const loadAbortRef = React.useRef<AbortController | null>(null);
 
   const loadAlerts = React.useCallback(async () => {
+    const sequence = loadSequenceRef.current + 1;
+    loadSequenceRef.current = sequence;
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setLoading(true);
     setError("");
     try {
@@ -64,13 +72,23 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
       if (severityFilter !== "all") params.set("severity", severityFilter);
       if (typeFilter !== "all") params.set("type", typeFilter);
       if (query.trim()) params.set("q", query.trim());
-      setAlerts(await api.get<Anomaly[]>(`/api/v1/alerts?${params}`));
+      const rows = await api.get<Anomaly[]>(`/api/v1/alerts?${params}`, { signal: controller.signal });
+      if (loadSequenceRef.current === sequence && !controller.signal.aborted) {
+        setAlerts(rows);
+      }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load alerts");
+      if (!isAbortError(loadError) && loadSequenceRef.current === sequence) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load alerts");
+      }
     } finally {
-      setLoading(false);
+      if (loadSequenceRef.current === sequence) {
+        setLoading(false);
+        if (loadAbortRef.current === controller) loadAbortRef.current = null;
+      }
     }
   }, [query, severityFilter, statusFilter, typeFilter]);
+
+  React.useEffect(() => () => loadAbortRef.current?.abort(), []);
 
   React.useEffect(() => {
     loadAlerts().catch(() => undefined);

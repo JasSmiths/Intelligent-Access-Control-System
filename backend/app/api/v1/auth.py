@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,16 +23,16 @@ from app.services.auth import (
     normalize_username,
     serialize_user,
     set_session_cookie,
-    verify_password,
+    verify_password_async,
 )
 from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
 
 router = APIRouter()
 
 
-def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
+async def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
     try:
-        return normalize_profile_photo_data_url(profile_photo_data_url)
+        return await asyncio.to_thread(normalize_profile_photo_data_url, profile_photo_data_url)
     except ProfilePhotoError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -123,7 +124,7 @@ async def first_run_setup(
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=normalize_profile_photo_or_400(request.profile_photo_data_url),
+            profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=request.password,
@@ -151,7 +152,8 @@ async def login(
     user = await session.scalar(
         select(User).where(User.username == normalize_username(request.username))
     )
-    if not user or not user.is_active or not verify_password(request.password, user.password_hash):
+    password_ok = bool(user and user.is_active) and await verify_password_async(request.password, user.password_hash)
+    if not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     user.last_login_at = datetime.now(tz=UTC)
@@ -178,7 +180,7 @@ async def my_photo(
     user: User = Depends(current_user),
     variant: PhotoVariant = Query(default="full"),
 ) -> Response:
-    return data_url_media_response(user.profile_photo_data_url, variant=variant)
+    return await data_url_media_response(user.profile_photo_data_url, variant=variant)
 
 
 @router.patch("/me/preferences", response_model=UserResponse)

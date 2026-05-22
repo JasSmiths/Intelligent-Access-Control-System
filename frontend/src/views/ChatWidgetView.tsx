@@ -1056,8 +1056,15 @@ export function ChatWidget({
 
   const sendConfirmationAction = React.useCallback((messageId: string, action: ChatConfirmationAction, decision: "confirm" | "cancel" = "confirm") => {
     const socket = socketRef.current;
-    if (!connected || thinking || !socket || socket.readyState !== WebSocket.OPEN || action.sent) return;
+    if (!connected || thinking || awaitingResponseRef.current || !socket || socket.readyState !== WebSocket.OPEN || action.sent) return;
     const userEcho = decision === "confirm" ? action.userEcho : `Cancelled: ${action.displayTarget}`;
+    awaitingResponseRef.current = true;
+    activeTurnPhaseRef.current = decision === "confirm" ? "using_tools" : "cancelled";
+    lastUserRequestRef.current = null;
+    markTurnStarted();
+    setThinking(true);
+    setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
+    setRunActivity(null);
     setMessages((current) => [
       ...current.map((message) =>
         message.id === messageId && message.confirmationAction
@@ -1076,24 +1083,36 @@ export function ChatWidget({
         status: "sent_local"
       }
     ]);
-    socket.send(JSON.stringify({
-      message: userEcho,
-      session_id: sessionId,
-      attachments: [],
-      client_context: chatClientContext(),
-      tool_confirmation: {
-        id: action.confirmationId,
-        confirmation_id: action.confirmationId,
-        decision
-      }
-    }));
-    awaitingResponseRef.current = true;
-    activeTurnPhaseRef.current = decision === "confirm" ? "using_tools" : "cancelled";
-    lastUserRequestRef.current = null;
-    markTurnStarted();
-    setThinking(true);
-    setToolStatus(decision === "confirm" ? action.statusLabel : "Cancelling action...");
-    setRunActivity(null);
+    try {
+      socket.send(JSON.stringify({
+        message: userEcho,
+        session_id: sessionId,
+        attachments: [],
+        client_context: chatClientContext(),
+        tool_confirmation: {
+          id: action.confirmationId,
+          confirmation_id: action.confirmationId,
+          decision
+        }
+      }));
+    } catch {
+      awaitingResponseRef.current = false;
+      activeTurnStartedAtRef.current = null;
+      activeTurnPhaseRef.current = "idle";
+      setThinking(false);
+      setToolStatus("");
+      setRunActivity(null);
+      setMessages((current) => [
+        ...current,
+        {
+          id: clientId("alfred-send-error"),
+          role: "assistant",
+          text: "Alfred could not send that confirmation. Please try again.",
+          createdAt: Date.now(),
+          status: "failed"
+        }
+      ]);
+    }
   }, [connected, markTurnStarted, sessionId, thinking]);
 
   const submitFeedback = React.useCallback(async (
@@ -1222,26 +1241,59 @@ export function ChatWidget({
       return;
     }
     const attachments = overrideAttachments ?? readyAttachments.map(publicChatAttachment);
-    if ((!sourceText.trim() && !attachments.length) || !connected || uploading || thinking || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (
+      (!sourceText.trim() && !attachments.length) ||
+      !connected ||
+      uploading ||
+      thinking ||
+      awaitingResponseRef.current ||
+      !socket ||
+      socket.readyState !== WebSocket.OPEN
+    ) return;
     const text = sourceText.trim() || "Please inspect the attached file.";
+    awaitingResponseRef.current = true;
+    lastUserRequestRef.current = { text, attachments: attachments.map((attachment) => ({ ...attachment })) };
+    activeTurnPhaseRef.current = "starting";
+    markTurnStarted();
+    setThinking(true);
+    setToolStatus("Starting...");
+    setRunActivity(null);
     setMessages((current) => [
       ...current,
       { id: clientId("user"), role: "user", text, createdAt: Date.now(), attachments, status: "sent_local" }
     ]);
-    lastUserRequestRef.current = { text, attachments: attachments.map((attachment) => ({ ...attachment })) };
-    activeTurnPhaseRef.current = "starting";
-    markTurnStarted();
-    socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
-    awaitingResponseRef.current = true;
+    try {
+      socket.send(JSON.stringify({ message: text, session_id: sessionId, attachments, client_context: chatClientContext() }));
+    } catch {
+      const retryAction = lastUserRequestRef.current
+        ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+        : null;
+      awaitingResponseRef.current = false;
+      activeTurnStartedAtRef.current = null;
+      activeTurnPhaseRef.current = "idle";
+      lastUserRequestRef.current = null;
+      setThinking(false);
+      setToolStatus("");
+      setRunActivity(null);
+      setMessages((current) => [
+        ...current,
+        {
+          id: clientId("alfred-send-error"),
+          role: "assistant",
+          text: "Alfred could not send that message. Please try again.",
+          createdAt: Date.now(),
+          status: "failed",
+          retryAction
+        }
+      ]);
+      return;
+    }
     setDraft("");
     setLlmPickerOpen(false);
     setLlmFeedback("");
     if (!overrideAttachments) {
       setPendingAttachments((current) => current.filter((attachment) => attachment.uploadState === "error"));
     }
-    setThinking(true);
-    setToolStatus("Starting...");
-    setRunActivity(null);
   }, [connected, draft, markTurnStarted, readyAttachments, sessionId, thinking, uploading]);
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {

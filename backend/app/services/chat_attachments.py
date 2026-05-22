@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import json
@@ -101,7 +102,8 @@ class ChatAttachmentStore:
         if content_type not in ALLOWED_CONTENT_TYPES:
             raise ChatAttachmentError(f"Unsupported file type: {content_type}")
 
-        return self.save_generated(
+        return await asyncio.to_thread(
+            self.save_generated,
             filename=filename,
             content=content,
             content_type=content_type,

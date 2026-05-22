@@ -14,6 +14,7 @@ Badge,
 BadgeTone,
 EmptyState,
 formatDate,
+isAbortError,
 matches,
 movementSagaDisplay,
 titleCase,
@@ -84,26 +85,48 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
   const [error, setError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const deferredQuery = React.useDeferredValue(query);
+  const movementsLoadSequenceRef = React.useRef(0);
+  const movementsLoadAbortRef = React.useRef<AbortController | null>(null);
+  const detailLoadSequenceRef = React.useRef(0);
+  const detailLoadAbortRef = React.useRef<AbortController | null>(null);
 
   const loadMovements = React.useCallback(async () => {
+    const sequence = movementsLoadSequenceRef.current + 1;
+    movementsLoadSequenceRef.current = sequence;
+    movementsLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    movementsLoadAbortRef.current = controller;
     setLoading(true);
     setError(null);
     try {
-      const rows = await api.get<MovementRecord[]>("/api/v1/access/movements?limit=250");
+      const rows = await api.get<MovementRecord[]>("/api/v1/access/movements?limit=250", { signal: controller.signal });
+      if (movementsLoadSequenceRef.current !== sequence) return;
       setMovements(rows);
       setSelected((current) => {
         if (!current) return rows[0] ?? null;
         return rows.find((row) => row.id === current.id) ?? rows[0] ?? null;
       });
     } catch (loadError) {
+      if (isAbortError(loadError)) return;
+      if (movementsLoadSequenceRef.current !== sequence) return;
       setError(errorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (movementsLoadSequenceRef.current === sequence) {
+        setLoading(false);
+        if (movementsLoadAbortRef.current === controller) {
+          movementsLoadAbortRef.current = null;
+        }
+      }
     }
   }, []);
 
   const loadMovementDetail = React.useCallback(
     async (movement: MovementRecord, options: { optimistic?: boolean; quiet?: boolean } = {}) => {
+      const sequence = detailLoadSequenceRef.current + 1;
+      detailLoadSequenceRef.current = sequence;
+      detailLoadAbortRef.current?.abort();
+      const controller = new AbortController();
+      detailLoadAbortRef.current = controller;
       if (options.optimistic !== false) {
         setSelected(movement);
       }
@@ -112,19 +135,36 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
       }
       setDetailLoading(true);
       try {
-        const detail = await api.get<MovementRecord>(`/api/v1/access/movements/${movement.id}`);
+        const detail = await api.get<MovementRecord>(`/api/v1/access/movements/${movement.id}`, {
+          signal: controller.signal
+        });
+        if (detailLoadSequenceRef.current !== sequence) return;
         setSelected((current) => (current?.id === movement.id ? detail : current));
         setMovements((current) => current.map((row) => (row.id === detail.id ? { ...row, ...detail } : row)));
       } catch (detailError) {
+        if (isAbortError(detailError)) return;
+        if (detailLoadSequenceRef.current !== sequence) return;
         if (!options.quiet) {
           setActionError(errorMessage(detailError));
         }
       } finally {
-        setDetailLoading(false);
+        if (detailLoadSequenceRef.current === sequence) {
+          setDetailLoading(false);
+          if (detailLoadAbortRef.current === controller) {
+            detailLoadAbortRef.current = null;
+          }
+        }
       }
     },
     []
   );
+
+  React.useEffect(() => () => {
+    movementsLoadSequenceRef.current += 1;
+    movementsLoadAbortRef.current?.abort();
+    detailLoadSequenceRef.current += 1;
+    detailLoadAbortRef.current?.abort();
+  }, []);
 
   React.useEffect(() => {
     void loadMovements();

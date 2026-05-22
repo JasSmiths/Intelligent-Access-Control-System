@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -306,9 +307,9 @@ def normalize_person_pronouns(pronouns: str | None) -> str | None:
     return normalized
 
 
-def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
+async def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
     try:
-        return normalize_profile_photo_data_url(profile_photo_data_url)
+        return await asyncio.to_thread(normalize_profile_photo_data_url, profile_photo_data_url)
     except ProfilePhotoError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -587,7 +588,7 @@ async def person_photo(
     person = await session.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
-    return data_url_media_response(person.profile_photo_data_url, variant=variant)
+    return await data_url_media_response(person.profile_photo_data_url, variant=variant)
 
 
 async def get_group_or_404(session: AsyncSession, group_id: uuid.UUID | None) -> Group | None:
@@ -738,7 +739,7 @@ async def add_person(
         last_name=request.last_name.strip(),
         display_name=compose_person_name(request.first_name, request.last_name),
         pronouns=normalize_person_pronouns(request.pronouns),
-        profile_photo_data_url=normalize_profile_photo_or_400(request.profile_photo_data_url),
+        profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
         group_id=group.id if group else None,
         schedule_id=schedule.id if schedule else None,
         garage_door_entity_ids=garage_door_entity_ids,
@@ -854,7 +855,7 @@ async def update_person(
     if "pronouns" in request.model_fields_set:
         person.pronouns = normalize_person_pronouns(request.pronouns)
     if "profile_photo_data_url" in request.model_fields_set:
-        person.profile_photo_data_url = normalize_profile_photo_or_400(request.profile_photo_data_url)
+        person.profile_photo_data_url = await normalize_profile_photo_or_400(request.profile_photo_data_url)
     if "notes" in request.model_fields_set:
         person.notes = normalize_optional_text(request.notes)
     if request.is_active is not None:
@@ -929,7 +930,7 @@ async def vehicle_photo(
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
-    return data_url_media_response(vehicle.vehicle_photo_data_url, variant=variant)
+    return await data_url_media_response(vehicle.vehicle_photo_data_url, variant=variant)
 
 
 @router.post("/vehicles", response_model=VehicleResponse, status_code=status.HTTP_201_CREATED)
@@ -946,7 +947,7 @@ async def add_vehicle(
         person_id=derived_vehicle_person_id([person.id for person in people]),
         schedule_id=schedule.id if schedule else None,
         registration_number=normalize_registration_number(request.registration_number),
-        vehicle_photo_data_url=normalize_profile_photo_or_400(request.vehicle_photo_data_url),
+        vehicle_photo_data_url=await normalize_profile_photo_or_400(request.vehicle_photo_data_url),
         make=normalize_vehicle_text(request.make),
         model=normalize_vehicle_text(request.model),
         color=normalize_vehicle_text(request.color),
@@ -1018,7 +1019,7 @@ async def update_vehicle(
     if request.registration_number is not None:
         vehicle.registration_number = normalize_registration_number(request.registration_number)
     if "vehicle_photo_data_url" in request.model_fields_set:
-        vehicle.vehicle_photo_data_url = normalize_profile_photo_or_400(request.vehicle_photo_data_url)
+        vehicle.vehicle_photo_data_url = await normalize_profile_photo_or_400(request.vehicle_photo_data_url)
     if "make" in request.model_fields_set:
         vehicle.make = normalize_vehicle_text(request.make)
     if "model" in request.model_fields_set:

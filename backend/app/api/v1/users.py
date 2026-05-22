@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from typing import Any
 
@@ -16,7 +17,7 @@ from app.services.auth import (
     compose_full_name,
     create_user,
     generate_temporary_password,
-    hash_password,
+    hash_password_async,
     normalize_username,
     normalize_mobile_phone_number,
     serialize_user,
@@ -32,9 +33,9 @@ from app.services.telemetry import (
 router = APIRouter()
 
 
-def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
+async def normalize_profile_photo_or_400(profile_photo_data_url: str | None) -> str | None:
     try:
-        return normalize_profile_photo_data_url(profile_photo_data_url)
+        return await asyncio.to_thread(normalize_profile_photo_data_url, profile_photo_data_url)
     except ProfilePhotoError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -138,7 +139,7 @@ async def user_photo(
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    return data_url_media_response(user.profile_photo_data_url, variant=variant)
+    return await data_url_media_response(user.profile_photo_data_url, variant=variant)
 
 
 @router.post("", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)
@@ -161,7 +162,7 @@ async def add_user(
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=normalize_profile_photo_or_400(request.profile_photo_data_url),
+            profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=temporary_password,
@@ -228,7 +229,7 @@ async def update_user(
     if request.first_name is not None or request.last_name is not None:
         user.full_name = compose_full_name(user.first_name, user.last_name)
     if "profile_photo_data_url" in request.model_fields_set:
-        user.profile_photo_data_url = normalize_profile_photo_or_400(request.profile_photo_data_url)
+        user.profile_photo_data_url = await normalize_profile_photo_or_400(request.profile_photo_data_url)
     if "email" in request.model_fields_set:
         user.email = request.email.strip().lower() if request.email else None
     if "mobile_phone_number" in request.model_fields_set:
@@ -277,7 +278,7 @@ async def reset_password(
         if request.generate_password or not request.temporary_password
         else request.temporary_password
     )
-    user.password_hash = hash_password(temporary_password)
+    user.password_hash = await hash_password_async(temporary_password)
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_CRUD,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import re
@@ -606,8 +607,11 @@ async def render_person_movement_report_pdf(
     timezone: ZoneInfo,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    report = _report_for_pdf(snapshot)
-    html = _TEMPLATES.get_template("person_movements.html").render(report=report)
+    report = await asyncio.to_thread(_report_for_pdf, snapshot)
+    html = await asyncio.to_thread(
+        _TEMPLATES.get_template("person_movements.html").render,
+        report=report,
+    )
     footer = (
         "<div style=\"width:100%;font-family:Inter,Arial,sans-serif;font-size:8px;"
         "color:#6b7890;padding:0 14mm;display:flex;justify-content:space-between;\">"

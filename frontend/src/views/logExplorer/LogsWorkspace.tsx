@@ -4,6 +4,7 @@ import {
 api,
 AuditLog,
 createActionConfirmation,
+isAbortError,
 RealtimeMessage
 } from "../../shared";
 import {
@@ -85,6 +86,10 @@ export function LogsWorkspace({
   const reloadTimerRef = React.useRef<number | null>(null);
   const processedRealtimeKeysRef = React.useRef<Set<string>>(new Set());
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const summaryLoadSequenceRef = React.useRef(0);
+  const summaryLoadAbortRef = React.useRef<AbortController | null>(null);
+  const logsLoadSequenceRef = React.useRef(0);
+  const logsLoadAbortRef = React.useRef<AbortController | null>(null);
 
   const normalizedLiveRecords = React.useMemo(
     () => logs.map((log, index) => liveRecord(log, index)),
@@ -141,15 +146,40 @@ export function LogsWorkspace({
   }, []);
 
   const loadSummary = React.useCallback(async () => {
+    const sequence = summaryLoadSequenceRef.current + 1;
+    summaryLoadSequenceRef.current = sequence;
+    summaryLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    summaryLoadAbortRef.current = controller;
     const params = buildSummaryParams(filters);
     const path = params.toString() ? `/api/v1/telemetry/summary?${params}` : "/api/v1/telemetry/summary";
-    setSummary(await api.get<TelemetrySummary>(path));
-  }, [filters.timeRange]);
+    try {
+      const nextSummary = await api.get<TelemetrySummary>(path, { signal: controller.signal });
+      if (summaryLoadSequenceRef.current !== sequence) return;
+      setSummary(nextSummary);
+    } catch (summaryError) {
+      if (isAbortError(summaryError)) return;
+      if (summaryLoadSequenceRef.current !== sequence) return;
+      throw summaryError;
+    } finally {
+      if (summaryLoadSequenceRef.current === sequence && summaryLoadAbortRef.current === controller) {
+        summaryLoadAbortRef.current = null;
+      }
+    }
+  }, [filters]);
 
   const loadLogs = React.useCallback(async (mode: "reset" | "append" = "reset") => {
+    const sequence = logsLoadSequenceRef.current + 1;
+    logsLoadSequenceRef.current = sequence;
+    logsLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    logsLoadAbortRef.current = controller;
     if (activeSource === "live") {
       setLoading(false);
       setLoadingMore(false);
+      if (logsLoadAbortRef.current === controller) {
+        logsLoadAbortRef.current = null;
+      }
       return;
     }
     setError("");
@@ -167,31 +197,48 @@ export function LogsWorkspace({
           if (from) params.set("from", from);
           if (filters.status !== "all") params.set("status", filters.status);
           if (mode === "append" && traceCursor) params.set("cursor", traceCursor);
-          const response = await api.get<PaginatedResponse<GateMalfunctionRecord>>(`/api/v1/gate-malfunctions/history?${params}`);
+          const response = await api.get<PaginatedResponse<GateMalfunctionRecord>>(
+            `/api/v1/gate-malfunctions/history?${params}`,
+            { signal: controller.signal }
+          );
           nextTraceRecords.push(...response.items.map((record) => traceRecord(gateMalfunctionRecordToTrace(record))));
           nextTraceCursor = response.next_cursor;
         } else {
-          const response = await api.get<PaginatedResponse<TelemetryTrace>>(`/api/v1/telemetry/traces?${buildTraceParams(activeSource, filters, mode === "append" ? traceCursor : null)}`);
+          const response = await api.get<PaginatedResponse<TelemetryTrace>>(
+            `/api/v1/telemetry/traces?${buildTraceParams(activeSource, filters, mode === "append" ? traceCursor : null)}`,
+            { signal: controller.signal }
+          );
           nextTraceRecords.push(...response.items.map(traceRecord));
           nextTraceCursor = response.next_cursor;
         }
       }
 
       if (sourceUsesAudit(activeSource) && (mode === "reset" || auditCursor)) {
-          const response = await api.get<PaginatedResponse<AuditLog>>(`/api/v1/telemetry/audit?${buildAuditParams(activeSource, filters, mode === "append" ? auditCursor : null)}`);
+        const response = await api.get<PaginatedResponse<AuditLog>>(
+          `/api/v1/telemetry/audit?${buildAuditParams(activeSource, filters, mode === "append" ? auditCursor : null)}`,
+          { signal: controller.signal }
+        );
         nextAuditRecords.push(...response.items.map(auditRecord));
         nextAuditCursor = response.next_cursor;
       }
 
+      if (logsLoadSequenceRef.current !== sequence) return;
       setTraceRecords((current) => mode === "append" ? mergeRecords(current, nextTraceRecords) : nextTraceRecords);
       setAuditRecords((current) => mode === "append" ? mergeRecords(current, nextAuditRecords) : nextAuditRecords);
       setTraceCursor(nextTraceCursor);
       setAuditCursor(nextAuditCursor);
     } catch (loadError) {
+      if (isAbortError(loadError)) return;
+      if (logsLoadSequenceRef.current !== sequence) return;
       setError(loadError instanceof Error ? loadError.message : "Unable to load logs");
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
+      if (logsLoadSequenceRef.current === sequence) {
+        setLoading(false);
+        setLoadingMore(false);
+        if (logsLoadAbortRef.current === controller) {
+          logsLoadAbortRef.current = null;
+        }
+      }
     }
   }, [activeSource, auditCursor, filters, traceCursor]);
 
@@ -213,9 +260,15 @@ export function LogsWorkspace({
     lastRefreshTokenRef.current = refreshToken;
     loadLogs("reset").catch(() => undefined);
     loadSummary().catch(() => undefined);
-  }, [refreshToken]);
+  }, [loadLogs, loadSummary, refreshToken]);
 
-  React.useEffect(() => () => clearScheduledReload(), [clearScheduledReload]);
+  React.useEffect(() => () => {
+    clearScheduledReload();
+    summaryLoadSequenceRef.current += 1;
+    summaryLoadAbortRef.current?.abort();
+    logsLoadSequenceRef.current += 1;
+    logsLoadAbortRef.current?.abort();
+  }, [clearScheduledReload]);
 
   React.useEffect(() => {
     if (!notice) return undefined;
@@ -240,14 +293,18 @@ export function LogsWorkspace({
     const malfunctionId = selectedRecord.rawTrace?.category === "gate_malfunction"
       ? String(selectedRecord.rawTrace.context.malfunction_id || selectedRecord.rawTrace.context.id || "")
       : "";
+    const controller = new AbortController();
     const request = malfunctionId
-      ? api.get<GateMalfunctionRecord>(`/api/v1/gate-malfunctions/${malfunctionId}/trace`).then(gateMalfunctionRecordToTraceDetail)
-      : api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`);
+      ? api.get<GateMalfunctionRecord>(`/api/v1/gate-malfunctions/${malfunctionId}/trace`, {
+        signal: controller.signal
+      }).then(gateMalfunctionRecordToTraceDetail)
+      : api.get<TelemetryTraceDetail>(`/api/v1/telemetry/traces/${traceId}`, { signal: controller.signal });
     request
       .then((detail) => {
         setTraceDetails((current) => ({ ...current, [traceId]: { loading: false, error: "", detail } }));
       })
       .catch((detailError) => {
+        if (isAbortError(detailError)) return;
         setTraceDetails((current) => ({
           ...current,
           [traceId]: {
@@ -257,7 +314,8 @@ export function LogsWorkspace({
           }
         }));
       });
-  }, [selectedRecord, traceDetails]);
+    return () => controller.abort();
+  }, [selectedRecord]);
 
   React.useEffect(() => {
     if (!logs.length || activeSource === "live") return;
@@ -295,7 +353,7 @@ export function LogsWorkspace({
       loadLogs("reset").catch(() => undefined);
       loadSummary().catch(() => undefined);
     }, 900);
-  }, [activeSource, clearScheduledReload, logs]);
+  }, [activeSource, clearScheduledReload, loadLogs, loadSummary, logs]);
 
   async function clearLogs() {
     setClearing(true);

@@ -39,6 +39,7 @@ BadgeTone,
 EmptyState,
 formatDate,
 fromDateTimeLocal,
+isAbortError,
 isRecord,
 levelTone,
 matches,
@@ -146,8 +147,15 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
   const [error, setError] = React.useState("");
   const deferredQuery = React.useDeferredValue(query);
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const loadSequenceRef = React.useRef(0);
+  const loadAbortRef = React.useRef<AbortController | null>(null);
 
   const loadPasses = React.useCallback(async (options?: { showLoading?: boolean }) => {
+    const sequence = loadSequenceRef.current + 1;
+    loadSequenceRef.current = sequence;
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     const showLoading = options?.showLoading !== false;
     const params = new URLSearchParams();
     if (filters.size && filters.size < visitorPassStatuses.length) {
@@ -158,13 +166,27 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
     if (showLoading) setLoading(true);
     setError("");
     try {
-      setPasses(await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`));
+      const rows = await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`, { signal: controller.signal });
+      if (loadSequenceRef.current !== sequence) return;
+      setPasses(rows);
     } catch (loadError) {
+      if (isAbortError(loadError)) return;
+      if (loadSequenceRef.current !== sequence) return;
       setError(loadError instanceof Error ? loadError.message : "Unable to load Visitor Passes");
     } finally {
-      if (showLoading) setLoading(false);
+      if (loadSequenceRef.current === sequence) {
+        if (showLoading) setLoading(false);
+        if (loadAbortRef.current === controller) {
+          loadAbortRef.current = null;
+        }
+      }
     }
   }, [deferredQuery, filters]);
+
+  React.useEffect(() => () => {
+    loadSequenceRef.current += 1;
+    loadAbortRef.current?.abort();
+  }, []);
 
   React.useEffect(() => {
     loadPasses().catch(() => undefined);
@@ -643,6 +665,10 @@ export function VisitorPassDetailsModal({
   const threadRef = React.useRef<HTMLDivElement | null>(null);
   const latestMessageCountRef = React.useRef(0);
   const shouldStickToLatestRef = React.useRef(true);
+  const messagesLoadSequenceRef = React.useRef(0);
+  const messagesLoadAbortRef = React.useRef<AbortController | null>(null);
+  const logsLoadSequenceRef = React.useRef(0);
+  const logsLoadAbortRef = React.useRef<AbortController | null>(null);
   const reduceMotion = usePrefersReducedMotion();
   const isDuration = visitorPass.pass_type === "duration";
   const canModify = visitorPass.status === "active" || visitorPass.status === "scheduled";
@@ -666,36 +692,75 @@ export function VisitorPassDetailsModal({
   const canUnblockVisitor = Boolean(isDuration && activeTab === "whatsapp" && abuseCooldown && !visitorUnblocking);
 
   const loadWhatsAppMessages = React.useCallback(async (showLoading = false) => {
-    if (!isDuration) return;
+    if (!isDuration) {
+      messagesLoadSequenceRef.current += 1;
+      messagesLoadAbortRef.current?.abort();
+      return;
+    }
+    const sequence = messagesLoadSequenceRef.current + 1;
+    messagesLoadSequenceRef.current = sequence;
+    messagesLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    messagesLoadAbortRef.current = controller;
     if (showLoading) setMessagesLoading(true);
     setMessagesError("");
     try {
-      const rows = await api.get<VisitorPassWhatsAppMessage[]>(`/api/v1/visitor-passes/${visitorPass.id}/whatsapp-messages`);
+      const rows = await api.get<VisitorPassWhatsAppMessage[]>(
+        `/api/v1/visitor-passes/${visitorPass.id}/whatsapp-messages`,
+        { signal: controller.signal }
+      );
+      if (messagesLoadSequenceRef.current !== sequence) return;
       const nextMessages = rows.map(visitorPassWhatsAppMessageFromApi);
       setMessages((current) => visitorPassWhatsAppMessagesEqual(current, nextMessages) ? current : nextMessages);
       setMessagesLoaded(true);
     } catch (historyError) {
+      if (isAbortError(historyError)) return;
+      if (messagesLoadSequenceRef.current !== sequence) return;
       setMessagesError(historyError instanceof Error ? historyError.message : "Unable to load WhatsApp history");
     } finally {
-      if (showLoading) setMessagesLoading(false);
+      if (messagesLoadSequenceRef.current === sequence) {
+        if (showLoading) setMessagesLoading(false);
+        if (messagesLoadAbortRef.current === controller) {
+          messagesLoadAbortRef.current = null;
+        }
+      }
     }
   }, [isDuration, visitorPass.id]);
 
   const loadLogs = React.useCallback(async (showLoading = false) => {
+    const sequence = logsLoadSequenceRef.current + 1;
+    logsLoadSequenceRef.current = sequence;
+    logsLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    logsLoadAbortRef.current = controller;
     if (showLoading) setLogsLoading(true);
     setLogsError("");
     try {
-      const rows = await api.get<VisitorPassLogEntry[]>(`/api/v1/visitor-passes/${visitorPass.id}/logs`);
+      const rows = await api.get<VisitorPassLogEntry[]>(`/api/v1/visitor-passes/${visitorPass.id}/logs`, {
+        signal: controller.signal
+      });
+      if (logsLoadSequenceRef.current !== sequence) return;
       setLogs((current) => visitorPassLogsEqual(current, rows) ? current : rows);
       setLogsLoaded(true);
     } catch (logError) {
+      if (isAbortError(logError)) return;
+      if (logsLoadSequenceRef.current !== sequence) return;
       setLogsError(logError instanceof Error ? logError.message : "Unable to load Visitor Pass log");
     } finally {
-      if (showLoading) setLogsLoading(false);
+      if (logsLoadSequenceRef.current === sequence) {
+        if (showLoading) setLogsLoading(false);
+        if (logsLoadAbortRef.current === controller) {
+          logsLoadAbortRef.current = null;
+        }
+      }
     }
   }, [visitorPass.id]);
 
   React.useEffect(() => {
+    messagesLoadSequenceRef.current += 1;
+    messagesLoadAbortRef.current?.abort();
+    logsLoadSequenceRef.current += 1;
+    logsLoadAbortRef.current?.abort();
     setActiveTab("details");
     setMessages([]);
     setMessagesError("");
@@ -711,6 +776,13 @@ export function VisitorPassDetailsModal({
     latestMessageCountRef.current = 0;
     shouldStickToLatestRef.current = true;
   }, [visitorPass.id]);
+
+  React.useEffect(() => () => {
+    messagesLoadSequenceRef.current += 1;
+    messagesLoadAbortRef.current?.abort();
+    logsLoadSequenceRef.current += 1;
+    logsLoadAbortRef.current?.abort();
+  }, []);
 
   React.useEffect(() => {
     if (activeTab !== "whatsapp" || !isDuration) return undefined;

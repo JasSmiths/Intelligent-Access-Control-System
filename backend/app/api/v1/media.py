@@ -1,3 +1,4 @@
+import asyncio
 from typing import Literal
 
 from fastapi import HTTPException, Response, status
@@ -11,7 +12,7 @@ PHOTO_VARIANT_MAX_EDGE_PX: dict[PhotoVariant, int] = {
 }
 
 
-def data_url_media_response(
+async def data_url_media_response(
     value: str | None,
     *,
     detail: str = "Photo not found",
@@ -20,7 +21,8 @@ def data_url_media_response(
     if not value:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
     try:
-        content_type, content = photo_data_url_to_media(
+        content_type, content = await asyncio.to_thread(
+            photo_data_url_to_media,
             value,
             max_edge_px=PHOTO_VARIANT_MAX_EDGE_PX[variant],
         )
