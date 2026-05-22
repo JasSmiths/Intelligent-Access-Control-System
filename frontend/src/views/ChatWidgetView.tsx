@@ -1006,6 +1006,10 @@ export function ChatWidget({
       cancelled = true;
       clearReconnectTimer();
       clearConnectionTimeout();
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
@@ -1661,6 +1665,8 @@ export function ChatMessageBubble({
     if (!displayText) return;
     onOpenCopyMenu({ messageId: message.id, text: displayText, x, y });
   }, [displayText, message.id, onOpenCopyMenu]);
+
+  React.useEffect(() => () => clearLongPress(), [clearLongPress]);
 
   React.useEffect(() => {
     if (!isAssistant || message.localSeenAt) return undefined;

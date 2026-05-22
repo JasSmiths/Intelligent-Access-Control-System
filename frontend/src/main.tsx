@@ -118,6 +118,7 @@ const REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS = 1000;
 const REALTIME_RESUME_RECONNECT_AFTER_MS = 30000;
 const REALTIME_CLIENT_PING_INTERVAL_MS = 25000;
 const REALTIME_PROBE_TIMEOUT_MS = 5000;
+const REALTIME_DEFER_PARSE_BYTES = 256 * 1024;
 
 const REALTIME_DATA_REFRESH_EVENTS = new Set([
   "access_event.finalize_failed",
@@ -549,6 +550,110 @@ function shouldRefreshDataForRealtimeEvent(event: RealtimeMessage) {
   const payload = isRecord(event.payload.log) ? event.payload.log : event.payload;
   const action = stringPayload(payload.action);
   return REALTIME_AUDIT_REFRESH_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix));
+}
+
+function realtimeMessageForRouteConsumers(event: RealtimeMessage): RealtimeMessage | null {
+  if (event.type.startsWith("visitor_pass.")) {
+    const visitorPass = isRecord(event.payload.visitor_pass) ? compactVisitorPassRealtimePayload(event.payload.visitor_pass) : null;
+    return {
+      type: event.type,
+      created_at: event.created_at,
+      payload: {
+        ...(visitorPass ? { visitor_pass: visitorPass } : {}),
+        source: stringPayload(event.payload.source)
+      }
+    };
+  }
+
+  if (event.type === "audit.log.created") {
+    const log = isRecord(event.payload.log) ? event.payload.log : event.payload;
+    const action = stringPayload(log.action);
+    const targetEntity = stringPayload(log.target_entity);
+    if (!action.startsWith("visitor_pass.") && targetEntity.toLowerCase() !== "visitorpass") return null;
+    return {
+      type: event.type,
+      created_at: event.created_at,
+      payload: {
+        log: {
+          action,
+          target_entity: targetEntity,
+          target_id: stringPayload(log.target_id)
+        }
+      }
+    };
+  }
+
+  if (event.type === "access_event.finalized" || event.type === "leaderboard_overtake") {
+    return { type: event.type, created_at: event.created_at, payload: {} };
+  }
+
+  if (event.type === "access_device.status") {
+    const payload = isRecord(event.payload.status) ? { status: event.payload.status } : event.payload;
+    return { type: event.type, created_at: event.created_at, payload };
+  }
+
+  if (event.type === "icloud_calendar.accounts_changed") {
+    return {
+      type: event.type,
+      created_at: event.created_at,
+      payload: Array.isArray(event.payload.accounts) ? { accounts: event.payload.accounts } : {}
+    };
+  }
+
+  if (event.type === "icloud_calendar.sync_completed") {
+    return {
+      type: event.type,
+      created_at: event.created_at,
+      payload: isRecord(event.payload.sync) ? { sync: event.payload.sync } : {}
+    };
+  }
+
+  return null;
+}
+
+function compactVisitorPassRealtimePayload(candidate: Record<string, unknown>) {
+  return {
+    id: stringPayload(candidate.id),
+    visitor_name: stringPayload(candidate.visitor_name),
+    pass_type: stringPayload(candidate.pass_type),
+    visitor_phone: stringPayload(candidate.visitor_phone),
+    expected_time: stringPayload(candidate.expected_time),
+    window_minutes: numberPayload(candidate.window_minutes),
+    valid_from: stringPayload(candidate.valid_from),
+    valid_until: stringPayload(candidate.valid_until),
+    window_start: stringPayload(candidate.window_start),
+    window_end: stringPayload(candidate.window_end),
+    status: stringPayload(candidate.status),
+    creation_source: stringPayload(candidate.creation_source),
+    source_reference: stringPayload(candidate.source_reference),
+    source_metadata: compactVisitorPassSourceMetadata(candidate.source_metadata),
+    whatsapp_status: stringPayload(candidate.whatsapp_status),
+    whatsapp_status_label: stringPayload(candidate.whatsapp_status_label),
+    whatsapp_status_detail: stringPayload(candidate.whatsapp_status_detail),
+    created_by_user_id: stringPayload(candidate.created_by_user_id),
+    created_by: stringPayload(candidate.created_by),
+    arrival_time: stringPayload(candidate.arrival_time),
+    departure_time: stringPayload(candidate.departure_time),
+    number_plate: stringPayload(candidate.number_plate),
+    vehicle_make: stringPayload(candidate.vehicle_make),
+    vehicle_colour: stringPayload(candidate.vehicle_colour),
+    duration_on_site_seconds: typeof candidate.duration_on_site_seconds === "number" ? candidate.duration_on_site_seconds : null,
+    duration_human: stringPayload(candidate.duration_human),
+    arrival_event_id: stringPayload(candidate.arrival_event_id),
+    departure_event_id: stringPayload(candidate.departure_event_id),
+    telemetry_trace_id: stringPayload(candidate.telemetry_trace_id),
+    created_at: stringPayload(candidate.created_at),
+    updated_at: stringPayload(candidate.updated_at)
+  };
+}
+
+function compactVisitorPassSourceMetadata(value: unknown) {
+  if (!isRecord(value)) return null;
+  return {
+    whatsapp_abuse_muted_until: stringPayload(value.whatsapp_abuse_muted_until),
+    whatsapp_abuse_muted_reason: stringPayload(value.whatsapp_abuse_muted_reason),
+    whatsapp_last_error: stringPayload(value.whatsapp_last_error)
+  };
 }
 
 function isNotificationSeverity(value: string): value is NotificationToast["severity"] {
@@ -1406,7 +1511,7 @@ function App() {
   const [schedules, setSchedules] = React.useState<Schedule[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [maintenanceStatus, setMaintenanceStatus] = React.useState<MaintenanceStatus | null>(null);
-  const [realtime, setRealtime] = React.useState<RealtimeMessage[]>([]);
+  const [latestRealtime, setLatestRealtime] = React.useState<RealtimeMessage | null>(null);
   const [dataRefreshToken, setDataRefreshToken] = React.useState(0);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -1638,15 +1743,15 @@ function App() {
     let lastSocketActivityAt = Date.now();
     let hasVerifiedSocket = false;
 
-    const handleMessage = (event: MessageEvent, sourceSocket: WebSocket) => {
+    const handleMessageData = (data: unknown, sourceSocket: WebSocket) => {
       lastSocketActivityAt = Date.now();
       let parsed: RealtimeMessage;
       try {
-        parsed = JSON.parse(event.data) as RealtimeMessage;
+        parsed = JSON.parse(String(data)) as RealtimeMessage;
       } catch (parseError) {
         console.warn("Ignored malformed realtime stream message", {
           error: parseError instanceof Error ? parseError.message : String(parseError),
-          bytes: typeof event.data === "string" ? event.data.length : undefined
+          bytes: typeof data === "string" ? data.length : undefined
         });
         setRealtimeStatus("degraded", "Ignored malformed stream data; waiting for next event");
         return;
@@ -1655,7 +1760,10 @@ function App() {
         markSocketVerified(sourceSocket, parsed);
         return;
       }
-      setRealtime((current) => [parsed, ...current].slice(0, 80));
+      const routeRealtime = realtimeMessageForRouteConsumers(parsed);
+      if (routeRealtime) {
+        setLatestRealtime(routeRealtime);
+      }
       if (parsed.type === "connection.ready") {
         if (pendingProbeId) {
           setRealtimeStatus("checking", "Server accepted stream; waiting for health reply");
@@ -1687,6 +1795,19 @@ function App() {
       if (shouldRefreshDataForRealtimeEvent(parsed)) {
         refreshFromRealtime();
       }
+    };
+
+    const handleMessage = (event: MessageEvent, sourceSocket: WebSocket) => {
+      lastSocketActivityAt = Date.now();
+      if (typeof event.data === "string" && event.data.length >= REALTIME_DEFER_PARSE_BYTES) {
+        window.setTimeout(() => {
+          if (!stopped && socket === sourceSocket) {
+            handleMessageData(event.data, sourceSocket);
+          }
+        }, 0);
+        return;
+      }
+      handleMessageData(event.data, sourceSocket);
     };
 
     const clearProbeTimer = () => {
@@ -1923,7 +2044,15 @@ function App() {
       window.removeEventListener("pageshow", handlePageShow);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
-      socket?.close();
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close();
+      }
+      socket = null;
+      verifiedSocket = null;
     };
   }, [authStatus?.authenticated, refreshFromRealtime, refreshFromRealtimeLifecycle, setRealtimeStatus]);
 
@@ -2023,7 +2152,7 @@ function App() {
       refreshPromiseRef.current = null;
       refreshPromiseKeyRef.current = null;
       loadedShellDataRef.current.clear();
-      setRealtime([]);
+      setLatestRealtime(null);
       setNotificationToasts([]);
       setLoading(true);
       setMobileNavOpen(false);
@@ -2313,7 +2442,7 @@ function App() {
             schedules={schedules}
             integrationStatus={integrationStatus}
             maintenanceStatus={maintenanceStatus}
-            realtime={realtime}
+            latestRealtime={latestRealtime}
             dataRefreshToken={dataRefreshToken}
             refresh={refresh}
             currentUser={currentUser}
@@ -2355,7 +2484,7 @@ function View(props: {
   schedules: Schedule[];
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
-  realtime: RealtimeMessage[];
+  latestRealtime: RealtimeMessage | null;
   dataRefreshToken: number;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
@@ -2375,13 +2504,13 @@ function View(props: {
       content = <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
       break;
     case "passes":
-      content = <PassesView query={props.search} realtime={props.realtime} refreshToken={props.dataRefreshToken} />;
+      content = <PassesView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "vehicles":
       content = <VehiclesView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "top_charts":
-      content = <TopChartsView query={props.search} realtime={props.realtime} refreshToken={props.dataRefreshToken} />;
+      content = <TopChartsView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "events":
       content = <EventsView events={props.events} query={props.search} />;
@@ -2396,7 +2525,7 @@ function View(props: {
       content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
       break;
     case "integrations":
-      content = <IntegrationsView people={props.people} realtime={props.realtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
+      content = <IntegrationsView people={props.people} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
       content = <LogsView refreshToken={props.dataRefreshToken} />;

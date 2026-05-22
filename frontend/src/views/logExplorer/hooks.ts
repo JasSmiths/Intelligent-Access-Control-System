@@ -34,6 +34,7 @@ import {
 } from "./utils";
 
 const emptyTraceDetailState: TraceDetailState = { loading: false, error: "", detail: null };
+const TRACE_DETAIL_CACHE_LIMIT = 12;
 
 type LoadMode = "reset" | "append";
 
@@ -403,7 +404,7 @@ export function useTraceDetail(record: LogRecord | null, resetKey: string) {
     if (!selectedTraceId || traceDetailsRef.current[selectedTraceId]) return;
 
     const traceId = selectedTraceId;
-    updateTraceDetails((current) => ({ ...current, [traceId]: { loading: true, error: "", detail: null } }));
+    updateTraceDetails((current) => upsertTraceDetail(current, traceId, { loading: true, error: "", detail: null }));
     const controller = new AbortController();
     const request = selectedMalfunctionId
       ? api.get<GateMalfunctionRecord>(`/api/v1/gate-malfunctions/${selectedMalfunctionId}/trace`, {
@@ -413,18 +414,19 @@ export function useTraceDetail(record: LogRecord | null, resetKey: string) {
 
     request
       .then((detail) => {
-        updateTraceDetails((current) => ({ ...current, [traceId]: { loading: false, error: "", detail } }));
+        updateTraceDetails((current) => upsertTraceDetail(current, traceId, { loading: false, error: "", detail }));
       })
       .catch((detailError) => {
         if (isAbortError(detailError)) return;
-        updateTraceDetails((current) => ({
-          ...current,
-          [traceId]: {
+        updateTraceDetails((current) => upsertTraceDetail(
+          current,
+          traceId,
+          {
             loading: false,
             error: detailError instanceof Error ? detailError.message : "Unable to load trace detail",
             detail: null
           }
-        }));
+        ));
       });
 
     return () => controller.abort();
@@ -439,6 +441,21 @@ export function useTraceDetail(record: LogRecord | null, resetKey: string) {
   }, [updateTraceDetails]);
 
   return { clearTraceDetails, selectedTraceDetail };
+}
+
+function upsertTraceDetail(
+  current: Record<string, TraceDetailState>,
+  traceId: string,
+  state: TraceDetailState
+) {
+  const next = { ...current };
+  delete next[traceId];
+  next[traceId] = state;
+  const keys = Object.keys(next);
+  if (keys.length <= TRACE_DETAIL_CACHE_LIMIT) return next;
+  const keep = new Set(keys.slice(-TRACE_DETAIL_CACHE_LIMIT));
+  keep.add(traceId);
+  return Object.fromEntries(Object.entries(next).filter(([key]) => keep.has(key)));
 }
 
 export function mergeRecords(left: LogRecord[], right: LogRecord[]) {

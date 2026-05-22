@@ -481,8 +481,17 @@ type ApiRequestOptions = {
   signal?: AbortSignal;
 };
 
+const LARGE_JSON_PARSE_YIELD_BYTES = 512 * 1024;
+
 export function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
+}
+
+function yieldBeforeLargeJsonParse(text: string) {
+  if (text.length < LARGE_JSON_PARSE_YIELD_BYTES || typeof window === "undefined") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
 }
 
 async function parseApiResponse<T>(response: Response, path: string): Promise<T> {
@@ -490,6 +499,7 @@ async function parseApiResponse<T>(response: Response, path: string): Promise<T>
   const text = await response.text();
   if (!text.trim()) return undefined as T;
   try {
+    await yieldBeforeLargeJsonParse(text);
     return JSON.parse(text) as T;
   } catch (error) {
     throw new Error(`Malformed JSON response from ${path}: ${error instanceof Error ? error.message : "unable to parse response"}`);

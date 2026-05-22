@@ -137,7 +137,7 @@ function usePrefersReducedMotion() {
   return prefersReducedMotion;
 }
 
-export function PassesView({ query, realtime, refreshToken }: { query: string; realtime: RealtimeMessage[]; refreshToken: number }) {
+export function PassesView({ query, latestRealtime, refreshToken }: { query: string; latestRealtime: RealtimeMessage | null; refreshToken: number }) {
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
   const [filters, setFilters] = React.useState<Set<VisitorPassStatus>>(() => new Set(defaultVisitorPassFilters));
   const [modalPass, setModalPass] = React.useState<VisitorPass | null>(null);
@@ -199,7 +199,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
   }, [loadPasses, refreshToken]);
 
   React.useEffect(() => {
-    const latest = realtime[0];
+    const latest = latestRealtime;
     if (!latest) return;
     if (isVisitorPassRealtimeEvent(latest)) {
       if (latest.type === "visitor_pass.deleted") {
@@ -223,7 +223,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
     } else if (latest.type === "access_event.finalized") {
       loadPasses({ showLoading: false }).catch(() => undefined);
     }
-  }, [realtime, loadPasses]);
+  }, [latestRealtime, loadPasses]);
 
   const openCreate = () => {
     setModalPass(null);
@@ -354,7 +354,7 @@ export function PassesView({ query, realtime, refreshToken }: { query: string; r
             openEdit(visitorPass);
           }}
           onUpdated={handlePassUpdated}
-          realtime={realtime}
+          latestRealtime={latestRealtime}
           visitorPass={detailPass}
         />
       ) : null}
@@ -631,7 +631,7 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
 
 export function VisitorPassDetailsModal({
   visitorPass,
-  realtime,
+  latestRealtime,
   onClose,
   onEdit,
   onCancel,
@@ -639,7 +639,7 @@ export function VisitorPassDetailsModal({
   onUpdated
 }: {
   visitorPass: VisitorPass;
-  realtime: RealtimeMessage[];
+  latestRealtime: RealtimeMessage | null;
   onClose: () => void;
   onEdit: (visitorPass: VisitorPass) => void;
   onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
@@ -795,21 +795,21 @@ export function VisitorPassDetailsModal({
   }, [activeTab, loadLogs, logsLoaded, visitorPass.updated_at]);
 
   React.useEffect(() => {
-    const latest = realtime[0];
+    const latest = latestRealtime;
     if (!latest || activeTab !== "whatsapp" || !isDuration) return;
     if (!isVisitorPassRealtimeEvent(latest)) return;
     if (visitorPassIdFromRealtime(latest) !== visitorPass.id) return;
     const source = stringPayload(latest.payload.source);
     if (!source.startsWith("whatsapp")) return;
     loadWhatsAppMessages(false).catch(() => undefined);
-  }, [activeTab, isDuration, loadWhatsAppMessages, realtime, visitorPass.id]);
+  }, [activeTab, isDuration, latestRealtime, loadWhatsAppMessages, visitorPass.id]);
 
   React.useEffect(() => {
-    const latest = realtime[0];
+    const latest = latestRealtime;
     if (!latest || activeTab !== "log") return;
     if (!isVisitorPassAuditLogEvent(latest, visitorPass.id)) return;
     loadLogs(false).catch(() => undefined);
-  }, [activeTab, loadLogs, realtime, visitorPass.id]);
+  }, [activeTab, latestRealtime, loadLogs, visitorPass.id]);
 
   React.useEffect(() => {
     if (activeTab !== "whatsapp") return;

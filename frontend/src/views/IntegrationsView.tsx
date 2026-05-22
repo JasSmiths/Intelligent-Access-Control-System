@@ -450,7 +450,9 @@ export type DependencyConfirmAction =
   | { kind: "apply" }
   | { kind: "restore"; backup: DependencyBackup };
 
-export function IntegrationsView({ people, realtime, refreshToken, status }: { people: Person[]; realtime: RealtimeMessage[]; refreshToken: number; status: IntegrationStatus | null }) {
+const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
+
+export function IntegrationsView({ people, latestRealtime, refreshToken, status }: { people: Person[]; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
   const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
@@ -551,32 +553,38 @@ export function IntegrationsView({ people, realtime, refreshToken, status }: { p
   }, [status]);
 
   React.useEffect(() => {
-    const latest = realtime[0];
+    const latest = latestRealtime;
     if (!latest || latest.type !== "access_device.status") return;
     const payload = isRecord(latest.payload.status) ? latest.payload.status : latest.payload;
     setAccessDeviceStatus((current) => current
       ? { ...current, ...(payload as Partial<IntegrationStatus>) }
       : payload as IntegrationStatus);
-  }, [realtime]);
+  }, [latestRealtime]);
 
   React.useEffect(() => {
-    for (const message of realtime.slice(0, 20).reverse()) {
-      const key = `${message.type}-${message.created_at ?? ""}`;
-      if (processedIcloudRealtimeRef.current.has(key)) continue;
-      if (message.type !== "icloud_calendar.accounts_changed" && message.type !== "icloud_calendar.sync_completed") continue;
-      processedIcloudRealtimeRef.current.add(key);
-      if (message.type === "icloud_calendar.accounts_changed" && Array.isArray(message.payload.accounts)) {
-        setIcloudPayload((current) => ({ ...current, accounts: message.payload.accounts as ICloudCalendarAccount[] }));
-      }
-      if (message.type === "icloud_calendar.sync_completed" && isRecord(message.payload.sync)) {
-        const run = message.payload.sync as ICloudCalendarSyncRun;
-        setIcloudPayload((current) => ({
-          ...current,
-          recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5)
-        }));
-      }
+    const message = latestRealtime;
+    if (!message) return;
+    const key = `${message.type}-${message.created_at ?? ""}`;
+    if (processedIcloudRealtimeRef.current.has(key)) return;
+    if (message.type !== "icloud_calendar.accounts_changed" && message.type !== "icloud_calendar.sync_completed") return;
+    processedIcloudRealtimeRef.current.add(key);
+    if (processedIcloudRealtimeRef.current.size > ICLOUD_REALTIME_PROCESSED_LIMIT) {
+      const staleCount = processedIcloudRealtimeRef.current.size - ICLOUD_REALTIME_PROCESSED_LIMIT;
+      Array.from(processedIcloudRealtimeRef.current)
+        .slice(0, staleCount)
+        .forEach((staleKey) => processedIcloudRealtimeRef.current.delete(staleKey));
     }
-  }, [realtime]);
+    if (message.type === "icloud_calendar.accounts_changed" && Array.isArray(message.payload.accounts)) {
+      setIcloudPayload((current) => ({ ...current, accounts: message.payload.accounts as ICloudCalendarAccount[] }));
+    }
+    if (message.type === "icloud_calendar.sync_completed" && isRecord(message.payload.sync)) {
+      const run = message.payload.sync as ICloudCalendarSyncRun;
+      setIcloudPayload((current) => ({
+        ...current,
+        recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5)
+      }));
+    }
+  }, [latestRealtime]);
   const loadDiscord = React.useCallback(async () => {
     setDiscordLoading(true);
     setDiscordError("");

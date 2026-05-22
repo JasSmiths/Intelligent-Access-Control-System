@@ -36,6 +36,9 @@ TelemetryTraceDetail
 } from "./types";
 import { deriveNarrativeLogItem as deriveNarrativeLogItemForSearch } from "./narrative";
 
+const LOG_SEARCH_JSON_MAX_CHARS = 4000;
+const LIVE_SUMMARY_JSON_MAX_CHARS = 1500;
+
 export function formatLogMegabytes(size: number) {
   const value = Math.max(0, size);
   if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
@@ -61,6 +64,12 @@ export function formatSecondsDuration(value: number | null | undefined) {
 
 export function stringifyJson(value: unknown) {
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function compactJsonForLog(value: unknown, maxChars = LOG_SEARCH_JSON_MAX_CHARS) {
+  const text = JSON.stringify(value ?? {});
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}... [truncated ${text.length - maxChars} chars]`;
 }
 
 export function levelLabel(level: string | null | undefined) {
@@ -186,7 +195,7 @@ export function traceRecord(trace: TelemetryTrace): LogRecord {
       trace.source,
       trace.registration_number,
       trace.category,
-      JSON.stringify(trace.context)
+      compactJsonForLog(trace.context)
     ].join(" ").toLowerCase(),
     tone: display.tone,
     rawTrace: trace
@@ -236,8 +245,8 @@ export function auditRecord(log: AuditLog): LogRecord {
       log.category,
       log.outcome,
       log.level,
-      JSON.stringify(log.diff),
-      JSON.stringify(log.metadata)
+      compactJsonForLog(log.diff),
+      compactJsonForLog(log.metadata)
     ].join(" ").toLowerCase(),
     tone,
     rawAudit: log
@@ -277,8 +286,8 @@ export function liveRecord(message: RealtimeMessage, index: number): LogRecord {
     actor: stringPayload(payload.actor) || "System",
     traceId: nullableString(payload.trace_id),
     requestId: nullableString(payload.request_id),
-    summary: JSON.stringify(payload),
-    searchText: [action, category, subject, JSON.stringify(payload)].join(" ").toLowerCase(),
+    summary: compactJsonForLog(payload, LIVE_SUMMARY_JSON_MAX_CHARS),
+    searchText: [action, category, subject, compactJsonForLog(payload)].join(" ").toLowerCase(),
     tone: levelTone(level),
     rawRealtime: message
   };

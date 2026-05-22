@@ -16,6 +16,7 @@ BadgeTone,
 EmptyState,
 formatDate,
 initials,
+isAbortError,
 matches,
 mediaSource,
 mediaVariantUrl,
@@ -99,7 +100,7 @@ export type LeaderboardResponse = {
 
 export const TOP_CHARTS_PAGE_SIZE = 5;
 
-export function TopChartsView({ query, realtime, refreshToken }: { query: string; realtime: RealtimeMessage[]; refreshToken: number }) {
+export function TopChartsView({ query, latestRealtime, refreshToken }: { query: string; latestRealtime: RealtimeMessage | null; refreshToken: number }) {
   const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -107,18 +108,39 @@ export function TopChartsView({ query, realtime, refreshToken }: { query: string
   const [knownPage, setKnownPage] = React.useState(0);
   const [unknownPage, setUnknownPage] = React.useState(0);
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const loadSequenceRef = React.useRef(0);
+  const loadAbortRef = React.useRef<AbortController | null>(null);
 
   const load = React.useCallback(async () => {
+    const sequence = loadSequenceRef.current + 1;
+    loadSequenceRef.current = sequence;
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setRefreshing(true);
     setError("");
     try {
-      setLeaderboard(await api.get<LeaderboardResponse>("/api/v1/leaderboard"));
+      const nextLeaderboard = await api.get<LeaderboardResponse>("/api/v1/leaderboard", { signal: controller.signal });
+      if (loadSequenceRef.current !== sequence) return;
+      setLeaderboard(nextLeaderboard);
     } catch (loadError) {
+      if (isAbortError(loadError)) return;
+      if (loadSequenceRef.current !== sequence) return;
       setError(loadError instanceof Error ? loadError.message : "Unable to load Top Charts.");
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (loadSequenceRef.current === sequence) {
+        setLoading(false);
+        setRefreshing(false);
+        if (loadAbortRef.current === controller) {
+          loadAbortRef.current = null;
+        }
+      }
     }
+  }, []);
+
+  React.useEffect(() => () => {
+    loadSequenceRef.current += 1;
+    loadAbortRef.current?.abort();
   }, []);
 
   React.useEffect(() => {
@@ -131,13 +153,12 @@ export function TopChartsView({ query, realtime, refreshToken }: { query: string
     load().catch(() => undefined);
   }, [load, refreshToken]);
 
-  const latestRealtime = realtime[0];
   React.useEffect(() => {
     if (!latestRealtime) return;
     if (latestRealtime.type === "access_event.finalized" || latestRealtime.type === "leaderboard_overtake") {
       load().catch(() => undefined);
     }
-  }, [latestRealtime?.created_at, latestRealtime?.type, load]);
+  }, [latestRealtime, load]);
 
   const knownRows = React.useMemo(
     () => (leaderboard?.known ?? []).filter((item) => leaderboardKnownMatches(item, query)),
