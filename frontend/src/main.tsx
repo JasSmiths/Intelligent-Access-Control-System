@@ -2562,7 +2562,7 @@ function View(props: {
       content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_zones":
-      content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} />;
+      content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} currentUser={props.currentUser} />;
       break;
     case "settings":
       content = <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;

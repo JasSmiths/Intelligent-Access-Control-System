@@ -42,7 +42,11 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
-from app.services.lpr_zone_shadow import get_lpr_zone_shadow_service
+from app.services.lpr_zone_shadow import (
+    LPR_ZONE_FILTER_SUPPRESSION_REASON,
+    evaluate_lpr_zone_filter_for_read,
+    get_lpr_zone_shadow_service,
+)
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.movement_fsm import (
@@ -725,6 +729,9 @@ class AccessEventService:
             await self._ignore_unknown_gate_malfunction_read(read)
             return
 
+        if await self._suppress_by_live_lpr_zone_filter(read):
+            return
+
         if not gate_malfunction:
             exact_suppression_reason = await self._exact_resolution_suppression_reason(read)
             if exact_suppression_reason:
@@ -750,6 +757,44 @@ class AccessEventService:
         elif _is_visitor_pass_plate_match(read):
             window = self._pop_related_read_window(window, read)
             await self._finalize_visitor_pass_window(window, read)
+
+    async def _suppress_by_live_lpr_zone_filter(self, read: PlateRead) -> bool:
+        mode = getattr(self._runtime, "lpr_zone_filter_mode", "shadow") if self._runtime else "shadow"
+        try:
+            decision = evaluate_lpr_zone_filter_for_read(read, mode=mode)
+        except Exception as exc:
+            logger.warning(
+                "lpr_zone_filter_evaluation_failed",
+                extra={
+                    "registration_number": read.registration_number,
+                    "source": read.source,
+                    "error": self._safe_exception_detail(exc),
+                },
+            )
+            return False
+        if not decision.should_suppress_live:
+            return False
+        try:
+            await get_lpr_zone_shadow_service().record_decision(
+                read,
+                access_event_id=None,
+                actual_decision=None,
+                actual_direction=None,
+                actual_outcome=decision.actual_outcome,
+                mode=mode,
+                decision_override=decision,
+            )
+        except Exception as exc:
+            logger.warning(
+                "lpr_zone_filter_live_suppression_log_failed",
+                extra={
+                    "registration_number": read.registration_number,
+                    "source": read.source,
+                    "error": self._safe_exception_detail(exc),
+                },
+            )
+        await self._publish_suppressed_read(read, reason=LPR_ZONE_FILTER_SUPPRESSION_REASON)
+        return True
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "maintenance_mode.changed" and event.payload.get("is_active") is True:
@@ -2365,10 +2410,11 @@ class AccessEventService:
                 access_event_id=event.id,
                 actual_decision=decision.value,
                 actual_direction=direction.value,
-                actual_outcome="access_event_finalized",
+                actual_outcome=None,
                 person_id=person.id if person else None,
                 vehicle_id=vehicle.id if vehicle else None,
                 visitor_pass_id=visitor_pass.id if visitor_pass else None,
+                mode=getattr(self._runtime, "lpr_zone_filter_mode", "shadow") if self._runtime else "shadow",
             )
         except Exception as exc:
             logger.warning(

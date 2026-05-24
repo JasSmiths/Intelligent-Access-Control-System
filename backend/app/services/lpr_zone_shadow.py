@@ -14,6 +14,9 @@ from app.services.event_bus import event_bus
 SMART_ZONE_EVIDENCE_PAYLOAD_KEY = "_iacs_smart_zone_evidence"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
+LPR_ZONE_FILTER_SUPPRESSION_REASON = "lpr_zone_filter_invalid_zone_status"
+LPR_ZONE_FILTER_TARGET_ZONE_ID = "2"
+LPR_ZONE_FILTER_ACCEPTED_STATUSES = frozenset({"enter", "moving"})
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,8 @@ class ZoneShadowDecision:
     shadow_decision: str
     shadow_reason: str
     would_suppress: bool
+    should_suppress_live: bool = False
+    actual_outcome: str = "shadow_zone_filter_allowed"
 
 
 class LprZoneShadowService:
@@ -31,24 +36,25 @@ class LprZoneShadowService:
         access_event_id: uuid.UUID | None,
         actual_decision: str | None,
         actual_direction: str | None,
-        actual_outcome: str,
+        actual_outcome: str | None = None,
         person_id: uuid.UUID | None = None,
         vehicle_id: uuid.UUID | None = None,
         visitor_pass_id: uuid.UUID | None = None,
+        mode: str = "shadow",
+        decision_override: ZoneShadowDecision | None = None,
     ) -> list[dict[str, Any]]:
         metadata = _smart_zone_metadata(read)
         known_vehicle = bool(_known_vehicle_match(read) or vehicle_id)
         visitor = bool(_visitor_pass_match(read) or visitor_pass_id)
         zone_entries = _zone_entries(metadata)
+        filter_decision = decision_override or evaluate_lpr_zone_filter_decision(
+            metadata.get("zone_statuses"),
+            mode=mode,
+        )
         protect_event_id = _first_protect_event_id(read.raw_payload or {})
         rows: list[LprZoneShadowObservation] = []
         for zone in zone_entries:
             status = _optional_text(zone.get("status"))
-            decision = evaluate_zone_shadow_decision(
-                zone_status=status,
-                known_vehicle=known_vehicle,
-                visitor=visitor,
-            )
             row = LprZoneShadowObservation(
                 access_event_id=access_event_id,
                 registration_number=read.registration_number,
@@ -67,16 +73,20 @@ class LprZoneShadowService:
                 zone_level=_float_or_none(zone.get("level")),
                 actual_decision=actual_decision,
                 actual_direction=actual_direction,
-                actual_outcome=actual_outcome,
-                shadow_decision=decision.shadow_decision,
-                shadow_reason=decision.shadow_reason,
-                would_suppress=decision.would_suppress,
+                actual_outcome=actual_outcome or filter_decision.actual_outcome,
+                shadow_decision=filter_decision.shadow_decision,
+                shadow_reason=filter_decision.shadow_reason,
+                would_suppress=filter_decision.would_suppress,
                 details={
+                    "mode": _normalize_zone_filter_mode(mode),
                     "known_vehicle": known_vehicle,
                     "visitor": visitor,
                     "person_id": str(person_id) if person_id else None,
                     "vehicle_id": str(vehicle_id) if vehicle_id else None,
                     "visitor_pass_id": str(visitor_pass_id) if visitor_pass_id else None,
+                    "target_zone_id": LPR_ZONE_FILTER_TARGET_ZONE_ID,
+                    "accepted_statuses": sorted(LPR_ZONE_FILTER_ACCEPTED_STATUSES),
+                    "should_suppress_live": filter_decision.should_suppress_live,
                     "smart_zones": metadata.get("smart_zones") if isinstance(metadata.get("smart_zones"), list) else [],
                     "raw_smart_zones": metadata.get("raw_smart_zones") if isinstance(metadata.get("raw_smart_zones"), list) else [],
                 },
@@ -119,38 +129,66 @@ class LprZoneShadowService:
 def evaluate_zone_shadow_decision(
     *,
     zone_status: str | None,
-    known_vehicle: bool,
-    visitor: bool,
+    known_vehicle: bool = False,
+    visitor: bool = False,
+    zone_id: str | None = LPR_ZONE_FILTER_TARGET_ZONE_ID,
+    mode: str = "shadow",
 ) -> ZoneShadowDecision:
-    normalized = str(zone_status or "").strip().lower()
-    if not normalized:
+    del known_vehicle, visitor
+    return evaluate_lpr_zone_filter_decision(
+        [{"zone_id": zone_id, "status": zone_status}] if zone_status is not None else [],
+        mode=mode,
+    )
+
+
+def evaluate_lpr_zone_filter_for_read(read: PlateRead, *, mode: str = "shadow") -> ZoneShadowDecision:
+    return evaluate_lpr_zone_filter_decision(_smart_zone_metadata(read).get("zone_statuses"), mode=mode)
+
+
+def evaluate_lpr_zone_filter_decision(zone_statuses: Any, *, mode: str = "shadow") -> ZoneShadowDecision:
+    normalized_mode = _normalize_zone_filter_mode(mode)
+    usable_entries = _usable_zone_status_entries(zone_statuses)
+    if not usable_entries:
         return ZoneShadowDecision(
-            shadow_decision="would_allow",
-            shadow_reason="No UniFi zone status was supplied, so live filtering would have let the read continue.",
+            shadow_decision="skipped_missing_zone_status",
+            shadow_reason=(
+                "UniFi zone/status data was missing, empty, malformed, or status-less; "
+                "the zone filter skipped this check and allowed the normal pipeline."
+            ),
             would_suppress=False,
+            actual_outcome=f"{normalized_mode}_zone_filter_skipped_missing_zone_status",
         )
-    if normalized == "enter":
+
+    for entry in usable_entries:
+        if _zone_id(entry) == LPR_ZONE_FILTER_TARGET_ZONE_ID and _zone_status(entry) in LPR_ZONE_FILTER_ACCEPTED_STATUSES:
+            status = _zone_status(entry)
+            return ZoneShadowDecision(
+                shadow_decision="allowed",
+                shadow_reason=f"UniFi reported driveway zone {LPR_ZONE_FILTER_TARGET_ZONE_ID} with status {status!r}.",
+                would_suppress=False,
+                actual_outcome=f"{normalized_mode}_zone_filter_allowed",
+            )
+
+    if normalized_mode == "live":
         return ZoneShadowDecision(
-            shadow_decision="would_allow",
-            shadow_reason="UniFi reported the plate entering the monitored zone.",
-            would_suppress=False,
-        )
-    if normalized == "moving" and not known_vehicle and not visitor:
-        return ZoneShadowDecision(
-            shadow_decision="would_suppress",
-            shadow_reason="Unknown plate was only moving in the zone, so live filtering would treat it as road traffic.",
+            shadow_decision="suppressed",
+            shadow_reason=(
+                f"UniFi supplied zone/status data, but no driveway zone {LPR_ZONE_FILTER_TARGET_ZONE_ID} "
+                f"entry had status enter or moving."
+            ),
             would_suppress=True,
+            should_suppress_live=True,
+            actual_outcome="live_zone_filter_suppressed",
         )
-    if normalized == "moving":
-        return ZoneShadowDecision(
-            shadow_decision="would_allow",
-            shadow_reason="Plate was moving, but it matched a known vehicle or visitor pass.",
-            would_suppress=False,
-        )
+
     return ZoneShadowDecision(
-        shadow_decision="would_review",
-        shadow_reason=f"Unhandled UniFi zone status {normalized!r}; shadow mode records it without changing access behavior.",
-        would_suppress=False,
+        shadow_decision="shadow_only",
+        shadow_reason=(
+            f"UniFi supplied zone/status data, but no driveway zone {LPR_ZONE_FILTER_TARGET_ZONE_ID} "
+            f"entry had status enter or moving. Shadow mode recorded the would-suppress decision only."
+        ),
+        would_suppress=True,
+        actual_outcome="shadow_zone_filter_would_suppress",
     )
 
 
@@ -191,11 +229,38 @@ def _smart_zone_metadata(read: PlateRead) -> dict[str, Any]:
 def _zone_entries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     statuses = metadata.get("zone_statuses")
     if isinstance(statuses, list) and statuses:
-        return [dict(item) for item in statuses if isinstance(item, dict)]
+        entries = [dict(item) for item in statuses if isinstance(item, dict)]
+        return entries or [{}]
     smart_zones = metadata.get("smart_zones")
     if isinstance(smart_zones, list) and smart_zones:
         return [{"zone": str(smart_zones[0]), "zone_id": str(smart_zones[0]), "zone_name": str(smart_zones[0])}]
     return [{}]
+
+
+def _usable_zone_status_entries(zone_statuses: Any) -> list[dict[str, Any]]:
+    if not isinstance(zone_statuses, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in zone_statuses:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        if _zone_status(entry):
+            entries.append(entry)
+    return entries
+
+
+def _zone_id(entry: dict[str, Any]) -> str | None:
+    return _optional_text(entry.get("zone_id") or entry.get("zone"))
+
+
+def _zone_status(entry: dict[str, Any]) -> str | None:
+    status = _optional_text(entry.get("status"))
+    return status.lower() if status else None
+
+
+def _normalize_zone_filter_mode(mode: str) -> str:
+    return "live" if str(mode or "").strip().lower() == "live" else "shadow"
 
 
 def _time_of_day(metadata: dict[str, Any]) -> str:

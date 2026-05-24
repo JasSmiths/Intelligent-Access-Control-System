@@ -196,14 +196,22 @@ export function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
 
 export function ZonesSettingsView({
   icon: Icon,
-  refreshToken
+  refreshToken,
+  currentUser
 }: {
   icon: React.ElementType;
   refreshToken: number;
+  currentUser: UserAccount;
 }) {
   const [observations, setObservations] = React.useState<LprZoneShadowObservation[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const [modeMessage, setModeMessage] = React.useState("");
+  const [modeError, setModeError] = React.useState("");
+  const [savingMode, setSavingMode] = React.useState(false);
+  const lprSettings = useSettings("lpr");
+  const isAdmin = currentUser.role === "admin";
+  const zoneFilterMode = normalizeZoneFilterMode(stringifySetting(lprSettings.values.lpr_zone_filter_mode || "shadow"));
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const loadObservations = React.useCallback(async (showLoading = true) => {
@@ -233,14 +241,52 @@ export function ZonesSettingsView({
     loadObservations(false).catch(() => undefined);
   }, [loadObservations, refreshToken]);
 
+  const saveMode = async (mode: "shadow" | "live") => {
+    if (!isAdmin || mode === zoneFilterMode || savingMode) return;
+    setModeMessage("");
+    setModeError("");
+    setSavingMode(true);
+    try {
+      await lprSettings.save({ lpr_zone_filter_mode: mode });
+      setModeMessage(`Zone filter mode saved as ${mode}.`);
+    } catch (saveError) {
+      setModeError(saveError instanceof Error ? saveError.message : "Unable to save zone filter mode.");
+    } finally {
+      setSavingMode(false);
+    }
+  };
+
   return (
     <section className="view-stack settings-page">
-      <Toolbar title="Zones" count={observations.length} icon={Icon}>
-        <button className="icon-button" type="button" onClick={() => loadObservations()} disabled={loading} title="Refresh zone shadow observations">
-          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-        </button>
+      <Toolbar
+        title="Zones"
+        badge={<Badge tone={zoneFilterMode === "live" ? "red" : "blue"}>{zoneFilterMode}</Badge>}
+        icon={Icon}
+      >
+        <div className="zone-toolbar-actions">
+          <div className="zone-mode-toggle" role="group" aria-label="LPR zone filter mode">
+            {(["shadow", "live"] as const).map((mode) => (
+              <button
+                className={mode === zoneFilterMode ? "active" : ""}
+                disabled={!isAdmin || savingMode || lprSettings.loading}
+                key={mode}
+                onClick={() => saveMode(mode)}
+                title={!isAdmin ? "Administrator access is required to change zone filter mode" : undefined}
+                type="button"
+              >
+                {zoneTitle(mode)}
+              </button>
+            ))}
+          </div>
+          <Badge tone="gray">{observations.length}</Badge>
+          <button className="icon-button" type="button" onClick={() => loadObservations()} disabled={loading} title="Refresh zone shadow observations">
+            {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          </button>
+        </div>
       </Toolbar>
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {modeError || lprSettings.error ? <div className="auth-error inline-error">{modeError || lprSettings.error}</div> : null}
+      {modeMessage ? <div className="success-note">{modeMessage}</div> : null}
       <div className="table-card zone-shadow-table-card">
         <table className="zone-shadow-table">
           <thead>
@@ -316,17 +362,29 @@ function zoneStatusTone(value: string | null): "green" | "gray" | "amber" | "red
 }
 
 function zoneDecisionTone(item: LprZoneShadowObservation): "green" | "gray" | "amber" | "red" | "blue" | "purple" {
-  if (item.would_suppress || item.shadow_decision === "would_suppress") return "red";
+  if (item.shadow_decision === "shadow_only") return "blue";
+  if (item.shadow_decision === "skipped_missing_zone_status") return "gray";
+  if (item.shadow_decision === "suppressed") return "red";
+  if (item.shadow_decision === "allowed") return "green";
+  if (item.would_suppress || item.shadow_decision === "would_suppress") return "blue";
   if (item.shadow_decision === "would_review") return "amber";
   if (item.shadow_decision === "would_allow") return "green";
   return "gray";
 }
 
 function zoneDecisionLabel(value: string) {
-  if (value === "would_allow") return "Would Allow";
-  if (value === "would_suppress") return "Would Suppress";
-  if (value === "would_review") return "Would Review";
+  if (value === "allowed") return "Allowed";
+  if (value === "suppressed") return "Suppressed";
+  if (value === "skipped_missing_zone_status") return "Skipped: missing zone/status";
+  if (value === "shadow_only") return "Shadow only";
+  if (value === "would_allow") return "Allowed";
+  if (value === "would_suppress") return "Shadow only";
+  if (value === "would_review") return "Shadow only";
   return zoneTitle(value);
+}
+
+function normalizeZoneFilterMode(value: string): "shadow" | "live" {
+  return value.trim().toLowerCase() === "live" ? "live" : "shadow";
 }
 
 export function findGateLprCamera(cameras: UnifiProtectCamera[]) {

@@ -69,6 +69,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         ["default"],
         "Legacy UniFi smart-zone diagnostic list. Smart zones are not used to accept or reject LPR events.",
     ),
+    "lpr_zone_filter_mode": (
+        "lpr",
+        "shadow",
+        "UniFi zone-status driveway filter mode. Use shadow to log only, or live to suppress invalid present zone/status reads.",
+    ),
     "schedule_default_policy": (
         "access",
         "allow",
@@ -278,6 +283,7 @@ class RuntimeConfig:
     lpr_vehicle_session_idle_seconds: float
     lpr_similarity_threshold: float
     lpr_allowed_smart_zones: list[str]
+    lpr_zone_filter_mode: str
     schedule_default_policy: str
     gate_control_provider: str
     gate_failover_provider: str
@@ -600,6 +606,9 @@ async def get_runtime_config() -> RuntimeConfig:
         lpr_vehicle_session_idle_seconds=float(values["lpr_vehicle_session_idle_seconds"]),
         lpr_similarity_threshold=float(values["lpr_similarity_threshold"]),
         lpr_allowed_smart_zones=string_list_value(values["lpr_allowed_smart_zones"]),
+        lpr_zone_filter_mode=(
+            "live" if str(values["lpr_zone_filter_mode"]).strip().lower() == "live" else "shadow"
+        ),
         schedule_default_policy=(
             "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
         ),
