@@ -899,7 +899,8 @@ export const secretSettingKeys = new Set([
   "unifi_protect_api_key",
   "openai_api_key",
   "gemini_api_key",
-  "anthropic_api_key"
+  "anthropic_api_key",
+  "lpr_webhook_token"
 ]);
 
 export const discordListSettingKeys = new Set([
@@ -912,27 +913,39 @@ export const discordListSettingKeys = new Set([
 
 const listSettingKeys = new Set([
   ...discordListSettingKeys,
-  "lpr_allowed_smart_zones"
+  "lpr_allowed_smart_zones",
+  "lpr_webhook_allowed_source_ips"
 ]);
 
 export function SettingField({
+  action,
   field,
   isConfiguredSecret = false,
+  revealPasswordValue = false,
   value,
   onChange
 }: {
+  action?: React.ReactNode;
   field: SettingFieldDefinition;
   isConfiguredSecret?: boolean;
+  revealPasswordValue?: boolean;
   value: string;
   onChange: (value: string) => void;
 }) {
   const secretPlaceholder = isConfiguredSecret ? "Configured. Paste a new value to replace it." : undefined;
   return (
     <label className="field">
-      <span>
-        {field.label}
-        {field.href ? <a href={field.href} rel="noreferrer" target="_blank">Get key</a> : null}
-      </span>
+      {action ? (
+        <span className="field-label-row">
+          <span>{field.label}</span>
+          {action}
+        </span>
+      ) : (
+        <span>
+          {field.label}
+          {field.href ? <a href={field.href} rel="noreferrer" target="_blank">Get key</a> : null}
+        </span>
+      )}
       {field.type === "textarea" ? (
         <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={secretPlaceholder} rows={4} />
       ) : field.type === "select" ? (
@@ -949,7 +962,7 @@ export function SettingField({
             value={value}
             onChange={(event) => onChange(event.target.value)}
             placeholder={field.type === "password" ? secretPlaceholder ?? "Leave blank to keep existing secret" : undefined}
-            type={field.type === "password" ? "password" : field.type === "number" ? "number" : "text"}
+            type={field.type === "password" && !revealPasswordValue ? "password" : field.type === "number" ? "number" : "text"}
           />
         </div>
       )}

@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from datetime import UTC, datetime
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -21,6 +21,7 @@ from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
+from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_reconciliation import get_movement_reconciliation_service
 from app.services.notifications import get_notification_service
@@ -222,6 +223,14 @@ async def maintenance_webhook_guard(request: Request, call_next):
         and request.url.path in MAINTENANCE_IGNORED_WEBHOOK_PATHS
         and await is_maintenance_mode_active()
     ):
+        try:
+            verify_lpr_webhook_request(request, runtime=await get_runtime_config())
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers,
+            )
         return JSONResponse(
             status_code=202,
             content={"status": "ignored", "reason": "maintenance_mode"},

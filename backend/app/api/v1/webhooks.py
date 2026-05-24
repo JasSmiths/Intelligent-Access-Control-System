@@ -18,6 +18,7 @@ from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.access_events import AccessEventService, get_access_event_service
 from app.services.event_bus import event_bus
 from app.services.lpr_timing import get_lpr_timing_recorder
+from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_LPR,
@@ -206,6 +207,9 @@ async def receive_ubiquiti_lpr(
     the access event service.
     """
 
+    runtime = await get_runtime_config()
+    verify_lpr_webhook_request(request, runtime=runtime)
+
     webhook_received_at = utc_now()
     raw_payload = await request.json()
     payload_shape = _payload_shape(raw_payload)
@@ -292,7 +296,6 @@ async def receive_ubiquiti_lpr(
                 smart_zones = [str(zone) for zone in resolved_smart_zones]
         except UnifiProtectError as exc:
             zone_resolution_error = str(exc)
-    runtime = await get_runtime_config()
     zone_evidence_detail = _smart_zone_evidence_detail(
         read,
         smart_zones=smart_zones,

@@ -3,14 +3,28 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
+from app import main as main_api
 from app.api.v1 import webhooks
 
 
-def make_json_request(payload: dict) -> Request:
+VALID_LPR_WEBHOOK_TOKEN = "test-lpr-webhook-token"
+VALID_LPR_SOURCE_IP = "192.0.2.10"
+
+
+def make_json_request(
+    payload: dict,
+    *,
+    token: str | None = VALID_LPR_WEBHOOK_TOKEN,
+    client_host: str = VALID_LPR_SOURCE_IP,
+) -> Request:
     body = json.dumps(payload).encode()
+    headers = [(b"content-type", b"application/json")]
+    if token is not None:
+        headers.append((b"x-iacs-lpr-token", token.encode()))
 
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
@@ -21,7 +35,33 @@ def make_json_request(payload: dict) -> Request:
             "method": "POST",
             "path": "/api/v1/webhooks/ubiquiti/lpr",
             "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": headers,
+            "client": (client_host, 51234),
+        },
+        receive,
+    )
+
+
+def make_unreadable_lpr_request(
+    *,
+    token: str | None = VALID_LPR_WEBHOOK_TOKEN,
+    client_host: str = VALID_LPR_SOURCE_IP,
+) -> Request:
+    headers = [(b"content-type", b"application/json")]
+    if token is not None:
+        headers.append((b"x-iacs-lpr-token", token.encode()))
+
+    async def receive():
+        raise AssertionError("LPR webhook body should not be read before authentication succeeds.")
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/webhooks/ubiquiti/lpr",
+            "query_string": b"",
+            "headers": headers,
+            "client": (client_host, 51234),
         },
         receive,
     )
@@ -115,7 +155,11 @@ def webhook_runtime(monkeypatch):
     presence_tracker = FakeUnifiPayloadRecorder()
 
     async def runtime_config():
-        return SimpleNamespace(lpr_allowed_smart_zones=["default"])
+        return SimpleNamespace(
+            lpr_allowed_smart_zones=["default"],
+            lpr_webhook_token=VALID_LPR_WEBHOOK_TOKEN,
+            lpr_webhook_allowed_source_ips=[VALID_LPR_SOURCE_IP],
+        )
 
     async def publish(event_type, payload):
         published.append((event_type, payload))
@@ -134,6 +178,115 @@ def webhook_runtime(monkeypatch):
         timing_recorder=timing_recorder,
         visual_recorder=visual_recorder,
     )
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_rejects_missing_token_before_reading_body(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_ubiquiti_lpr(make_unreadable_lpr_request(token=None), service)
+
+    assert exc.value.status_code == 401
+    assert service.enqueued == []
+    assert webhook_runtime.timing_recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_rejects_wrong_token(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_ubiquiti_lpr(
+            make_json_request(alarm_payload("AGS7X", []), token="wrong-token"),
+            service,
+        )
+
+    assert exc.value.status_code == 401
+    assert service.enqueued == []
+    assert webhook_runtime.timing_recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_rejects_unconfigured_token_as_misconfigured(webhook_runtime, monkeypatch) -> None:
+    service = FakeAccessEventService()
+
+    async def runtime_config():
+        return SimpleNamespace(
+            lpr_allowed_smart_zones=["default"],
+            lpr_webhook_token="",
+            lpr_webhook_allowed_source_ips=[VALID_LPR_SOURCE_IP],
+        )
+
+    monkeypatch.setattr(webhooks, "get_runtime_config", runtime_config)
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_ubiquiti_lpr(make_unreadable_lpr_request(), service)
+
+    assert exc.value.status_code == 503
+    assert service.enqueued == []
+    assert webhook_runtime.timing_recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_rejects_disallowed_source_ip(webhook_runtime) -> None:
+    service = FakeAccessEventService()
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_ubiquiti_lpr(
+            make_json_request(alarm_payload("AGS7X", []), client_host="198.51.100.7"),
+            service,
+        )
+
+    assert exc.value.status_code == 403
+    assert service.enqueued == []
+    assert webhook_runtime.timing_recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_fails_closed_when_allowlist_has_no_valid_entries(webhook_runtime, monkeypatch) -> None:
+    service = FakeAccessEventService()
+
+    async def runtime_config():
+        return SimpleNamespace(
+            lpr_allowed_smart_zones=["default"],
+            lpr_webhook_token=VALID_LPR_WEBHOOK_TOKEN,
+            lpr_webhook_allowed_source_ips=["not-an-ip"],
+        )
+
+    monkeypatch.setattr(webhooks, "get_runtime_config", runtime_config)
+
+    with pytest.raises(HTTPException) as exc:
+        await webhooks.receive_ubiquiti_lpr(make_json_request(alarm_payload("AGS7X", [])), service)
+
+    assert exc.value.status_code == 503
+    assert service.enqueued == []
+    assert webhook_runtime.timing_recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_maintenance_mode_lpr_webhook_still_requires_authentication(monkeypatch) -> None:
+    async def active_maintenance():
+        return True
+
+    async def runtime_config():
+        return SimpleNamespace(
+            lpr_webhook_token=VALID_LPR_WEBHOOK_TOKEN,
+            lpr_webhook_allowed_source_ips=[VALID_LPR_SOURCE_IP],
+        )
+
+    async def call_next(_request):
+        raise AssertionError("Unauthorized maintenance-mode LPR webhook should not continue.")
+
+    monkeypatch.setattr(main_api, "is_maintenance_mode_active", active_maintenance)
+    monkeypatch.setattr(main_api, "get_runtime_config", runtime_config)
+
+    response = await main_api.maintenance_webhook_guard(
+        make_unreadable_lpr_request(token=None),
+        call_next,
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ import app.core.auth_secret as auth_secret
 import app.services.auth as auth_service
 import app.services.actionable_notifications as actionable
 import app.services.auth_secret_management as auth_secret_management
+import app.services.settings as settings_service
 from app.core.auth_secret import DEFAULT_AUTH_SECRET_KEY, AuthSecretError
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.models import ICloudCalendarAccount, NotificationActionContext, SystemSetting, User
@@ -89,6 +90,58 @@ def test_env_backed_auth_secret_status_hides_value_and_disables_ui_rotation(tmp_
     assert status["source"] == "env"
     assert status["ui_rotation_available"] is False
     assert secret not in json.dumps(status)
+
+
+def test_lpr_webhook_token_is_registered_as_secret_setting() -> None:
+    assert "lpr_webhook_token" in settings_service.SECRET_KEYS
+    assert settings_service.DEFAULT_DYNAMIC_SETTINGS["lpr_webhook_token"][0] == "lpr"
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_secret_lists_as_boolean_public_value(monkeypatch) -> None:
+    setting = SystemSetting(
+        key="lpr_webhook_token",
+        category="lpr",
+        value={"encrypted": "encrypted-token"},
+        is_secret=True,
+        description="Webhook token.",
+    )
+    fake_session = FakeSession([setting])
+
+    monkeypatch.setattr(settings_service, "AsyncSessionLocal", lambda: fake_session)
+
+    rows = await settings_service.list_settings("lpr")
+
+    assert rows == [
+        {
+            "key": "lpr_webhook_token",
+            "category": "lpr",
+            "value": True,
+            "is_secret": True,
+            "description": "Webhook token.",
+        }
+    ]
+    assert "encrypted-token" not in json.dumps(rows)
+
+
+@pytest.mark.asyncio
+async def test_lpr_webhook_secret_empty_update_keeps_existing_value(monkeypatch) -> None:
+    setting = SystemSetting(
+        key="lpr_webhook_token",
+        category="lpr",
+        value={"encrypted": "existing-token"},
+        is_secret=True,
+        description=settings_service.DEFAULT_DYNAMIC_SETTINGS["lpr_webhook_token"][2],
+    )
+    sessions = [FakeSession([setting]), FakeSession([setting])]
+
+    monkeypatch.setattr(settings_service, "AsyncSessionLocal", lambda: sessions.pop(0))
+    monkeypatch.setattr(settings_service, "invalidate_runtime_config_cache", lambda: None)
+
+    rows = await settings_service.update_settings({"lpr_webhook_token": ""})
+
+    assert setting.value == {"encrypted": "existing-token"}
+    assert rows[0]["value"] is True
 
 
 @pytest.mark.asyncio

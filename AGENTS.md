@@ -50,6 +50,7 @@ hard_rules:
     - unifi_protect_api_key
     - esphome_api_encryption_key
     - esphome_legacy_password
+    - lpr_webhook_token
     - openai_api_key
     - gemini_api_key
     - anthropic_api_key
@@ -165,6 +166,7 @@ api:
 
 lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
+  security: require X-IACS-LPR-Token shared secret + static UNVR source IP/CIDR allowlist before reading payload, including maintenance-mode ignores.
   adapter: backend/app/modules/lpr/ubiquiti.py -> PlateRead(registration_number, confidence, source, captured_at, raw_payload)
   service: backend/app/services/access_events.py with movement_fsm.py, movement_ledger.py, gate_commands.py
   maintenance_mode: accept/ignore webhook; clear queues; no access_event/presence/gate/garage.

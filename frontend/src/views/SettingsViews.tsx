@@ -418,21 +418,29 @@ export function DynamicSettingsView({
   onMaintenanceStatusChanged?: (status: MaintenanceStatus) => void;
   refreshToken: number;
 }) {
-  const { values, loading, error, save, reload } = useSettings(category);
+  const { rows, values, loading, error, save, reload } = useSettings(category);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
   const [submitError, setSubmitError] = React.useState("");
   const fields = settingsFields(category);
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const configuredSecretKeys = React.useMemo(
+    () => new Set(rows.filter((row) => row.is_secret && Boolean(row.value)).map((row) => row.key)),
+    [rows]
+  );
+  const secretKeys = React.useMemo(
+    () => new Set(rows.filter((row) => row.is_secret).map((row) => row.key)),
+    [rows]
+  );
 
   React.useEffect(() => {
     const next: Record<string, string> = {};
     for (const field of fields) {
-      next[field.key] = stringifySetting(values[field.key]);
+      next[field.key] = secretKeys.has(field.key) ? "" : stringifySetting(values[field.key]);
     }
     setForm(next);
-  }, [values, category]);
+  }, [values, category, secretKeys]);
 
   React.useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
@@ -482,6 +490,7 @@ export function DynamicSettingsView({
               return (
                 <SettingField
                   field={field}
+                  isConfiguredSecret={configuredSecretKeys.has(field.key)}
                   key={field.key}
                   value={form[field.key] ?? ""}
                   onChange={onChange}

@@ -1138,7 +1138,19 @@ export function integrationDefinitions(
         },
         { key: "unifi_protect_verify_ssl", label: "Verify TLS", type: "select", options: ["false", "true"] },
         { key: "unifi_protect_snapshot_width", label: "Snapshot width", type: "number", min: 160, max: 4096, step: 1 },
-        { key: "unifi_protect_snapshot_height", label: "Snapshot height", type: "number", min: 90, max: 2160, step: 1 }
+        { key: "unifi_protect_snapshot_height", label: "Snapshot height", type: "number", min: 90, max: 2160, step: 1 },
+        {
+          key: "lpr_webhook_token",
+          label: "LPR webhook token",
+          type: "password",
+          help: "Configure UniFi Protect Alarm Manager to send X-IACS-LPR-Token with this same value."
+        },
+        {
+          key: "lpr_webhook_allowed_source_ips",
+          label: "LPR webhook source IPs",
+          type: "textarea",
+          help: "One static UNVR IP or CIDR range per line. IACS rejects LPR webhooks from every other source."
+        }
       ]
     },
     {
@@ -3088,6 +3100,7 @@ export function IntegrationModal({
   const [appriseLoading, setAppriseLoading] = React.useState(false);
   const [esphomeDevices, setEsphomeDevices] = React.useState<ESPHomeDeviceSummary[]>([]);
   const [esphomeLoading, setEsphomeLoading] = React.useState(false);
+  const [generatedLprWebhookToken, setGeneratedLprWebhookToken] = React.useState("");
   const isHomeAssistant = definition.key === "home_assistant";
   const isApprise = definition.key === "apprise";
   const isESPHome = definition.key === "esphome";
@@ -3105,9 +3118,13 @@ export function IntegrationModal({
     setHaDiscoveryError("");
     setAppriseUrls([]);
     setEsphomeDevices([]);
+    setGeneratedLprWebhookToken("");
   }, [definition.key, initialTab]);
 
-  const update = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const update = (key: string, value: string) => {
+    if (key === "lpr_webhook_token") setGeneratedLprWebhookToken(value);
+    setForm((current) => ({ ...current, [key]: value }));
+  };
 
   const loadHomeAssistantDiscovery = React.useCallback(async () => {
     if (!isHomeAssistant) return;
@@ -3325,6 +3342,41 @@ export function IntegrationModal({
     }
   };
 
+  const generateLprWebhookToken = () => {
+    if (!window.crypto?.getRandomValues) {
+      setFeedback({
+        tone: "error",
+        title: "Token generation unavailable",
+        detail: "This browser does not expose secure random generation."
+      });
+      return;
+    }
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    update("lpr_webhook_token", token);
+    setFeedback({
+      tone: "success",
+      title: "Token generated",
+      detail: "Copy this token into UniFi Protect before saving or closing this modal."
+    });
+  };
+
+  const copyLprWebhookToken = async () => {
+    const token = form.lpr_webhook_token || generatedLprWebhookToken;
+    if (!token) return;
+    try {
+      await navigator.clipboard?.writeText(token);
+      setFeedback({
+        tone: "success",
+        title: "Token copied",
+        detail: "Paste it into UniFi Protect as the X-IACS-LPR-Token header value."
+      });
+    } catch {
+      window.prompt("LPR webhook token", token);
+    }
+  };
+
   return (
     <div className="modal-backdrop" role="presentation">
       <div className="modal-card integration-modal">
@@ -3478,9 +3530,36 @@ export function IntegrationModal({
           <div className="settings-form-grid">
             {definition.fields.map((field) => (
               <SettingField
+                action={field.key === "lpr_webhook_token" ? (
+                  <>
+                    {form.lpr_webhook_token ? (
+                      <button
+                        className="secondary-button compact"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          copyLprWebhookToken();
+                        }}
+                        type="button"
+                      >
+                        <Copy size={14} /> Copy
+                      </button>
+                    ) : null}
+                    <button
+                      className="secondary-button compact"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        generateLprWebhookToken();
+                      }}
+                      type="button"
+                    >
+                      <Key size={14} /> Generate
+                    </button>
+                  </>
+                ) : undefined}
                 field={field}
                 key={field.key}
                 isConfiguredSecret={secretSettingKeys.has(field.key) && Boolean(values[field.key])}
+                revealPasswordValue={field.key === "lpr_webhook_token" && Boolean(form.lpr_webhook_token)}
                 value={form[field.key] ?? ""}
                 onChange={(value) => update(field.key, value)}
               />

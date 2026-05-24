@@ -31,6 +31,7 @@ SECRET_KEYS = {
     "gemini_api_key",
     "anthropic_api_key",
     "dependency_update_backup_mount_options",
+    "lpr_webhook_token",
 }
 
 CLEARABLE_SECRET_KEYS = {"apprise_urls", "dependency_update_backup_mount_options"}
@@ -73,6 +74,16 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "lpr",
         "shadow",
         "UniFi zone-status driveway filter mode. Use shadow to log only, or live to suppress invalid present zone/status reads.",
+    ),
+    "lpr_webhook_token": (
+        "lpr",
+        "",
+        "Shared secret expected in the X-IACS-LPR-Token header on incoming UniFi LPR webhooks.",
+    ),
+    "lpr_webhook_allowed_source_ips": (
+        "lpr",
+        [],
+        "Static UNVR source IP addresses or CIDR ranges allowed to send UniFi LPR webhooks.",
     ),
     "schedule_default_policy": (
         "access",
@@ -284,6 +295,8 @@ class RuntimeConfig:
     lpr_similarity_threshold: float
     lpr_allowed_smart_zones: list[str]
     lpr_zone_filter_mode: str
+    lpr_webhook_token: str
+    lpr_webhook_allowed_source_ips: list[str]
     schedule_default_policy: str
     gate_control_provider: str
     gate_failover_provider: str
@@ -609,6 +622,8 @@ async def get_runtime_config() -> RuntimeConfig:
         lpr_zone_filter_mode=(
             "live" if str(values["lpr_zone_filter_mode"]).strip().lower() == "live" else "shadow"
         ),
+        lpr_webhook_token=str(values["lpr_webhook_token"] or ""),
+        lpr_webhook_allowed_source_ips=string_list_value(values["lpr_webhook_allowed_source_ips"]),
         schedule_default_policy=(
             "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
         ),
