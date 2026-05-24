@@ -345,6 +345,9 @@ def _smart_zone_evidence_detail(
         "smart_zones": smart_zones,
         "raw_smart_zones": raw_smart_zones,
         "configured_smart_zones": configured_smart_zones,
+        "zone_statuses": _smart_zone_status_payloads(zone_evidence, zone_resolution),
+        "time_of_day": zone_resolution.get("time_of_day") or "unknown",
+        "time_of_day_source": zone_resolution.get("time_of_day_source") or "unifi_protect.isDark_unavailable",
         "smart_zone_evidence": {
             "present": zone_evidence.present,
             "explicit_empty": zone_evidence.explicit_empty,
@@ -357,6 +360,36 @@ def _smart_zone_evidence_detail(
     }
 
 
+def _smart_zone_status_payloads(zone_evidence: Any, zone_resolution: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses = getattr(zone_evidence, "zone_statuses", []) or []
+    matches = zone_resolution.get("smart_zone_matches")
+    match_by_input: dict[str, dict[str, Any]] = {}
+    if isinstance(matches, list):
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            key = str(match.get("input") or "").strip()
+            if key:
+                match_by_input[key] = match
+
+    payloads: list[dict[str, Any]] = []
+    for item in statuses:
+        zone = str(getattr(item, "zone", "") or "").strip()
+        if not zone:
+            continue
+        match = match_by_input.get(zone) or {}
+        payloads.append(
+            {
+                "zone": zone,
+                "zone_id": str(match.get("id") or zone),
+                "zone_name": str(match.get("name") or zone),
+                "status": str(getattr(item, "status", "") or "").strip().lower(),
+                "level": getattr(item, "level", None),
+            }
+        )
+    return payloads
+
+
 def _read_with_smart_zone_evidence_metadata(
     read: PlateRead,
     detail: dict[str, Any],
@@ -366,6 +399,9 @@ def _read_with_smart_zone_evidence_metadata(
         "smart_zones": detail.get("smart_zones") or [],
         "raw_smart_zones": detail.get("raw_smart_zones") or [],
         "configured_smart_zones": detail.get("configured_smart_zones") or [],
+        "zone_statuses": detail.get("zone_statuses") or [],
+        "time_of_day": detail.get("time_of_day") or "unknown",
+        "time_of_day_source": detail.get("time_of_day_source") or "unifi_protect.isDark_unavailable",
         "smart_zone_evidence": detail.get("smart_zone_evidence") or {},
     }
     return PlateRead(

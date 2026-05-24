@@ -467,6 +467,7 @@ export type ViewKey =
   | "settings_automations"
   | "settings_notifications"
   | "settings_lpr"
+  | "settings_zones"
   | "users";
 
 type NavigateOptions = {

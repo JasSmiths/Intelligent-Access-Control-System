@@ -309,6 +309,10 @@ async def init_database() -> None:
                     """
                 )
             )
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_observed_at ON lpr_zone_shadow_observations (observed_at DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_plate_observed ON lpr_zone_shadow_observations (registration_number, observed_at DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_status_observed ON lpr_zone_shadow_observations (zone_status, observed_at DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_decision_observed ON lpr_zone_shadow_observations (shadow_decision, observed_at DESC)"))
             await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_movement_sagas_idempotency_key ON movement_sagas (idempotency_key)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_source ON movement_sagas (source)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_state ON movement_sagas (state)"))

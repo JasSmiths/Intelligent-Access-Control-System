@@ -2512,19 +2512,18 @@
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
+  outline: none;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .variable-editor-content.multiline {
   min-height: 112px;
 }
 
-.variable-editor-content .ProseMirror {
-  min-height: 20px;
-  outline: none;
-}
-
-.variable-editor-content.multiline .ProseMirror {
-  min-height: 88px;
+.variable-editor-content:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
 }
 
 .template-editor-fallback {

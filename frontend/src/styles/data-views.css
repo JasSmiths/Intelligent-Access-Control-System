@@ -522,6 +522,19 @@ tr:last-child td {
   line-height: 1.25;
 }
 
+.zone-shadow-table-card {
+  overflow-x: auto;
+}
+
+.zone-shadow-table {
+  min-width: 860px;
+}
+
+.zone-shadow-decision-cell {
+  min-width: 260px;
+  max-width: 360px;
+}
+
 .event-snapshot-cell {
   width: 88px;
   position: relative;

@@ -334,9 +334,9 @@ def test_npm_peer_update_group_retries_scoped_direct_dependencies(tmp_path) -> N
         json.dumps(
             {
                 "dependencies": {
-                    "@tiptap/extension-mention": "^3.22.4",
-                    "@tiptap/react": "^3.22.4",
-                    "@tiptap/starter-kit": "^3.22.4",
+                    "@acme/editor-mention": "^3.22.4",
+                    "@acme/editor-react": "^3.22.4",
+                    "@acme/editor-kit": "^3.22.4",
                     "react": "^18.3.1",
                 },
                 "devDependencies": {"@types/react": "^18.3.18"},
@@ -345,8 +345,8 @@ def test_npm_peer_update_group_retries_scoped_direct_dependencies(tmp_path) -> N
     )
     dependency = ExternalDependency(
         ecosystem="npm",
-        package_name="@tiptap/extension-mention",
-        normalized_name="@tiptap/extension-mention",
+        package_name="@acme/editor-mention",
+        normalized_name="@acme/editor-mention",
         current_version="3.22.4",
         dependant_area="Notification Template Editor",
         manifest_path="frontend/package.json",
@@ -357,9 +357,9 @@ def test_npm_peer_update_group_retries_scoped_direct_dependencies(tmp_path) -> N
     group = _npm_peer_update_group(frontend, dependency, "3.22.5", "npm ERR! ERESOLVE unable to resolve dependency tree")
 
     assert group == [
-        "@tiptap/extension-mention@3.22.5",
-        "@tiptap/react@3.22.5",
-        "@tiptap/starter-kit@3.22.5",
+        "@acme/editor-mention@3.22.5",
+        "@acme/editor-react@3.22.5",
+        "@acme/editor-kit@3.22.5",
     ]
 
 
@@ -446,19 +446,19 @@ def test_npm_recovery_plan_keeps_strict_peer_resolution_for_scoped_groups(tmp_pa
         json.dumps(
             {
                 "dependencies": {
-                    "@tiptap/extension-mention": "^3.22.4",
-                    "@tiptap/pm": "^3.22.4",
-                    "@tiptap/react": "^3.22.4",
-                    "@tiptap/starter-kit": "^3.22.4",
-                    "@tiptap/suggestion": "^3.22.4",
+                    "@acme/editor-mention": "^3.22.4",
+                    "@acme/editor-model": "^3.22.4",
+                    "@acme/editor-react": "^3.22.4",
+                    "@acme/editor-kit": "^3.22.4",
+                    "@acme/editor-suggestion": "^3.22.4",
                 }
             }
         )
     )
     dependency = ExternalDependency(
         ecosystem="npm",
-        package_name="@tiptap/extension-mention",
-        normalized_name="@tiptap/extension-mention",
+        package_name="@acme/editor-mention",
+        normalized_name="@acme/editor-mention",
         current_version="3.22.4",
         dependant_area="Notification Template Editor",
         manifest_path="frontend/package.json",
@@ -476,11 +476,11 @@ def test_npm_recovery_plan_keeps_strict_peer_resolution_for_scoped_groups(tmp_pa
     assert plan
     assert plan.regenerate_lockfile is True
     assert set(plan.specs) == {
-        "@tiptap/extension-mention@3.22.5",
-        "@tiptap/pm@3.22.5",
-        "@tiptap/react@3.22.5",
-        "@tiptap/starter-kit@3.22.5",
-        "@tiptap/suggestion@3.22.5",
+        "@acme/editor-mention@3.22.5",
+        "@acme/editor-model@3.22.5",
+        "@acme/editor-react@3.22.5",
+        "@acme/editor-kit@3.22.5",
+        "@acme/editor-suggestion@3.22.5",
     }
 
 
@@ -492,22 +492,22 @@ async def test_npm_clean_lock_recovery_updates_only_staged_frontend(tmp_path, mo
     staged.mkdir()
     package_json = {
         "dependencies": {
-            "@tiptap/extension-mention": "^3.22.5",
-            "@tiptap/pm": "^3.22.5",
-            "@tiptap/react": "^3.22.5",
-            "@tiptap/starter-kit": "^3.22.5",
-            "@tiptap/suggestion": "^3.22.5",
+            "@acme/editor-mention": "^3.22.5",
+            "@acme/editor-model": "^3.22.5",
+            "@acme/editor-react": "^3.22.5",
+            "@acme/editor-kit": "^3.22.5",
+            "@acme/editor-suggestion": "^3.22.5",
         }
     }
     (live / "package.json").write_text(json.dumps(package_json))
     (staged / "package.json").write_text(json.dumps(package_json))
     (staged / "package-lock.json").write_text(
-        json.dumps({"packages": {"node_modules/@tiptap/core": {"version": "3.22.5"}}})
+        json.dumps({"packages": {"node_modules/@acme/editor-core": {"version": "3.22.5"}}})
     )
     dependency = ExternalDependency(
         ecosystem="npm",
-        package_name="@tiptap/suggestion",
-        normalized_name="@tiptap/suggestion",
+        package_name="@acme/editor-suggestion",
+        normalized_name="@acme/editor-suggestion",
         current_version="3.22.5",
         dependant_area="Notification Template Editor",
         manifest_path="frontend/package.json",
@@ -531,9 +531,9 @@ async def test_npm_clean_lock_recovery_updates_only_staged_frontend(tmp_path, mo
         dependency,
         "3.23.1",
         DependencyCommandError(
-            ["npm", "install", "@tiptap/suggestion@3.23.1", "--package-lock-only"],
+            ["npm", "install", "@acme/editor-suggestion@3.23.1", "--package-lock-only"],
             1,
-            "npm ERR! ERESOLVE could not resolve\nnpm ERR! peer @tiptap/core@3.23.1",
+            "npm ERR! ERESOLVE could not resolve\nnpm ERR! peer @acme/editor-core@3.23.1",
         ),
         cast(Any, _FakeJobLog()),
     )
@@ -541,7 +541,7 @@ async def test_npm_clean_lock_recovery_updates_only_staged_frontend(tmp_path, mo
     assert recovered is True
     assert commands[0] == ["npm", "install", "--package-lock-only", "--no-audit"]
     assert all("--legacy-peer-deps" not in command for command in commands)
-    assert "@tiptap/suggestion@3.23.1" not in commands[0]
+    assert "@acme/editor-suggestion@3.23.1" not in commands[0]
     assert json.loads(live.joinpath("package.json").read_text()) == package_json
     staged_dependencies = json.loads(staged.joinpath("package.json").read_text())["dependencies"]
     assert set(staged_dependencies.values()) == {"^3.23.1"}

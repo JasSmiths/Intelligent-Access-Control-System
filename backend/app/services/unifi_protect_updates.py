@@ -1,4 +1,6 @@
 import asyncio
+from email.parser import Parser
+from importlib import metadata as importlib_metadata
 import json
 import re
 import shutil
@@ -10,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from sqlalchemy import select
 
@@ -341,8 +345,6 @@ class UnifiProtectUpdateService:
         staging = target_path.with_name(f"{target_path.name}.staging")
         if staging.exists():
             shutil.rmtree(staging)
-        if target_path.exists():
-            shutil.rmtree(target_path)
         staging.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable,
@@ -355,18 +357,73 @@ class UnifiProtectUpdateService:
             str(staging),
             f"uiprotect=={version}",
         ]
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
-        if process.returncode != 0:
-            raise UnifiProtectUpdateError(
-                "pip install failed: "
-                + _truncate((stderr or stdout).decode(errors="replace"), 1200)
+        await _run_pip_install(cmd)
+        requirements = _missing_overlay_requirements(staging)
+        if requirements:
+            await _run_pip_install(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-cache-dir",
+                    "--target",
+                    str(staging),
+                    *requirements,
+                ]
             )
+        if target_path.exists():
+            shutil.rmtree(target_path)
         staging.rename(target_path)
+
+
+async def _run_pip_install(cmd: list[str]) -> None:
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+    if process.returncode != 0:
+        raise UnifiProtectUpdateError(
+            "pip install failed: "
+            + _truncate((stderr or stdout).decode(errors="replace"), 1200)
+        )
+
+
+def _missing_overlay_requirements(package_path: Path) -> list[str]:
+    metadata_path = next(package_path.glob("uiprotect-*.dist-info/METADATA"), None)
+    if metadata_path is None:
+        return []
+    message = Parser().parsestr(metadata_path.read_text())
+    requirements: list[str] = []
+    for raw in message.get_all("Requires-Dist") or []:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:
+            requirements.append(raw)
+            continue
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        try:
+            installed = _installed_distribution_version(requirement.name)
+        except importlib_metadata.PackageNotFoundError:
+            requirements.append(str(requirement))
+            continue
+        if requirement.specifier and not requirement.specifier.contains(installed, prereleases=True):
+            requirements.append(str(requirement))
+    return requirements
+
+
+def _installed_distribution_version(package_name: str) -> str:
+    target = canonicalize_name(package_name)
+    overlay_root = str(settings.data_dir / "unifi-protect-package" / "versions")
+    search_path = [item for item in sys.path if item and not item.startswith(overlay_root)]
+    for distribution in importlib_metadata.distributions(path=search_path):
+        name = distribution.metadata.get("Name")
+        if name and canonicalize_name(name) == target:
+            return distribution.version
+    raise importlib_metadata.PackageNotFoundError(package_name)
 
 
 def _backup_root() -> Path:

@@ -124,6 +124,33 @@ export type AuthSecretStatus = {
   action_contexts_invalidated?: number;
 };
 
+export type LprZoneShadowObservation = {
+  id: string;
+  access_event_id: string | null;
+  registration_number: string;
+  detected_registration_number: string | null;
+  source: string;
+  protect_event_id: string | null;
+  camera_id: string | null;
+  camera_name: string | null;
+  camera_identifier: string | null;
+  observed_at: string;
+  time_of_day: "day" | "night" | "unknown" | string;
+  time_of_day_source: string;
+  zone_id: string | null;
+  zone_name: string | null;
+  zone_status: string | null;
+  zone_level: number | null;
+  actual_decision: string | null;
+  actual_direction: string | null;
+  actual_outcome: string | null;
+  shadow_decision: string;
+  shadow_reason: string;
+  would_suppress: boolean;
+  details: Record<string, unknown>;
+  created_at: string | null;
+};
+
 export function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
   const [state, setState] = React.useState<GateLprSmartZonesState>({
     loading: false,
@@ -165,6 +192,141 @@ export function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
   }, [enabled]);
 
   return state;
+}
+
+export function ZonesSettingsView({
+  icon: Icon,
+  refreshToken
+}: {
+  icon: React.ElementType;
+  refreshToken: number;
+}) {
+  const [observations, setObservations] = React.useState<LprZoneShadowObservation[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const lastRefreshTokenRef = React.useRef(refreshToken);
+
+  const loadObservations = React.useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
+    setError("");
+    try {
+      const payload = await api.get<{ observations: LprZoneShadowObservation[] }>("/api/v1/diagnostics/lpr-zone-shadow?limit=300");
+      setObservations(payload.observations ?? []);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load zone shadow observations.");
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadObservations().catch(() => undefined);
+    const interval = window.setInterval(() => {
+      loadObservations(false).catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(interval);
+  }, [loadObservations]);
+
+  React.useEffect(() => {
+    if (lastRefreshTokenRef.current === refreshToken) return;
+    lastRefreshTokenRef.current = refreshToken;
+    loadObservations(false).catch(() => undefined);
+  }, [loadObservations, refreshToken]);
+
+  return (
+    <section className="view-stack settings-page">
+      <Toolbar title="Zones" count={observations.length} icon={Icon}>
+        <button className="icon-button" type="button" onClick={() => loadObservations()} disabled={loading} title="Refresh zone shadow observations">
+          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+        </button>
+      </Toolbar>
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      <div className="table-card zone-shadow-table-card">
+        <table className="zone-shadow-table">
+          <thead>
+            <tr>
+              <th>Plate Detected</th>
+              <th>Day/Night</th>
+              <th>Zone</th>
+              <th>Status</th>
+              <th>Level</th>
+              <th>Decision</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && !observations.length ? (
+              <tr>
+                <td colSpan={7}><span className="table-muted-line">Loading zone shadow observations</span></td>
+              </tr>
+            ) : observations.length ? observations.map((item) => (
+              <tr key={item.id}>
+                <td>
+                  <strong>{item.registration_number}</strong>
+                  {item.detected_registration_number && item.detected_registration_number !== item.registration_number ? (
+                    <span className="table-muted-line">Detected {item.detected_registration_number}</span>
+                  ) : <span className="table-muted-line">{item.source}</span>}
+                </td>
+                <td>
+                  <Badge tone={timeOfDayTone(item.time_of_day)}>{zoneTitle(item.time_of_day)}</Badge>
+                  <span className="table-muted-line">{item.time_of_day_source}</span>
+                </td>
+                <td>
+                  <strong>{item.zone_name || item.zone_id || "Unknown"}</strong>
+                  {item.zone_id && item.zone_id !== item.zone_name ? <span className="table-muted-line">Zone {item.zone_id}</span> : null}
+                </td>
+                <td><Badge tone={zoneStatusTone(item.zone_status)}>{zoneTitle(item.zone_status)}</Badge></td>
+                <td>{typeof item.zone_level === "number" ? Math.round(item.zone_level) : <span className="table-muted-line">--</span>}</td>
+                <td className="zone-shadow-decision-cell">
+                  <Badge tone={zoneDecisionTone(item)}>{zoneDecisionLabel(item.shadow_decision)}</Badge>
+                  <span className="table-muted-line">{item.shadow_reason}</span>
+                </td>
+                <td>
+                  {formatDate(item.observed_at)}
+                  {item.actual_decision ? <span className="table-muted-line">{zoneTitle(item.actual_decision)} {zoneTitle(item.actual_direction)}</span> : null}
+                </td>
+              </tr>
+            )) : (
+              <tr>
+                <td colSpan={7}><span className="table-muted-line">No zone shadow observations yet</span></td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function zoneTitle(value: string | null | undefined) {
+  return String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function timeOfDayTone(value: string): "green" | "gray" | "amber" | "red" | "blue" | "purple" {
+  if (value === "night") return "purple";
+  if (value === "day") return "amber";
+  return "gray";
+}
+
+function zoneStatusTone(value: string | null): "green" | "gray" | "amber" | "red" | "blue" | "purple" {
+  if (value === "enter") return "green";
+  if (value === "moving") return "amber";
+  if (value) return "blue";
+  return "gray";
+}
+
+function zoneDecisionTone(item: LprZoneShadowObservation): "green" | "gray" | "amber" | "red" | "blue" | "purple" {
+  if (item.would_suppress || item.shadow_decision === "would_suppress") return "red";
+  if (item.shadow_decision === "would_review") return "amber";
+  if (item.shadow_decision === "would_allow") return "green";
+  return "gray";
+}
+
+function zoneDecisionLabel(value: string) {
+  if (value === "would_allow") return "Would Allow";
+  if (value === "would_suppress") return "Would Suppress";
+  if (value === "would_review") return "Would Review";
+  return zoneTitle(value);
 }
 
 export function findGateLprCamera(cameras: UnifiProtectCamera[]) {

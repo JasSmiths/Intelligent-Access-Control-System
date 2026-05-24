@@ -906,6 +906,57 @@ Index(
 )
 
 
+class LprZoneShadowObservation(Base, TimestampMixin):
+    __tablename__ = "lpr_zone_shadow_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    registration_number: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    detected_registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    protect_event_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    camera_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    camera_name: Mapped[str | None] = mapped_column(String(160))
+    camera_identifier: Mapped[str | None] = mapped_column(String(160))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    time_of_day: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False, index=True)
+    time_of_day_source: Mapped[str] = mapped_column(String(80), default="unknown", nullable=False)
+    zone_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    zone_name: Mapped[str | None] = mapped_column(String(160), index=True)
+    zone_status: Mapped[str | None] = mapped_column(String(40), index=True)
+    zone_level: Mapped[float | None] = mapped_column(Float)
+    actual_decision: Mapped[str | None] = mapped_column(String(80), index=True)
+    actual_direction: Mapped[str | None] = mapped_column(String(40), index=True)
+    actual_outcome: Mapped[str | None] = mapped_column(String(80), index=True)
+    shadow_decision: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    shadow_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    would_suppress: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    access_event: Mapped[AccessEvent | None] = relationship()
+
+
+Index("ix_lpr_zone_shadow_observed_at", LprZoneShadowObservation.observed_at.desc())
+Index(
+    "ix_lpr_zone_shadow_plate_observed",
+    LprZoneShadowObservation.registration_number,
+    LprZoneShadowObservation.observed_at.desc(),
+)
+Index(
+    "ix_lpr_zone_shadow_status_observed",
+    LprZoneShadowObservation.zone_status,
+    LprZoneShadowObservation.observed_at.desc(),
+)
+Index(
+    "ix_lpr_zone_shadow_decision_observed",
+    LprZoneShadowObservation.shadow_decision,
+    LprZoneShadowObservation.observed_at.desc(),
+)
+
+
 class MovementSagaRecord(Base, TimestampMixin):
     __tablename__ = "movement_sagas"
 

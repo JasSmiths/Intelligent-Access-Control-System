@@ -2027,7 +2027,6 @@ def _dependant_area(name: str) -> str:
         "vite": "Frontend Build",
         "typescript": "Frontend Build",
         "lucide-react": "Frontend UI",
-        "tiptap": "Notification Template Editor",
         "monaco": "Telemetry Diff Viewer",
         "postgres": "Database",
         "nginx": "Frontend Runtime",
@@ -2035,8 +2034,6 @@ def _dependant_area(name: str) -> str:
     for needle, area in mappings.items():
         if needle in normalized:
             return area
-    if normalized.startswith("@tiptap"):
-        return "Notification Template Editor"
     if normalized.startswith("@monaco") or normalized.startswith("@tanstack"):
         return "Frontend Runtime"
     return "System Core"

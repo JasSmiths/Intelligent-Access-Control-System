@@ -27,6 +27,7 @@ Menu,
 MessageCircle,
 Monitor,
 Moon,
+MapPinned,
 MoveHorizontal,
 PlugZap,
 RefreshCcw,
@@ -104,6 +105,7 @@ const NotificationsView = React.lazy(() => import("./views/WorkflowViews").then(
 const SettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.SettingsView })));
 const DynamicSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.DynamicSettingsView })));
 const AccessDevicesSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
+const ZonesSettingsView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.ZonesSettingsView })));
 const UsersView = React.lazy(() => import("./views/SettingsViews").then((module) => ({ default: module.UsersView })));
 const loadChatWidgetModule = () => import("./views/ChatWidgetView").then((module) => ({ default: module.ChatWidget }));
 const ChatWidget = React.lazy(loadChatWidgetModule);
@@ -185,6 +187,7 @@ const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
   settings_automations: ["people", "vehicles"],
   settings_notifications: ["people", "schedules"],
   settings_lpr: [],
+  settings_zones: [],
   users: []
 };
 
@@ -320,6 +323,7 @@ const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.Element
   { key: "settings_automations", label: "Automations", icon: GitBranch },
   { key: "settings_notifications", label: "Notifications", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
+  { key: "settings_zones", label: "Zones", icon: MapPinned },
   { key: "users", label: "Users", icon: Users, adminOnly: true }
 ];
 
@@ -346,6 +350,7 @@ const viewPaths: Record<ViewKey, string> = {
   settings_automations: "/settings/automations",
   settings_notifications: "/settings/notifications",
   settings_lpr: "/settings/lpr-tuning",
+  settings_zones: "/settings/zones",
   users: "/settings/users"
 };
 
@@ -2555,6 +2560,9 @@ function View(props: {
       break;
     case "settings_lpr":
       content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      break;
+    case "settings_zones":
+      content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings":
       content = <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;

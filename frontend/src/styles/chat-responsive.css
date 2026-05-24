@@ -1822,8 +1822,7 @@
   .modal-backdrop input:not([type="checkbox"]):not([type="radio"]),
   .modal-backdrop textarea,
   .modal-backdrop select,
-  .variable-editor-content,
-  .variable-editor-content .ProseMirror {
+  .variable-editor-content {
     font-size: 16px;
   }
 

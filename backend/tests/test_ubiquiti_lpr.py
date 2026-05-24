@@ -106,6 +106,49 @@ def test_extracts_plate_scoped_zone_id_from_alarm_manager_trigger() -> None:
     assert not evidence.explicit_empty
 
 
+def test_extracts_plate_scoped_zone_status_from_alarm_manager_trigger() -> None:
+    evidence = extract_plate_smart_zone_evidence(
+        {
+            "alarm": {
+                "triggers": [
+                    {
+                        "key": "license_plate_unknown",
+                        "value": "LC61TXJ",
+                        "device": "942A6FD09D64",
+                        "zones": {"line": [], "zone": [2], "loiter": []},
+                        "sourceEvent": {
+                            "metadata": {
+                                "zonesStatus": {
+                                    "2": {"status": "enter", "level": 84},
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "key": "license_plate_unknown",
+                        "value": "YEO3N",
+                        "device": "942A6FD09D64",
+                        "zones": {"line": [], "zone": [2], "loiter": []},
+                        "sourceEvent": {
+                            "metadata": {
+                                "zonesStatus": {
+                                    "2": {"status": "moving", "level": 84},
+                                }
+                            }
+                        },
+                    },
+                ]
+            }
+        },
+        "LC61TXJ",
+    )
+
+    assert evidence.zone_statuses
+    assert evidence.zone_statuses[0].zone == "2"
+    assert evidence.zone_statuses[0].status == "enter"
+    assert evidence.zone_statuses[0].level == 84
+
+
 def test_empty_plate_zone_rejects_even_when_sibling_detection_has_zone() -> None:
     payload = {
         "alarm": {

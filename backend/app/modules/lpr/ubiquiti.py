@@ -51,8 +51,16 @@ SMART_ZONE_TRIGGER_MARKERS = ("zone", "smart detect zone", "smartdetectzone")
 
 
 @dataclass(frozen=True)
+class PlateSmartZoneStatus:
+    zone: str
+    status: str
+    level: float | None = None
+
+
+@dataclass(frozen=True)
 class PlateSmartZoneEvidence:
     smart_zones: list[str]
+    zone_statuses: list[PlateSmartZoneStatus]
     present: bool
     explicit_empty: bool
     source: str
@@ -338,7 +346,13 @@ def _looks_like_lpr_trigger(value: str) -> bool:
 
 
 def _empty_plate_zone_evidence() -> PlateSmartZoneEvidence:
-    return PlateSmartZoneEvidence(smart_zones=[], present=False, explicit_empty=False, source="missing")
+    return PlateSmartZoneEvidence(
+        smart_zones=[],
+        zone_statuses=[],
+        present=False,
+        explicit_empty=False,
+        source="missing",
+    )
 
 
 def _alarm_triggers(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -372,8 +386,10 @@ def _plate_zone_evidence_from_mapping(
     camera_identifier: str | None,
 ) -> PlateSmartZoneEvidence:
     smart_zones, present, explicit_empty = _smart_zone_values_from_mapping(mapping)
+    zone_statuses = _zone_statuses_from_mapping(mapping)
     return PlateSmartZoneEvidence(
         smart_zones=_dedupe_preserving_order(smart_zones),
+        zone_statuses=zone_statuses,
         present=present,
         explicit_empty=explicit_empty,
         source=source,
@@ -437,6 +453,66 @@ def _zone_values_from_value(value: Any) -> tuple[list[str], bool]:
             return _zone_values_from_value(normalized_items["zone"])
         return [], not bool(value)
     return [], False
+
+
+def _zone_statuses_from_mapping(mapping: dict[str, Any]) -> list[PlateSmartZoneStatus]:
+    statuses: list[PlateSmartZoneStatus] = []
+    _collect_zone_statuses(mapping, statuses)
+    deduped: list[PlateSmartZoneStatus] = []
+    seen: set[tuple[str, str, float | None]] = set()
+    for item in statuses:
+        key = (_normalize_zone_name(item.zone), item.status.casefold(), item.level)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _collect_zone_statuses(value: Any, statuses: list[PlateSmartZoneStatus]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = _normalize_key(str(key))
+            if normalized in {"zonesstatus", "zones_status"}:
+                _collect_zone_status_mapping(item, statuses)
+                continue
+            _collect_zone_statuses(item, statuses)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_zone_statuses(item, statuses)
+
+
+def _collect_zone_status_mapping(value: Any, statuses: list[PlateSmartZoneStatus]) -> None:
+    if not isinstance(value, dict):
+        return
+    for zone, detail in value.items():
+        zone_text = str(zone).strip()
+        if not zone_text:
+            continue
+        if isinstance(detail, dict):
+            status = _text_or_none(detail.get("status"))
+            if not status:
+                continue
+            statuses.append(
+                PlateSmartZoneStatus(
+                    zone=zone_text,
+                    status=status.strip().lower(),
+                    level=_float_or_none(detail.get("level")),
+                )
+            )
+        else:
+            status = _text_or_none(detail)
+            if status:
+                statuses.append(PlateSmartZoneStatus(zone=zone_text, status=status.strip().lower()))
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _find_plate_mapping(value: Any, registration_number: str) -> dict[str, Any] | None:

@@ -42,6 +42,7 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
+from app.services.lpr_zone_shadow import get_lpr_zone_shadow_service
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.movement_fsm import (
@@ -2159,6 +2160,15 @@ class AccessEventService:
             )
 
             await session.commit()
+            await self._record_lpr_zone_shadow_decision(
+                read,
+                event=event,
+                decision=decision,
+                direction=direction,
+                person=person,
+                vehicle=vehicle,
+                visitor_pass=visitor_pass,
+            )
 
         if gate_command_required:
             gate_outcome = await self._open_gate_for_event(
@@ -2337,6 +2347,38 @@ class AccessEventService:
             decision=decision,
             occurred_at=event.occurred_at,
         )
+
+    async def _record_lpr_zone_shadow_decision(
+        self,
+        read: PlateRead,
+        *,
+        event: AccessEvent,
+        decision: AccessDecision,
+        direction: AccessDirection,
+        person: Person | None,
+        vehicle: Vehicle | None,
+        visitor_pass: VisitorPass | None,
+    ) -> None:
+        try:
+            await get_lpr_zone_shadow_service().record_decision(
+                read,
+                access_event_id=event.id,
+                actual_decision=decision.value,
+                actual_direction=direction.value,
+                actual_outcome="access_event_finalized",
+                person_id=person.id if person else None,
+                vehicle_id=vehicle.id if vehicle else None,
+                visitor_pass_id=visitor_pass.id if visitor_pass else None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "lpr_zone_shadow_record_failed",
+                extra={
+                    "event_id": str(event.id),
+                    "registration_number": read.registration_number,
+                    "error": self._safe_exception_detail(exc),
+                },
+            )
 
     async def _lookup_active_vehicle(self, session: AsyncSession, read: PlateRead, trace: Any) -> Vehicle | None:
         vehicle_span = trace.start_span(

@@ -36,6 +36,7 @@ class ProtectPackageState:
 
 
 def activate_unifi_protect_package_overlay() -> ProtectPackageState:
+    _remove_overlay_paths()
     state = read_active_package_state()
     if state.mode != "overlay" or not state.path:
         return state
@@ -44,8 +45,7 @@ def activate_unifi_protect_package_overlay() -> ProtectPackageState:
         logger.warning("unifi_protect_overlay_missing", extra={"path": state.path})
         return ProtectPackageState(mode="base", version=base_unifi_protect_version())
     path_text = str(package_path)
-    if path_text not in sys.path:
-        sys.path.insert(0, path_text)
+    sys.path.insert(0, path_text)
     return state
 
 

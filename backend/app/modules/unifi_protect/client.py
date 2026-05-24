@@ -56,7 +56,8 @@ async def build_unifi_protect_client(config: RuntimeConfig):
         from uiprotect import ProtectApiClient
         from uiprotect.data import ModelType
     except ImportError as exc:
-        raise UnifiProtectError("The uiprotect package is not installed in the backend environment.") from exc
+        detail = _uiprotect_import_error_message(exc)
+        raise UnifiProtectError(detail) from exc
 
     return ProtectApiClient(
         host=config.unifi_protect_host,
@@ -252,7 +253,8 @@ async def list_unifi_protect_events(
     try:
         from uiprotect.data import EventType
     except ImportError as exc:
-        raise UnifiProtectError("The uiprotect package is not installed in the backend environment.") from exc
+        detail = _uiprotect_import_error_message(exc)
+        raise UnifiProtectError(detail) from exc
 
     start = since or datetime.now(tz=UTC) - timedelta(hours=24)
     end = until or datetime.now(tz=UTC) + timedelta(seconds=10)
@@ -523,6 +525,16 @@ def _isoformat(value: Any) -> str | None:
 def _protect_error_message(exc: Exception) -> str:
     message = str(exc) or exc.__class__.__name__
     return f"UniFi Protect error: {message}"
+
+
+def _uiprotect_import_error_message(exc: ImportError) -> str:
+    missing_module = getattr(exc, "name", None)
+    if missing_module and missing_module != "uiprotect":
+        return (
+            "The uiprotect package could not be imported because dependency "
+            f"{missing_module!r} is missing from the backend environment."
+        )
+    return "The uiprotect package is not installed in the backend environment."
 
 
 def run_coroutine_threadsafe(coro: Any) -> None:

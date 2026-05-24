@@ -120,11 +120,15 @@ class UnifiProtectIntegrationService:
         api = await self._ensure_api(subscribe=True)
         camera = gate_lpr_camera_from_bootstrap(list_bootstrap_cameras(api), camera_identifier=camera_identifier)
         resolved = resolve_camera_smart_zone_names(camera, zone_values) if camera is not None else zone_values
+        day_night, day_night_source = camera_day_night(camera)
         return {
             "camera_id": str(getattr(camera, "id", "") or "") if camera is not None else None,
             "camera_name": str(getattr(camera, "display_name", None) or getattr(camera, "name", None) or "") if camera is not None else None,
             "camera_identifier": camera_identifier,
             "smart_zones": resolved,
+            "smart_zone_matches": resolve_camera_smart_zone_matches(camera, zone_values) if camera is not None else [],
+            "time_of_day": day_night,
+            "time_of_day_source": day_night_source,
         }
 
     async def list_events(
@@ -493,6 +497,45 @@ def resolve_camera_smart_zone_names(camera: Any, zone_values: list[str]) -> list
     return _dedupe_preserving_order(resolved)
 
 
+def resolve_camera_smart_zone_matches(camera: Any, zone_values: list[str]) -> list[dict[str, str | None]]:
+    lookup: dict[str, dict[str, str | None]] = {}
+    for zone in getattr(camera, "smart_detect_zones", []) or []:
+        zone_id = _string_or_none(getattr(zone, "id", None))
+        zone_name = _string_or_none(getattr(zone, "name", None))
+        match = {"id": zone_id, "name": zone_name}
+        for label in (zone_id, zone_name):
+            if label:
+                lookup[_normalize_smart_zone(label)] = match
+
+    matches: list[dict[str, str | None]] = []
+    for value in zone_values:
+        text = _string_or_none(value)
+        if not text:
+            continue
+        match = lookup.get(_normalize_smart_zone(text), {})
+        matches.append(
+            {
+                "input": text,
+                "id": match.get("id") or text,
+                "name": match.get("name") or text,
+            }
+        )
+    return matches
+
+
+def camera_day_night(camera: Any | None) -> tuple[str, str]:
+    if camera is None:
+        return "unknown", "camera_unavailable"
+    is_dark = _bool_or_none(getattr(camera, "is_dark", None))
+    if is_dark is None:
+        camera_dict = _camera_to_dict(camera)
+        if isinstance(camera_dict, dict):
+            is_dark = _bool_or_none(camera_dict.get("isDark"))
+    if is_dark is None:
+        return "unknown", "unifi_protect.isDark_unavailable"
+    return ("night" if is_dark else "day"), "unifi_protect.isDark"
+
+
 def _camera_identifier_values(camera: Any) -> set[str]:
     return {
         value
@@ -536,6 +579,30 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _camera_to_dict(camera: Any) -> dict[str, Any]:
+    unifi_dict = getattr(camera, "unifi_dict", None)
+    if callable(unifi_dict):
+        try:
+            value = unifi_dict()
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 def _dict_get(value: Any, key: str) -> Any:
