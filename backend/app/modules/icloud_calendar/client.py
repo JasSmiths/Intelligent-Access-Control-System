@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 
+ICLOUD_RECONNECT_REQUIRED_MESSAGE = "Stored iCloud session is no longer accepted by Apple. Reconnect this account."
+
 
 class ICloudCalendarClientError(RuntimeError):
     """Raised when iCloud calendar authentication or sync fails."""
@@ -100,7 +102,12 @@ class ICloudCalendarClient:
         cookie_directory = self._new_cookie_directory()
         try:
             _restore_directory_bundle(cookie_directory, session_bundle)
-            api = self._service(apple_id, password=None, cookie_directory=cookie_directory)
+            try:
+                api = self._service(apple_id, password=None, cookie_directory=cookie_directory)
+            except ICloudCalendarClientError as exc:
+                if _stored_session_needs_reauth(exc):
+                    raise ICloudCalendarReauthRequired(ICLOUD_RECONNECT_REQUIRED_MESSAGE) from exc
+                raise
             if bool(getattr(api, "requires_2fa", False)) or bool(getattr(api, "requires_2sa", False)):
                 raise ICloudCalendarReauthRequired("iCloud requested verification again. Reconnect this account.")
             raw_events = _fetch_raw_calendar_events(api, starts_at, ends_at)
@@ -184,6 +191,11 @@ def _restore_directory_bundle(directory: Path, bundle: dict[str, Any]) -> None:
         target = directory / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(base64.b64decode(str(item.get("content_b64") or "")))
+
+
+def _stored_session_needs_reauth(exc: Exception) -> bool:
+    message = str(exc).strip().lower()
+    return "no password set" in message
 
 
 def _normalize_event(value: Any) -> ICloudCalendarEvent | None:

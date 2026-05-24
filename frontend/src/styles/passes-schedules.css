@@ -3253,7 +3253,7 @@
 .icloud-account-card {
   min-height: 70px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(170px, max-content) 36px;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, max-content) max-content;
   align-items: center;
   gap: 12px;
   padding: 11px;
@@ -3278,6 +3278,13 @@
 
 .icloud-account-status {
   justify-items: start;
+}
+
+.icloud-account-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .icloud-account-status small,

@@ -1375,11 +1375,11 @@
 }
 
 .maintenance-settings {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
+  gap: 14px;
   margin-bottom: 16px;
   padding: 14px;
   border: 1px solid var(--line);
@@ -1394,9 +1394,14 @@
 
 .maintenance-settings-copy {
   min-width: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
+}
+
+.maintenance-settings-copy > div {
+  min-width: 0;
 }
 
 .maintenance-settings-icon {
@@ -1407,39 +1412,45 @@
   justify-content: center;
   flex: 0 0 auto;
   border-radius: 8px;
-  color: var(--amber);
-  background: var(--amber-soft);
+  color: var(--muted);
+  background: var(--gray-soft);
   line-height: 0;
 }
 
-.maintenance-settings-copy strong,
-.maintenance-settings-copy span,
-.maintenance-settings-copy small {
+.maintenance-settings.active .maintenance-settings-icon {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.maintenance-settings-copy > div strong,
+.maintenance-settings-copy > div span,
+.maintenance-settings-copy > div small {
   display: block;
   min-width: 0;
 }
 
-.maintenance-settings-copy strong {
+.maintenance-settings-copy > div strong {
   font-size: 14px;
   font-weight: 680;
 }
 
-.maintenance-settings-copy span,
-.maintenance-settings-copy small {
+.maintenance-settings-copy > div span,
+.maintenance-settings-copy > div small {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
 .maintenance-switch {
-  min-width: 112px;
-  min-height: 38px;
+  position: relative;
+  min-width: 122px;
+  min-height: 40px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   flex: 0 0 auto;
-  padding: 0 12px;
+  padding: 0 10px 0 6px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted-strong);
@@ -1448,22 +1459,67 @@
   font-weight: 650;
 }
 
+.maintenance-switch::before {
+  content: "";
+  width: 36px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--surface-soft));
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
 .maintenance-switch.active {
   border-color: color-mix(in srgb, var(--amber) 34%, var(--line));
   color: var(--amber);
   background: var(--amber-soft);
 }
 
+.maintenance-switch.active::before {
+  border-color: color-mix(in srgb, var(--amber) 38%, var(--line));
+  background: color-mix(in srgb, var(--amber) 78%, var(--surface));
+}
+
 .maintenance-switch input {
-  width: 14px;
-  height: 14px;
+  position: absolute;
+  top: 50%;
+  left: 9px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
-  margin: 0;
-  accent-color: var(--amber);
+  margin: -8px 0 0;
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+  transform: translateX(0);
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.maintenance-switch.active input {
+  border-color: color-mix(in srgb, var(--amber) 42%, #ffffff);
+  background: #ffffff;
+  transform: translateX(14px);
+}
+
+.maintenance-switch input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 68%, transparent);
+  outline-offset: 3px;
+}
+
+.maintenance-switch input:disabled {
+  cursor: not-allowed;
+}
+
+.maintenance-switch:has(input:disabled) {
+  opacity: 0.68;
+  cursor: not-allowed;
 }
 
 .maintenance-settings-error {
-  flex-basis: 100%;
+  grid-column: 1 / -1;
 }
 
 .auth-secret-panel,

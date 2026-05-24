@@ -18,6 +18,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import ICloudCalendarAccount, ICloudCalendarSyncRun, User, VisitorPass
 from app.models.enums import VisitorPassStatus
 from app.modules.icloud_calendar.client import (
+    ICLOUD_RECONNECT_REQUIRED_MESSAGE,
     ICloudAuthSession,
     ICloudCalendarClient,
     ICloudCalendarClientError,
@@ -748,17 +749,18 @@ def calendar_pass_can_be_reconciled(visitor_pass: VisitorPass) -> bool:
 
 
 def serialize_icloud_account(account: ICloudCalendarAccount) -> dict[str, Any]:
+    status, last_error = _serialized_icloud_account_status(account)
     return {
         "id": str(account.id),
         "apple_id": account.apple_id,
         "display_name": account.display_name or account.apple_id,
-        "status": account.status,
+        "status": status,
         "is_active": account.is_active,
         "last_auth_at": _iso(account.last_auth_at),
         "last_sync_at": _iso(account.last_sync_at),
         "last_sync_status": account.last_sync_status,
         "last_sync_summary": account.last_sync_summary or None,
-        "last_error": account.last_error,
+        "last_error": last_error,
         "created_by_user_id": str(account.created_by_user_id) if account.created_by_user_id else None,
         "created_at": _iso(account.created_at),
         "updated_at": _iso(account.updated_at),
@@ -799,6 +801,16 @@ def icloud_account_audit_snapshot(account: ICloudCalendarAccount) -> dict[str, A
         "last_error": account.last_error,
         "created_by_user_id": str(account.created_by_user_id) if account.created_by_user_id else None,
     }
+
+
+def _serialized_icloud_account_status(account: ICloudCalendarAccount) -> tuple[str, str | None]:
+    if account.status == "error" and _looks_like_stored_session_password_fallback(account.last_error):
+        return "requires_reauth", ICLOUD_RECONNECT_REQUIRED_MESSAGE
+    return account.status, account.last_error
+
+
+def _looks_like_stored_session_password_fallback(value: str | None) -> bool:
+    return "no password set" in str(value or "").strip().lower()
 
 
 def _encrypt_session_bundle(bundle: dict[str, Any]) -> str:

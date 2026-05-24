@@ -488,6 +488,98 @@
   .movement-layout {
     grid-template-columns: 1fr;
   }
+
+  .events-table-card,
+  .zone-shadow-table-card {
+    overflow-x: visible;
+  }
+
+  .events-table-card > table,
+  .zone-shadow-table {
+    width: 100%;
+    min-width: 0;
+    display: block;
+  }
+
+  .events-table-card thead,
+  .zone-shadow-table thead {
+    display: none;
+  }
+
+  .events-table-card tbody,
+  .zone-shadow-table tbody {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .events-table-card tr,
+  .zone-shadow-table tr {
+    display: grid;
+    gap: 10px 12px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .events-table-card tr {
+    grid-template-columns: 70px repeat(2, minmax(0, 1fr));
+  }
+
+  .zone-shadow-table tr {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .events-table-card th,
+  .events-table-card td,
+  .zone-shadow-table th,
+  .zone-shadow-table td {
+    min-width: 0;
+    width: auto !important;
+    display: grid;
+    gap: 4px;
+    padding: 0;
+    border-bottom: 0;
+    text-align: left;
+  }
+
+  .events-table-card td::before,
+  .zone-shadow-table td::before {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 740;
+    letter-spacing: 0;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .events-table-card td:nth-child(1) {
+    grid-row: span 3;
+  }
+
+  .events-table-card td:nth-child(7),
+  .zone-shadow-table td:nth-child(6),
+  .zone-shadow-table td:nth-child(7) {
+    grid-column: 1 / -1;
+  }
+
+  .events-table-card td:nth-child(1)::before { content: "Snapshot"; }
+  .events-table-card td:nth-child(2)::before { content: "Plate"; }
+  .events-table-card td:nth-child(3)::before { content: "Direction"; }
+  .events-table-card td:nth-child(4)::before { content: "Decision"; }
+  .events-table-card td:nth-child(5)::before { content: "Movement"; }
+  .events-table-card td:nth-child(6)::before { content: "Confidence"; }
+  .events-table-card td:nth-child(7)::before { content: "When"; }
+  .events-table-card td:nth-child(8)::before { content: "Alerts"; }
+
+  .zone-shadow-table td:nth-child(1)::before { content: "Plate detected"; }
+  .zone-shadow-table td:nth-child(2)::before { content: "Day/night"; }
+  .zone-shadow-table td:nth-child(3)::before { content: "Zone"; }
+  .zone-shadow-table td:nth-child(4)::before { content: "Status"; }
+  .zone-shadow-table td:nth-child(5)::before { content: "Level"; }
+  .zone-shadow-table td:nth-child(6)::before { content: "Decision"; }
+  .zone-shadow-table td:nth-child(7)::before { content: "Time"; }
 }
 
 table {

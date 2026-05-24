@@ -13,7 +13,9 @@ from app.models.enums import VisitorPassStatus
 from app.modules.icloud_calendar.client import (
     ICloudAuthSession,
     ICloudCalendarClient,
+    ICloudCalendarClientError,
     ICloudCalendarEvent,
+    ICloudCalendarReauthRequired,
     _normalize_event,
 )
 from app.services.icloud_calendar import (
@@ -25,6 +27,7 @@ from app.services.icloud_calendar import (
     calendar_pass_can_be_reconciled,
     event_contains_open_gate,
     fallback_visitor_name_from_calendar_title,
+    serialize_icloud_account,
     source_metadata_for_event,
     source_reference_for_event,
     visitor_window_for_event,
@@ -209,6 +212,47 @@ def test_icloud_fetch_prefers_raw_refresh_payload_when_available() -> None:
     )
 
     assert events == [{"title": "Chris Starkey", "privateComments": "Open Gate"}]
+
+
+def test_icloud_fetch_maps_missing_password_fallback_to_reauth(tmp_path: Path) -> None:
+    class ExpiredSessionClient(ICloudCalendarClient):
+        def _new_cookie_directory(self) -> Path:
+            return tmp_path / "session"
+
+        def _service(self, apple_id: str, *, password: str | None, cookie_directory: Path) -> Any:
+            _ = (apple_id, password, cookie_directory)
+            raise ICloudCalendarClientError("No password set")
+
+    with pytest.raises(ICloudCalendarReauthRequired, match="Reconnect this account"):
+        ExpiredSessionClient().fetch_events(
+            apple_id="user@example.com",
+            session_bundle={"version": 1, "files": []},
+            starts_at=datetime(2026, 4, 30, tzinfo=UTC),
+            ends_at=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+
+
+def test_icloud_account_serialization_maps_missing_password_to_reauth() -> None:
+    account = SimpleNamespace(
+        id=uuid.uuid4(),
+        apple_id="user@example.com",
+        display_name="user@example.com",
+        status="error",
+        is_active=True,
+        last_auth_at=None,
+        last_sync_at=None,
+        last_sync_status="error",
+        last_sync_summary=None,
+        last_error="No password set",
+        created_by_user_id=None,
+        created_at=None,
+        updated_at=None,
+    )
+
+    payload = serialize_icloud_account(account)
+
+    assert payload["status"] == "requires_reauth"
+    assert payload["last_error"] == "Stored iCloud session is no longer accepted by Apple. Reconnect this account."
 
 
 def test_calendar_source_reference_is_stable_for_account_and_event() -> None:
