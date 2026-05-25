@@ -300,32 +300,34 @@ type SearchPaletteItem = Omit<GlobalSearchResult, "type"> & {
 const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
   { key: "people", label: "People", icon: UserRound },
-  { key: "groups", label: "Groups", icon: Users },
   { key: "schedules", label: "Schedules", icon: Clock3 },
   { key: "passes", label: "Passes", icon: ClipboardPaste },
   { key: "vehicles", label: "Vehicles", icon: Car },
   { key: "top_charts", label: "Top Charts", icon: Trophy },
   { key: "events", label: "Events", icon: CalendarDays },
   { key: "movements", label: "Movements", icon: MoveHorizontal },
-  { key: "alerts", label: "Alerts", icon: Bell },
   { key: "reports", label: "Reports", icon: BarChart3 },
-  { key: "integrations", label: "API & Integrations", icon: PlugZap },
-  { key: "logs", label: "Logs", icon: FileText },
   { key: "settings", label: "Settings", icon: Settings }
 ];
 
 const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType; adminOnly?: boolean }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
+  { key: "groups", label: "Groups", icon: Users },
   { key: "settings_gates", label: "Gates", icon: DoorOpen },
   { key: "settings_garage_doors", label: "Garage Doors", icon: Warehouse },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
+  { key: "integrations", label: "API & Integrations", icon: PlugZap },
   { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true },
   { key: "settings_automations", label: "Automations", icon: GitBranch },
   { key: "settings_notifications", label: "Notifications", icon: Bell },
+  { key: "alerts", label: "Alerts", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "settings_zones", label: "Zones", icon: MapPinned },
+  { key: "logs", label: "Logs", icon: FileText },
   { key: "users", label: "Users", icon: Users, adminOnly: true }
 ];
+
+const settingsNavViewKeys = new Set<ViewKey>(settingsNavItems.map((item) => item.key));
 
 const viewPaths: Record<ViewKey, string> = {
   dashboard: "/",
@@ -2114,7 +2116,7 @@ function App() {
   const sidebarCollapsed = profilePreferences.sidebarCollapsed;
   const navigationCollapsed = !isMobileNavigation && sidebarCollapsed;
   const navigationExpanded = isMobileNavigation ? mobileNavOpen : !sidebarCollapsed;
-  const settingsActive = view === "settings" || view.startsWith("settings_") || view === "users";
+  const settingsActive = view === "settings" || settingsNavViewKeys.has(view);
   const visibleSettingsNavItems = React.useMemo(
     () => settingsNavItems.filter((item) => !item.adminOnly || currentUser?.role === "admin"),
     [currentUser?.role]
