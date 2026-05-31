@@ -76,7 +76,8 @@ jobs:
       - name: Python dependency audit
         run: |
           python -m pip install pip-audit
-          pip-audit --strict --skip-editable
+          uv export --locked --extra dev --format requirements-txt --no-emit-project --no-hashes > /tmp/iacs-requirements.txt
+          pip-audit --strict -r /tmp/iacs-requirements.txt
       - name: Alembic migration smoke
         env:
           IACS_AUTO_CREATE_SCHEMA: "false"
