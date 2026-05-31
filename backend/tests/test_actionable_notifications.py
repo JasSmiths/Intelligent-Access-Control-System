@@ -108,6 +108,7 @@ def context_row(*, token: str = "token", consumed=False, expired=False):
 
 async def test_expired_gate_action_token_notifies_requesting_device(monkeypatch) -> None:
     service = ActionableNotificationService()
+    monkeypatch.setattr(actionable, "get_auth_secret", lambda: "test-secret")
     row = context_row(expired=True)
     notifications = []
     monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession(row))
@@ -128,6 +129,7 @@ async def test_expired_gate_action_token_notifies_requesting_device(monkeypatch)
 
 async def test_consumed_gate_action_token_is_single_use(monkeypatch) -> None:
     service = ActionableNotificationService()
+    monkeypatch.setattr(actionable, "get_auth_secret", lambda: "test-secret")
     row = context_row(consumed=True)
     notifications = []
     monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession(row))

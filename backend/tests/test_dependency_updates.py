@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import app.core.crypto as crypto_module
 import app.services.dependency_updates as dependency_updates_module
 from app.models import DependencyUpdateBackup, ExternalDependency, SystemSetting, User
 from app.services.dependency_updates import (
@@ -129,7 +130,8 @@ dependencies = [
     assert discord_row.dependant_area == "Discord Messaging"
 
 
-def test_dependency_backup_mount_options_are_secret_and_legacy_plaintext_is_migrated() -> None:
+def test_dependency_backup_mount_options_are_secret_and_legacy_plaintext_is_migrated(monkeypatch) -> None:
+    monkeypatch.setattr(crypto_module, "get_auth_secret", lambda: "test-secret")
     secret = "username=iacs,password=secret,vers=3.0,rw"
     record = SystemSetting(
         key="dependency_update_backup_mount_options",
