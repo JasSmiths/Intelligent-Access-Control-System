@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
-from app.core.config import settings
+from app.core.config import settings, validate_startup_security_config
 from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal
@@ -47,6 +47,19 @@ from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 logger = get_logger(__name__)
 
+KIB = 1024
+MIB = 1024 * KIB
+DEFAULT_API_BODY_LIMIT_BYTES = 2 * MIB
+CHAT_UPLOAD_BODY_LIMIT_BYTES = 25 * MIB
+WEBHOOK_BODY_LIMIT_BYTES = 1 * MIB
+AUTOMATION_WEBHOOK_BODY_LIMIT_BYTES = 256 * KIB
+
+
+class RequestBodyTooLarge(RuntimeError):
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = limit_bytes
+        super().__init__(f"Request body exceeds {limit_bytes} bytes.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,6 +70,7 @@ async def lifespan(app: FastAPI):
     """
 
     configure_logging()
+    validate_startup_security_config()
     logger.info(
         "starting_backend",
         extra={"app_name": settings.app_name, "environment": settings.environment},
@@ -216,6 +230,63 @@ def _should_trace_api_request(method: str, path: str) -> bool:
     return method.upper() not in READ_ONLY_METHODS
 
 
+def _body_limit_for_request(method: str, path: str) -> int | None:
+    if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if path == "/api/v1/ai/chat/upload":
+        return CHAT_UPLOAD_BODY_LIMIT_BYTES
+    if path == "/api/v1/webhooks/whatsapp" or path == "/api/v1/webhooks/ubiquiti/lpr":
+        return WEBHOOK_BODY_LIMIT_BYTES
+    if path.startswith("/api/v1/automations/webhooks/"):
+        return AUTOMATION_WEBHOOK_BODY_LIMIT_BYTES
+    if path.startswith("/api/v1/"):
+        return DEFAULT_API_BODY_LIMIT_BYTES
+    return None
+
+
+def _payload_too_large_response(limit_bytes: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content={
+            "detail": "Request body is too large.",
+            "max_body_bytes": limit_bytes,
+        },
+    )
+
+
+@app.middleware("http")
+async def request_size_limit_middleware(request: Request, call_next):
+    limit_bytes = _body_limit_for_request(request.method, request.url.path)
+    if limit_bytes is None:
+        return await call_next(request)
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > limit_bytes:
+                return _payload_too_large_response(limit_bytes)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
+
+    original_receive = request._receive
+    bytes_seen = 0
+
+    async def receive_with_limit():
+        nonlocal bytes_seen
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            bytes_seen += len(message.get("body") or b"")
+            if bytes_seen > limit_bytes:
+                raise RequestBodyTooLarge(limit_bytes)
+        return message
+
+    request._receive = receive_with_limit
+    try:
+        return await call_next(request)
+    except RequestBodyTooLarge as exc:
+        return _payload_too_large_response(exc.limit_bytes)
+
+
 @app.middleware("http")
 async def maintenance_webhook_guard(request: Request, call_next):
     if (
@@ -327,6 +398,8 @@ async def telemetry_http_middleware(request: Request, call_next):
 async def api_error_response_middleware(request: Request, call_next):
     try:
         return await call_next(request)
+    except RequestBodyTooLarge as exc:
+        return _payload_too_large_response(exc.limit_bytes)
     except Exception:
         if not request.url.path.startswith("/api/"):
             raise

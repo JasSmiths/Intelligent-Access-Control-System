@@ -1,21 +1,25 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, GateCommandRecord, GateStateObservation, MovementSagaRecord, Person, Presence
+from app.models import AccessDevice, AccessEvent, GateCommandRecord, GateStateObservation, MovementSagaRecord, Person, Presence
 from app.models.enums import AccessDirection, GateCommandState, MovementSagaState, PresenceState
+from app.modules.access_devices.base import ACCESS_DEVICE_KIND_GATE
 from app.modules.gate.base import GateState
+from app.modules.home_assistant.covers import legacy_gate_entities, normalize_cover_entities
 from app.modules.notifications.base import NotificationContext
 from app.modules.registry import get_gate_controller
 from app.services.event_bus import event_bus
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.notifications import get_notification_service
 from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
+from app.services.settings import get_runtime_config
 
 logger = get_logger(__name__)
 
@@ -272,15 +276,107 @@ class MovementReconciliationService:
             return None
         window_start = started_at - timedelta(seconds=GATE_OBSERVATION_CLOCK_SKEW_SECONDS)
         window_end = started_at + timedelta(seconds=GATE_OPEN_CONFIRMATION_WINDOW_SECONDS)
+        observation_ids = await self._gate_observation_ids_for_command(session, command)
+        if not observation_ids:
+            logger.warning(
+                "movement_reconciliation_gate_identity_unresolved",
+                extra={
+                    "gate_command_id": str(command.id),
+                    "gate_key": command.gate_key,
+                    "source": command.source,
+                },
+            )
+            return None
         return await session.scalar(
             select(GateStateObservation)
             .where(
                 GateStateObservation.state.in_(GATE_OBSERVATION_OPEN_STATES),
+                GateStateObservation.gate_entity_id.in_(sorted(observation_ids)),
                 GateStateObservation.observed_at >= window_start,
                 GateStateObservation.observed_at <= window_end,
             )
             .order_by(GateStateObservation.observed_at.asc())
         )
+
+    async def _gate_observation_ids_for_command(
+        self,
+        session,
+        command: GateCommandRecord,
+    ) -> set[str]:
+        observation_ids = self._gate_observation_ids_from_command_metadata(command)
+        if observation_ids:
+            return observation_ids
+        observation_ids.update(await self._configured_gate_observation_ids(session))
+        return observation_ids
+
+    def _gate_observation_ids_from_command_metadata(self, command: GateCommandRecord) -> set[str]:
+        ids: set[str] = set()
+        gate_key = str(command.gate_key or "").strip()
+        if gate_key and gate_key != "default":
+            ids.add(gate_key)
+        metadata = command.command_metadata if isinstance(command.command_metadata, dict) else {}
+        for key in ("gate_entity_id", "entity_id", "device_key", "external_id"):
+            self._add_observation_id(ids, metadata.get(key))
+        outcomes = metadata.get("access_device_outcomes")
+        if isinstance(outcomes, list):
+            for outcome in outcomes:
+                if not isinstance(outcome, dict):
+                    continue
+                for key in ("entity_id", "device_key", "external_id"):
+                    self._add_observation_id(ids, outcome.get(key))
+                outcome_metadata = outcome.get("metadata")
+                if isinstance(outcome_metadata, dict):
+                    for key in ("entity_id", "device_key", "external_id"):
+                        self._add_observation_id(ids, outcome_metadata.get(key))
+        return ids
+
+    async def _configured_gate_observation_ids(self, session) -> set[str]:
+        ids: set[str] = set()
+        try:
+            rows = (
+                await session.scalars(
+                    select(AccessDevice)
+                    .options(selectinload(AccessDevice.provider_bindings))
+                    .where(
+                        AccessDevice.kind == ACCESS_DEVICE_KIND_GATE,
+                        AccessDevice.enabled.is_(True),
+                        AccessDevice.open_for_access.is_(True),
+                    )
+                )
+            ).all()
+        except Exception as exc:
+            logger.debug(
+                "movement_reconciliation_access_device_identity_lookup_failed",
+                extra={"error": str(exc)},
+            )
+            rows = []
+        for row in rows:
+            self._add_observation_id(ids, row.key)
+            for binding in row.provider_bindings:
+                if binding.enabled:
+                    self._add_observation_id(ids, binding.external_id)
+
+        try:
+            runtime = await get_runtime_config()
+            gate_entities = normalize_cover_entities(
+                runtime.home_assistant_gate_entities,
+                default_open_service=runtime.home_assistant_gate_open_service,
+            ) or legacy_gate_entities(runtime.home_assistant_gate_entity_id, runtime.home_assistant_gate_open_service)
+        except Exception as exc:
+            logger.debug(
+                "movement_reconciliation_legacy_gate_identity_lookup_failed",
+                extra={"error": str(exc)},
+            )
+            gate_entities = []
+        for entity in gate_entities:
+            if isinstance(entity, dict):
+                self._add_observation_id(ids, entity.get("entity_id"))
+        return ids
+
+    def _add_observation_id(self, ids: set[str], value: Any) -> None:
+        text = str(value or "").strip()
+        if text:
+            ids.add(text)
 
     async def _current_gate_state(self) -> GateState:
         try:

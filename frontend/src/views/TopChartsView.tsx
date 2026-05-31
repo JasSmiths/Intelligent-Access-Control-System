@@ -220,7 +220,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 <h2>The VIP Lounge</h2>
                 <p>Known plates battling for driveway supremacy.</p>
               </div>
-              <Badge tone="green">{knownReadCount} Detectiions</Badge>
+              <Badge tone="green">{knownReadCount} Detections</Badge>
             </div>
 
             {knownRows.length ? (
@@ -238,7 +238,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 />
               </>
             ) : (
-              <EmptyState icon={Trophy} label="No VIP Detectiions yet" />
+              <EmptyState icon={Trophy} label="No VIP Detections yet" />
             )}
           </section>
 
@@ -249,7 +249,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 <h2>The Mystery Guests</h2>
                 <p>Unrecognized plates ranked by repeat visits.</p>
               </div>
-              <Badge tone="amber">{unknownReadCount} Detectiions</Badge>
+              <Badge tone="amber">{unknownReadCount} Detections</Badge>
             </div>
 
             {unknownRows.length ? (
@@ -292,7 +292,7 @@ export function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry })
       </div>
       <div className="top-charts-read-count">
         <strong>{entry.read_count}</strong>
-        <span>{entry.read_count === 1 ? "Detectiion" : "Detectiions"}</span>
+        <span>{entry.read_count === 1 ? "Detection" : "Detections"}</span>
       </div>
     </article>
   );
@@ -313,7 +313,7 @@ export function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntr
       <div className="top-charts-read-count">
         {showStatus ? <Badge tone={leaderboardDvlaTone(entry.dvla.status)}>{leaderboardDvlaLabel(entry.dvla.status)}</Badge> : null}
         <strong>{entry.read_count}</strong>
-        <span>{entry.read_count === 1 ? "Detectiion" : "Detectiions"}</span>
+        <span>{entry.read_count === 1 ? "Detection" : "Detections"}</span>
       </div>
     </article>
   );

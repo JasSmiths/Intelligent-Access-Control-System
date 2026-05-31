@@ -210,7 +210,7 @@ export function ZonesSettingsView({
   const [modeError, setModeError] = React.useState("");
   const [savingMode, setSavingMode] = React.useState(false);
   const lprSettings = useSettings("lpr");
-  const isAdmin = currentUser.role === "admin";
+  const isAdmin = currentUser?.role === "admin";
   const zoneFilterMode = normalizeZoneFilterMode(stringifySetting(lprSettings.values.lpr_zone_filter_mode || "shadow"));
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
@@ -247,7 +247,14 @@ export function ZonesSettingsView({
     setModeError("");
     setSavingMode(true);
     try {
-      await lprSettings.save({ lpr_zone_filter_mode: mode });
+      const values = { lpr_zone_filter_mode: mode };
+      const confirmation = await createActionConfirmation("settings.update", { values }, {
+        target_entity: "SystemSetting",
+        target_id: "lpr_zone_filter_mode",
+        target_label: "LPR zone filter mode",
+        reason: "Update LPR zone filter mode"
+      });
+      await lprSettings.save(values, { confirmationToken: confirmation.confirmation_token });
       setModeMessage(`Zone filter mode saved as ${mode}.`);
     } catch (saveError) {
       setModeError(saveError instanceof Error ? saveError.message : "Unable to save zone filter mode.");
@@ -423,6 +430,7 @@ export function DynamicSettingsView({
   const [saved, setSaved] = React.useState("");
   const [submitError, setSubmitError] = React.useState("");
   const fields = settingsFields(category);
+  const isAdmin = currentUser?.role === "admin";
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
   const lastRefreshTokenRef = React.useRef(refreshToken);
   const configuredSecretKeys = React.useMemo(
@@ -452,8 +460,19 @@ export function DynamicSettingsView({
     event.preventDefault();
     setSaved("");
     setSubmitError("");
+    if (!isAdmin) {
+      setSubmitError("Administrator access is required to save settings.");
+      return;
+    }
     try {
-      await save(coerceSettingsPayload(form));
+      const updates = coerceSettingsPayload(form);
+      const confirmationPayload = { values: updates };
+      const confirmation = await createActionConfirmation("settings.update", confirmationPayload, {
+        target_entity: "SystemSetting",
+        target_label: title,
+        reason: "Update dynamic settings"
+      });
+      await save(updates, { confirmationToken: confirmation.confirmation_token });
       setSaved("Settings saved.");
     } catch (saveError) {
       setSubmitError(saveError instanceof Error ? saveError.message : "Unable to save settings.");
@@ -501,7 +520,7 @@ export function DynamicSettingsView({
           {submitError || error ? <div className="auth-error inline-error">{submitError || error}</div> : null}
           {saved ? <div className="success-note">{saved}</div> : null}
           <div className="modal-actions">
-            <button className="primary-button" type="submit">Save Settings</button>
+            <button className="primary-button" disabled={!isAdmin} type="submit">Save Settings</button>
           </div>
         </div>
         {category === "auth" ? <AuthSecretSecurityPanel refreshToken={refreshToken} /> : null}
@@ -532,12 +551,14 @@ export function AccessDevicesSettingsView({
   kind,
   title,
   icon: Icon,
+  currentUser,
   refreshToken,
   schedules
 }: {
   kind: AccessDeviceKind;
   title: string;
   icon: React.ElementType;
+  currentUser: UserAccount;
   refreshToken: number;
   schedules: Schedule[];
 }) {
@@ -552,6 +573,7 @@ export function AccessDevicesSettingsView({
   const [esphomeCovers, setEsphomeCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
   const accessSettings = useSettings("access");
   const lastRefreshTokenRef = React.useRef(refreshToken);
+  const isAdmin = currentUser.role === "admin";
 
   const loadDevices = React.useCallback(async (showLoading = true) => {
     if (showLoading) setDevicesLoading(true);
@@ -628,18 +650,32 @@ export function AccessDevicesSettingsView({
   };
 
   const addDevice = async () => {
+    if (!isAdmin) {
+      setError("Administrator access is required to add access devices.");
+      return;
+    }
     setError("");
     const suffix = devices.length + 1;
     const baseKey = kind === "gate" ? `gate_${suffix}` : `garage_door_${suffix}`;
+    const payload = {
+      key: baseKey,
+      kind,
+      name: kind === "gate" ? `Gate ${suffix}` : `Garage Door ${suffix}`,
+      enabled: true,
+      schedule_id: null,
+      open_for_access: kind === "gate",
+      sort_order: devices.length
+    };
     try {
+      const confirmation = await createActionConfirmation("access_device.create", payload, {
+        target_entity: "AccessDevice",
+        target_id: baseKey,
+        target_label: payload.name,
+        reason: "Create access device"
+      });
       const created = await api.post<AccessDevice>("/api/v1/access-devices", {
-        key: baseKey,
-        kind,
-        name: kind === "gate" ? `Gate ${suffix}` : `Garage Door ${suffix}`,
-        enabled: true,
-        schedule_id: null,
-        open_for_access: kind === "gate",
-        sort_order: devices.length
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       setDevices((current) => [...current, created]);
       setMessage("Device added.");
@@ -649,11 +685,15 @@ export function AccessDevicesSettingsView({
   };
 
   const saveDevice = async (device: AccessDevice) => {
+    if (!isAdmin) {
+      setError("Administrator access is required to save access devices.");
+      return;
+    }
     setSavingKey(device.id);
     setMessage("");
     setError("");
     try {
-      let saved = await api.patch<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
+      const payload = {
         key: device.key,
         kind: device.kind,
         name: device.name,
@@ -661,13 +701,37 @@ export function AccessDevicesSettingsView({
         schedule_id: device.schedule_id || null,
         open_for_access: device.open_for_access,
         sort_order: device.sort_order
+      };
+      const confirmation = await createActionConfirmation("access_device.update", { device_id: device.id, ...payload }, {
+        target_entity: "AccessDevice",
+        target_id: device.id,
+        target_label: device.name,
+        reason: "Update access device"
+      });
+      let saved = await api.patch<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       for (const provider of ["home_assistant", "esphome"]) {
         const binding = device.bindings.find((item) => item.provider === provider);
-        saved = await api.put<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(saved.id)}/bindings/${provider}`, {
+        const bindingPayload = {
           external_id: binding?.external_id ?? "",
           enabled: Boolean(binding?.external_id),
           config: binding?.config ?? {}
+        };
+        const bindingConfirmation = await createActionConfirmation("access_device.binding.update", {
+          device_id: saved.id,
+          provider,
+          ...bindingPayload
+        }, {
+          target_entity: "AccessDevice",
+          target_id: saved.id,
+          target_label: saved.name,
+          reason: `Update ${providerLabel(provider)} binding`
+        });
+        saved = await api.put<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(saved.id)}/bindings/${provider}`, {
+          ...bindingPayload,
+          confirmation_token: bindingConfirmation.confirmation_token
         });
       }
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
@@ -680,11 +744,22 @@ export function AccessDevicesSettingsView({
   };
 
   const saveProviderSetting = async (key: "gate_control_provider" | "gate_failover_provider", value: string) => {
+    if (!isAdmin) {
+      setError("Administrator access is required to save provider preferences.");
+      return;
+    }
     setProviderSavingKey(key);
     setError("");
     setMessage("");
     try {
-      await accessSettings.save({ [key]: value });
+      const updates = { [key]: value };
+      const confirmation = await createActionConfirmation("settings.update", { values: updates }, {
+        target_entity: "SystemSetting",
+        target_id: key,
+        target_label: providerLabel(value),
+        reason: "Update access-device provider preference"
+      });
+      await accessSettings.save(updates, { confirmationToken: confirmation.confirmation_token });
       setMessage("Provider preference saved.");
     } catch (providerError) {
       setError(providerError instanceof Error ? providerError.message : "Unable to save provider preference.");
@@ -694,10 +769,23 @@ export function AccessDevicesSettingsView({
   };
 
   const deleteDevice = async (device: AccessDevice) => {
+    if (!isAdmin) {
+      setError("Administrator access is required to remove access devices.");
+      return;
+    }
     if (!window.confirm(`Remove ${device.name}?`)) return;
     setError("");
     try {
-      await api.delete(`/api/v1/access-devices/${encodeURIComponent(device.id)}`);
+      const payload = { device_id: device.id };
+      const confirmation = await createActionConfirmation("access_device.delete", payload, {
+        target_entity: "AccessDevice",
+        target_id: device.id,
+        target_label: device.name,
+        reason: "Remove access device"
+      });
+      await api.delete(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       setDevices((current) => current.filter((item) => item.id !== device.id));
       setMessage("Device removed.");
     } catch (deleteError) {
@@ -746,7 +834,7 @@ export function AccessDevicesSettingsView({
           </div>
           <div className="access-provider-route">
             <AccessProviderChoice
-              disabled={accessSettings.loading || Boolean(providerSavingKey)}
+              disabled={!isAdmin || accessSettings.loading || Boolean(providerSavingKey)}
               helper="Used for every normal open or close command."
               label="Primary"
               value={primaryProvider}
@@ -755,7 +843,7 @@ export function AccessDevicesSettingsView({
             <div className="access-provider-route-join" aria-hidden="true">then</div>
             <AccessProviderChoice
               allowNone
-              disabled={accessSettings.loading || Boolean(providerSavingKey)}
+              disabled={!isAdmin || accessSettings.loading || Boolean(providerSavingKey)}
               helper="Only used when the primary integration is unavailable."
               label="Failover"
               value={failoverProvider}
@@ -773,7 +861,9 @@ export function AccessDevicesSettingsView({
                 <p>One saved device per physical {deviceNoun}. Bind either integration, or both for resilience.</p>
               </div>
             </div>
-            <button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
+            {isAdmin ? (
+              <button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
+            ) : null}
           </div>
           {(devicesLoading || discoveryLoading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
           {error ? <div className="auth-error inline-error">{error}</div> : null}
@@ -790,6 +880,7 @@ export function AccessDevicesSettingsView({
                 schedules={schedules}
                 scheduleLabel={device.schedule_id ? scheduleNameById.get(device.schedule_id) ?? "Custom schedule" : "Default policy"}
                 saving={savingKey === device.id}
+                disabled={!isAdmin}
                 onDelete={() => deleteDevice(device)}
                 onSave={() => saveDevice(device)}
                 onUpdate={(patch) => updateDevice(device.id, patch)}
@@ -860,6 +951,7 @@ function AccessDeviceLoadingBar({ label }: { label: string }) {
 function AccessDeviceEditor({
   device,
   deviceIcon: DeviceIcon,
+  disabled,
   homeAssistantCovers,
   esphomeCovers,
   scheduleLabel,
@@ -872,6 +964,7 @@ function AccessDeviceEditor({
 }: {
   device: AccessDevice;
   deviceIcon: React.ElementType;
+  disabled: boolean;
   homeAssistantCovers: AccessDeviceDiscoveryItem[];
   esphomeCovers: AccessDeviceDiscoveryItem[];
   scheduleLabel: string;
@@ -921,13 +1014,13 @@ function AccessDeviceEditor({
             <h4>Policy</h4>
           </div>
           <div className="access-device-policy-grid">
-            <AccessDeviceSwitch checked={device.enabled} label="Device enabled" onChange={(checked) => onUpdate({ enabled: checked })} />
+            <AccessDeviceSwitch checked={device.enabled} disabled={disabled} label="Device enabled" onChange={(checked) => onUpdate({ enabled: checked })} />
             {device.kind === "gate" ? (
-              <AccessDeviceSwitch checked={device.open_for_access} label="Open for access events" onChange={(checked) => onUpdate({ open_for_access: checked })} />
+              <AccessDeviceSwitch checked={device.open_for_access} disabled={disabled} label="Open for access events" onChange={(checked) => onUpdate({ open_for_access: checked })} />
             ) : null}
             <label className="field">
               <span>Schedule</span>
-              <select value={device.schedule_id ?? ""} onChange={(event) => onUpdate({ schedule_id: event.target.value || null })}>
+              <select disabled={disabled} value={device.schedule_id ?? ""} onChange={(event) => onUpdate({ schedule_id: event.target.value || null })}>
                 <option value="">Default policy</option>
                 {schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name}</option>)}
               </select>
@@ -941,30 +1034,30 @@ function AccessDeviceEditor({
             <h4>Provider bindings</h4>
           </div>
           <div className="settings-form-grid access-device-fields">
-            <ProviderBindingField provider="home_assistant" label="Home Assistant cover" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
-            <ProviderBindingField provider="esphome" label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
+            <ProviderBindingField disabled={disabled} provider="home_assistant" label="Home Assistant cover" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
+            <ProviderBindingField disabled={disabled} provider="esphome" label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
           </div>
         </div>
       </div>
       <div className="access-device-actions">
-        <button className="secondary-button danger" onClick={onDelete} type="button"><Trash2 size={15} /> Remove</button>
-        <button className="primary-button" disabled={saving} onClick={onSave} type="button">{saving ? "Saving..." : "Save Device"}</button>
+        <button className="secondary-button danger" disabled={disabled} onClick={onDelete} type="button"><Trash2 size={15} /> Remove</button>
+        <button className="primary-button" disabled={disabled || saving} onClick={onSave} type="button">{saving ? "Saving..." : "Save Device"}</button>
       </div>
     </article>
   );
 }
 
-function AccessDeviceSwitch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
+function AccessDeviceSwitch({ checked, disabled, label, onChange }: { checked: boolean; disabled?: boolean; label: string; onChange: (checked: boolean) => void }) {
   return (
     <label className="access-device-switch">
-      <input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
+      <input checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
       <span aria-hidden="true" />
       <strong>{label}</strong>
     </label>
   );
 }
 
-function ProviderBindingField({ label, options, provider, value, onChange }: { label: string; options: AccessDeviceDiscoveryItem[]; provider: "home_assistant" | "esphome"; value: string; onChange: (value: string) => void }) {
+function ProviderBindingField({ disabled, label, options, provider, value, onChange }: { disabled?: boolean; label: string; options: AccessDeviceDiscoveryItem[]; provider: "home_assistant" | "esphome"; value: string; onChange: (value: string) => void }) {
   const listId = React.useId();
   const mapped = Boolean(value.trim());
   const Icon = provider === "esphome" ? Zap : Home;
@@ -976,7 +1069,7 @@ function ProviderBindingField({ label, options, provider, value, onChange }: { l
       </span>
       <span className="field-control access-binding-control">
         <Icon size={16} />
-        <input list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="Select or enter an external ID" />
+        <input disabled={disabled} list={listId} value={value} onChange={(event) => onChange(event.target.value)} placeholder="Select or enter an external ID" />
       </span>
       <datalist id={listId}>
         {options.map((option) => <option key={option.entity_id} value={option.entity_id}>{option.name || option.entity_id}</option>)}

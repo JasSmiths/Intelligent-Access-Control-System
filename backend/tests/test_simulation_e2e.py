@@ -111,6 +111,7 @@ async def test_full_access_endpoint_requires_admin(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_full_access_endpoint_returns_runner_report(monkeypatch) -> None:
     captured: dict[str, FullAccessFlowRequest] = {}
+    confirmation: dict[str, object] = {}
 
     async def fake_runner(request: FullAccessFlowRequest) -> FullAccessFlowReport:
         captured["request"] = request
@@ -132,16 +133,25 @@ async def test_full_access_endpoint_returns_runner_report(monkeypatch) -> None:
             ),
             issues=[],
             scenarios=[],
-        )
+            )
+
+    async def fake_confirmation(_session, **kwargs) -> None:
+        confirmation.update(kwargs)
 
     monkeypatch.setattr(simulation_router_module, "run_full_access_flow", fake_runner)
+    monkeypatch.setattr(simulation_router_module, "require_confirmed_action", fake_confirmation)
     app = app_for_user(user_with_role(UserRole.ADMIN))
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/simulation/e2e/full-access-flow",
-            json={"cleanup": False, "scenario_ids": ["unknown_plate_denied"], "include_debug": True},
+            json={
+                "cleanup": False,
+                "scenario_ids": ["unknown_plate_denied"],
+                "include_debug": True,
+                "confirmation_token": "server-token",
+            },
         )
 
     assert response.status_code == 200
@@ -149,6 +159,13 @@ async def test_full_access_endpoint_returns_runner_report(monkeypatch) -> None:
     assert captured["request"].cleanup is False
     assert captured["request"].scenario_ids == ["unknown_plate_denied"]
     assert captured["request"].include_debug is True
+    assert confirmation["action"] == "simulation.full_access_flow"
+    assert confirmation["confirmation_token"] == "server-token"
+    assert confirmation["payload"] == {
+        "cleanup": False,
+        "scenario_ids": ["unknown_plate_denied"],
+        "include_debug": True,
+    }
 
 
 def test_recorder_counts_suppressed_reads() -> None:

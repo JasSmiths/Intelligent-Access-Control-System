@@ -856,9 +856,17 @@ async def test_visitor_pass_custom_message_endpoint_uses_pass_scoped_service(mon
 
     monkeypatch.setattr(visitor_passes_api, "get_whatsapp_messaging_service", lambda: Service())
 
+    async def fake_confirmation(_session, **kwargs) -> None:
+        captured["confirmation"] = kwargs
+
+    monkeypatch.setattr(visitor_passes_api, "require_confirmed_action", fake_confirmation)
+
     response = await visitor_passes_api.send_visitor_pass_whatsapp_message(
         pass_id,
-        visitor_passes_api.VisitorPassWhatsAppSendRequest(message="  Do you want me to move your visitor pass to tomorrow?  "),
+        visitor_passes_api.VisitorPassWhatsAppSendRequest(
+            message="  Do you want me to move your visitor pass to tomorrow?  ",
+            confirmation_token="server-token",
+        ),
         user=user,
     )
 
@@ -866,6 +874,15 @@ async def test_visitor_pass_custom_message_endpoint_uses_pass_scoped_service(mon
         "pass_id": pass_id,
         "message": "Do you want me to move your visitor pass to tomorrow?",
         "actor_user": user,
+        "confirmation": {
+            "user": user,
+            "action": "visitor_pass.whatsapp_send",
+            "payload": {
+                "pass_id": str(pass_id),
+                "message": "Do you want me to move your visitor pass to tomorrow?",
+            },
+            "confirmation_token": "server-token",
+        },
     }
     assert response.message.body == "Do you want me to move your visitor pass to tomorrow?"
     assert response.message.metadata["origin"] == "dashboard_custom"
@@ -919,9 +936,27 @@ async def test_visitor_pass_whatsapp_unblock_endpoint_uses_pass_scoped_service(m
 
     monkeypatch.setattr(visitor_passes_api, "get_whatsapp_messaging_service", lambda: Service())
 
-    response = await visitor_passes_api.unblock_visitor_pass_whatsapp(pass_id, user=user)
+    async def fake_confirmation(_session, **kwargs) -> None:
+        captured["confirmation"] = kwargs
 
-    assert captured == {"pass_id": pass_id, "actor_user": user}
+    monkeypatch.setattr(visitor_passes_api, "require_confirmed_action", fake_confirmation)
+
+    response = await visitor_passes_api.unblock_visitor_pass_whatsapp(
+        pass_id,
+        request=visitor_passes_api.VisitorPassConfirmationRequest(confirmation_token="server-token"),
+        user=user,
+    )
+
+    assert captured == {
+        "pass_id": pass_id,
+        "actor_user": user,
+        "confirmation": {
+            "user": user,
+            "action": "visitor_pass.whatsapp_unblock",
+            "payload": {"pass_id": str(pass_id)},
+            "confirmation_token": "server-token",
+        },
+    }
     assert response.id == str(pass_id)
     assert response.source_metadata == {}
 

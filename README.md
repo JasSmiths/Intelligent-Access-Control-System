@@ -4,8 +4,7 @@ AI-ready access control and presence system with modular LPR/gate integrations,
 Home Assistant support, Apprise notifications, multi-provider LLM tooling, and
 a realtime React dashboard.
 
-Future AI agents should read [AGENTS.md](/Users/jas/Documents/Intelligent%20Access%20System/AGENTS.md)
-before making changes.
+Future AI agents should read [AGENTS.md](AGENTS.md) before making changes.
 
 ## Run
 
@@ -59,6 +58,17 @@ For a focused test file:
 docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
 ```
 
+Frontend guardrail tests run with Vitest:
+
+```bash
+cd frontend && npm run test
+```
+
+Schema changes are managed through Alembic. Normal Compose startup runs
+`alembic upgrade head` when `IACS_AUTO_CREATE_SCHEMA=true`; the previous
+transitional bootstrap DDL is available only for older local databases by
+setting `IACS_LEGACY_SCHEMA_BOOTSTRAP=true`.
+
 ## Architecture Shape
 
 - `backend/app/core`: configuration, logging, lifecycle wiring.
@@ -89,7 +99,7 @@ service also mounts Docker's socket for dependency update jobs.
 - `GET /api/v1/access/gate-commands`
 - `WS /api/v1/realtime/ws`
 
-See [docs/phase-2.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-2.md)
+See [docs/phase-2.md](docs/phase-2.md)
 for the current data model and movement-session behavior.
 
 ## Phase 3 Integrations
@@ -99,7 +109,7 @@ for the current data model and movement-session behavior.
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
 
-See [docs/phase-3.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-3.md)
+See [docs/phase-3.md](docs/phase-3.md)
 for Home Assistant, TTS, presence sync, and Apprise configuration.
 
 ## Phase 4 AI Agent
@@ -109,7 +119,7 @@ for Home Assistant, TTS, presence sync, and Apprise configuration.
 - `POST /api/v1/ai/chat`
 - `WS /api/v1/ai/chat/ws`
 
-See [docs/phase-4.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-4.md)
+See [docs/phase-4.md](docs/phase-4.md)
 for provider configuration, agent tools, and conversational memory behavior.
 
 ## Smoke Checks
@@ -130,12 +140,12 @@ after first-run setup.
 The frontend is served by the `frontend` Docker service on port `8089` and
 proxies API/WebSocket traffic to the backend.
 
-See [docs/phase-5.md](/Users/jas/Documents/Intelligent%20Access%20System/docs/phase-5.md)
+See [docs/phase-5.md](docs/phase-5.md)
 for UI routes, NPM setup, and verification notes.
 
 ## Phase 6 Agent Guide
 
 Future implementation work should start with
-[AGENTS.md](/Users/jas/Documents/Intelligent%20Access%20System/AGENTS.md), which
+[AGENTS.md](AGENTS.md), which
 documents the architecture, modular I/O rules, API surface, UI design language,
 reverse-proxy expectations, and safe extension points for future AI agents.

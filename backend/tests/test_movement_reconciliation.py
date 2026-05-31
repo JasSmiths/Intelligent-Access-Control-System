@@ -270,6 +270,33 @@ async def test_reconcile_uses_open_observation_after_command_even_if_current_gat
     assert published == [(str(saga.id), GateState.OPEN.value)]
 
 
+def test_gate_observation_identity_uses_command_specific_device_ids() -> None:
+    service = MovementReconciliationService()
+    command = GateCommandRecord(
+        idempotency_key="gate-a-command",
+        source="test",
+        gate_key="gate_a",
+        controller="fake",
+        reason="automatic lpr",
+        state=GateCommandState.RECONCILIATION_REQUIRED,
+        command_metadata={
+            "access_device_outcomes": [
+                {
+                    "device_key": "gate_a",
+                    "external_id": "cover.gate_a",
+                    "metadata": {"entity_id": "cover.gate_a_shadow"},
+                }
+            ]
+        },
+    )
+
+    ids = service._gate_observation_ids_from_command_metadata(command)
+
+    assert {"gate_a", "cover.gate_a", "cover.gate_a_shadow"}.issubset(ids)
+    assert "gate_b" not in ids
+    assert "cover.gate_b" not in ids
+
+
 @pytest.mark.asyncio
 async def test_recent_pending_saga_without_command_waits_for_grace_period() -> None:
     service = MovementReconciliationService()

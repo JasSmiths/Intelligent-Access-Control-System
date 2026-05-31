@@ -22,7 +22,17 @@ from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.modules.lpr.base import PlateRead
-from app.models import AccessEvent, Anomaly, MovementSessionRecord, Person, Presence, Vehicle, VisitorPass
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    LprIngestEvent,
+    MovementSagaRecord,
+    MovementSessionRecord,
+    Person,
+    Presence,
+    Vehicle,
+    VisitorPass,
+)
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
@@ -42,6 +52,11 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
+from app.services.lpr_ingest import (
+    LPR_INGEST_STATUS_FAILED,
+    LPR_INGEST_STATUS_SKIPPED,
+    LprIngestRepository,
+)
 from app.services.lpr_zone_shadow import (
     LPR_ZONE_FILTER_SUPPRESSION_REASON,
     evaluate_lpr_zone_filter_for_read,
@@ -94,6 +109,7 @@ KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
 PROCESSING_ATTEMPT_PAYLOAD_KEY = "_iacs_processing_attempt"
 INGEST_METADATA_PAYLOAD_KEY = "_iacs_ingest"
+LPR_INGEST_EVENT_PAYLOAD_KEY = "_iacs_lpr_ingest_event"
 WEBHOOK_TRACE_PAYLOAD_KEY = "webhook_trace"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
@@ -135,7 +151,6 @@ SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME = {
     "charlotte": "she/her",
     "grace": "she/her",
 }
-
 
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
     normalized = (mot_status or "").strip().casefold().replace("_", " ")
@@ -285,6 +300,7 @@ class AccessEventService:
         self._movement_direction_fsm = MovementDirectionFSM()
         self._movement_suppression_fsm = MovementSuppressionFSM()
         self._movement_ledger = get_movement_ledger_repository()
+        self._lpr_ingest_repository = LprIngestRepository()
         self._started_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
         self._last_processed_at: datetime | None = None
@@ -302,6 +318,14 @@ class AccessEventService:
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
         self._worker.add_done_callback(self._handle_worker_done)
         event_bus.subscribe(self._handle_realtime_event, scope="all_workers")
+        try:
+            await self._enqueue_pending_lpr_ingest_rows()
+        except Exception as exc:
+            self._record_worker_failure(exc)
+            logger.warning(
+                "lpr_ingest_startup_recovery_failed",
+                extra={"error": self._safe_exception_detail(exc)},
+            )
         logger.info("access_event_service_started")
 
     async def stop(self) -> None:
@@ -355,6 +379,20 @@ class AccessEventService:
             return
         received_at = datetime.now(tz=UTC)
         read = self._read_with_webhook_trace(read, received_at)
+        ingest_row, should_wake_worker = await self._persist_lpr_ingest_read(read, received_at=received_at)
+        read = self._read_with_lpr_ingest_event(read, ingest_row)
+        if not should_wake_worker:
+            logger.info(
+                "plate_read_ingest_duplicate_ignored",
+                extra={
+                    "registration_number": read.registration_number,
+                    "source": read.source,
+                    "captured_at": read.captured_at.isoformat(),
+                    "ingest_event_id": str(ingest_row.id),
+                    "ingest_status": ingest_row.status,
+                },
+            )
+            return
         read = await self._read_with_gate_observation(read)
         gate_observation = self._gate_observation_from_read(read)
         logger.info(
@@ -368,6 +406,7 @@ class AccessEventService:
                 "capture_to_receive_ms": _datetime_delta_ms(received_at, read.captured_at),
                 "gate_state": gate_observation.get("state"),
                 "gate_observed_at": gate_observation.get("observed_at"),
+                "ingest_event_id": str(ingest_row.id),
             },
         )
         await self._queue.put(read)
@@ -444,6 +483,164 @@ class AccessEventService:
         trace["window_updated_at"] = window.updated_at.isoformat()
         return trace
 
+    async def _persist_lpr_ingest_read(
+        self,
+        read: PlateRead,
+        *,
+        received_at: datetime,
+    ) -> tuple[LprIngestEvent, bool]:
+        idempotency_key = self._lpr_ingest_idempotency_key(read)
+        payload = self._lpr_ingest_normalized_payload(read)
+        return await self._lpr_ingest_repo().persist_read(
+            read,
+            received_at=received_at,
+            idempotency_key=idempotency_key,
+            normalized_payload=payload,
+        )
+
+    async def _enqueue_pending_lpr_ingest_rows(self) -> int:
+        rows = await self._lpr_ingest_repo().pending_rows()
+        for row in rows:
+            await self._queue.put(self._read_from_lpr_ingest_event(row))
+        if rows:
+            logger.info("lpr_ingest_pending_rows_enqueued", extra={"count": len(rows)})
+        return len(rows)
+
+    async def _claim_lpr_ingest_for_processing(self, read: PlateRead) -> bool:
+        ingest_id = self._lpr_ingest_event_id_from_read(read)
+        if ingest_id is None:
+            return True
+        return await self._lpr_ingest_repo().claim_for_processing(ingest_id)
+
+    async def _mark_lpr_ingest_window_succeeded(
+        self,
+        window: DebounceWindow,
+        *,
+        access_event_id: uuid.UUID,
+        movement_saga_id: uuid.UUID | None,
+    ) -> None:
+        ids = [ingest_id for read in window.reads if (ingest_id := self._lpr_ingest_event_id_from_read(read))]
+        if not ids:
+            return
+        await self._lpr_ingest_repo().mark_ids_succeeded(
+            ids,
+            access_event_id=access_event_id,
+            movement_saga_id=movement_saga_id,
+        )
+
+    async def _mark_lpr_ingest_ids_succeeded_in_session(
+        self,
+        session: AsyncSession,
+        ids: list[uuid.UUID],
+        *,
+        access_event_id: uuid.UUID | None,
+        movement_saga_id: uuid.UUID | None,
+    ) -> None:
+        if not ids:
+            return
+        await self._lpr_ingest_repo().mark_ids_succeeded_in_session(
+            session,
+            ids,
+            access_event_id=access_event_id,
+            movement_saga_id=movement_saga_id,
+        )
+
+    async def _mark_lpr_ingest_succeeded(
+        self,
+        read: PlateRead,
+        *,
+        movement_saga_id: uuid.UUID | None = None,
+        access_event_id: uuid.UUID | None = None,
+    ) -> None:
+        ingest_id = self._lpr_ingest_event_id_from_read(read)
+        if ingest_id is None:
+            return
+        await self._lpr_ingest_repo().mark_succeeded(
+            ingest_id,
+            access_event_id=access_event_id,
+            movement_saga_id=movement_saga_id,
+        )
+
+    async def _mark_lpr_ingest_skipped(self, read: PlateRead, *, reason: str) -> None:
+        await self._mark_lpr_ingest_terminal(read, status=LPR_INGEST_STATUS_SKIPPED, detail=reason)
+
+    async def _mark_lpr_ingest_failed(self, read: PlateRead, exc: Exception) -> None:
+        await self._mark_lpr_ingest_terminal(
+            read,
+            status=LPR_INGEST_STATUS_FAILED,
+            detail=self._safe_exception_detail(exc),
+        )
+
+    async def _mark_lpr_ingest_terminal(self, read: PlateRead, *, status: str, detail: str) -> None:
+        ingest_id = self._lpr_ingest_event_id_from_read(read)
+        if ingest_id is None:
+            return
+        await self._lpr_ingest_repo().mark_terminal(ingest_id, status=status, detail=detail)
+
+    def _lpr_ingest_repo(self) -> LprIngestRepository:
+        self._lpr_ingest_repository.session_factory = AsyncSessionLocal
+        return self._lpr_ingest_repository
+
+    def _lpr_ingest_idempotency_key(self, read: PlateRead) -> str:
+        return f"lpr-ingest:{self._movement_saga_idempotency_key(read)}"
+
+    def _lpr_ingest_normalized_payload(self, read: PlateRead) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "registration_number": read.registration_number,
+            "confidence": read.confidence,
+            "source": read.source,
+            "captured_at": read.captured_at.isoformat(),
+            "raw_payload": read.raw_payload or {},
+            "candidate_registration_numbers": list(read.candidate_registration_numbers),
+        }
+
+    def _read_with_lpr_ingest_event(self, read: PlateRead, row: LprIngestEvent) -> PlateRead:
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[LPR_INGEST_EVENT_PAYLOAD_KEY] = {
+            "id": str(row.id),
+            "idempotency_key": row.idempotency_key,
+            "status": row.status,
+        }
+        return PlateRead(
+            registration_number=read.registration_number,
+            confidence=read.confidence,
+            source=read.source,
+            captured_at=read.captured_at,
+            raw_payload=raw_payload,
+            candidate_registration_numbers=read.candidate_registration_numbers,
+        )
+
+    def _read_from_lpr_ingest_event(self, row: LprIngestEvent) -> PlateRead:
+        payload = dict(row.normalized_payload or {})
+        captured_at = row.captured_at
+        raw_payload = payload.get("raw_payload")
+        read = PlateRead(
+            registration_number=str(payload.get("registration_number") or row.registration_number),
+            confidence=float(payload.get("confidence") or 0.0),
+            source=str(payload.get("source") or row.source),
+            captured_at=captured_at,
+            raw_payload=raw_payload if isinstance(raw_payload, dict) else {},
+            candidate_registration_numbers=tuple(
+                str(candidate)
+                for candidate in payload.get("candidate_registration_numbers", [])
+                if str(candidate or "").strip()
+            ),
+        )
+        return self._read_with_lpr_ingest_event(read, row)
+
+    def _lpr_ingest_event_id_from_read(self, read: PlateRead) -> uuid.UUID | None:
+        metadata = (read.raw_payload or {}).get(LPR_INGEST_EVENT_PAYLOAD_KEY)
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("id")
+        if not value:
+            return None
+        try:
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        except (TypeError, ValueError):
+            return None
+
     def _float_from_payload(self, value: Any) -> float | None:
         if isinstance(value, bool) or value is None:
             return None
@@ -494,6 +691,8 @@ class AccessEventService:
 
     def _should_preserve_supplied_gate_observation(self, read: PlateRead) -> bool:
         raw_payload = read.raw_payload or {}
+        if isinstance(raw_payload.get(GATE_OBSERVATION_PAYLOAD_KEY), dict):
+            return True
         return bool(
             read.source in {"simulator", "simulation_e2e"}
             and raw_payload.get(PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY) is True
@@ -514,8 +713,12 @@ class AccessEventService:
 
                 if read is not None:
                     read_for_retry = read
+                    if not await self._claim_lpr_ingest_for_processing(read):
+                        read_for_retry = None
+                        continue
                     if await is_maintenance_mode_active():
                         self._clear_pending_reads()
+                        await self._mark_lpr_ingest_skipped(read, reason="maintenance_mode_active")
                         await self._publish_terminal_read(
                             read,
                             "plate_read.skipped",
@@ -523,6 +726,8 @@ class AccessEventService:
                         )
                         read_for_retry = None
                         continue
+                    read = await self._read_with_gate_observation(read)
+                    read_for_retry = read
                     await self._handle_queued_read(read)
                     self._last_processed_at = datetime.now(tz=UTC)
                     if self._processing_attempt(read) > 0:
@@ -534,6 +739,8 @@ class AccessEventService:
                     read_for_retry = None
 
                 await self._flush_expired_windows()
+                if read is None and self._queue.empty():
+                    await self._enqueue_pending_lpr_ingest_rows()
                 self._consecutive_failures = 0
             except Exception as exc:
                 await self._handle_worker_iteration_failure(exc, read_for_retry=read_for_retry)
@@ -626,6 +833,7 @@ class AccessEventService:
         )
         if self._stop_event.is_set() or attempt >= MAX_PLATE_READ_PROCESSING_ATTEMPTS:
             logger.error("plate_read_processing_failed_permanently", extra=payload)
+            await self._mark_lpr_ingest_failed(read, exc)
             await event_bus.publish("plate_read.failed", payload)
             return False
 
@@ -903,6 +1111,7 @@ class AccessEventService:
             "reason": "gate_malfunction_unknown_vehicle",
         }
         logger.info("plate_read_ignored_during_gate_malfunction", extra=detail)
+        await self._mark_lpr_ingest_skipped(read, reason="gate_malfunction_unknown_vehicle")
         await event_bus.publish("plate_read.ignored", detail)
         try:
             async with AsyncSessionLocal() as session:
@@ -1205,7 +1414,8 @@ class AccessEventService:
 
     async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
         match = _known_vehicle_plate_match_from_read(read) or {}
-        await self._record_suppressed_movement_read(read, reason=reason)
+        saga = await self._record_suppressed_movement_read(read, reason=reason)
+        await self._mark_lpr_ingest_succeeded(read, movement_saga_id=saga.id)
         await event_bus.publish(
             "plate_read.suppressed",
             {
@@ -1216,35 +1426,33 @@ class AccessEventService:
             },
         )
 
-    async def _record_suppressed_movement_read(self, read: PlateRead, *, reason: str) -> None:
-        try:
-            async with AsyncSessionLocal() as session:
-                saga = await self._movement_ledger.create_movement_saga(
-                    session,
-                    idempotency_key=f"movement-suppressed:{self._movement_saga_idempotency_key(read)}:{reason}",
-                    source=read.source,
-                    occurred_at=read.captured_at,
-                    registration_number=_detected_registration_number(read),
-                    state=MovementSagaState.SUPPRESSED,
-                    intent_payload={
-                        "source": read.source,
-                        "captured_at": read.captured_at.isoformat(),
-                        "registration_number": read.registration_number,
-                        "detected_registration_number": _detected_registration_number(read),
-                        "confidence": read.confidence,
-                    },
-                    decision_payload={"suppression_reason": reason},
-                )
-                await self._movement_ledger.transition_movement_saga(
-                    session,
-                    saga,
-                    MovementSagaState.SUPPRESSED,
-                    detail=reason,
-                    reconciliation_required=False,
-                )
-                await session.commit()
-        except Exception:
-            logger.exception("Failed to persist suppressed movement saga for %s.", read.registration_number)
+    async def _record_suppressed_movement_read(self, read: PlateRead, *, reason: str) -> MovementSagaRecord:
+        async with AsyncSessionLocal() as session:
+            saga = await self._movement_ledger.create_movement_saga(
+                session,
+                idempotency_key=f"movement-suppressed:{self._movement_saga_idempotency_key(read)}:{reason}",
+                source=read.source,
+                occurred_at=read.captured_at,
+                registration_number=_detected_registration_number(read),
+                state=MovementSagaState.SUPPRESSED,
+                intent_payload={
+                    "source": read.source,
+                    "captured_at": read.captured_at.isoformat(),
+                    "registration_number": read.registration_number,
+                    "detected_registration_number": _detected_registration_number(read),
+                    "confidence": read.confidence,
+                },
+                decision_payload={"suppression_reason": reason},
+            )
+            await self._movement_ledger.transition_movement_saga(
+                session,
+                saga,
+                MovementSagaState.SUPPRESSED,
+                detail=reason,
+                reconciliation_required=False,
+            )
+            await session.commit()
+            return saga
 
     async def _vehicle_session_suppression(self, read: PlateRead) -> VehicleSessionSuppression | None:
         context = self._vehicle_session_context_from_read(read)
@@ -2202,6 +2410,16 @@ class AccessEventService:
                 anomaly_count=len(anomalies),
                 visitor_pass=visitor_pass,
                 visitor_pass_mode=visitor_pass_mode,
+            )
+            await self._mark_lpr_ingest_ids_succeeded_in_session(
+                session,
+                [
+                    ingest_id
+                    for item in window.reads
+                    if (ingest_id := self._lpr_ingest_event_id_from_read(item))
+                ],
+                access_event_id=event.id,
+                movement_saga_id=movement_saga.id if movement_saga else None,
             )
 
             await session.commit()

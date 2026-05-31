@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +47,10 @@ class ProtectBackupCreateRequest(BaseModel):
 
 
 class ProtectBackupRestoreRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class ProtectBackupDeleteRequest(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
@@ -214,14 +218,14 @@ async def unifi_protect_create_backup(
 
 
 @router.get("/backups")
-async def unifi_protect_backups(_: User = Depends(current_user)) -> dict[str, Any]:
+async def unifi_protect_backups(_: User = Depends(admin_user)) -> dict[str, Any]:
     return {"backups": await get_unifi_protect_update_service().list_backups()}
 
 
 @router.get("/backups/{backup_id}/download")
 async def unifi_protect_download_backup(
     backup_id: str,
-    _: User = Depends(current_user),
+    _: User = Depends(admin_user),
 ) -> FileResponse:
     try:
         path = get_unifi_protect_update_service().backup_file(backup_id)
@@ -277,7 +281,7 @@ async def unifi_protect_restore_backup(
 @router.delete("/backups/{backup_id}", status_code=204)
 async def unifi_protect_delete_backup(
     backup_id: str,
-    confirmation_token: str | None = Query(default=None, max_length=160),
+    request: ProtectBackupDeleteRequest | None = Body(default=None),
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
@@ -287,7 +291,7 @@ async def unifi_protect_delete_backup(
         user=user,
         action="unifi_protect.backup.delete",
         payload=confirmation_payload,
-        confirmation_token=confirmation_token,
+        confirmation_token=request.confirmation_token if request else None,
     )
     try:
         await get_unifi_protect_update_service().delete_backup(backup_id)

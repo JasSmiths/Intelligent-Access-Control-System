@@ -274,9 +274,26 @@ export function GroupModal({
         description: form.description || null
       };
       if (mode === "edit" && group) {
-        await api.patch<Group>(`/api/v1/groups/${group.id}`, payload);
+        const confirmation = await createActionConfirmation("group.update", { ...payload, group_id: group.id }, {
+          target_entity: "Group",
+          target_id: group.id,
+          target_label: payload.name,
+          reason: "Update directory group"
+        });
+        await api.patch<Group>(`/api/v1/groups/${group.id}`, {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post<Group>("/api/v1/groups", payload);
+        const confirmation = await createActionConfirmation("group.create", payload, {
+          target_entity: "Group",
+          target_label: payload.name,
+          reason: "Create directory group"
+        });
+        await api.post<Group>("/api/v1/groups", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       }
       await onSaved();
     } catch (saveError) {
@@ -1021,9 +1038,26 @@ export function PersonModal({
     }
     try {
       if (mode === "edit" && person) {
-        await api.patch<Person>(`/api/v1/people/${person.id}`, payload);
+        const confirmation = await createActionConfirmation("person.update", { ...payload, person_id: person.id }, {
+          target_entity: "Person",
+          target_id: person.id,
+          target_label: `${String(payload.first_name || "")} ${String(payload.last_name || "")}`.trim(),
+          reason: "Update directory person"
+        });
+        await api.patch<Person>(`/api/v1/people/${person.id}`, {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post<Person>("/api/v1/people", payload);
+        const confirmation = await createActionConfirmation("person.create", payload, {
+          target_entity: "Person",
+          target_label: `${String(payload.first_name || "")} ${String(payload.last_name || "")}`.trim(),
+          reason: "Create directory person"
+        });
+        await api.post<Person>("/api/v1/people", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       }
       await onSaved();
     } catch (saveError) {
@@ -1505,7 +1539,16 @@ export function VehiclesView({
     if (!window.confirm(`Delete ${vehicle.registration_number}?`)) return;
     setError("");
     try {
-      await api.delete(`/api/v1/vehicles/${vehicle.id}`);
+      const confirmationPayload = { vehicle_id: vehicle.id };
+      const confirmation = await createActionConfirmation("vehicle.delete", confirmationPayload, {
+        target_entity: "Vehicle",
+        target_id: vehicle.id,
+        target_label: vehicle.registration_number,
+        reason: "Delete directory vehicle"
+      });
+      await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
@@ -1846,7 +1889,16 @@ export function VehicleModal({
       setPageError("");
       setComplianceRefreshing(true);
       try {
-        const refreshed = await api.post<Vehicle>(`/api/v1/vehicles/${vehicle.id}/dvla-refresh`);
+        const confirmationPayload = { vehicle_id: vehicle.id };
+        const confirmation = await createActionConfirmation("vehicle.dvla_refresh", confirmationPayload, {
+          target_entity: "Vehicle",
+          target_id: vehicle.id,
+          target_label: vehicle.registration_number,
+          reason: "Refresh DVLA compliance data"
+        });
+        const refreshed = await api.post<Vehicle>(`/api/v1/vehicles/${vehicle.id}/dvla-refresh`, {
+          confirmation_token: confirmation.confirmation_token
+        });
         setForm((current) => ({
           ...current,
           make: refreshed.make ?? current.make,
@@ -1894,9 +1946,26 @@ export function VehicleModal({
     }
     try {
       if (mode === "edit" && vehicle) {
-        await api.patch<Vehicle>(`/api/v1/vehicles/${vehicle.id}`, payload);
+        const confirmation = await createActionConfirmation("vehicle.update", { ...payload, vehicle_id: vehicle.id }, {
+          target_entity: "Vehicle",
+          target_id: vehicle.id,
+          target_label: String(payload.registration_number || vehicle.registration_number),
+          reason: "Update directory vehicle"
+        });
+        await api.patch<Vehicle>(`/api/v1/vehicles/${vehicle.id}`, {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post<Vehicle>("/api/v1/vehicles", payload);
+        const confirmation = await createActionConfirmation("vehicle.create", payload, {
+          target_entity: "Vehicle",
+          target_label: String(payload.registration_number || ""),
+          reason: "Create directory vehicle"
+        });
+        await api.post<Vehicle>("/api/v1/vehicles", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       }
       await onSaved();
     } catch (saveError) {

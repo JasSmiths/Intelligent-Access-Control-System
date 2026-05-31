@@ -483,6 +483,8 @@ type ApiRequestOptions = {
 };
 
 const LARGE_JSON_PARSE_YIELD_BYTES = 512 * 1024;
+export const CHAT_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+export const CHAT_ATTACHMENT_MAX_LABEL = "25 MB";
 
 export function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -653,9 +655,9 @@ export function PanelHeader({ title, action, actionKind, onAction }: { title: st
   return (
     <div className="panel-header">
       <h2>{title}</h2>
-      {action ? (
+      {action && onAction ? (
         actionKind === "select" ? (
-          <button className="panel-select" type="button">
+          <button className="panel-select" onClick={onAction} type="button">
             {action}
             <ChevronDown size={14} />
           </button>
@@ -1016,8 +1018,11 @@ export function useSettings(category?: string) {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
-  const save = React.useCallback(async (updates: Record<string, unknown>) => {
-    await api.patch<SystemSetting[]>("/api/v1/settings", { values: updates });
+  const save = React.useCallback(async (updates: Record<string, unknown>, options: { confirmationToken?: string } = {}) => {
+    await api.patch<SystemSetting[]>("/api/v1/settings", {
+      values: updates,
+      ...(options.confirmationToken ? { confirmation_token: options.confirmationToken } : {})
+    });
     await load();
   }, [load]);
 
@@ -1080,7 +1085,12 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
       "unifi_protect_snapshot_width",
       "unifi_protect_snapshot_height"
     ].includes(key)) {
-      payload[key] = Number(value);
+      const text = value.trim();
+      const parsed = Number(text);
+      if (!text || !Number.isFinite(parsed)) {
+        throw new Error(`${key} must be a finite number.`);
+      }
+      payload[key] = parsed;
     } else {
       payload[key] = value;
     }

@@ -49,6 +49,19 @@ LEGACY_DEFAULT_REPLACEMENTS = {
 OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities", "alfred_agent_mode"}
 
 
+class UnknownDynamicSettingsError(ValueError):
+    def __init__(self, unknown_keys: list[str]) -> None:
+        self.unknown_keys = sorted(unknown_keys)
+        self.allowed_keys = sorted(DEFAULT_DYNAMIC_SETTINGS.keys())
+        super().__init__("Unknown dynamic setting key(s): " + ", ".join(self.unknown_keys))
+
+
+def validate_dynamic_setting_keys(updates: dict[str, Any]) -> None:
+    unknown_keys = sorted(str(key) for key in updates if str(key) not in DEFAULT_DYNAMIC_SETTINGS)
+    if unknown_keys:
+        raise UnknownDynamicSettingsError(unknown_keys)
+
+
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "app_name": ("general", settings.app_name, "Application display name."),
     "log_level": ("general", settings.log_level, "Backend log level."),
@@ -84,6 +97,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "lpr",
         [],
         "Static UNVR source IP addresses or CIDR ranges allowed to send UniFi LPR webhooks.",
+    ),
+    "lpr_webhook_trusted_proxy_ips": (
+        "lpr",
+        [],
+        "Trusted reverse-proxy source IPs or CIDRs whose forwarded client IP may be used for UniFi LPR source checks.",
     ),
     "schedule_default_policy": (
         "access",
@@ -297,6 +315,7 @@ class RuntimeConfig:
     lpr_zone_filter_mode: str
     lpr_webhook_token: str
     lpr_webhook_allowed_source_ips: list[str]
+    lpr_webhook_trusted_proxy_ips: list[str]
     schedule_default_policy: str
     gate_control_provider: str
     gate_failover_provider: str
@@ -624,6 +643,7 @@ async def get_runtime_config() -> RuntimeConfig:
         ),
         lpr_webhook_token=str(values["lpr_webhook_token"] or ""),
         lpr_webhook_allowed_source_ips=string_list_value(values["lpr_webhook_allowed_source_ips"]),
+        lpr_webhook_trusted_proxy_ips=string_list_value(values["lpr_webhook_trusted_proxy_ips"]),
         schedule_default_policy=(
             "deny" if str(values["schedule_default_policy"]).strip().lower() == "deny" else "allow"
         ),
@@ -782,14 +802,14 @@ async def list_settings(category: str | None = None, *, reveal: bool = False) ->
 
 
 async def update_settings(updates: dict[str, Any]) -> list[dict[str, Any]]:
+    validate_dynamic_setting_keys(updates)
+
     async with AsyncSessionLocal() as session:
         records = {
             record.key: record
             for record in (await session.scalars(select(SystemSetting))).all()
         }
         for key, value in updates.items():
-            if key not in DEFAULT_DYNAMIC_SETTINGS:
-                continue
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)
             if record:

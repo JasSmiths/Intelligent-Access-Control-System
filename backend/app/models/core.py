@@ -652,6 +652,30 @@ Index(
 )
 
 
+class NotificationRun(Base, TimestampMixin):
+    __tablename__ = "notification_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    trigger_event: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False, index=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    delivered_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failures: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    skipped_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+Index("ix_notification_runs_status_queued", NotificationRun.status, NotificationRun.queued_at)
+Index("ix_notification_runs_trigger_queued", NotificationRun.trigger_event, NotificationRun.queued_at)
+
+
 class NotificationActionContext(Base, TimestampMixin):
     __tablename__ = "notification_action_contexts"
     __table_args__ = (
@@ -758,6 +782,14 @@ class AutomationWebhookSender(Base, TimestampMixin):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_payload_shape: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    key_strength: Mapped[str] = mapped_column(String(40), default="legacy", nullable=False, index=True)
+    hmac_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    allowed_source_ips: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    last_nonce: Mapped[str | None] = mapped_column(String(160), index=True)
+    last_signature_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    rate_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    rate_window_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
@@ -955,6 +987,38 @@ Index(
     LprZoneShadowObservation.shadow_decision,
     LprZoneShadowObservation.observed_at.desc(),
 )
+
+
+class LprIngestEvent(Base, TimestampMixin):
+    __tablename__ = "lpr_ingest_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("movement_sagas.id", ondelete="SET NULL"),
+        index=True,
+    )
+    access_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+
+    movement_saga: Mapped["MovementSagaRecord | None"] = relationship()
+    access_event: Mapped[AccessEvent | None] = relationship()
+
+
+Index("ix_lpr_ingest_events_status_received", LprIngestEvent.status, LprIngestEvent.received_at)
+Index("ix_lpr_ingest_events_source_captured", LprIngestEvent.source, LprIngestEvent.captured_at)
 
 
 class MovementSagaRecord(Base, TimestampMixin):

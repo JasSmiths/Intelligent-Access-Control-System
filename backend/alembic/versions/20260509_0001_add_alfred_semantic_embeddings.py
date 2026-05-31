@@ -1,7 +1,7 @@
 """add Alfred semantic embeddings
 
 Revision ID: 20260509_0001
-Revises:
+Revises: 20260531_0000
 Create Date: 2026-05-09 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 
 revision = "20260509_0001"
-down_revision = None
+down_revision = "20260531_0000"
 branch_labels = None
 depends_on = None
 

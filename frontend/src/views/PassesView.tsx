@@ -36,6 +36,7 @@ import {
 api,
 AuditLog,
 BadgeTone,
+createActionConfirmation,
 EmptyState,
 formatDate,
 fromDateTimeLocal,
@@ -253,7 +254,17 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
   const cancelPass = async (visitorPass: VisitorPass): Promise<VisitorPass | null> => {
     setError("");
     try {
-      const cancelled = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/cancel`, { reason: "Cancelled from dashboard" });
+      const payload = { reason: "Cancelled from dashboard" };
+      const confirmation = await createActionConfirmation("visitor_pass.cancel", { ...payload, pass_id: visitorPass.id }, {
+        target_entity: "VisitorPass",
+        target_id: visitorPass.id,
+        target_label: visitorPass.visitor_name,
+        reason: "Cancel visitor pass"
+      });
+      const cancelled = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/cancel`, {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
+      });
       await handlePassUpdated(cancelled);
       return cancelled;
     } catch (cancelError) {
@@ -265,7 +276,16 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
   const deletePass = async (visitorPass: VisitorPass): Promise<boolean> => {
     setError("");
     try {
-      await api.delete(`/api/v1/visitor-passes/${visitorPass.id}`);
+      const confirmationPayload = { pass_id: visitorPass.id };
+      const confirmation = await createActionConfirmation("visitor_pass.delete", confirmationPayload, {
+        target_entity: "VisitorPass",
+        target_id: visitorPass.id,
+        target_label: visitorPass.visitor_name,
+        reason: "Delete visitor pass"
+      });
+      await api.delete(`/api/v1/visitor-passes/${visitorPass.id}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       setPasses((current) => current.filter((item) => item.id !== visitorPass.id));
       setDetailPass(null);
       await loadPasses();
@@ -875,9 +895,16 @@ export function VisitorPassDetailsModal({
     setMessageSendError("");
     shouldStickToLatestRef.current = true;
     try {
+      const confirmationPayload = { pass_id: visitorPass.id, message: trimmedMessageDraft };
+      const confirmation = await createActionConfirmation("visitor_pass.whatsapp_send", confirmationPayload, {
+        target_entity: "VisitorPass",
+        target_id: visitorPass.id,
+        target_label: visitorPass.visitor_name,
+        reason: "Send Visitor Pass WhatsApp message"
+      });
       const result = await api.post<VisitorPassWhatsAppSendResponse>(
         `/api/v1/visitor-passes/${visitorPass.id}/whatsapp-messages`,
-        { message: trimmedMessageDraft }
+        { message: trimmedMessageDraft, confirmation_token: confirmation.confirmation_token }
       );
       const sentMessage = visitorPassWhatsAppMessageFromApi(result.message);
       setMessages((current) => visitorPassWhatsAppMessagesWithMessage(current, sentMessage));
@@ -896,7 +923,16 @@ export function VisitorPassDetailsModal({
     setVisitorUnblocking(true);
     setVisitorUnblockError("");
     try {
-      const updatedPass = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/whatsapp-unblock`, {});
+      const confirmationPayload = { pass_id: visitorPass.id };
+      const confirmation = await createActionConfirmation("visitor_pass.whatsapp_unblock", confirmationPayload, {
+        target_entity: "VisitorPass",
+        target_id: visitorPass.id,
+        target_label: visitorPass.visitor_name,
+        reason: "Unblock Visitor Concierge WhatsApp replies"
+      });
+      const updatedPass = await api.post<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}/whatsapp-unblock`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await onUpdated(updatedPass);
       await loadWhatsAppMessages(false);
     } catch (unblockError) {
@@ -1278,9 +1314,26 @@ export function VisitorPassModal({
       };
     try {
       if (mode === "edit" && visitorPass) {
-        await api.patch<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}`, payload);
+        const confirmation = await createActionConfirmation("visitor_pass.update", { ...payload, pass_id: visitorPass.id }, {
+          target_entity: "VisitorPass",
+          target_id: visitorPass.id,
+          target_label: payload.visitor_name,
+          reason: "Update visitor pass"
+        });
+        await api.patch<VisitorPass>(`/api/v1/visitor-passes/${visitorPass.id}`, {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post<VisitorPass>("/api/v1/visitor-passes", payload);
+        const confirmation = await createActionConfirmation("visitor_pass.create", payload, {
+          target_entity: "VisitorPass",
+          target_label: payload.visitor_name,
+          reason: "Create visitor pass"
+        });
+        await api.post<VisitorPass>("/api/v1/visitor-passes", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       }
       await onSaved();
     } catch (saveError) {

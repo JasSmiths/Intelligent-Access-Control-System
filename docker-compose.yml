@@ -18,6 +18,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: ${BACKEND_BUILD_TARGET:-development}
     container_name: iacs-backend
     environment:
       IACS_ENVIRONMENT: ${IACS_ENVIRONMENT:-development}
@@ -28,9 +29,11 @@ services:
       IACS_WORKSPACE_DIR: /workspace
       IACS_CORS_ORIGINS: ${IACS_CORS_ORIGINS:-http://localhost:5173,http://localhost:3000,http://localhost:8088}
       IACS_TRUSTED_HOSTS: ${IACS_TRUSTED_HOSTS:-*}
+      IACS_TRUSTED_PROXY_IPS: ${IACS_TRUSTED_PROXY_IPS:-}
       IACS_PUBLIC_BASE_URL: ${IACS_PUBLIC_BASE_URL:-}
       IACS_ROOT_PATH: ${IACS_ROOT_PATH:-}
       IACS_AUTO_CREATE_SCHEMA: ${IACS_AUTO_CREATE_SCHEMA:-true}
+      IACS_LEGACY_SCHEMA_BOOTSTRAP: ${IACS_LEGACY_SCHEMA_BOOTSTRAP:-false}
       IACS_SEED_DEMO_DATA: ${IACS_SEED_DEMO_DATA:-false}
       IACS_AUTH_SECRET_FILE: ${IACS_AUTH_SECRET_FILE:-/app/data/auth-secret.key}
       IACS_AUTH_SECRET_KEY: ${IACS_AUTH_SECRET_KEY:-}
@@ -62,7 +65,7 @@ services:
     restart: unless-stopped
 
   updater:
-    image: docker:29.4.3-cli
+    image: docker:29.4.3-cli@sha256:51e23845f5caff1e688a2fae003b0c69d635c9200ad544731db1593731df1d3a
     container_name: iacs-updater
     working_dir: /workspace
     command: ["sh", "-c", "while sleep 3600; do :; done"]
@@ -78,14 +81,14 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:00ba258a66dac104fd5171074a0084462a64a1369d8513f3d0a634e2f24d15bc
     container_name: iacs-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-iacs}
       POSTGRES_USER: ${POSTGRES_USER:-iacs}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iacs_dev_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       # Bind mount, not a named Docker volume.
       - ./data/postgres:/var/lib/postgresql/data
@@ -97,11 +100,11 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     container_name: iacs-redis
     command: ["redis-server", "--appendonly", "yes", "--dir", "/data"]
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       # Bind mount, not a named Docker volume.
       - ./data/redis:/data

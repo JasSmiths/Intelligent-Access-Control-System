@@ -128,9 +128,10 @@ async def consume_action_confirmation(
             now=datetime.now(tz=UTC),
         )
     except ActionConfirmationError as exc:
-        row.consumed_at = row.consumed_at or datetime.now(tz=UTC)
-        row.outcome = "rejected"
-        await session.commit()
+        if row.consumed_at is None:
+            row.consumed_at = datetime.now(tz=UTC)
+            row.outcome = "rejected"
+            await session.commit()
         _emit_confirmation_rejected(
             user,
             action=action,

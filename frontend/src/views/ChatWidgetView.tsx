@@ -33,6 +33,9 @@ import React from "react";
 import {
 api,
 apiError,
+CHAT_ATTACHMENT_MAX_BYTES,
+CHAT_ATTACHMENT_MAX_LABEL,
+createActionConfirmation,
 displayUserName,
 formatFileSize,
 isLlmProviderConfigured,
@@ -236,6 +239,9 @@ function nonNegativeNumber(value: unknown, fallback: number) {
 }
 
 export async function uploadChatAttachment(file: File, sessionId: string | null): Promise<ChatAttachment> {
+  if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+    throw new Error(`${file.name || "Attachment"} is ${formatFileSize(file.size)}. Attachments must be ${CHAT_ATTACHMENT_MAX_LABEL} or smaller.`);
+  }
   const body = new FormData();
   body.append("file", file);
   const suffix = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
@@ -1047,11 +1053,15 @@ export function ChatWidget({
       size_bytes: file.size,
       kind: file.type.startsWith("image/") ? "image" : "document",
       url: "",
-      uploadState: "uploading",
-      preview_url: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
+      uploadState: file.size > CHAT_ATTACHMENT_MAX_BYTES ? "error" : "uploading",
+      preview_url: file.size <= CHAT_ATTACHMENT_MAX_BYTES && file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+      error: file.size > CHAT_ATTACHMENT_MAX_BYTES
+        ? `${formatFileSize(file.size)} exceeds the ${CHAT_ATTACHMENT_MAX_LABEL} limit`
+        : undefined
     }));
     setPendingAttachments((current) => [...current, ...drafts]);
     drafts.forEach((draftAttachment, index) => {
+      if (draftAttachment.uploadState === "error") return;
       uploadChatAttachment(files[index], sessionId)
         .then((uploaded) => {
           if (draftAttachment.preview_url) URL.revokeObjectURL(draftAttachment.preview_url);
@@ -1228,7 +1238,14 @@ export function ChatWidget({
     setLlmSaving(true);
     setLlmFeedback("");
     try {
-      await llmSettings.save({ llm_provider: provider });
+      const values = { llm_provider: provider };
+      const confirmation = await createActionConfirmation("settings.update", { values }, {
+        target_entity: "SystemSetting",
+        target_id: "llm_provider",
+        target_label: label,
+        reason: "Switch Alfred LLM provider"
+      });
+      await llmSettings.save(values, { confirmationToken: confirmation.confirmation_token });
       setLlmPickerOpen(false);
       setMessages((current) => [
         ...current,

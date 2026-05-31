@@ -1,3 +1,8 @@
+import asyncio
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -10,16 +15,18 @@ from app.services.access_devices import seed_access_devices_from_legacy_settings
 from app.services.settings import seed_dynamic_settings
 
 logger = get_logger(__name__)
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 async def init_database() -> None:
-    """Create schema and seed dynamic settings for this early-phase deployment.
-
-    Alembic migrations should take over once the schema stabilizes. Until then,
-    startup creation keeps `docker compose up` useful on a clean machine.
-    """
+    """Prepare the database schema and seed dynamic settings."""
 
     if settings.auto_create_schema:
+        await _run_alembic_upgrade_head()
+        logger.info("database_migrations_ready")
+
+    if settings.legacy_schema_bootstrap:
+        logger.warning("legacy_schema_bootstrap_enabled")
         async with engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
@@ -206,6 +213,19 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_next_run ON automation_rules (is_active, next_run_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_rules_active_created ON automation_rules (is_active, created_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_runs_rule_started ON automation_runs (rule_id, started_at DESC)"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS key_strength VARCHAR(40) NOT NULL DEFAULT 'legacy'"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS hmac_required BOOLEAN NOT NULL DEFAULT false"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS allowed_source_ips JSONB NOT NULL DEFAULT '[]'::jsonb"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS last_nonce VARCHAR(160)"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS last_signature_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS rate_window_started_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS rate_window_count INTEGER NOT NULL DEFAULT 0"))
+            await conn.execute(text("ALTER TABLE automation_webhook_senders ADD COLUMN IF NOT EXISTS rejected_count INTEGER NOT NULL DEFAULT 0"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_webhook_senders_key_strength ON automation_webhook_senders (key_strength)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_webhook_senders_hmac_required ON automation_webhook_senders (hmac_required)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_webhook_senders_last_nonce ON automation_webhook_senders (last_nonce)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_webhook_senders_last_signature_at ON automation_webhook_senders (last_signature_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_webhook_senders_rate_window_started_at ON automation_webhook_senders (rate_window_started_at)"))
             await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_timestamp"))
             await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_category"))
             await conn.execute(text("DROP INDEX IF EXISTS ix_audit_logs_action"))
@@ -313,6 +333,18 @@ async def init_database() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_plate_observed ON lpr_zone_shadow_observations (registration_number, observed_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_status_observed ON lpr_zone_shadow_observations (zone_status, observed_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_zone_shadow_decision_observed ON lpr_zone_shadow_observations (shadow_decision, observed_at DESC)"))
+            await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_lpr_ingest_events_idempotency_key ON lpr_ingest_events (idempotency_key)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_source ON lpr_ingest_events (source)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_registration_number ON lpr_ingest_events (registration_number)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_captured_at ON lpr_ingest_events (captured_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_received_at ON lpr_ingest_events (received_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_status ON lpr_ingest_events (status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_processing_started_at ON lpr_ingest_events (processing_started_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_processed_at ON lpr_ingest_events (processed_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_movement_saga_id ON lpr_ingest_events (movement_saga_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_access_event_id ON lpr_ingest_events (access_event_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_status_received ON lpr_ingest_events (status, received_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lpr_ingest_events_source_captured ON lpr_ingest_events (source, captured_at)"))
             await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_movement_sagas_idempotency_key ON movement_sagas (idempotency_key)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_source ON movement_sagas (source)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movement_sagas_state ON movement_sagas (state)"))
@@ -646,6 +678,15 @@ async def init_database() -> None:
 
     if settings.seed_demo_data:
         logger.warning("seed_demo_data_ignored")
+
+
+async def _run_alembic_upgrade_head() -> None:
+    def upgrade() -> None:
+        config = Config(str(BACKEND_ROOT / "alembic.ini"))
+        config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+        command.upgrade(config, "head")
+
+    await asyncio.to_thread(upgrade)
 
 
 async def _ensure_alfred_semantic_schema(conn) -> None:

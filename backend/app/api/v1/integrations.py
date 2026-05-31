@@ -3,10 +3,11 @@ import re
 
 from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
@@ -45,16 +46,13 @@ from app.services.gate_commands import GateCommandIntent, get_gate_command_coord
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config, normalize_esphome_device_id, update_settings
-from app.services.action_confirmations import (
-    ActionConfirmationError,
-    consume_action_confirmation,
-)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
     audit_diff,
     emit_audit_log,
+    write_audit_log,
 )
 
 router = APIRouter()
@@ -80,24 +78,10 @@ async def _raise_if_maintenance_active() -> None:
         )
 
 
-async def _require_real_world_confirmation(
-    session: AsyncSession,
-    *,
-    user: User,
-    action: str,
-    payload: dict,
-    confirmation_token: str | None,
-) -> None:
-    try:
-        await consume_action_confirmation(
-            session,
-            user=user,
-            action=action,
-            payload=payload,
-            confirmation_token=confirmation_token,
-        )
-    except ActionConfirmationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+async def _commit_if_supported(session: AsyncSession) -> None:
+    commit = getattr(session, "commit", None)
+    if commit is not None:
+        await commit()
 
 
 def emit_settings_update_audit(
@@ -175,6 +159,7 @@ class TestHomeAssistantMobileNotificationRequest(BaseModel):
 
 class AddAppriseUrlRequest(BaseModel):
     url: str = Field(min_length=6, max_length=1200)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ESPHomeDeviceRequest(BaseModel):
@@ -185,6 +170,7 @@ class ESPHomeDeviceRequest(BaseModel):
     legacy_password: str | None = Field(default=None, max_length=512)
     timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
     enabled: bool = True
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ESPHomeDevicePatchRequest(BaseModel):
@@ -195,6 +181,11 @@ class ESPHomeDevicePatchRequest(BaseModel):
     legacy_password: str | None = Field(default=None, max_length=512)
     timeout_seconds: float | None = Field(default=None, ge=5.0, le=120.0)
     enabled: bool | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class IntegrationConfirmationRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class DvlaLookupRequest(BaseModel):
@@ -218,7 +209,24 @@ async def esphome_devices(_: User = Depends(admin_user)) -> dict:
 
 
 @router.post("/esphome/devices")
-async def add_esphome_device(request: ESPHomeDeviceRequest, user: User = Depends(admin_user)) -> dict:
+async def add_esphome_device(
+    request: ESPHomeDeviceRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="esphome.device.create",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     config = await get_runtime_config()
     devices = [dict(device) for device in config.esphome_devices]
     device_id = _unique_esphome_device_id(request.name, devices)
@@ -237,7 +245,22 @@ async def update_esphome_device(
     device_id: str,
     request: ESPHomeDevicePatchRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    confirmation_payload["device_id"] = device_id
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="esphome.device.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     config = await get_runtime_config()
     devices = [dict(device) for device in config.esphome_devices]
     index = _find_esphome_device_index(devices, device_id)
@@ -245,7 +268,7 @@ async def update_esphome_device(
         raise HTTPException(status_code=404, detail="ESPHome device not found.")
     before = [_esphome_device_summary(device) for device in devices]
     device = devices[index]
-    updates = request.model_dump(exclude_unset=True)
+    updates = request.model_dump(exclude={"confirmation_token"}, exclude_unset=True)
     if "name" in updates:
         device["name"] = str(updates["name"] or "").strip()
     if "host" in updates:
@@ -271,7 +294,19 @@ async def update_esphome_device(
 
 
 @router.delete("/esphome/devices/{device_id}")
-async def remove_esphome_device(device_id: str, user: User = Depends(admin_user)) -> dict:
+async def remove_esphome_device(
+    device_id: str,
+    request: IntegrationConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="esphome.device.delete",
+        payload={"device_id": device_id},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     config = await get_runtime_config()
     devices = [dict(device) for device in config.esphome_devices]
     index = _find_esphome_device_index(devices, device_id)
@@ -295,7 +330,19 @@ async def esphome_status(refresh: bool = False, _: User = Depends(current_user))
 
 
 @router.post("/esphome/devices/{device_id}/test")
-async def test_esphome_device(device_id: str, _: User = Depends(admin_user)) -> dict:
+async def test_esphome_device(
+    device_id: str,
+    request: IntegrationConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="esphome.device.test",
+        payload={"device_id": device_id},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     try:
         provider = get_access_device_provider("esphome")
         verify_live_device = getattr(provider, "verify_live_device", None)
@@ -378,7 +425,18 @@ async def home_assistant_entities(
 
 
 @router.post("/home-assistant/gates/auto-detect")
-async def auto_detect_home_assistant_gates(user: User = Depends(admin_user)) -> dict:
+async def auto_detect_home_assistant_gates(
+    request: IntegrationConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="home_assistant.gates.auto_detect",
+        payload={},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     try:
         states = await _home_assistant_client().list_states()
     except HomeAssistantError as exc:
@@ -403,7 +461,18 @@ async def auto_detect_home_assistant_gates(user: User = Depends(admin_user)) -> 
 
 
 @router.post("/home-assistant/garage-doors/auto-detect")
-async def auto_detect_home_assistant_garage_doors(user: User = Depends(admin_user)) -> dict:
+async def auto_detect_home_assistant_garage_doors(
+    request: IntegrationConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="home_assistant.garage_doors.auto_detect",
+        payload={},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     try:
         states = await _home_assistant_client().list_states()
     except HomeAssistantError as exc:
@@ -435,8 +504,19 @@ async def apprise_urls(_: User = Depends(admin_user)) -> dict:
 
 
 @router.post("/apprise/urls")
-async def add_apprise_url(request: AddAppriseUrlRequest, user: User = Depends(admin_user)) -> dict:
+async def add_apprise_url(
+    request: AddAppriseUrlRequest,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     normalized = normalize_apprise_url(request.url.strip())
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="apprise.url.create",
+        payload={"url": normalized},
+        confirmation_token=request.confirmation_token,
+    )
     try:
         validate_apprise_urls(normalized)
     except NotificationDeliveryError as exc:
@@ -458,7 +538,19 @@ async def add_apprise_url(request: AddAppriseUrlRequest, user: User = Depends(ad
 
 
 @router.delete("/apprise/urls/{index}")
-async def remove_apprise_url(index: int, user: User = Depends(admin_user)) -> dict:
+async def remove_apprise_url(
+    index: int,
+    request: IntegrationConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="apprise.url.delete",
+        payload={"index": index},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     config = await get_runtime_config()
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
     if index < 0 or index >= len(urls):
@@ -536,7 +628,7 @@ async def open_gate(
 ) -> dict:
     await _raise_if_maintenance_active()
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await _require_real_world_confirmation(
+    await require_confirmed_action(
         session,
         user=user,
         action="gate.open",
@@ -552,7 +644,8 @@ async def open_gate(
         )
     )
     if not result.accepted:
-        emit_audit_log(
+        await write_audit_log(
+            session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="gate.open",
             actor=actor_from_user(user),
@@ -571,8 +664,10 @@ async def open_gate(
                 "requires_reconciliation": result.requires_reconciliation,
             },
         )
+        await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=result.detail or "Gate command failed.")
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="gate.open",
         actor=actor_from_user(user),
@@ -589,6 +684,7 @@ async def open_gate(
             "requires_reconciliation": result.requires_reconciliation,
         },
     )
+    await _commit_if_supported(session)
     return {
         "accepted": result.accepted,
         "state": result.state.value,
@@ -620,7 +716,7 @@ async def cover_command(
         raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await _require_real_world_confirmation(
+    await require_confirmed_action(
         session,
         user=user,
         action=f"cover.{request.action}",
@@ -635,7 +731,8 @@ async def cover_command(
         schedule_source="garage_door",
     )
     if not outcome.accepted:
-        emit_audit_log(
+        await write_audit_log(
+            session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action=f"cover.{request.action}",
             actor=actor_from_user(user),
@@ -647,8 +744,10 @@ async def cover_command(
             level="error",
             metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
         )
+        await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action=f"cover.{request.action}",
         actor=actor_from_user(user),
@@ -658,6 +757,7 @@ async def cover_command(
         target_label=device.name,
         metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
     )
+    await _commit_if_supported(session)
     return {
         "accepted": True,
         "entity_id": device.key,
@@ -683,7 +783,7 @@ async def say_announcement(
         raise HTTPException(status_code=400, detail="No media_player entity configured or supplied.")
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await _require_real_world_confirmation(
+    await require_confirmed_action(
         session,
         user=user,
         action="announcement.say",
@@ -694,7 +794,8 @@ async def say_announcement(
     try:
         await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), request.message)
     except (HomeAssistantError, ValueError) as exc:
-        emit_audit_log(
+        await write_audit_log(
+            session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="announcement.say",
             actor=actor_from_user(user),
@@ -705,9 +806,11 @@ async def say_announcement(
             level="error",
             metadata={"message": request.message, "error": str(exc)},
         )
+        await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="announcement.say",
         actor=actor_from_user(user),
@@ -716,6 +819,7 @@ async def say_announcement(
         target_id=target,
         metadata={"message": request.message},
     )
+    await _commit_if_supported(session)
     return {"status": "sent", "entity_id": target}
 
 
@@ -727,7 +831,7 @@ async def send_home_assistant_mobile_notification_test(
 ) -> dict[str, str]:
     person_name = request.person_name.strip() or "this person"
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await _require_real_world_confirmation(
+    await require_confirmed_action(
         session,
         user=user,
         action="notification.mobile_test",
@@ -745,9 +849,10 @@ async def send_home_assistant_mobile_notification_test(
                 severity="info",
                 facts={"message": f"Mobile notifications are linked for {person_name}."},
             ),
-        )
+    )
     except NotificationDeliveryError as exc:
-        emit_audit_log(
+        await write_audit_log(
+            session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="notification.mobile_test",
             actor=actor_from_user(user),
@@ -758,9 +863,11 @@ async def send_home_assistant_mobile_notification_test(
             level="error",
             metadata={"error": str(exc), "person_name": person_name},
         )
+        await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="notification.mobile_test",
         actor=actor_from_user(user),
@@ -769,6 +876,7 @@ async def send_home_assistant_mobile_notification_test(
         target_id=request.service_name,
         metadata={"person_name": person_name},
     )
+    await _commit_if_supported(session)
     return {"status": "sent", "service_name": request.service_name}
 
 
@@ -777,13 +885,13 @@ async def send_test_notification(
     request: TestNotificationRequest,
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     config = await get_runtime_config()
     if not config.apprise_urls:
         raise HTTPException(status_code=400, detail="Apprise is not configured.")
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await _require_real_world_confirmation(
+    await require_confirmed_action(
         session,
         user=user,
         action="notification.test",
@@ -792,7 +900,7 @@ async def send_test_notification(
     )
 
     try:
-        notification = await get_notification_service().notify(
+        result = await get_notification_service().send_notification_now_with_result(
             NotificationContext(
                 event_type="integration_test",
                 subject=request.subject,
@@ -800,9 +908,10 @@ async def send_test_notification(
                 facts={"message": request.message},
             ),
             raise_on_failure=True,
-        )
+    )
     except NotificationDeliveryError as exc:
-        emit_audit_log(
+        await write_audit_log(
+            session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="notification.test",
             actor=actor_from_user(user),
@@ -813,8 +922,10 @@ async def send_test_notification(
             level="error",
             metadata={"severity": request.severity, "error": str(exc)},
         )
+        await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="notification.test",
         actor=actor_from_user(user),
@@ -823,7 +934,14 @@ async def send_test_notification(
         target_label=request.subject,
         metadata={"severity": request.severity},
     )
-    return {"status": "sent", "title": notification.title, "body": notification.body}
+    await _commit_if_supported(session)
+    return {
+        "status": "sent",
+        "delivery_status": result.status,
+        "notification_run_id": result.run_id,
+        "title": result.notification.title,
+        "body": result.notification.body,
+    }
 
 
 def _esphome_device_summary(device: dict) -> dict:

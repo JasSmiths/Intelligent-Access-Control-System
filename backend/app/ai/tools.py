@@ -82,7 +82,7 @@ from app.services.schedules import (
     schedule_dependencies,
     schedule_allows_at,
 )
-from app.services.settings import get_runtime_config, list_settings, update_settings
+from app.services.settings import UnknownDynamicSettingsError, get_runtime_config, list_settings, update_settings
 from app.services.snapshots import get_snapshot_manager
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_ACCESS, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry, write_audit_log
@@ -473,7 +473,15 @@ async def update_system_settings(arguments: dict[str, Any]) -> dict[str, Any]:
             "detail": f"Update {len(values)} setting(s)? Secrets stay redacted, but this can change live IACS behavior.",
             "setting_keys": sorted(str(key) for key in values.keys()),
         }
-    rows = await update_settings(values)
+    try:
+        rows = await update_settings(values)
+    except UnknownDynamicSettingsError as exc:
+        return {
+            "updated": False,
+            "error": str(exc),
+            "unknown_keys": exc.unknown_keys,
+            "allowed_keys": exc.allowed_keys,
+        }
     changed_keys = sorted(str(key) for key in values.keys())
     return {
         "updated": True,

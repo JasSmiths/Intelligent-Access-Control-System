@@ -137,6 +137,8 @@ async def test_consume_action_confirmation_rejects_replay_and_payload_mismatch(m
             confirmation_token=token,
         )
     assert replay.value.status_code == 409
+    assert row.outcome == "consumed"
+    assert session.commits == 1
 
     fresh_row = ActionConfirmation(
         id=uuid.uuid4(),
@@ -233,7 +235,7 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
             return accepted_gate_outcome(intent)
 
     monkeypatch.setattr(integrations, "is_maintenance_mode_active", inactive_maintenance)
-    monkeypatch.setattr(integrations, "consume_action_confirmation", consume)
+    monkeypatch.setattr(integrations, "require_confirmed_action", consume)
     monkeypatch.setattr(integrations, "get_gate_command_coordinator", lambda: FakeCoordinator())
     monkeypatch.setattr(integrations, "emit_audit_log", lambda **_kwargs: None)
     transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))

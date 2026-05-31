@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import re
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address, ip_network
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -65,6 +69,14 @@ AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {
     "notification.skipped",
 }
 AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES = ("automation.run.",)
+WEBHOOK_KEY_PREFIX = "whk_"
+WEBHOOK_KEY_RANDOM_BYTES = 32
+WEBHOOK_HMAC_WINDOW_SECONDS = 300
+WEBHOOK_RATE_WINDOW_SECONDS = 60
+WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
+WEBHOOK_SIGNATURE_HEADER = "X-IACS-Webhook-Signature"
+WEBHOOK_TIMESTAMP_HEADER = "X-IACS-Webhook-Timestamp"
+WEBHOOK_NONCE_HEADER = "X-IACS-Webhook-Nonce"
 
 
 @dataclass(frozen=True)
@@ -498,8 +510,9 @@ class AutomationService:
         is_active: bool = True,
         created_by: User | None = None,
     ) -> AutomationRule:
-        normalized_triggers = normalize_triggers(triggers)
+        normalized_triggers = normalize_triggers(triggers, generate_webhook_keys=True)
         normalized_actions = normalize_actions(actions)
+        harden_webhook_triggers_for_actions(normalized_triggers, normalized_actions)
         if not normalized_triggers:
             raise AutomationError("At least one automation trigger is required.")
         if not normalized_actions:
@@ -549,8 +562,15 @@ class AutomationService:
             rule.name = name.strip()[:160] or rule.name
         if description is not None:
             rule.description = description.strip() or None
+        normalized_triggers = (
+            normalize_triggers(triggers, generate_webhook_keys=True)
+            if triggers is not None
+            else normalize_triggers(rule.triggers)
+        )
+        normalized_actions = normalize_actions(actions) if actions is not None else normalize_actions(rule.actions)
+        harden_webhook_triggers_for_actions(normalized_triggers, normalized_actions)
         if triggers is not None:
-            rule.triggers = normalize_triggers(triggers)
+            rule.triggers = normalized_triggers
             if not rule.triggers:
                 raise AutomationError("At least one automation trigger is required.")
             rule.trigger_keys = trigger_keys_for_triggers(rule.triggers)
@@ -558,7 +578,7 @@ class AutomationService:
         if conditions is not None:
             rule.conditions = normalize_conditions(conditions)
         if actions is not None:
-            rule.actions = normalize_actions(actions)
+            rule.actions = normalized_actions
             if not rule.actions:
                 raise AutomationError("At least one automation action is required.")
         if is_active is not None:
@@ -942,9 +962,42 @@ class AutomationService:
         payload: dict[str, Any],
         *,
         source_ip: str,
+        raw_body: bytes = b"",
+        signature: str | None = None,
+        signature_timestamp: str | None = None,
+        nonce: str | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(tz=UTC)
+        payload_shape_value = payload_shape(payload)
+        hmac_verified = False
         async with AsyncSessionLocal() as session:
+            policies = await webhook_policies_for_key(session, webhook_key)
+            if policies:
+                allowed_by_source = [
+                    policy
+                    for policy in policies
+                    if webhook_source_allowed(source_ip, policy.get("allowed_source_ips", []))
+                ]
+                if not allowed_by_source:
+                    raise AutomationError("Automation webhook source is not allowed.")
+                policies = allowed_by_source
+                if any(policy.get("require_hmac") for policy in policies):
+                    if not verify_webhook_hmac(
+                        webhook_key,
+                        raw_body,
+                        signature=signature,
+                        timestamp=signature_timestamp,
+                        nonce=nonce,
+                        window_seconds=min(
+                            int(policy.get("replay_window_seconds") or WEBHOOK_HMAC_WINDOW_SECONDS)
+                            for policy in policies
+                        ),
+                        now=now,
+                    ):
+                        await record_rejected_webhook_sender(session, webhook_key, source_ip, now=now)
+                        raise AutomationError("Automation webhook signature is invalid or expired.")
+                    hmac_verified = True
+
             sender = (
                 await session.scalars(
                     select(AutomationWebhookSender)
@@ -960,13 +1013,38 @@ class AutomationService:
                     first_seen_at=now,
                     last_seen_at=now,
                     event_count=1,
-                    last_payload_shape=payload_shape(payload),
+                    last_payload_shape=payload_shape_value,
                 )
                 session.add(sender)
             else:
                 sender.last_seen_at = now
                 sender.event_count = int(sender.event_count or 0) + 1
-                sender.last_payload_shape = payload_shape(payload)
+                sender.last_payload_shape = payload_shape_value
+            if policies:
+                strictest_rate_limit = min(
+                    int(policy.get("rate_limit_per_minute") or WEBHOOK_RATE_LIMIT_PER_MINUTE)
+                    for policy in policies
+                )
+                if not apply_webhook_rate_limit(sender, now=now, limit=strictest_rate_limit):
+                    sender.rejected_count = int(sender.rejected_count or 0) + 1
+                    await session.commit()
+                    raise AutomationError("Automation webhook rate limit exceeded.")
+                sender.key_strength = "server_generated" if is_high_entropy_webhook_key(webhook_key) else "legacy"
+                sender.hmac_required = any(policy.get("require_hmac") for policy in policies)
+                sender.allowed_source_ips = sorted(
+                    {
+                        value
+                        for policy in policies
+                        for value in normalize_string_list(policy.get("allowed_source_ips"))
+                    }
+                )
+                if hmac_verified:
+                    if nonce and sender.last_nonce == nonce:
+                        sender.rejected_count = int(sender.rejected_count or 0) + 1
+                        await session.commit()
+                        raise AutomationError("Automation webhook nonce was already used.")
+                    sender.last_nonce = nonce
+                    sender.last_signature_at = now
             try:
                 await session.commit()
             except IntegrityError:
@@ -977,8 +1055,9 @@ class AutomationService:
             "webhook_key": webhook_key,
             "source_ip": source_ip,
             "payload": payload,
-            "payload_shape": payload_shape(payload),
+            "payload_shape": payload_shape_value,
             "occurred_at": now.isoformat(),
+            "hmac_verified": hmac_verified,
         }
         runs = await self.fire_trigger("webhook.received", base_payload, source="webhook", actor="Webhook")
         if new_sender:
@@ -987,6 +1066,7 @@ class AutomationService:
             "accepted": True,
             "webhook_key": webhook_key,
             "new_sender": new_sender,
+            "hmac_verified": hmac_verified,
             "runs": runs,
         }
 
@@ -1366,7 +1446,7 @@ def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_triggers(value: Any) -> list[dict[str, Any]]:
+def normalize_triggers(value: Any, *, generate_webhook_keys: bool = False) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     allowed = {trigger_type for group in TRIGGER_CATALOG for trigger_type in [item["type"] for item in group["triggers"]]}
@@ -1382,13 +1462,22 @@ def normalize_triggers(value: Any) -> list[dict[str, Any]]:
             {
                 "id": str(raw.get("id") or f"trigger-{index + 1}"),
                 "type": trigger_type,
-                "config": normalize_trigger_config(trigger_type, config),
+                "config": normalize_trigger_config(
+                    trigger_type,
+                    config,
+                    generate_webhook_key=generate_webhook_keys,
+                ),
             }
         )
     return normalized
 
 
-def normalize_trigger_config(trigger_type: str, config: dict[str, Any]) -> dict[str, Any]:
+def normalize_trigger_config(
+    trigger_type: str,
+    config: dict[str, Any],
+    *,
+    generate_webhook_key: bool = False,
+) -> dict[str, Any]:
     if trigger_type == "time.every_x":
         unit = str(config.get("unit") or "minutes").lower()
         if unit not in {"minutes", "hours", "days"}:
@@ -1417,6 +1506,33 @@ def normalize_trigger_config(trigger_type: str, config: dict[str, Any]) -> dict[
             "single_use": config.get("single_use", recurrence == "none") is not False,
             "recurrence": recurrence,
             "end_at": optional_text(config.get("end_at")),
+        }
+    if trigger_type == "webhook.received":
+        webhook_key = optional_text(config.get("webhook_key"))
+        key_was_generated = False
+        if generate_webhook_key and not is_high_entropy_webhook_key(webhook_key):
+            webhook_key = generate_automation_webhook_key()
+            key_was_generated = True
+        return {
+            "webhook_key": webhook_key,
+            "webhook_key_strength": "server_generated"
+            if key_was_generated or is_high_entropy_webhook_key(webhook_key)
+            else "legacy",
+            "require_hmac": bool_config(config.get("require_hmac")),
+            "allowed_source_ips": normalize_string_list(
+                config.get("allowed_source_ips", config.get("source_allowlist", []))
+            ),
+            "rate_limit_per_minute": safe_int(
+                config.get("rate_limit_per_minute"),
+                default=WEBHOOK_RATE_LIMIT_PER_MINUTE,
+                minimum=1,
+            ),
+            "replay_window_seconds": safe_int(
+                config.get("replay_window_seconds"),
+                default=WEBHOOK_HMAC_WINDOW_SECONDS,
+                minimum=30,
+            ),
+            "source_ip": optional_text(config.get("source_ip")),
         }
     return {
         key: item
@@ -1521,6 +1637,183 @@ def action_paused_by_maintenance_mode(action_type: str) -> bool:
         or action_type == "maintenance_mode.enable"
         or action_type == "integration.whatsapp.send_message"
     )
+
+
+def generate_automation_webhook_key() -> str:
+    return f"{WEBHOOK_KEY_PREFIX}{secrets.token_urlsafe(WEBHOOK_KEY_RANDOM_BYTES)}"
+
+
+def is_high_entropy_webhook_key(value: Any) -> bool:
+    text = optional_text(value)
+    return text.startswith(WEBHOOK_KEY_PREFIX) and len(text) >= len(WEBHOOK_KEY_PREFIX) + 40
+
+
+def harden_webhook_triggers_for_actions(
+    triggers: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+) -> None:
+    if not any(action_requires_webhook_hardening(action) for action in actions):
+        return
+    for trigger in triggers:
+        if trigger.get("type") != "webhook.received":
+            continue
+        config = as_dict(trigger.get("config"))
+        if not normalize_string_list(config.get("allowed_source_ips")):
+            config["require_hmac"] = True
+        if not is_high_entropy_webhook_key(config.get("webhook_key")):
+            config["webhook_key"] = generate_automation_webhook_key()
+            config["webhook_key_strength"] = "server_generated"
+        config.setdefault("rate_limit_per_minute", WEBHOOK_RATE_LIMIT_PER_MINUTE)
+        config.setdefault("replay_window_seconds", WEBHOOK_HMAC_WINDOW_SECONDS)
+        trigger["config"] = config
+
+
+def action_requires_webhook_hardening(action: dict[str, Any]) -> bool:
+    action_type = str(action.get("type") or "")
+    return action_paused_by_maintenance_mode(action_type) or bool(integration_action_for_type(action_type))
+
+
+async def webhook_policies_for_key(session: AsyncSession, webhook_key: str) -> list[dict[str, Any]]:
+    rules = (
+        await session.scalars(
+            select(AutomationRule)
+            .where(AutomationRule.is_active.is_(True))
+            .where(AutomationRule.trigger_keys.contains(["webhook.received"]))
+            .order_by(AutomationRule.created_at)
+        )
+    ).all()
+    policies: list[dict[str, Any]] = []
+    for rule in rules:
+        for trigger in normalize_triggers(rule.triggers):
+            if trigger.get("type") != "webhook.received":
+                continue
+            config = as_dict(trigger.get("config"))
+            if str(config.get("webhook_key") or "") != webhook_key:
+                continue
+            policy = {
+                "rule_id": str(rule.id),
+                "require_hmac": bool_config(config.get("require_hmac")),
+                "allowed_source_ips": normalize_string_list(config.get("allowed_source_ips")),
+                "rate_limit_per_minute": safe_int(
+                    config.get("rate_limit_per_minute"),
+                    default=WEBHOOK_RATE_LIMIT_PER_MINUTE,
+                    minimum=1,
+                ),
+                "replay_window_seconds": safe_int(
+                    config.get("replay_window_seconds"),
+                    default=WEBHOOK_HMAC_WINDOW_SECONDS,
+                    minimum=30,
+                ),
+            }
+            if (
+                any(action_requires_webhook_hardening(action) for action in normalize_actions(rule.actions))
+                and not policy["require_hmac"]
+                and not policy["allowed_source_ips"]
+            ):
+                policy["require_hmac"] = True
+            policies.append(policy)
+    return policies
+
+
+def webhook_source_allowed(source_ip: str, allowed_source_ips: Any) -> bool:
+    networks = []
+    for raw_value in normalize_string_list(allowed_source_ips):
+        try:
+            networks.append(ip_network(raw_value, strict=False))
+        except ValueError:
+            continue
+    if not networks:
+        return True
+    try:
+        address = ip_address(source_ip)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)
+
+
+def verify_webhook_hmac(
+    webhook_key: str,
+    raw_body: bytes,
+    *,
+    signature: str | None,
+    timestamp: str | None,
+    nonce: str | None,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    signature_hex = normalize_webhook_signature(signature)
+    timestamp_text = optional_text(timestamp)
+    nonce_text = optional_text(nonce)
+    if not signature_hex or not timestamp_text or not nonce_text:
+        return False
+    signed_at = parse_webhook_timestamp(timestamp_text)
+    if not signed_at:
+        return False
+    now = now or datetime.now(tz=UTC)
+    if abs((now - signed_at).total_seconds()) > window_seconds:
+        return False
+    message = b".".join([timestamp_text.encode(), nonce_text.encode(), raw_body or b""])
+    expected = hmac.new(webhook_key.encode(), message, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature_hex, expected)
+
+
+def normalize_webhook_signature(value: str | None) -> str:
+    text = optional_text(value)
+    if text.lower().startswith("sha256="):
+        text = text.split("=", 1)[1].strip()
+    return text.lower()
+
+
+def parse_webhook_timestamp(value: str) -> datetime | None:
+    text = optional_text(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromtimestamp(int(text), tz=UTC)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def apply_webhook_rate_limit(
+    sender: AutomationWebhookSender,
+    *,
+    now: datetime,
+    limit: int,
+) -> bool:
+    window_started = sender.rate_window_started_at
+    if not window_started or (now - window_started).total_seconds() >= WEBHOOK_RATE_WINDOW_SECONDS:
+        sender.rate_window_started_at = now
+        sender.rate_window_count = 1
+        return True
+    if int(sender.rate_window_count or 0) >= limit:
+        return False
+    sender.rate_window_count = int(sender.rate_window_count or 0) + 1
+    return True
+
+
+async def record_rejected_webhook_sender(
+    session: AsyncSession,
+    webhook_key: str,
+    source_ip: str,
+    *,
+    now: datetime,
+) -> None:
+    sender = (
+        await session.scalars(
+            select(AutomationWebhookSender)
+            .where(AutomationWebhookSender.webhook_key == webhook_key)
+            .where(AutomationWebhookSender.source_ip == source_ip)
+        )
+    ).first()
+    if sender:
+        sender.last_seen_at = now
+        sender.rejected_count = int(sender.rejected_count or 0) + 1
+        await session.commit()
 
 
 def trigger_keys_for_triggers(triggers: list[dict[str, Any]]) -> list[str]:
@@ -2109,6 +2402,14 @@ def timezone_for(value: Any) -> ZoneInfo:
 
 def optional_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def bool_config(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def safe_int(value: Any, *, default: int = 1, minimum: int | None = None) -> int:

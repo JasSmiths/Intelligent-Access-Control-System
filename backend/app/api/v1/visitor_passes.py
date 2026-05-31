@@ -2,11 +2,12 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.core.logging import get_logger
 from app.db.session import get_db_session
@@ -36,6 +37,7 @@ class VisitorPassCreateRequest(BaseModel):
     window_minutes: int = Field(default=DEFAULT_WINDOW_MINUTES, ge=1, le=1440)
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class VisitorPassUpdateRequest(BaseModel):
@@ -46,14 +48,21 @@ class VisitorPassUpdateRequest(BaseModel):
     window_minutes: int | None = Field(default=None, ge=1, le=1440)
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class VisitorPassCancelRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class VisitorPassWhatsAppSendRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1024)
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class VisitorPassConfirmationRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class VisitorPassWhatsAppMessageResponse(BaseModel):
@@ -188,11 +197,18 @@ async def list_visitor_passes(
 @router.post("", response_model=VisitorPassResponse, status_code=status.HTTP_201_CREATED)
 async def create_visitor_pass(
     request: VisitorPassCreateRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
+        await require_confirmed_action(
+            session,
+            user=user,
+            action="visitor_pass.create",
+            payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+            confirmation_token=request.confirmation_token,
+        )
         visitor_pass = await service.create_pass(
             session,
             visitor_name=request.visitor_name,
@@ -222,6 +238,8 @@ async def create_visitor_pass(
     except VisitorPassError as exc:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         await session.rollback()
         raise visitor_pass_server_error("create", exc) from exc
@@ -272,7 +290,8 @@ async def get_visitor_pass_whatsapp_messages(
 async def send_visitor_pass_whatsapp_message(
     pass_id: uuid.UUID,
     request: VisitorPassWhatsAppSendRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassWhatsAppSendResponse:
     message = request.message.strip()
     if not message:
@@ -280,6 +299,13 @@ async def send_visitor_pass_whatsapp_message(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message is required.",
         )
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="visitor_pass.whatsapp_send",
+        payload={"pass_id": str(pass_id), "message": message},
+        confirmation_token=request.confirmation_token,
+    )
     try:
         result = await get_whatsapp_messaging_service().send_visitor_pass_custom_message(
             pass_id,
@@ -301,8 +327,17 @@ async def send_visitor_pass_whatsapp_message(
 @router.post("/{pass_id}/whatsapp-unblock", response_model=VisitorPassResponse)
 async def unblock_visitor_pass_whatsapp(
     pass_id: uuid.UUID,
-    user: User = Depends(current_user),
+    request: VisitorPassConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassResponse:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="visitor_pass.whatsapp_unblock",
+        payload={"pass_id": str(pass_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     try:
         payload = await get_whatsapp_messaging_service().clear_visitor_abuse_mute(pass_id, actor_user=user)
         return visitor_pass_response(payload)
@@ -353,7 +388,7 @@ async def get_visitor_pass_logs(
 async def update_visitor_pass(
     pass_id: uuid.UUID,
     request: VisitorPassUpdateRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
@@ -361,6 +396,20 @@ async def update_visitor_pass(
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        confirmation_payload = request.model_dump(
+            mode="json",
+            exclude={"confirmation_token"},
+            exclude_none=True,
+            exclude_unset=True,
+        )
+        confirmation_payload["pass_id"] = str(pass_id)
+        await require_confirmed_action(
+            session,
+            user=user,
+            action="visitor_pass.update",
+            payload=confirmation_payload,
+            confirmation_token=request.confirmation_token,
+        )
         await service.update_pass(
             session,
             visitor_pass,
@@ -408,7 +457,7 @@ async def update_visitor_pass(
 async def cancel_visitor_pass(
     pass_id: uuid.UUID,
     request: VisitorPassCancelRequest | None = None,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
@@ -416,6 +465,20 @@ async def cancel_visitor_pass(
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        confirmation_payload = request.model_dump(
+            mode="json",
+            exclude={"confirmation_token"},
+            exclude_none=True,
+            exclude_unset=True,
+        ) if request else {}
+        confirmation_payload["pass_id"] = str(pass_id)
+        await require_confirmed_action(
+            session,
+            user=user,
+            action="visitor_pass.cancel",
+            payload=confirmation_payload,
+            confirmation_token=request.confirmation_token if request else None,
+        )
         await service.cancel_pass(
             session,
             visitor_pass,
@@ -441,7 +504,8 @@ async def cancel_visitor_pass(
 @router.delete("/{pass_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_visitor_pass(
     pass_id: uuid.UUID,
-    user: User = Depends(current_user),
+    request: VisitorPassConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     service = get_visitor_pass_service()
@@ -449,6 +513,13 @@ async def delete_visitor_pass(
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+        await require_confirmed_action(
+            session,
+            user=user,
+            action="visitor_pass.delete",
+            payload={"pass_id": str(pass_id)},
+            confirmation_token=request.confirmation_token if request else None,
+        )
         snapshot = await service.delete_pass(
             session,
             visitor_pass,
@@ -471,11 +542,20 @@ async def decide_visitor_pass_timeframe_request(
     pass_id: uuid.UUID,
     request_id: str,
     decision: str,
+    request: VisitorPassConfirmationRequest | None = Body(default=None),
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     normalized_decision = decision.strip().lower()
     if normalized_decision not in {"allow", "deny"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Decision must be allow or deny.")
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="visitor_pass.timeframe_decision",
+        payload={"pass_id": str(pass_id), "request_id": request_id, "decision": normalized_decision},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     try:
         return await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
             str(pass_id),

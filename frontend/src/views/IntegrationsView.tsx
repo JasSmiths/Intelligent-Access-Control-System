@@ -452,8 +452,9 @@ export type DependencyConfirmAction =
 
 const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
 
-export function IntegrationsView({ people, latestRealtime, refreshToken, status }: { people: Person[]; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
+export function IntegrationsView({ currentUser, people, latestRealtime, refreshToken, status }: { currentUser: UserAccount; people: Person[]; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
   const { values, loading, save, reload } = useSettings();
+  const isAdmin = currentUser.role === "admin";
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
   const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
   const [pageTab, setPageTab] = React.useState<IntegrationsPageTab>("integrations");
@@ -706,12 +707,19 @@ export function IntegrationsView({ people, latestRealtime, refreshToken, status 
               <div className="integration-category-actions">
                 {category.key === "ai" ? (
                   <LlmProviderSelector
-                    saving={llmProviderSaving || loading}
+                    saving={!isAdmin || llmProviderSaving || loading}
                     values={values}
                     onChange={async (provider) => {
                       setLlmProviderSaving(true);
                       try {
-                        await save({ llm_provider: provider });
+                        const updates = { llm_provider: provider };
+                        const confirmation = await createActionConfirmation("settings.update", { values: updates }, {
+                          target_entity: "SystemSetting",
+                          target_id: "llm_provider",
+                          target_label: provider,
+                          reason: "Update LLM provider"
+                        });
+                        await save(updates, { confirmationToken: confirmation.confirmation_token });
                       } finally {
                         setLlmProviderSaving(false);
                       }
@@ -758,6 +766,7 @@ export function IntegrationsView({ people, latestRealtime, refreshToken, status 
       {active ? (
         <IntegrationModal
           definition={active}
+          currentUser={currentUser}
           initialTab={activeTab}
           dependencyPackages={dependenciesForIntegration(active, dependencyPackages)}
           dependencyStorage={dependencyStorage}
@@ -794,8 +803,8 @@ export function IntegrationsView({ people, latestRealtime, refreshToken, status 
           onProtectRefresh={() => loadProtect(true, true)}
           onSettingsChanged={reloadSettingsAndProtect}
           onAccessDeviceStatusChanged={setAccessDeviceStatus}
-          onSaved={async (updates) => {
-            await save(updates);
+          onSaved={async (updates, confirmationToken) => {
+            await save(updates, confirmationToken ? { confirmationToken } : {});
             await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
             await loadWhatsApp();
             if (dependencyUpdatesLoadedRef.current) await loadDependencyUpdates();
@@ -2733,7 +2742,9 @@ export function UnifiProtectUpdatesPanel({
         target_label: backup.created_at || backup.id,
         reason: "Delete UniFi Protect backup"
       });
-      await api.delete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}?confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
+      await api.delete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       setBackups((current) => current.filter((item) => item.id !== backup.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete backup.");
@@ -3018,6 +3029,7 @@ export function ProtectUpdateConfirmModal({
 
 export function IntegrationModal({
   definition,
+  currentUser,
   initialTab,
   values,
   loading,
@@ -3053,6 +3065,7 @@ export function IntegrationModal({
   onSaved
 }: {
   definition: IntegrationDefinition;
+  currentUser: UserAccount;
   initialTab: ProtectIntegrationTab;
   values: SettingsMap;
   loading: boolean;
@@ -3085,7 +3098,7 @@ export function IntegrationModal({
   onProtectRefresh?: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
   onAccessDeviceStatusChanged?: (status: IntegrationStatus) => void;
-  onSaved: (updates: Record<string, unknown>) => Promise<void>;
+  onSaved: (updates: Record<string, unknown>, confirmationToken?: string) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
   const [form, setForm] = React.useState<Record<string, string>>(() => integrationInitialValues(definition, values));
@@ -3108,6 +3121,7 @@ export function IntegrationModal({
   const isICloudCalendar = definition.key === "icloud_calendar";
   const isDiscord = definition.key === "discord";
   const isWhatsApp = definition.key === "whatsapp";
+  const canManage = currentUser.role === "admin";
   const hasDependencyUpdates = dependencyPackages.length > 0;
 
   React.useEffect(() => {
@@ -3193,6 +3207,14 @@ export function IntegrationModal({
   }, [isESPHome, loadESPHomeDevices]);
 
   const testConnection = async () => {
+    if (!canManage) {
+      setFeedback({
+        tone: "error",
+        title: "Administrator required",
+        detail: "Administrator access is required to test integrations."
+      });
+      return;
+    }
     setTesting(true);
     setFeedback({
       tone: "progress",
@@ -3248,6 +3270,14 @@ export function IntegrationModal({
   };
 
   const sendTestNotification = async () => {
+    if (!canManage) {
+      setFeedback({
+        tone: "error",
+        title: "Administrator required",
+        detail: "Administrator access is required to send test notifications."
+      });
+      return;
+    }
     setSendingTest(true);
     setFeedback({
       tone: "progress",
@@ -3327,10 +3357,29 @@ export function IntegrationModal({
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!canManage) {
+      setFeedback({
+        tone: "error",
+        title: "Administrator required",
+        detail: "Administrator access is required to save integration settings."
+      });
+      return;
+    }
     setSaving(true);
     setFeedback(null);
     try {
-      await onSaved(coerceSettingsPayload(form));
+      const updates = coerceSettingsPayload(form);
+      const payload = {
+        integration: definition.key,
+        values: updates
+      };
+      const confirmation = await createActionConfirmation("settings.update", { values: updates }, {
+        target_entity: "Integration",
+        target_id: definition.key,
+        target_label: definition.title,
+        reason: "Save integration settings"
+      });
+      await onSaved(payload.values, confirmation.confirmation_token);
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -3474,6 +3523,7 @@ export function IntegrationModal({
           />
         ) : isApprise ? (
           <AppriseSettingsFields
+            canManage={canManage}
             loading={appriseLoading}
             urls={appriseUrls}
             onChanged={async (urls) => {
@@ -3489,6 +3539,7 @@ export function IntegrationModal({
         ) : isESPHome ? (
           <ESPHomeSettingsFields
             accessStatus={accessDeviceStatus ?? null}
+            canManage={canManage}
             devices={esphomeDevices}
             loading={esphomeLoading}
             onAccessStatusChanged={onAccessDeviceStatusChanged}
@@ -3535,6 +3586,7 @@ export function IntegrationModal({
                     {form.lpr_webhook_token ? (
                       <button
                         className="secondary-button compact"
+                        disabled={!canManage}
                         onClick={(event) => {
                           event.preventDefault();
                           copyLprWebhookToken();
@@ -3546,6 +3598,7 @@ export function IntegrationModal({
                     ) : null}
                     <button
                       className="secondary-button compact"
+                      disabled={!canManage}
                       onClick={(event) => {
                         event.preventDefault();
                         generateLprWebhookToken();
@@ -3569,17 +3622,17 @@ export function IntegrationModal({
         {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
         <div className="modal-actions">
           {isApprise || isDiscord || isWhatsApp ? (
-            <button className="secondary-button" onClick={sendTestNotification} disabled={sendingTest} type="button">
+            <button className="secondary-button" onClick={sendTestNotification} disabled={!canManage || sendingTest} type="button">
               <Send size={15} /> {sendingTest ? "Sending..." : "Send Test"}
             </button>
           ) : null}
-          <button className="secondary-button" onClick={testConnection} disabled={testing} type="button">
+          <button className="secondary-button" onClick={testConnection} disabled={!canManage || testing} type="button">
             {testing ? "Testing..." : "Test Connection"}
           </button>
           {isApprise || isESPHome ? (
             <button className="primary-button" onClick={onClose} type="button">Done</button>
           ) : (
-            <button className="primary-button" disabled={saving} type="submit">
+            <button className="primary-button" disabled={!canManage || saving} type="submit">
               {saving ? "Saving..." : "Save"}
             </button>
           )}
@@ -4039,11 +4092,13 @@ export function IntegrationFeedbackPanel({ feedback }: { feedback: IntegrationFe
 }
 
 export function AppriseSettingsFields({
+  canManage,
   loading,
   urls,
   onChanged,
   onError
 }: {
+  canManage: boolean;
   loading: boolean;
   urls: AppriseUrlSummary[];
   onChanged: (urls: AppriseUrlSummary[]) => Promise<void>;
@@ -4061,9 +4116,22 @@ export function AppriseSettingsFields({
   const addUrl = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!newUrl.trim()) return;
+    if (!canManage) {
+      onError("Administrator access is required to update notification URLs.");
+      return;
+    }
     setSubmitting(true);
     try {
-      const result = await api.post<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", { url: newUrl.trim() });
+      const payload = { url: newUrl.trim() };
+      const confirmation = await createActionConfirmation("apprise.url.create", payload, {
+        target_entity: "AppriseURL",
+        target_label: "Notification URL",
+        reason: "Add notification URL"
+      });
+      const result = await api.post<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
+      });
       setNewUrl("");
       setAdding(false);
       await onChanged(result.urls);
@@ -4075,9 +4143,22 @@ export function AppriseSettingsFields({
   };
 
   const removeUrl = async (url: AppriseUrlSummary) => {
+    if (!canManage) {
+      onError("Administrator access is required to update notification URLs.");
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.delete(`/api/v1/integrations/apprise/urls/${url.index}`);
+      const payload = { index: url.index };
+      const confirmation = await createActionConfirmation("apprise.url.delete", payload, {
+        target_entity: "AppriseURL",
+        target_id: String(url.index),
+        target_label: url.preview || "Notification URL",
+        reason: "Remove notification URL"
+      });
+      await api.delete(`/api/v1/integrations/apprise/urls/${url.index}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Unable to remove Apprise URL.");
@@ -4093,7 +4174,7 @@ export function AppriseSettingsFields({
           <strong>Notification URLs</strong>
           <span>Add one destination per service. Secrets stay encrypted; only safe previews are shown here.</span>
         </div>
-        <button className="primary-button" onClick={() => setAdding((current) => !current)} type="button">
+        <button className="primary-button" disabled={!canManage} onClick={() => setAdding((current) => !current)} type="button">
           <Plus size={15} /> Add New Apprise URL
         </button>
       </div>
@@ -4115,7 +4196,7 @@ export function AppriseSettingsFields({
           </label>
           <div className="apprise-add-actions">
             <button className="secondary-button" onClick={() => setAdding(false)} type="button">Cancel</button>
-            <button className="primary-button" disabled={submitting || !newUrl.trim()} type="submit">
+            <button className="primary-button" disabled={!canManage || submitting || !newUrl.trim()} type="submit">
               {submitting ? "Adding..." : "Add URL"}
             </button>
           </div>
@@ -4140,7 +4221,7 @@ export function AppriseSettingsFields({
                 <strong>{url.preview}</strong>
                 <span>{url.scheme}</span>
               </div>
-              <button className="icon-button danger" onClick={() => removeUrl(url)} disabled={submitting} type="button" aria-label={`Remove ${url.type} URL`}>
+              <button className="icon-button danger" onClick={() => removeUrl(url)} disabled={!canManage || submitting} type="button" aria-label={`Remove ${url.type} URL`}>
                 <Trash2 size={15} />
               </button>
             </div>
@@ -4155,6 +4236,7 @@ export function AppriseSettingsFields({
 
 export function ESPHomeSettingsFields({
   accessStatus,
+  canManage,
   loading,
   devices,
   onAccessStatusChanged,
@@ -4162,6 +4244,7 @@ export function ESPHomeSettingsFields({
   onError
 }: {
   accessStatus: IntegrationStatus | null;
+  canManage: boolean;
   loading: boolean;
   devices: ESPHomeDeviceSummary[];
   onAccessStatusChanged?: (status: IntegrationStatus) => void;
@@ -4276,10 +4359,14 @@ export function ESPHomeSettingsFields({
   };
 
   const addDevice = async () => {
+    if (!canManage) {
+      onError("Administrator access is required to manage ESPHome devices.");
+      return;
+    }
     setSubmitting(true);
     setStatusMessage("");
     try {
-      const result = await api.post<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", {
+      const payload = {
         name: form.name.trim(),
         host: form.host.trim(),
         port: Number(form.port || 6053),
@@ -4287,6 +4374,15 @@ export function ESPHomeSettingsFields({
         legacy_password: form.legacy_password,
         timeout_seconds: Number(form.timeout_seconds || 30),
         enabled: true
+      };
+      const confirmation = await createActionConfirmation("esphome.device.create", payload, {
+        target_entity: "ESPHomeDevice",
+        target_label: payload.name,
+        reason: "Add ESPHome access device"
+      });
+      const result = await api.post<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", {
+        ...payload,
+        confirmation_token: confirmation.confirmation_token
       });
       resetForm();
       setAdding(false);
@@ -4301,11 +4397,24 @@ export function ESPHomeSettingsFields({
   };
 
   const removeDevice = async (device: ESPHomeDeviceSummary) => {
+    if (!canManage) {
+      onError("Administrator access is required to manage ESPHome devices.");
+      return;
+    }
     if (!window.confirm(`Remove ESPHome device ${device.name}?`)) return;
     setSubmitting(true);
     setStatusMessage("");
     try {
-      const result = await api.delete<{ devices: ESPHomeDeviceSummary[] }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`);
+      const confirmationPayload = { device_id: device.id };
+      const confirmation = await createActionConfirmation("esphome.device.delete", confirmationPayload, {
+        target_entity: "ESPHomeDevice",
+        target_id: device.id,
+        target_label: device.name,
+        reason: "Remove ESPHome access device"
+      });
+      const result = await api.delete<{ devices: ESPHomeDeviceSummary[] }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await onChanged(result.devices);
       setStatusMessage("ESPHome device removed.");
       refreshStreamStatus(false).catch(() => undefined);
@@ -4317,10 +4426,23 @@ export function ESPHomeSettingsFields({
   };
 
   const testDevice = async (device: ESPHomeDeviceSummary) => {
+    if (!canManage) {
+      onError("Administrator access is required to test ESPHome devices.");
+      return;
+    }
     setTestingId(device.id);
     setStatusMessage("");
     try {
-      const result = await api.post<{ ok: boolean; cover_count: number; stream?: string }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, {});
+      const confirmationPayload = { device_id: device.id };
+      const confirmation = await createActionConfirmation("esphome.device.test", confirmationPayload, {
+        target_entity: "ESPHomeDevice",
+        target_id: device.id,
+        target_label: device.name,
+        reason: "Test ESPHome access device"
+      });
+      const result = await api.post<{ ok: boolean; cover_count: number; stream?: string }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       setStatusMessage(`${device.name} live stream verified. ${result.cover_count} cover${result.cover_count === 1 ? "" : "s"} available.`);
       refreshStreamStatus(false).catch(() => undefined);
     } catch (error) {
@@ -4338,7 +4460,7 @@ export function ESPHomeSettingsFields({
           <span>Add one native API controller per gate or garage-door device. Cover mappings live under Settings Gates and Garage Doors.</span>
         </div>
         <div className="esphome-header-actions">
-          <button className="primary-button" onClick={() => setAdding((current) => !current)} type="button">
+          <button className="primary-button" disabled={!canManage} onClick={() => setAdding((current) => !current)} type="button">
             <Plus size={15} /> Add New ESPHome Device
           </button>
         </div>
@@ -4396,7 +4518,7 @@ export function ESPHomeSettingsFields({
           </div>
           <div className="apprise-add-actions">
             <button className="secondary-button" onClick={() => setAdding(false)} type="button">Cancel</button>
-            <button className="primary-button" disabled={submitting || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
+            <button className="primary-button" disabled={!canManage || submitting || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
               {submitting ? "Adding..." : "Add Device"}
             </button>
           </div>
@@ -4441,7 +4563,7 @@ export function ESPHomeSettingsFields({
                 <div className="esphome-device-stream">
                   <button
                     className={deviceStreamLive ? "esphome-stream-pill live" : device.enabled ? "esphome-stream-pill polling" : "esphome-stream-pill"}
-                    disabled={deviceStreamChecking}
+                    disabled={!canManage || deviceStreamChecking}
                     onClick={() => verifyStream(device)}
                     title={deviceStreamDetail}
                     type="button"
@@ -4456,11 +4578,11 @@ export function ESPHomeSettingsFields({
                   {device.legacy_password_configured ? <span>Legacy password saved</span> : <span>No legacy password</span>}
                 </div>
                 <div className="esphome-device-actions">
-                  <button className="secondary-button" onClick={() => testDevice(device)} disabled={Boolean(testingId) || submitting} type="button">
+                  <button className="secondary-button" onClick={() => testDevice(device)} disabled={!canManage || Boolean(testingId) || submitting} type="button">
                     {testingId === device.id ? <Loader2 className="spin" size={14} /> : <Activity size={14} />}
                     {testingId === device.id ? "Testing" : "Test"}
                   </button>
-                  <button className="icon-button danger" onClick={() => removeDevice(device)} disabled={submitting || testingId === device.id} type="button" aria-label={`Remove ${device.name}`}>
+                  <button className="icon-button danger" onClick={() => removeDevice(device)} disabled={!canManage || submitting || testingId === device.id} type="button" aria-label={`Remove ${device.name}`}>
                     <Trash2 size={15} />
                   </button>
                 </div>

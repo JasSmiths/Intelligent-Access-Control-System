@@ -5,14 +5,15 @@ from datetime import date, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.dependencies import current_user
+from app.api.confirmations import require_confirmed_action
+from app.api.dependencies import admin_user, current_user
 from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import AccessEvent, Group, Person, Schedule, User, Vehicle, VehiclePersonAssignment
@@ -104,6 +105,7 @@ class CreatePersonRequest(BaseModel):
     )
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool = True
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class UpdatePersonRequest(BaseModel):
@@ -127,6 +129,7 @@ class UpdatePersonRequest(BaseModel):
     )
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class VehicleResponse(BaseModel):
@@ -170,6 +173,7 @@ class CreateVehicleRequest(BaseModel):
     person_ids: list[uuid.UUID] | None = None
     schedule_id: uuid.UUID | None = None
     is_active: bool = True
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class UpdateVehicleRequest(BaseModel):
@@ -189,6 +193,7 @@ class UpdateVehicleRequest(BaseModel):
     person_ids: list[uuid.UUID] | None = None
     schedule_id: uuid.UUID | None = None
     is_active: bool | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class GroupResponse(BaseModel):
@@ -205,6 +210,7 @@ class CreateGroupRequest(BaseModel):
     category: GroupCategory
     subtype: str | None = Field(default=None, max_length=120)
     description: str | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class UpdateGroupRequest(BaseModel):
@@ -212,6 +218,11 @@ class UpdateGroupRequest(BaseModel):
     category: GroupCategory | None = None
     subtype: str | None = Field(default=None, max_length=120)
     description: str | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class DirectoryConfirmationRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 def compose_person_name(first_name: str, last_name: str) -> str:
@@ -726,9 +737,16 @@ async def validate_garage_door_entity_ids(entity_ids: list[str]) -> list[str]:
 @router.post("/people", response_model=PersonResponse, status_code=status.HTTP_201_CREATED)
 async def add_person(
     request: CreatePersonRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> PersonResponse:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="person.create",
+        payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+        confirmation_token=request.confirmation_token,
+    )
     group = await get_group_or_404(session, request.group_id)
     schedule = await get_schedule_or_404(session, request.schedule_id)
     vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
@@ -797,12 +815,26 @@ async def add_person(
 async def update_person(
     person_id: uuid.UUID,
     request: UpdatePersonRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> PersonResponse:
     person = await session.get(Person, person_id)
     if not person:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    confirmation_payload["person_id"] = str(person_id)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="person.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     before = person_audit_snapshot(person)
 
     if "group_id" in request.model_fields_set:
@@ -936,9 +968,16 @@ async def vehicle_photo(
 @router.post("/vehicles", response_model=VehicleResponse, status_code=status.HTTP_201_CREATED)
 async def add_vehicle(
     request: CreateVehicleRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VehicleResponse:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="vehicle.create",
+        payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+        confirmation_token=request.confirmation_token,
+    )
     person_ids = requested_vehicle_person_ids(request) or []
     people = await get_people_or_404(session, person_ids)
     schedule = await get_schedule_or_404(session, request.schedule_id)
@@ -999,12 +1038,26 @@ async def add_vehicle(
 async def update_vehicle(
     vehicle_id: uuid.UUID,
     request: UpdateVehicleRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VehicleResponse:
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    confirmation_payload["vehicle_id"] = str(vehicle_id)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="vehicle.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     before = vehicle_audit_snapshot(vehicle)
 
     person_ids = requested_vehicle_person_ids(request)
@@ -1078,12 +1131,20 @@ async def update_vehicle(
 @router.post("/vehicles/{vehicle_id}/dvla-refresh", response_model=VehicleResponse)
 async def refresh_vehicle_dvla(
     vehicle_id: uuid.UUID,
-    user: User = Depends(current_user),
+    request: DirectoryConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> VehicleResponse:
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="vehicle.dvla_refresh",
+        payload={"vehicle_id": str(vehicle_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
 
     before = vehicle_audit_snapshot(vehicle)
     config = await get_runtime_config()
@@ -1126,12 +1187,20 @@ async def refresh_vehicle_dvla(
 @router.delete("/vehicles/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vehicle(
     vehicle_id: uuid.UUID,
-    user: User = Depends(current_user),
+    request: DirectoryConfirmationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     vehicle = await session.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="vehicle.delete",
+        payload={"vehicle_id": str(vehicle_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
 
     before = vehicle_audit_snapshot(vehicle)
     await write_audit_log(
@@ -1166,9 +1235,16 @@ async def list_groups() -> list[GroupResponse]:
 @router.post("/groups", response_model=GroupResponse, status_code=status.HTTP_201_CREATED)
 async def add_group(
     request: CreateGroupRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> GroupResponse:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="group.create",
+        payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+        confirmation_token=request.confirmation_token,
+    )
     group = Group(
         name=request.name.strip(),
         category=request.category,
@@ -1209,12 +1285,26 @@ async def add_group(
 async def update_group(
     group_id: uuid.UUID,
     request: UpdateGroupRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> GroupResponse:
     group = await session.get(Group, group_id)
     if not group:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    confirmation_payload["group_id"] = str(group_id)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="group.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     before = group_audit_snapshot(group)
 
     if request.name is not None:

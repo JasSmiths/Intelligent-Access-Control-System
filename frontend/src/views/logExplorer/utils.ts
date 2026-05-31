@@ -572,7 +572,7 @@ function exportableRecord(record: LogRecord) {
   };
 }
 
-function recordsToCsv(records: LogRecord[]) {
+export function recordsToCsv(records: LogRecord[]) {
   const headers = ["timestamp", "source", "category", "action", "subject", "status", "level", "outcome", "duration_ms", "actor", "trace_id", "request_id", "summary"];
   const rows = records.map((record) => exportableRecord(record));
   return [
@@ -581,8 +581,9 @@ function recordsToCsv(records: LogRecord[]) {
   ].join("\n");
 }
 
-function csvCell(value: unknown) {
-  const text = String(value ?? "");
+export function csvCell(value: unknown) {
+  const raw = String(value ?? "");
+  const text = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
   return `"${text.replaceAll("\"", "\"\"")}"`;
 }
 

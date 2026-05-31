@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 
 import { spawnSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import tls from "node:tls";
 import { performance } from "node:perf_hooks";
+
+const LOAD_WS_CONNECTING = 0;
+const LOAD_WS_OPEN = 1;
+const LOAD_WS_CLOSING = 2;
+const LOAD_WS_CLOSED = 3;
 
 const DEFAULTS = {
   frontend: "http://localhost:8089",
@@ -31,12 +39,13 @@ const options = {
   wsPingIntervalMs: numberArg(args["ws-ping-interval-ms"], DEFAULTS.wsPingIntervalMs),
   skipToken: Boolean(args["skip-token"]),
   skipWebsocket: Boolean(args["skip-websocket"]),
+  tokenStdin: Boolean(args["token-stdin"]),
   output: args.output,
 };
 
 const startedAt = new Date();
-const token = options.skipToken ? "" : getAdminToken();
-const authHeaders = token ? [`Authorization=Bearer ${token}`] : [];
+const token = options.skipToken ? "" : await getAdminToken();
+const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 const result = {
   started_at: startedAt.toISOString(),
   options: redactOptions(options),
@@ -49,45 +58,13 @@ const result = {
 await sampleMetrics("start");
 
 const httpTargets = [
-  {
-    title: "frontend_api_health",
-    url: `${options.frontend}/api/v1/health`,
-    headers: [],
-  },
-  {
-    title: "backend_api_health_direct",
-    url: `${options.backend}/api/v1/health`,
-    headers: [],
-  },
-  {
-    title: "frontend_auth_status",
-    url: `${options.frontend}/api/v1/auth/status`,
-    headers: [],
-  },
-  {
-    title: "frontend_maintenance_status_auth",
-    url: `${options.frontend}/api/v1/maintenance/status`,
-    headers: authHeaders,
-    requiresToken: true,
-  },
-  {
-    title: "frontend_events_auth",
-    url: `${options.frontend}/api/v1/events?limit=100`,
-    headers: authHeaders,
-    requiresToken: true,
-  },
-  {
-    title: "frontend_movements_auth",
-    url: `${options.frontend}/api/v1/access/movements?limit=100`,
-    headers: authHeaders,
-    requiresToken: true,
-  },
-  {
-    title: "frontend_people_auth",
-    url: `${options.frontend}/api/v1/people?include_media=false`,
-    headers: authHeaders,
-    requiresToken: true,
-  },
+  httpTarget("frontend_api_health", options.frontend, "/api/v1/health"),
+  httpTarget("backend_api_health_direct", options.backend, "/api/v1/health"),
+  httpTarget("frontend_auth_status", options.frontend, "/api/v1/auth/status"),
+  httpTarget("frontend_maintenance_status_auth", options.frontend, "/api/v1/maintenance/status", true),
+  httpTarget("frontend_events_auth", options.frontend, "/api/v1/events?limit=100", true),
+  httpTarget("frontend_movements_auth", options.frontend, "/api/v1/access/movements?limit=100", true),
+  httpTarget("frontend_people_auth", options.frontend, "/api/v1/people?include_media=false", true),
 ];
 
 for (const target of httpTargets) {
@@ -96,7 +73,7 @@ for (const target of httpTargets) {
     continue;
   }
   await sampleMetrics(`before_${target.title}`);
-  const phase = runAutocannon(target);
+  const phase = await runHttpLoad(target);
   result.http.push(phase);
   printHttpSummary(phase);
   await sampleMetrics(`after_${target.title}`);
@@ -121,51 +98,78 @@ fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`);
 console.log(`load test result: ${outputPath}`);
 
-function runAutocannon(target) {
-  const args = [
-    "--yes",
-    "autocannon",
-    "-j",
-    "--no-progress",
-    "--renderStatusCodes",
-    "-c",
-    String(options.connections),
-    "-d",
-    String(options.duration),
-    "-t",
-    String(options.timeout),
-    "-T",
-    target.title,
-  ];
-  for (const header of target.headers ?? []) {
-    args.push("-H", header);
-  }
-  args.push(target.url);
-
+async function runHttpLoad(target) {
   const started = performance.now();
-  const completed = spawnSync("npx", args, {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const deadline = started + options.duration * 1000;
+  const latencies = [];
+  const statusCodeStats = {};
+  let requests = 0;
+  let errors = 0;
+  let timeouts = 0;
+  let non2xx = 0;
+  let bytes = 0;
+
+  async function worker() {
+    while (performance.now() < deadline) {
+      const requestStarted = performance.now();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), options.timeout * 1000);
+      try {
+        const response = await fetch(target.url, {
+          headers: target.headers ?? {},
+          signal: controller.signal,
+        });
+        const body = await response.arrayBuffer();
+        bytes += body.byteLength;
+        requests += 1;
+        statusCodeStats[response.status] = {
+          count: (statusCodeStats[response.status]?.count ?? 0) + 1,
+        };
+        if (!response.ok) {
+          non2xx += 1;
+        }
+      } catch (error) {
+        requests += 1;
+        if (error?.name === "AbortError") {
+          timeouts += 1;
+        } else {
+          errors += 1;
+        }
+      } finally {
+        clearTimeout(timeout);
+        latencies.push(performance.now() - requestStarted);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: options.connections }, () => worker()));
   const elapsedMs = performance.now() - started;
-  const parsed = parseJsonFromOutput(completed.stdout);
   return {
     title: target.title,
     url: target.url,
     connections: options.connections,
     duration_seconds: options.duration,
     elapsed_ms: Math.round(elapsedMs),
-    exit_code: completed.status,
-    error: completed.error?.message,
-    stderr: sanitizeAutocannonStderr(completed.stderr),
-    summary: summarizeAutocannon(parsed),
-    raw: parsed,
+    exit_code: 0,
+    error: undefined,
+    stderr: "",
+    summary: summarizeHttpLoad({
+      requests,
+      latencies,
+      bytes,
+      elapsedMs,
+      errors,
+      timeouts,
+      non2xx,
+      statusCodeStats,
+    }),
+    raw: null,
   };
 }
 
 async function runWebsocketPhase(token) {
   const wsBase = options.frontend.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-  const url = `${wsBase}/api/v1/realtime/ws?token=${encodeURIComponent(token)}`;
+  const url = `${wsBase}/api/v1/realtime/ws`;
   const sockets = [];
   const counters = {
     opened: 0,
@@ -180,7 +184,7 @@ async function runWebsocketPhase(token) {
 
   await Promise.all(
     Array.from({ length: options.wsClients }, (_, index) =>
-      openWebsocket(url, index, sockets, counters, pendingPings, pongLatencies),
+      openWebsocket(url, index, sockets, counters),
     ),
   );
 
@@ -188,7 +192,7 @@ async function runWebsocketPhase(token) {
   const pingTimer = setInterval(() => {
     const now = Date.now();
     for (const [index, socket] of sockets.entries()) {
-      if (socket?.readyState !== WebSocket.OPEN) {
+      if (socket?.readyState !== LOAD_WS_OPEN) {
         continue;
       }
       const id = `${index}-${now}`;
@@ -257,44 +261,38 @@ async function runWebsocketPhase(token) {
   };
 }
 
-function openWebsocket(url, index, sockets, counters, pendingPings, pongLatencies) {
+function openWebsocket(url, index, sockets, counters) {
   return new Promise((resolve) => {
-    const socket = new WebSocket(url);
+    const socket = createAuthenticatedWebSocket(url, token);
+    let settled = false;
+    const settle = (failed) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (failed) {
+        counters.failed += 1;
+      }
+      resolve();
+    };
     const timeout = setTimeout(() => {
-      counters.failed += 1;
       try {
         socket.close();
       } catch {
         // Best effort cleanup only.
       }
-      resolve();
+      settle(true);
     }, 10000);
 
     socket.addEventListener("open", () => {
       clearTimeout(timeout);
       counters.opened += 1;
       sockets[index] = socket;
-      resolve();
+      settle(false);
     });
     socket.addEventListener("error", () => {
       clearTimeout(timeout);
-      counters.failed += 1;
-      resolve();
-    });
-    socket.addEventListener("message", (event) => {
-      try {
-        const message = JSON.parse(String(event.data));
-        if (message.type === "connection.pong") {
-          const id = message.payload?.id;
-          const sentAt = pendingPings.get(id);
-          if (sentAt) {
-            pongLatencies.push(performance.now() - sentAt);
-            pendingPings.delete(id);
-          }
-        }
-      } catch {
-        // Main phase handler counts parse errors after setup.
-      }
+      settle(true);
     });
   });
 }
@@ -460,59 +458,54 @@ function postgresActivity() {
     });
 }
 
-function getAdminToken() {
+async function getAdminToken() {
   if (process.env.IACS_LOAD_TEST_TOKEN) {
-    return process.env.IACS_LOAD_TEST_TOKEN;
+    return process.env.IACS_LOAD_TEST_TOKEN.trim();
   }
-  const script = [
-    "cd /workspace/backend",
-    "python - <<'PY'",
-    "import asyncio",
-    "from sqlalchemy import select",
-    "from app.db.session import AsyncSessionLocal",
-    "from app.models import User",
-    "from app.models.enums import UserRole",
-    "from app.services.auth import create_access_token",
-    "async def main():",
-    "    async with AsyncSessionLocal() as session:",
-    "        user = await session.scalar(",
-    "            select(User).where(User.is_active.is_(True), User.role == UserRole.ADMIN).limit(1)",
-    "        )",
-    "        if not user:",
-    "            return",
-    "        token, _ = await create_access_token(user, remember_me=False)",
-    "        print(token)",
-    "asyncio.run(main())",
-    "PY",
-  ].join("\n");
-  const completed = spawnSync("docker", ["compose", "exec", "-T", "backend", "sh", "-lc", script], {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024,
-  });
-  if (completed.status !== 0) {
-    console.error("warning: failed to generate admin load-test token");
-    return "";
+  if (process.env.IACS_LOAD_TEST_TOKEN_FILE) {
+    return fs.readFileSync(process.env.IACS_LOAD_TEST_TOKEN_FILE, "utf8").trim();
   }
-  return completed.stdout.trim();
+  if (options.tokenStdin) {
+    return (await readStdin()).trim();
+  }
+  console.error(
+    "warning: no load-test token supplied; set IACS_LOAD_TEST_TOKEN, IACS_LOAD_TEST_TOKEN_FILE, or pass --token-stdin",
+  );
+  return "";
 }
 
-function summarizeAutocannon(raw) {
-  if (!raw) {
-    return null;
-  }
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      value += chunk;
+    });
+    process.stdin.on("end", () => resolve(value));
+    process.stdin.on("error", reject);
+  });
+}
+
+function summarizeHttpLoad(stats) {
+  const sorted = [...stats.latencies].sort((a, b) => a - b);
+  const elapsedSeconds = Math.max(stats.elapsedMs / 1000, 0.001);
+  const latencyAverage =
+    stats.latencies.length > 0
+      ? stats.latencies.reduce((sum, value) => sum + value, 0) / stats.latencies.length
+      : 0;
   return {
-    requests_average: raw.requests?.average,
-    requests_total: raw.requests?.total,
-    latency_avg_ms: raw.latency?.average,
-    latency_p50_ms: raw.latency?.p50,
-    latency_p90_ms: raw.latency?.p90,
-    latency_p99_ms: raw.latency?.p99,
-    latency_max_ms: raw.latency?.max,
-    throughput_average_bytes: raw.throughput?.average,
-    errors: raw.errors,
-    timeouts: raw.timeouts,
-    non2xx: raw.non2xx,
-    statusCodeStats: raw.statusCodeStats,
+    requests_average: round(stats.requests / elapsedSeconds),
+    requests_total: stats.requests,
+    latency_avg_ms: round(latencyAverage),
+    latency_p50_ms: sorted.length ? round(percentile(sorted, 50)) : 0,
+    latency_p90_ms: sorted.length ? round(percentile(sorted, 90)) : 0,
+    latency_p99_ms: sorted.length ? round(percentile(sorted, 99)) : 0,
+    latency_max_ms: sorted.length ? round(sorted[sorted.length - 1]) : 0,
+    throughput_average_bytes: round(stats.bytes / elapsedSeconds),
+    errors: stats.errors,
+    timeouts: stats.timeouts,
+    non2xx: stats.non2xx,
+    statusCodeStats: stats.statusCodeStats,
   };
 }
 
@@ -539,7 +532,7 @@ function percentile(sorted, p) {
 function printHttpSummary(phase) {
   const summary = phase.summary;
   if (!summary) {
-    console.log(`${phase.title}: failed to parse autocannon output`);
+    console.log(`${phase.title}: no HTTP load summary available`);
     return;
   }
   console.log(
@@ -583,35 +576,18 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function httpTarget(title, baseUrl, pathname, requiresToken = false) {
+  return {
+    title,
+    url: `${baseUrl}${pathname}`,
+    headers: requiresToken ? authHeaders : undefined,
+    requiresToken,
+  };
+}
+
 function numberArg(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
-}
-
-function parseJsonFromOutput(output) {
-  const lines = output
-    .trim()
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (!lines[index].startsWith("{")) {
-      continue;
-    }
-    const parsed = safeJson(lines[index]);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function sanitizeAutocannonStderr(stderr) {
-  return stderr
-    .split(/\r?\n/)
-    .filter((line) => line && !line.startsWith("npm warn deprecated"))
-    .join("\n")
-    .slice(0, 4000);
 }
 
 function safeJson(value) {
@@ -629,6 +605,206 @@ function respArray(parts) {
 function respBulk(value) {
   const stringValue = String(value);
   return `$${Buffer.byteLength(stringValue)}\r\n${stringValue}\r\n`;
+}
+
+function createAuthenticatedWebSocket(urlText, token) {
+  const url = new URL(urlText);
+  const secure = url.protocol === "wss:";
+  const port = Number(url.port || (secure ? 443 : 80));
+  const hostHeader = url.port ? `${url.hostname}:${url.port}` : url.hostname;
+  const pathAndQuery = `${url.pathname || "/"}${url.search}`;
+  const listeners = { open: [], error: [], message: [], close: [] };
+  let readyState = LOAD_WS_CONNECTING;
+  let handshakeComplete = false;
+  let buffer = Buffer.alloc(0);
+  let closeDispatched = false;
+
+  const socket = secure
+    ? tls.connect({ host: url.hostname, port, servername: url.hostname })
+    : net.connect({ host: url.hostname, port });
+
+  const api = {
+    get readyState() {
+      return readyState;
+    },
+    addEventListener(type, handler) {
+      if (listeners[type]) {
+        listeners[type].push(handler);
+      }
+    },
+    send(message) {
+      if (readyState !== LOAD_WS_OPEN) {
+        return;
+      }
+      sendFrame(socket, 0x1, Buffer.from(String(message)));
+    },
+    close() {
+      if (readyState === LOAD_WS_CLOSED || readyState === LOAD_WS_CLOSING) {
+        return;
+      }
+      readyState = LOAD_WS_CLOSING;
+      try {
+        sendFrame(socket, 0x8, Buffer.alloc(0));
+      } catch {
+        // Best effort cleanup only.
+      }
+      socket.end();
+    },
+  };
+
+  const dispatch = (type, event = {}) => {
+    for (const handler of listeners[type] ?? []) {
+      try {
+        handler(event);
+      } catch {
+        // Load-test callbacks should not crash the runner.
+      }
+    }
+  };
+
+  const fail = (error) => {
+    if (readyState === LOAD_WS_CLOSED) {
+      return;
+    }
+    readyState = LOAD_WS_CLOSED;
+    dispatch("error", { error });
+    socket.destroy();
+  };
+
+  socket.setTimeout(10000, () => fail(new Error("websocket handshake timed out")));
+  socket.on("connect", () => {
+    const key = crypto.randomBytes(16).toString("base64");
+    const request = [
+      `GET ${pathAndQuery} HTTP/1.1`,
+      `Host: ${hostHeader}`,
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Key: ${key}`,
+      "Sec-WebSocket-Version: 13",
+      `Authorization: Bearer ${token}`,
+      "\r\n",
+    ].join("\r\n");
+    socket.write(request);
+  });
+  socket.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    if (!handshakeComplete) {
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) {
+        return;
+      }
+      const header = buffer.subarray(0, headerEnd).toString("utf8");
+      if (!header.startsWith("HTTP/1.1 101") && !header.startsWith("HTTP/1.0 101")) {
+        fail(new Error(`websocket handshake failed: ${header.split("\r\n")[0]}`));
+        return;
+      }
+      buffer = buffer.subarray(headerEnd + 4);
+      handshakeComplete = true;
+      readyState = LOAD_WS_OPEN;
+      socket.setTimeout(0);
+      dispatch("open");
+    }
+    parseWebSocketFrames();
+  });
+  socket.on("error", (error) => fail(error));
+  socket.on("close", () => {
+    readyState = LOAD_WS_CLOSED;
+    if (!closeDispatched) {
+      closeDispatched = true;
+      dispatch("close");
+    }
+  });
+
+  function parseWebSocketFrames() {
+    while (buffer.length >= 2) {
+      const first = buffer[0];
+      const second = buffer[1];
+      const opcode = first & 0x0f;
+      const masked = Boolean(second & 0x80);
+      let length = second & 0x7f;
+      let offset = 2;
+
+      if (length === 126) {
+        if (buffer.length < offset + 2) {
+          return;
+        }
+        length = buffer.readUInt16BE(offset);
+        offset += 2;
+      } else if (length === 127) {
+        if (buffer.length < offset + 8) {
+          return;
+        }
+        const bigLength = buffer.readBigUInt64BE(offset);
+        if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+          fail(new Error("websocket frame too large"));
+          return;
+        }
+        length = Number(bigLength);
+        offset += 8;
+      }
+
+      let mask;
+      if (masked) {
+        if (buffer.length < offset + 4) {
+          return;
+        }
+        mask = buffer.subarray(offset, offset + 4);
+        offset += 4;
+      }
+      if (buffer.length < offset + length) {
+        return;
+      }
+
+      let payload = buffer.subarray(offset, offset + length);
+      buffer = buffer.subarray(offset + length);
+      if (masked && mask) {
+        payload = unmaskPayload(payload, mask);
+      }
+
+      if (opcode === 0x1) {
+        dispatch("message", { data: payload.toString("utf8") });
+      } else if (opcode === 0x8) {
+        api.close();
+        return;
+      } else if (opcode === 0x9) {
+        sendFrame(socket, 0xA, payload);
+      }
+    }
+  }
+
+  return api;
+}
+
+function sendFrame(socket, opcode, payload) {
+  const length = payload.length;
+  const header =
+    length < 126
+      ? Buffer.from([0x80 | opcode, 0x80 | length])
+      : length < 65536
+        ? Buffer.from([0x80 | opcode, 0x80 | 126, (length >> 8) & 0xff, length & 0xff])
+        : websocketLargeFrameHeader(opcode, length);
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.alloc(length);
+  for (let index = 0; index < length; index += 1) {
+    masked[index] = payload[index] ^ mask[index % 4];
+  }
+  socket.write(Buffer.concat([header, mask, masked]));
+}
+
+function websocketLargeFrameHeader(opcode, length) {
+  const header = Buffer.alloc(10);
+  header[0] = 0x80 | opcode;
+  header[1] = 0x80 | 127;
+  header.writeBigUInt64BE(BigInt(length), 2);
+  return header;
+}
+
+function unmaskPayload(payload, mask) {
+  const unmasked = Buffer.alloc(payload.length);
+  for (let index = 0; index < payload.length; index += 1) {
+    unmasked[index] = payload[index] ^ mask[index % 4];
+  }
+  return unmasked;
 }
 
 function sleep(ms) {

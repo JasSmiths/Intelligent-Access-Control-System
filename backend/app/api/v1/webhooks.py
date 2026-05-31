@@ -42,6 +42,7 @@ SMART_ZONE_EVIDENCE_PAYLOAD_KEY = "_iacs_smart_zone_evidence"
 INGEST_METADATA_PAYLOAD_KEY = "_iacs_ingest"
 INGEST_METADATA_VERSION = 1
 PAYLOAD_SHAPE_VERSION = 1
+MAX_LPR_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
 @router.get("/whatsapp", response_class=PlainTextResponse)
@@ -209,6 +210,7 @@ async def receive_ubiquiti_lpr(
 
     runtime = await get_runtime_config()
     verify_lpr_webhook_request(request, runtime=runtime)
+    _reject_oversize_lpr_webhook(request)
 
     webhook_received_at = utc_now()
     raw_payload = await request.json()
@@ -331,6 +333,24 @@ async def receive_ubiquiti_lpr(
     )
     await service.enqueue_plate_read(read)
     return {"status": "accepted", "plate": read.registration_number}
+
+
+def _reject_oversize_lpr_webhook(request: Request) -> None:
+    content_length = request.headers.get("content-length")
+    if not content_length:
+        return
+    try:
+        body_size = int(content_length)
+    except ValueError:
+        return
+    if body_size > MAX_LPR_WEBHOOK_BODY_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "message": "Ubiquiti LPR webhook payload is too large.",
+                "max_bytes": MAX_LPR_WEBHOOK_BODY_BYTES,
+            },
+        )
 
 
 def _smart_zone_evidence_detail(

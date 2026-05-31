@@ -30,11 +30,15 @@ async def test_realtime_websocket_replies_to_client_ping() -> None:
 
 
 @pytest.mark.asyncio
-async def test_realtime_websocket_ignores_non_ping_control_messages() -> None:
+async def test_realtime_websocket_reports_malformed_control_messages() -> None:
     websocket = FakeWebSocket()
 
     await _handle_client_realtime_message(websocket, "not-json")
     await _handle_client_realtime_message(websocket, '{"type":"client.unknown"}')
     await _handle_client_realtime_message(websocket, "[]")
 
-    assert websocket.sent == []
+    assert len(websocket.sent) == 1
+    response = websocket.sent[0]
+    assert response["type"] == "connection.error"
+    assert response["payload"]["detail"] == "Malformed realtime control message ignored."
+    assert response["created_at"]

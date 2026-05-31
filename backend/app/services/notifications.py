@@ -1,7 +1,7 @@
 import json
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import NotificationRule, Person, Presence, Schedule
+from app.models import NotificationRule, NotificationRun, Person, Presence, Schedule
 from app.models.enums import PresenceState
 from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.modules.home_assistant.client import HomeAssistantClient as DefaultHomeAssistantClient, get_home_assistant_client
@@ -111,6 +111,7 @@ class NotificationWorkflowResult:
     skipped_count: int = 0
     failures: list[str] = field(default_factory=list)
     skipped_reasons: list[str] = field(default_factory=list)
+    run_id: str | None = None
 
     @property
     def status(self) -> str:
@@ -680,15 +681,67 @@ class NotificationService:
         raise_on_failure: bool = False,
         rules_override: list[dict[str, Any]] | None = None,
     ) -> ComposedNotification:
+        """Compatibility wrapper.
+
+        Use enqueue_notification() when the caller wants asynchronous workflow
+        delivery, and send_notification_now() when the caller needs immediate
+        delivery status or failures.
+        """
         if raise_on_failure or rules_override is not None:
-            return await self.process_context(
+            return await self.send_notification_now(
                 context,
                 raise_on_failure=raise_on_failure,
                 rules_override=rules_override,
             )
+        return await self.enqueue_notification(context)
 
-        await event_bus.publish("notification.trigger", notification_context_payload(context))
+    async def enqueue_notification(self, context: NotificationContext) -> ComposedNotification:
+        """Publish a notification workflow trigger and return the queued context."""
+        run = await self._create_notification_run(context, status="queued")
+        await event_bus.publish(
+            "notification.trigger",
+            notification_context_payload(context, notification_run_id=str(run.id)),
+        )
         return composed_from_context(context)
+
+    async def send_notification_now(
+        self,
+        context: NotificationContext,
+        *,
+        raise_on_failure: bool = False,
+        rules_override: list[dict[str, Any]] | None = None,
+    ) -> ComposedNotification:
+        """Process notification rules synchronously and return delivery output."""
+        return (
+            await self.send_notification_now_with_result(
+                context,
+                raise_on_failure=raise_on_failure,
+                rules_override=rules_override,
+            )
+        ).notification
+
+    async def send_notification_now_with_result(
+        self,
+        context: NotificationContext,
+        *,
+        raise_on_failure: bool = False,
+        rules_override: list[dict[str, Any]] | None = None,
+    ) -> NotificationWorkflowResult:
+        """Process notification rules synchronously and return durable run state."""
+        run = await self._create_notification_run(context, status="processing")
+        run_context = self._context_with_notification_run_id(context, run.id)
+        try:
+            result = await self.process_context_with_result(
+                run_context,
+                raise_on_failure=raise_on_failure,
+                rules_override=rules_override,
+            )
+        except Exception as exc:
+            await self._finish_notification_run_failed(run.id, exc)
+            raise
+        await self._finish_notification_run(run.id, result)
+        result.run_id = str(run.id)
+        return result
 
     async def process_context(
         self,
@@ -711,6 +764,7 @@ class NotificationService:
         raise_on_failure: bool = False,
         rules_override: list[dict[str, Any]] | None = None,
     ) -> NotificationWorkflowResult:
+        notification_run_id = self._notification_run_id_from_context(context)
         rules = await self._rules_for_context(context, rules_override)
 
         if not rules:
@@ -721,6 +775,7 @@ class NotificationService:
                 notification=composed_from_context(context),
                 skipped_count=1,
                 skipped_reasons=["no_matching_workflow"],
+                run_id=notification_run_id,
             )
 
         first_notification: ComposedNotification | None = None
@@ -769,6 +824,7 @@ class NotificationService:
                 skipped_count=skipped_count,
                 failures=failures,
                 skipped_reasons=skipped_reasons,
+                run_id=notification_run_id,
             )
         if not failures:
             await self._publish_workflow_skip(context, "no_workflow_actions_delivered")
@@ -785,6 +841,7 @@ class NotificationService:
             skipped_count=skipped_count,
             failures=failures,
             skipped_reasons=skipped_reasons,
+            run_id=notification_run_id,
         )
 
     async def _rules_for_context(
@@ -816,6 +873,7 @@ class NotificationService:
         payload = {
             "event_type": context.event_type,
             "malfunction_stage": context.facts.get("malfunction_stage"),
+            "notification_run_id": context.facts.get("notification_run_id"),
             "severity": context.severity,
             "subject": context.subject,
             "reason": reason,
@@ -853,6 +911,98 @@ class NotificationService:
                 "notification_last_fired_update_failed",
                 extra={"rule_id": str(rule_id_value), "error": str(exc)},
             )
+
+    async def _create_notification_run(
+        self,
+        context: NotificationContext,
+        *,
+        status: str,
+    ) -> NotificationRun:
+        now = datetime.now(UTC)
+        row = NotificationRun(
+            id=uuid.uuid4(),
+            trigger_event=context.event_type,
+            subject=context.subject[:255],
+            severity=context.severity,
+            status=status,
+            context=notification_context_payload(context),
+            queued_at=now,
+            started_at=now if status == "processing" else None,
+        )
+        async with AsyncSessionLocal() as session:
+            session.add(row)
+            await session.commit()
+        return row
+
+    async def _mark_notification_run_started(self, run_id: uuid.UUID) -> None:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(NotificationRun, run_id)
+            if row is None:
+                return
+            row.status = "processing"
+            row.started_at = row.started_at or datetime.now(UTC)
+            await session.commit()
+
+    async def _finish_notification_run(
+        self,
+        run_id: uuid.UUID,
+        result: NotificationWorkflowResult,
+    ) -> None:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(NotificationRun, run_id)
+            if row is None:
+                return
+            row.status = self._notification_run_status(result)
+            row.started_at = row.started_at or datetime.now(UTC)
+            row.finished_at = datetime.now(UTC)
+            row.delivered_count = result.delivered_count
+            row.failed_count = result.failed_count
+            row.skipped_count = result.skipped_count
+            row.failures = list(result.failures)
+            row.skipped_reasons = list(result.skipped_reasons)
+            row.error = "; ".join(result.failures) or None
+            await session.commit()
+
+    async def _finish_notification_run_failed(self, run_id: uuid.UUID, exc: Exception) -> None:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(NotificationRun, run_id)
+            if row is None:
+                return
+            row.status = "failed"
+            row.started_at = row.started_at or datetime.now(UTC)
+            row.finished_at = datetime.now(UTC)
+            row.failed_count = max(1, int(row.failed_count or 0))
+            row.failures = [str(exc)]
+            row.error = str(exc)
+            await session.commit()
+
+    def _context_with_notification_run_id(
+        self,
+        context: NotificationContext,
+        run_id: uuid.UUID,
+    ) -> NotificationContext:
+        return replace(context, facts={**context.facts, "notification_run_id": str(run_id)})
+
+    def _notification_run_id_from_context(self, context: NotificationContext) -> str | None:
+        value = str(context.facts.get("notification_run_id") or "").strip()
+        return value or None
+
+    def _parse_notification_run_id(self, value: str | uuid.UUID | None) -> uuid.UUID | None:
+        if isinstance(value, uuid.UUID):
+            return value
+        if not value:
+            return None
+        try:
+            return uuid.UUID(str(value))
+        except ValueError:
+            return None
+
+    def _notification_run_status(self, result: NotificationWorkflowResult) -> str:
+        if result.delivered_count > 0:
+            return "provider_accepted"
+        if result.failed_count > 0 or result.failures:
+            return "failed"
+        return "skipped"
 
     async def conditions_match(
         self,
@@ -981,6 +1131,7 @@ class NotificationService:
             skipped_count=skipped_count,
             failures=failures,
             skipped_reasons=skipped_reasons,
+            run_id=self._notification_run_id_from_context(context),
         )
 
     def render_rule(
@@ -1046,7 +1197,19 @@ class NotificationService:
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "notification.trigger":
-            await self.process_context(notification_context_from_payload(event.payload))
+            context = notification_context_from_payload(event.payload)
+            notification_run_id = self._notification_run_id_from_context(context)
+            parsed_run_id = self._parse_notification_run_id(notification_run_id)
+            if parsed_run_id:
+                await self._mark_notification_run_started(parsed_run_id)
+            try:
+                result = await self.process_context_with_result(context)
+            except Exception as exc:
+                if parsed_run_id:
+                    await self._finish_notification_run_failed(parsed_run_id, exc)
+                raise
+            if parsed_run_id:
+                await self._finish_notification_run(parsed_run_id, result)
             return
         for context in visitor_pass_notification_contexts_from_event(event):
             await self.process_context(context)
@@ -1808,6 +1971,7 @@ class NotificationService:
             "body": action.get("message") or "",
             "event_type": context.event_type,
             "malfunction_stage": context.facts.get("malfunction_stage"),
+            "notification_run_id": context.facts.get("notification_run_id"),
             "severity": context.severity,
             "configured": True,
             "delivered": delivered,
@@ -1817,12 +1981,20 @@ class NotificationService:
         }
 
 
-def notification_context_payload(context: NotificationContext) -> dict[str, Any]:
+def notification_context_payload(
+    context: NotificationContext,
+    *,
+    notification_run_id: str | None = None,
+) -> dict[str, Any]:
+    facts = dict(context.facts)
+    if notification_run_id:
+        facts["notification_run_id"] = notification_run_id
     return {
         "event_type": context.event_type,
         "subject": context.subject,
         "severity": context.severity,
-        "facts": dict(context.facts),
+        "facts": facts,
+        "notification_run_id": notification_run_id or facts.get("notification_run_id"),
     }
 
 
@@ -2042,6 +2214,9 @@ def _visitor_pass_text(value: Any) -> str:
 
 def notification_context_from_payload(payload: dict[str, Any]) -> NotificationContext:
     facts = as_dict(payload.get("facts"))
+    notification_run_id = str(payload.get("notification_run_id") or "").strip()
+    if notification_run_id:
+        facts["notification_run_id"] = notification_run_id
     return NotificationContext(
         event_type=str(payload.get("event_type") or payload.get("trigger_event") or "integration_test"),
         subject=str(payload.get("subject") or facts.get("subject") or "Notification event"),

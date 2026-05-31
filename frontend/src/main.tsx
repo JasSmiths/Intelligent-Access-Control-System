@@ -46,6 +46,7 @@ X
 import React from "react";
 import { createPortal } from "react-dom";
 import ReactDOM from "react-dom/client";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import "./styles.css";
 
 import {
@@ -2532,7 +2533,7 @@ function View(props: {
       content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
       break;
     case "integrations":
-      content = <IntegrationsView people={props.people} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
+      content = <IntegrationsView currentUser={props.currentUser} people={props.people} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
       content = <LogsView refreshToken={props.dataRefreshToken} />;
@@ -2541,20 +2542,20 @@ function View(props: {
       content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_gates":
-      content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
     case "settings_garage_doors":
-      content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
-	    case "settings_auth":
-	      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
-	      break;
-	    case "alfred_training":
-	      content = props.currentUser.role === "admin"
-	        ? <AlfredTrainingView refreshToken={props.dataRefreshToken} />
-	        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
-	      break;
-	    case "settings_automations":
+    case "settings_auth":
+      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      break;
+    case "alfred_training":
+      content = props.currentUser.role === "admin"
+        ? <AlfredTrainingView refreshToken={props.dataRefreshToken} />
+        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
+      break;
+    case "settings_automations":
       content = <AutomationsView people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
       break;
     case "settings_notifications":
@@ -2578,7 +2579,11 @@ function View(props: {
       content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;
       break;
   }
-  return <React.Suspense fallback={<RouteLoading />}>{content}</React.Suspense>;
+  return (
+    <RouteErrorBoundary view={props.view}>
+      <React.Suspense fallback={<RouteLoading />}>{content}</React.Suspense>
+    </RouteErrorBoundary>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

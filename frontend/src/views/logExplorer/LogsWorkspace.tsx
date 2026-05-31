@@ -99,7 +99,10 @@ export function LogsWorkspace({
         target_label: "All logs",
         reason: "Clear telemetry, audit history, artifacts, and file logs"
       });
-      await api.delete(`/api/v1/telemetry/purge?scope=full&confirmation_token=${encodeURIComponent(confirmation.confirmation_token)}`);
+      await api.delete("/api/v1/telemetry/purge", {
+        scope: "full",
+        confirmation_token: confirmation.confirmation_token
+      });
       clearRecords();
       clearTraceDetails();
       await refresh();

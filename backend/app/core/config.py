@@ -1,8 +1,12 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_POSTGRES_PASSWORD = "iacs_dev_password"
+DEVELOPMENT_ENVIRONMENTS = {"development", "dev", "local", "test", "testing"}
 
 
 class Settings(BaseSettings):
@@ -33,9 +37,11 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])
+    trusted_proxy_ips: list[str] = Field(default_factory=list)
     public_base_url: AnyHttpUrl | None = None
     root_path: str = ""
     auto_create_schema: bool = True
+    legacy_schema_bootstrap: bool = False
     seed_demo_data: bool = False
 
     auth_secret_key: str = ""
@@ -83,9 +89,9 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
-    @field_validator("trusted_hosts", mode="before")
+    @field_validator("trusted_hosts", "trusted_proxy_ips", mode="before")
     @classmethod
-    def parse_trusted_hosts(_cls, value: str | list[str]) -> list[str]:
+    def parse_string_list(_cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [host.strip() for host in value.split(",") if host.strip()]
         return value
@@ -115,3 +121,24 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def validate_startup_security_config(config: Settings = settings) -> None:
+    """Reject production-like starts that still use local development secrets."""
+
+    environment = (config.environment or "").strip().lower()
+    if environment in DEVELOPMENT_ENVIRONMENTS:
+        return
+    if _database_password(config.database_url) == DEFAULT_POSTGRES_PASSWORD:
+        raise RuntimeError(
+            "Refusing to start IACS with the default Postgres password outside development. "
+            "Set POSTGRES_PASSWORD/IACS_DATABASE_URL to a unique secret before production or LAN use."
+        )
+
+
+def _database_password(database_url: str) -> str:
+    try:
+        parsed = urlsplit(database_url)
+    except ValueError:
+        return ""
+    return unquote(parsed.password or "")

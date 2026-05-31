@@ -1315,6 +1315,12 @@ async def test_rule_test_endpoint_propagates_delivery_failures(monkeypatch) -> N
         async def process_context(self, *_args, **_kwargs):
             raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
 
+        async def send_notification_now(self, *_args, **_kwargs):
+            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+
+        async def send_notification_now_with_result(self, *_args, **_kwargs):
+            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+
     rule_id = uuid.uuid4()
     now = datetime(2026, 4, 26, 18, 42, tzinfo=UTC)
     session = FakeRuleSession(
@@ -1839,6 +1845,79 @@ async def test_process_context_with_result_reports_delivery_status(monkeypatch) 
     assert result.status == "sent"
     assert result.delivered_count == 1
     assert result.failed_count == 0
+
+
+async def test_notification_service_exposes_distinct_enqueue_and_send_apis(monkeypatch) -> None:
+    published: list[tuple[str, dict[str, Any]]] = []
+    created_runs: list[tuple[str, NotificationContext]] = []
+    finished_runs: list[tuple[uuid.UUID, NotificationWorkflowResult]] = []
+
+    async def fake_publish(event_type: str, payload: dict[str, Any]) -> None:
+        published.append((event_type, payload))
+
+    async def fake_runtime_config():
+        return SimpleNamespace()
+
+    async def fake_create_run(
+        self: NotificationService,
+        context: NotificationContext,
+        *,
+        status: str,
+    ):
+        created_runs.append((status, context))
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def fake_finish_run(
+        self: NotificationService,
+        run_id: uuid.UUID,
+        result: NotificationWorkflowResult,
+    ) -> None:
+        finished_runs.append((run_id, result))
+
+    monkeypatch.setattr("app.services.notifications.event_bus.publish", fake_publish)
+    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(NotificationService, "_create_notification_run", fake_create_run)
+    monkeypatch.setattr(NotificationService, "_finish_notification_run", fake_finish_run)
+
+    context = NotificationContext(
+        event_type="authorized_entry",
+        subject="Steph arrived",
+        severity="info",
+        facts={"first_name": "Steph", "message": "Gate opened"},
+    )
+
+    queued = await NotificationService().enqueue_notification(context)
+    sent = await NotificationService().send_notification_now_with_result(
+        context,
+        rules_override=[
+            {
+                "id": "rule-1",
+                "name": "Dashboard alert",
+                "trigger_event": "authorized_entry",
+                "conditions": [],
+                "actions": [
+                    {
+                        "type": "in_app",
+                        "title_template": "@FirstName arrived",
+                        "message_template": "@Message",
+                    }
+                ],
+                "is_active": True,
+            }
+        ],
+    )
+
+    assert queued.title == "Steph arrived"
+    assert sent.notification.title == "Steph arrived"
+    assert sent.run_id is not None
+    assert created_runs[0][0] == "queued"
+    assert created_runs[1][0] == "processing"
+    assert finished_runs[0][1].run_id == sent.run_id
+    assert published[0][0] == "notification.trigger"
+    assert published[0][1]["notification_run_id"]
+    assert published[1][0] == "notification.in_app"
+    assert published[2][0] == "notification.sent"
+    assert published[2][1]["notification_run_id"] == sent.run_id
 
 
 async def test_notification_rule_last_fired_timestamp_is_persisted(monkeypatch) -> None:

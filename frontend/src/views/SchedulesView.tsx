@@ -20,6 +20,7 @@ import {
 api,
 Badge,
 BadgeTone,
+createActionConfirmation,
 EmptyState,
 matches,
 Schedule,
@@ -132,7 +133,16 @@ export function SchedulesView({
     if (!window.confirm(`Delete ${schedule.name}?`)) return;
     setError("");
     try {
-      await api.delete(`/api/v1/schedules/${schedule.id}`);
+      const confirmationPayload = { schedule_id: schedule.id };
+      const confirmation = await createActionConfirmation("schedule.delete", confirmationPayload, {
+        target_entity: "Schedule",
+        target_id: schedule.id,
+        target_label: schedule.name,
+        reason: "Delete access schedule"
+      });
+      await api.delete(`/api/v1/schedules/${schedule.id}`, {
+        confirmation_token: confirmation.confirmation_token
+      });
       await refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete schedule");
@@ -145,7 +155,13 @@ export function SchedulesView({
     setPolicySaved("");
     setPolicySaving(true);
     try {
-      await accessSettings.save({ schedule_default_policy: policy });
+      const values = { schedule_default_policy: policy };
+      const confirmation = await createActionConfirmation("settings.update", { values }, {
+        target_entity: "SystemSetting",
+        target_label: "Schedule default policy",
+        reason: "Update default access schedule policy"
+      });
+      await accessSettings.save(values, { confirmationToken: confirmation.confirmation_token });
       setPolicySaved("Default policy saved.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save default policy");
@@ -326,9 +342,26 @@ export function ScheduleModal({
     };
     try {
       if (mode === "edit" && schedule) {
-        await api.patch<Schedule>(`/api/v1/schedules/${schedule.id}`, payload);
+        const confirmation = await createActionConfirmation("schedule.update", { ...payload, schedule_id: schedule.id }, {
+          target_entity: "Schedule",
+          target_id: schedule.id,
+          target_label: payload.name,
+          reason: "Update access schedule"
+        });
+        await api.patch<Schedule>(`/api/v1/schedules/${schedule.id}`, {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       } else {
-        await api.post<Schedule>("/api/v1/schedules", payload);
+        const confirmation = await createActionConfirmation("schedule.create", payload, {
+          target_entity: "Schedule",
+          target_label: payload.name,
+          reason: "Create access schedule"
+        });
+        await api.post<Schedule>("/api/v1/schedules", {
+          ...payload,
+          confirmation_token: confirmation.confirmation_token
+        });
       }
       await onSaved();
     } catch (saveError) {

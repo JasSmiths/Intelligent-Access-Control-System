@@ -1,4 +1,6 @@
 from datetime import UTC, datetime, timedelta
+import hashlib
+import hmac
 from types import SimpleNamespace
 from typing import Any
 import uuid
@@ -591,6 +593,66 @@ def test_alfred_registers_automation_tool_metadata() -> None:
     assert tools["edit_automation"].requires_confirmation is True
     assert tools["delete_automation"].requires_confirmation is True
     assert "Automations" in tools["create_automation"].categories
+
+
+def test_webhook_triggers_generate_high_entropy_keys_when_requested() -> None:
+    triggers = normalize_triggers(
+        [{"type": "webhook.received", "config": {"webhook_key": "legacy-hook"}}],
+        generate_webhook_keys=True,
+    )
+
+    config = triggers[0]["config"]
+    assert automations.is_high_entropy_webhook_key(config["webhook_key"])
+    assert config["webhook_key_strength"] == "server_generated"
+
+
+def test_high_impact_webhook_triggers_require_hmac_without_source_allowlist() -> None:
+    triggers = normalize_triggers(
+        [{"type": "webhook.received", "config": {"webhook_key": "legacy-hook"}}],
+        generate_webhook_keys=True,
+    )
+    actions = normalize_actions([{"type": "gate.open", "config": {"reason": "test"}}])
+
+    automations.harden_webhook_triggers_for_actions(triggers, actions)
+
+    config = triggers[0]["config"]
+    assert automations.is_high_entropy_webhook_key(config["webhook_key"])
+    assert config["require_hmac"] is True
+    assert config["rate_limit_per_minute"] == automations.WEBHOOK_RATE_LIMIT_PER_MINUTE
+
+
+def test_webhook_hmac_and_source_policy_helpers() -> None:
+    key = automations.generate_automation_webhook_key()
+    now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
+    timestamp = str(int(now.timestamp()))
+    nonce = "nonce-1"
+    raw_body = b'{"ok":true}'
+    signature = hmac.new(
+        key.encode(),
+        b".".join([timestamp.encode(), nonce.encode(), raw_body]),
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert automations.verify_webhook_hmac(
+        key,
+        raw_body,
+        signature=f"sha256={signature}",
+        timestamp=timestamp,
+        nonce=nonce,
+        window_seconds=300,
+        now=now,
+    )
+    assert not automations.verify_webhook_hmac(
+        key,
+        raw_body,
+        signature=signature,
+        timestamp=str(int((now - timedelta(minutes=10)).timestamp())),
+        nonce=nonce,
+        window_seconds=300,
+        now=now,
+    )
+    assert automations.webhook_source_allowed("192.0.2.10", ["192.0.2.0/24"])
+    assert not automations.webhook_source_allowed("198.51.100.10", ["192.0.2.0/24"])
 
 
 @pytest.mark.asyncio

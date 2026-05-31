@@ -62,6 +62,7 @@ class FullAccessFlowRequest(BaseModel):
     start_at: datetime | None = None
     scenario_ids: list[str] | None = Field(default=None, min_length=1)
     include_debug: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class SimulationIssue(BaseModel):

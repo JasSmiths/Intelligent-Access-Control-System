@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import User
@@ -21,7 +22,13 @@ from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
-from app.services.settings import get_runtime_config, list_settings, update_settings
+from app.services.settings import (
+    UnknownDynamicSettingsError,
+    get_runtime_config,
+    list_settings,
+    update_settings,
+    validate_dynamic_setting_keys,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -37,6 +44,7 @@ router = APIRouter()
 
 class SettingsUpdateRequest(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ConnectionTestRequest(BaseModel):
@@ -93,9 +101,38 @@ async def rotate_auth_secret_endpoint(
 async def patch_settings(
     request: SettingsUpdateRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, Any]]:
+    try:
+        validate_dynamic_setting_keys(request.values)
+    except UnknownDynamicSettingsError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": str(exc),
+                "unknown_keys": exc.unknown_keys,
+                "allowed_keys": exc.allowed_keys,
+            },
+        ) from exc
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="settings.update",
+        payload={"values": request.values},
+        confirmation_token=request.confirmation_token,
+    )
     before = {row["key"]: row["value"] for row in await list_settings()}
-    rows = await update_settings(request.values)
+    try:
+        rows = await update_settings(request.values)
+    except UnknownDynamicSettingsError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": str(exc),
+                "unknown_keys": exc.unknown_keys,
+                "allowed_keys": exc.allowed_keys,
+            },
+        ) from exc
     after = {row["key"]: row["value"] for row in rows}
     changed = {key: after.get(key) for key in request.values if before.get(key) != after.get(key)}
     if changed:

@@ -280,7 +280,7 @@ async def test_notification_rule_payload(
         else sample_notification_context(str(rule["trigger_event"]))
     )
     try:
-        notification = await get_notification_service().process_context(
+        result = await get_notification_service().send_notification_now_with_result(
             context,
             raise_on_failure=True,
             rules_override=[rule],
@@ -304,8 +304,10 @@ async def test_notification_rule_payload(
     )
     return {
         "status": "sent",
-        "title": notification.title,
-        "body": notification.body,
+        "delivery_status": result.status,
+        "notification_run_id": result.run_id,
+        "title": result.notification.title,
+        "body": result.notification.body,
         "preview": await get_notification_service().preview_rule(rule, context),
     }
 
@@ -328,7 +330,7 @@ async def test_notification_rule(
     )
     context = sample_notification_context(serialized["trigger_event"])
     try:
-        notification = await get_notification_service().process_context(
+        result = await get_notification_service().send_notification_now_with_result(
             context,
             raise_on_failure=True,
             rules_override=[serialized],
@@ -354,8 +356,10 @@ async def test_notification_rule(
     )
     return {
         "status": "sent",
-        "title": notification.title,
-        "body": notification.body,
+        "delivery_status": result.status,
+        "notification_run_id": result.run_id,
+        "title": result.notification.title,
+        "body": result.notification.body,
         "preview": await get_notification_service().preview_rule(serialized, context),
     }
 

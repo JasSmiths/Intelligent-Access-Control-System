@@ -65,11 +65,8 @@ WebSocket traffic to the backend container over the Docker network.
 
 ## Concept Reference
 
-Accepted layout concept:
-
-```text
-/Users/jas/.codex/generated_images/019dbc4e-2adb-7a20-8ccf-4f6a46682281/ig_05dd6360a0b3f49b0169eaa033eb908191b3423ff819aa3979.png
-```
+Accepted layout concept: generated locally during design exploration; the
+implemented inventory below is the durable reference for this repository.
 
 Implemented design inventory:
 
@@ -84,8 +81,10 @@ Implemented design inventory:
 
 ## Verification
 
+- `npm run test`
 - `npm run build`
 - `python3 -m compileall -q backend/app`
+- `docker compose exec -T backend sh -lc 'cd /workspace/backend && alembic upgrade head && alembic current'`
 - `docker compose config --quiet`
 - `GET http://localhost:8089/api/v1/health`
 - `GET http://localhost:8089/api/v1/auth/status`

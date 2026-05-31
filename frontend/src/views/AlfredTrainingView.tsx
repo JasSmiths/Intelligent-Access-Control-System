@@ -1,7 +1,7 @@
 import { Bot,Check,Download,Link2,Loader2,RefreshCw,ThumbsDown,ThumbsUp,X } from "lucide-react";
 import React from "react";
 
-import { api,Badge,titleCase,useSettings } from "../shared";
+import { api,Badge,createActionConfirmation,titleCase,useSettings } from "../shared";
 
 type AlfredTrainingSource = {
   kind: "user_feedback" | "self_learning" | "manual_training" | "seed" | "system" | string;
@@ -151,7 +151,14 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
     if (modeSaving || learningMode === nextMode) return;
     setModeSaving(true);
     try {
-      await settings.save({ alfred_learning_mode: nextMode });
+      const values = { alfred_learning_mode: nextMode };
+      const confirmation = await createActionConfirmation("settings.update", { values }, {
+        target_entity: "SystemSetting",
+        target_id: "alfred_learning_mode",
+        target_label: titleCase(nextMode.replace(/_/g, " ")),
+        reason: "Update Alfred learning mode"
+      });
+      await settings.save(values, { confirmationToken: confirmation.confirmation_token });
     } finally {
       setModeSaving(false);
     }

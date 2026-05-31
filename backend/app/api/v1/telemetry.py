@@ -4,8 +4,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import String, and_, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -26,6 +27,11 @@ from app.services.telemetry import (
 )
 
 router = APIRouter()
+
+
+class TelemetryPurgeRequest(BaseModel):
+    scope: str = Field(default="telemetry", pattern="^(telemetry|full)$")
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 @router.get("/categories")
@@ -254,11 +260,11 @@ async def telemetry_storage(
 
 @router.delete("/purge")
 async def purge_telemetry(
-    scope: str = Query(default="telemetry", pattern="^(telemetry|full)$"),
-    confirmation_token: str | None = Query(default=None, max_length=160),
+    request: TelemetryPurgeRequest | None = Body(default=None),
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    scope = request.scope if request else "telemetry"
     confirmation_payload = {"scope": scope}
     try:
         await consume_action_confirmation(
@@ -266,7 +272,7 @@ async def purge_telemetry(
             user=user,
             action="telemetry.purge",
             payload=confirmation_payload,
-            confirmation_token=confirmation_token,
+            confirmation_token=request.confirmation_token if request else None,
         )
     except ActionConfirmationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

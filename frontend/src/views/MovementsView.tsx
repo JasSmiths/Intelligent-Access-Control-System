@@ -1,5 +1,7 @@
 import {
 AlertTriangle,
+ArrowLeft,
+ArrowRight,
 CheckCircle2,
 Clock3,
 MoveHorizontal,
@@ -76,6 +78,8 @@ const FILTERS: Array<{ key: MovementFilter; label: string }> = [
   { key: "suppressed", label: "Suppressed" }
 ];
 
+const MOVEMENTS_PAGE_SIZE = 7;
+
 export function MovementsView({ query, refreshToken }: { query: string; refreshToken: number }) {
   const [movements, setMovements] = React.useState<MovementRecord[]>([]);
   const [selected, setSelected] = React.useState<MovementRecord | null>(null);
@@ -84,6 +88,7 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const [page, setPage] = React.useState(0);
   const deferredQuery = React.useDeferredValue(query);
   const movementsLoadSequenceRef = React.useRef(0);
   const movementsLoadAbortRef = React.useRef<AbortController | null>(null);
@@ -187,6 +192,26 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
     return (filter === "all" || filter === category) && textMatches;
   }), [deferredQuery, filter, movements]);
 
+  const pageCount = React.useMemo(
+    () => Math.max(1, Math.ceil(visibleMovements.length / MOVEMENTS_PAGE_SIZE)),
+    [visibleMovements.length]
+  );
+  const pagedMovements = React.useMemo(
+    () => visibleMovements.slice(page * MOVEMENTS_PAGE_SIZE, (page + 1) * MOVEMENTS_PAGE_SIZE),
+    [page, visibleMovements]
+  );
+
+  const firstItem = page * MOVEMENTS_PAGE_SIZE + 1;
+  const lastItem = Math.min(visibleMovements.length, (page + 1) * MOVEMENTS_PAGE_SIZE);
+
+  React.useEffect(() => {
+    setPage(0);
+  }, [deferredQuery, filter]);
+
+  React.useEffect(() => {
+    setPage((p) => Math.min(p, pageCount - 1));
+  }, [pageCount]);
+
   const selectMovement = async (movement: MovementRecord) => {
     await loadMovementDetail(movement);
   };
@@ -242,7 +267,7 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
               </tr>
             </thead>
             <tbody>
-              {visibleMovements.map((movement) => {
+              {pagedMovements.map((movement) => {
                 const display = movementSagaDisplay(movement);
                 return (
                   <tr
@@ -264,6 +289,36 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
               })}
             </tbody>
           </table>
+          {visibleMovements.length > MOVEMENTS_PAGE_SIZE ? (
+            <div
+              className="top-charts-pagination"
+              style={{ padding: "8px 12px", borderTop: "1px solid var(--line)" }}
+              aria-label="Movements pagination"
+            >
+              <span>{firstItem}-{lastItem} of {visibleMovements.length}</span>
+              <div className="top-charts-pagination-controls">
+                <button
+                  aria-label="Previous page"
+                  className="icon-button top-charts-page-button"
+                  disabled={page === 0}
+                  onClick={() => setPage(Math.max(0, page - 1))}
+                  type="button"
+                >
+                  <ArrowLeft size={15} />
+                </button>
+                <span>Page {page + 1} of {pageCount}</span>
+                <button
+                  aria-label="Next page"
+                  className="icon-button top-charts-page-button"
+                  disabled={page >= pageCount - 1}
+                  onClick={() => setPage(Math.min(pageCount - 1, page + 1))}
+                  type="button"
+                >
+                  <ArrowRight size={15} />
+                </button>
+              </div>
+            </div>
+          ) : null}
           {!loading && !visibleMovements.length ? <EmptyState icon={Clock3} label="No movements match this filter." /> : null}
         </div>
 

@@ -1,13 +1,14 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import current_user
+from app.api.confirmations import require_confirmed_action
+from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import Schedule, User
 from app.services.schedules import empty_time_blocks, normalize_time_blocks, schedule_dependencies
@@ -25,6 +26,11 @@ class ScheduleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = None
     time_blocks: dict[str, list[dict[str, str]]] = Field(default_factory=empty_time_blocks)
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class ScheduleDeleteRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ScheduleResponse(BaseModel):
@@ -74,9 +80,17 @@ async def list_schedules(
 @router.post("", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
     request: ScheduleRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ScheduleResponse:
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="schedule.create",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
         time_blocks = normalize_time_blocks(request.time_blocks)
     except (TypeError, ValueError) as exc:
@@ -126,12 +140,21 @@ async def get_schedule(
 async def update_schedule(
     schedule_id: uuid.UUID,
     request: ScheduleRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ScheduleResponse:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
+    confirmation_payload["schedule_id"] = str(schedule_id)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="schedule.update",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     before = schedule_audit_snapshot(schedule)
     try:
         schedule.time_blocks = normalize_time_blocks(request.time_blocks)
@@ -176,12 +199,20 @@ async def get_schedule_dependencies(
 @router.delete("/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_schedule(
     schedule_id: uuid.UUID,
-    user: User = Depends(current_user),
+    request: ScheduleDeleteRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="schedule.delete",
+        payload={"schedule_id": str(schedule_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
 
     dependencies = await schedule_dependencies(session, schedule_id)
     if any(dependencies.values()):

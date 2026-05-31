@@ -477,7 +477,7 @@
   border-top: 0;
 }
 
-.movement-command-row span,
+.movement-command-row > div span,
 .movement-history span {
   display: block;
   color: var(--muted);

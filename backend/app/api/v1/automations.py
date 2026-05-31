@@ -10,6 +10,9 @@ from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import AutomationRule, User
 from app.services.automations import (
+    WEBHOOK_NONCE_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
+    WEBHOOK_TIMESTAMP_HEADER,
     AutomationError,
     get_automation_service,
     normalize_actions,
@@ -216,9 +219,10 @@ async def receive_automation_webhook(
     webhook_key: str,
     request: Request,
 ) -> dict[str, Any]:
+    raw_body = await request.body()
     try:
-        payload = await request.json()
-    except json.JSONDecodeError as exc:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid automation webhook JSON.",
@@ -226,11 +230,19 @@ async def receive_automation_webhook(
     if not isinstance(payload, dict):
         payload = {"value": payload}
     source_ip = request.client.host if request.client else "unknown"
-    return await get_automation_service().handle_webhook(
-        webhook_key,
-        payload,
-        source_ip=source_ip,
-    )
+    try:
+        return await get_automation_service().handle_webhook(
+            webhook_key,
+            payload,
+            source_ip=source_ip,
+            raw_body=raw_body,
+            signature=request.headers.get(WEBHOOK_SIGNATURE_HEADER),
+            signature_timestamp=request.headers.get(WEBHOOK_TIMESTAMP_HEADER),
+            nonce=request.headers.get(WEBHOOK_NONCE_HEADER),
+        )
+    except AutomationError as exc:
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS if "rate limit" in str(exc).lower() else status.HTTP_403_FORBIDDEN
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 async def get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> AutomationRule:
