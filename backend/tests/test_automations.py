@@ -27,7 +27,6 @@ from app.services.automations import (
     build_context_variables,
     context_missing_references,
     cron_from_recurrence,
-    deterministic_schedule_parse,
     due_time_trigger,
     facts_from_payload,
     next_run_for_trigger,
@@ -509,15 +508,17 @@ async def test_dry_run_previews_integration_actions_without_executing(monkeypatc
     assert calls == []
 
 
-def test_ai_schedule_parser_validation_handles_thursday_until_june() -> None:
+def test_ai_schedule_validation_accepts_current_llm_cron_shape() -> None:
     now = datetime(2026, 4, 30, 10, 0, tzinfo=ZoneInfo("Europe/London"))
-    parsed = deterministic_schedule_parse(
-        "Every Thursday at 9pm until 4th June",
-        now=now,
-        timezone_name="Europe/London",
-    )
     validated = validate_schedule_parse(
-        parsed,
+        {
+            "cron_expression": "0 21 * * 4",
+            "end_at": "2026-06-04T23:59:59+01:00",
+            "timezone": "Europe/London",
+            "summary": "Every Thursday at 9pm until 4th June",
+            "confidence": 0.9,
+            "ambiguity_notes": [],
+        },
         now=now,
         timezone_name="Europe/London",
         raw_text="",
@@ -527,6 +528,25 @@ def test_ai_schedule_parser_validation_handles_thursday_until_june() -> None:
     assert validated["end_at"] == "2026-06-04T23:59:59+01:00"
     assert validated["next_run_at"] == "2026-04-30T20:00:00+00:00"
     assert validated["requires_review"] is False
+
+
+@pytest.mark.asyncio
+async def test_ai_schedule_parser_fails_closed_without_deterministic_guess(monkeypatch) -> None:
+    async def fake_runtime_config():
+        return SimpleNamespace(site_timezone="Europe/London", llm_provider="openai")
+
+    def unavailable_provider(_provider_name):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(automations, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(automations, "get_llm_provider", unavailable_provider)
+
+    parsed = await AutomationService().parse_ai_schedule("Every Thursday at 9pm until 4th June")
+
+    assert parsed["cron_expression"] == ""
+    assert parsed["next_run_at"] is None
+    assert parsed["requires_review"] is True
+    assert "No cron_expression or run_at was returned." in parsed["errors"]
 
 
 def test_scheduler_next_run_and_due_trigger_helpers() -> None:
@@ -541,7 +561,7 @@ def test_scheduler_next_run_and_due_trigger_helpers() -> None:
     assert cron_from_recurrence(weekly_start, "weekly") == "0 21 * * 4"
 
 
-def test_malformed_every_x_interval_falls_back_safely() -> None:
+def test_malformed_every_x_interval_defaults_safely() -> None:
     now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
     trigger = normalize_triggers(
         [{"type": "time.every_x", "config": {"interval": "not-a-number", "unit": "hours"}}]
@@ -597,7 +617,7 @@ def test_alfred_registers_automation_tool_metadata() -> None:
 
 def test_webhook_triggers_generate_high_entropy_keys_when_requested() -> None:
     triggers = normalize_triggers(
-        [{"type": "webhook.received", "config": {"webhook_key": "legacy-hook"}}],
+        [{"type": "webhook.received", "config": {"webhook_key": "weak-hook"}}],
         generate_webhook_keys=True,
     )
 
@@ -606,9 +626,9 @@ def test_webhook_triggers_generate_high_entropy_keys_when_requested() -> None:
     assert config["webhook_key_strength"] == "server_generated"
 
 
-def test_high_impact_webhook_triggers_require_hmac_without_source_allowlist() -> None:
+def test_high_impact_webhook_triggers_require_hmac_for_hardware_actions() -> None:
     triggers = normalize_triggers(
-        [{"type": "webhook.received", "config": {"webhook_key": "legacy-hook"}}],
+        [{"type": "webhook.received", "config": {"webhook_key": "weak-hook"}}],
         generate_webhook_keys=True,
     )
     actions = normalize_actions([{"type": "gate.open", "config": {"reason": "test"}}])

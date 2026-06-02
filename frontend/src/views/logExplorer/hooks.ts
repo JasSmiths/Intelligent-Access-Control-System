@@ -1,11 +1,7 @@
 import React from "react";
 
-import {
-  api,
-  AuditLog,
-  isAbortError,
-  RealtimeMessage
-} from "../../shared";
+import { api, isAbortError } from "../../api/client";
+import type { AuditLog } from "../../api/types";
 import {
   GateMalfunctionRecord,
   LogRecord,
@@ -18,15 +14,12 @@ import {
   TraceDetailState
 } from "./types";
 import {
-  auditLogFromRealtimePayload,
   auditRecord,
   buildAuditParams,
   buildSummaryParams,
   buildTraceParams,
   gateMalfunctionRecordToTrace,
   gateMalfunctionRecordToTraceDetail,
-  liveRecord,
-  realtimeLogKey,
   sourceUsesAudit,
   sourceUsesTraces,
   timeRangeFrom,
@@ -37,45 +30,6 @@ const emptyTraceDetailState: TraceDetailState = { loading: false, error: "", det
 const TRACE_DETAIL_CACHE_LIMIT = 12;
 
 type LoadMode = "reset" | "append";
-
-export function useDisplayedLiveRecords(logs: RealtimeMessage[]) {
-  const [liveOpen, setLiveOpen] = React.useState(true);
-  const [livePaused, setLivePaused] = React.useState(false);
-  const [displayedLiveRecords, setDisplayedLiveRecords] = React.useState<LogRecord[]>([]);
-
-  const normalizedLiveRecords = React.useMemo(
-    () => logs.map((log, index) => liveRecord(log, index)),
-    [logs]
-  );
-
-  React.useEffect(() => {
-    if (!livePaused) setDisplayedLiveRecords(normalizedLiveRecords);
-  }, [livePaused, normalizedLiveRecords]);
-
-  const clearDisplayedLiveRecords = React.useCallback(() => {
-    setDisplayedLiveRecords([]);
-  }, []);
-
-  const liveSourceCounts = React.useMemo(() => {
-    const counts = {} as Partial<Record<LogSourceKey, number>>;
-    displayedLiveRecords.forEach((record) => {
-      counts[record.source] = (counts[record.source] || 0) + 1;
-    });
-    counts.all = displayedLiveRecords.length;
-    counts.live = displayedLiveRecords.length;
-    return counts;
-  }, [displayedLiveRecords]);
-
-  return {
-    clearDisplayedLiveRecords,
-    displayedLiveRecords,
-    liveOpen,
-    livePaused,
-    liveSourceCounts,
-    setLiveOpen,
-    setLivePaused
-  };
-}
 
 export function useLogsData({
   activeSource,
@@ -228,11 +182,6 @@ export function useLogsData({
     setAuditCursorValue(null);
   }, [setAuditCursorValue, setTraceCursorValue]);
 
-  const prependAuditRecords = React.useCallback((records: LogRecord[]) => {
-    if (!records.length) return;
-    setAuditRecords((current) => mergeRecords(records, current).slice(0, 120));
-  }, []);
-
   React.useEffect(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
@@ -263,92 +212,11 @@ export function useLogsData({
     loading,
     loadingMore,
     loadMore,
-    prependAuditRecords,
     refresh,
     setError,
     summary,
     traceRecords
   };
-}
-
-export function useLogsRealtimeRefresh({
-  activeSource,
-  logs,
-  prependAuditRecords,
-  refresh,
-  resetKey
-}: {
-  activeSource: LogSourceKey;
-  logs: RealtimeMessage[];
-  prependAuditRecords: (records: LogRecord[]) => void;
-  refresh: () => Promise<void>;
-  resetKey: string;
-}) {
-  const reloadTimerRef = React.useRef<number | null>(null);
-  const processedRealtimeKeysRef = React.useRef<Set<string>>(new Set());
-
-  const clearScheduledReload = React.useCallback(() => {
-    if (reloadTimerRef.current === null) return;
-    window.clearTimeout(reloadTimerRef.current);
-    reloadTimerRef.current = null;
-  }, []);
-
-  const clearRealtimeState = React.useCallback(() => {
-    clearScheduledReload();
-    processedRealtimeKeysRef.current.clear();
-  }, [clearScheduledReload]);
-
-  React.useEffect(() => {
-    clearScheduledReload();
-  }, [clearScheduledReload, resetKey]);
-
-  React.useEffect(() => () => {
-    clearScheduledReload();
-  }, [clearScheduledReload]);
-
-  React.useEffect(() => {
-    if (!logs.length || activeSource === "live") return;
-
-    let shouldReload = false;
-    const nextAuditLogs: LogRecord[] = [];
-    const recentLogs = logs.slice(0, 20).reverse();
-
-    for (const realtimeLog of recentLogs) {
-      const realtimeKey = realtimeLogKey(realtimeLog);
-      if (processedRealtimeKeysRef.current.has(realtimeKey)) continue;
-      processedRealtimeKeysRef.current.add(realtimeKey);
-      if (
-        realtimeLog.type.startsWith("telemetry.") ||
-        realtimeLog.type.startsWith("gate_malfunction.") ||
-        realtimeLog.type === "maintenance_mode.changed"
-      ) {
-        shouldReload = true;
-      }
-      if (realtimeLog.type === "audit.log.created") {
-        shouldReload = true;
-        const liveAuditLog = auditLogFromRealtimePayload(realtimeLog.payload);
-        if (liveAuditLog) nextAuditLogs.push(auditRecord(liveAuditLog));
-      }
-    }
-
-    if (processedRealtimeKeysRef.current.size > 240) {
-      const staleKeys = Array.from(processedRealtimeKeysRef.current).slice(0, processedRealtimeKeysRef.current.size - 240);
-      staleKeys.forEach((key) => processedRealtimeKeysRef.current.delete(key));
-    }
-
-    if (sourceUsesAudit(activeSource)) {
-      prependAuditRecords(nextAuditLogs);
-    }
-
-    if (!shouldReload) return;
-    clearScheduledReload();
-    reloadTimerRef.current = window.setTimeout(() => {
-      reloadTimerRef.current = null;
-      refresh().catch(() => undefined);
-    }, 900);
-  }, [activeSource, clearScheduledReload, logs, prependAuditRecords, refresh]);
-
-  return { clearRealtimeState };
 }
 
 export function useSelectedLogRecord(records: LogRecord[], resetKey: string) {

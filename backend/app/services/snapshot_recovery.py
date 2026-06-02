@@ -12,7 +12,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Anomaly
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
-from app.services.alert_snapshots import ALERT_SNAPSHOT_CONTEXT_KEY, alert_snapshot_metadata_from_event
+from app.services.snapshots import ALERT_SNAPSHOT_CONTEXT_KEY, alert_snapshot_metadata_from_event
 from app.services.snapshots import (
     SNAPSHOT_CONTENT_TYPE,
     SnapshotMetadata,

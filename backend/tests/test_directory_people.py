@@ -72,7 +72,7 @@ def test_derived_vehicle_person_id_is_only_set_for_single_assignment() -> None:
     assert derived_vehicle_person_id([person_id, uuid.uuid4()]) is None
 
 
-def test_serialize_vehicle_exposes_multiple_assigned_people_without_legacy_owner() -> None:
+def test_serialize_vehicle_exposes_multiple_assigned_people() -> None:
     left = SimpleNamespace(id=uuid.uuid4(), display_name="Zoe Smith")
     right = SimpleNamespace(id=uuid.uuid4(), display_name="Ash Smith")
     vehicle = SimpleNamespace(
@@ -164,23 +164,6 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         schedule_id=None,
         schedule=None,
     )
-    legacy_vehicle = SimpleNamespace(
-        id=uuid.uuid4(),
-        registration_number="OLD1",
-        description=None,
-        vehicle_photo_data_url=None,
-        make=None,
-        model=None,
-        color=None,
-        fuel_type=None,
-        mot_status=None,
-        tax_status=None,
-        mot_expiry=None,
-        tax_expiry=None,
-        last_dvla_lookup_date=None,
-        schedule_id=None,
-        schedule=None,
-    )
     person = SimpleNamespace(
         id=uuid.uuid4(),
         first_name="Ash",
@@ -200,7 +183,7 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         home_assistant_presence_input_boolean_entry_action="turn_on",
         home_assistant_presence_input_boolean_exit_action="turn_off",
         vehicle_assignments=[SimpleNamespace(vehicle=assigned_vehicle)],
-        vehicles=[legacy_vehicle],
+        vehicles=[],
     )
 
     payload = serialize_person(person)

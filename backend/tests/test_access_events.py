@@ -11,19 +11,30 @@ from app.models.enums import AccessDecision, AccessDirection, PresenceState, Tim
 from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.lpr.base import PlateRead
+from app.services.access import hardware as access_hardware_module
+from app.services.access import snapshots as access_snapshots_module
+from app.services.access.hardware import (
+    open_garage_doors_for_access_event,
+    open_gate_for_access_event,
+    publish_gate_open_skipped,
+)
+from app.services.access.payloads import (
+    access_event_realtime_payload,
+    authorized_entry_message,
+    notification_facts,
+)
+from app.services.access.snapshots import capture_access_event_snapshot
 from app.services import access_events as access_events_module
+from app.services.movement import sessions as movement_sessions_module
 from app.services import person_presence_input_booleans as presence_input_booleans_module
 from app.services.access_events import (
     AccessEventService,
-    ActiveVehicleSession,
-    FinalizedPlateEvent,
     GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
     INGEST_METADATA_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     PROCESSING_ATTEMPT_PAYLOAD_KEY,
-    VEHICLE_SESSION_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     dvla_mot_alert_required,
     dvla_tax_alert_required,
@@ -32,7 +43,6 @@ from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.lpr_ingest import LPR_INGEST_STATUS_PENDING, LPR_INGEST_STATUS_SUCCEEDED
 from app.services.snapshots import access_event_snapshot_relative_path
-from app.services.vehicle_visual_detections import VehiclePresenceTracker
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
 
@@ -390,7 +400,7 @@ def install_gate_command_outcome(monkeypatch, outcome_factory):
             return outcome_factory(intent)
 
     monkeypatch.setattr(
-        access_events_module,
+        access_hardware_module,
         "get_gate_command_coordinator",
         lambda: FakeCoordinator(),
     )
@@ -437,9 +447,9 @@ def capture_hardware_audits(monkeypatch):
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: FakeAuditSession())
-    monkeypatch.setattr(access_events_module, "write_audit_log", fake_write_audit_log)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
+    monkeypatch.setattr(access_hardware_module, "AsyncSessionLocal", lambda: FakeAuditSession())
+    monkeypatch.setattr(access_hardware_module, "write_audit_log", fake_write_audit_log)
+    monkeypatch.setattr(access_hardware_module.event_bus, "publish", fake_publish)
     return audits, published
 
 
@@ -663,7 +673,7 @@ def remember_movement_session(
     direction: AccessDirection = AccessDirection.DENIED,
     decision: AccessDecision = AccessDecision.DENIED,
 ) -> MovementSessionRecord:
-    context = service._vehicle_session_context_from_read(read)
+    context = service._movement_sessions.context_from_read(read)
     max_seconds = service._runtime.lpr_debounce_max_seconds if service._runtime else 6.0
     idle_seconds = (
         getattr(service._runtime, "lpr_vehicle_session_idle_seconds", 180.0)
@@ -684,13 +694,14 @@ def remember_movement_session(
         started_at=read.captured_at,
         last_seen_at=read.captured_at,
         debounce_expires_at=read.captured_at + timedelta(seconds=max_seconds),
-        gate_cycle_expires_at=read.captured_at + timedelta(seconds=access_events_module.EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
+        gate_cycle_expires_at=read.captured_at
+        + timedelta(seconds=movement_sessions_module.EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
         idle_expires_at=read.captured_at + timedelta(seconds=idle_seconds),
         camera_id=context.camera_id,
         device_id=context.device_id,
         protect_event_ids=sorted(context.protect_event_ids),
         ocr_variants=[read.registration_number],
-        last_gate_state=service._gate_observation_from_read(read).get("state"),
+        last_gate_state=movement_sessions_module.gate_observation_from_read(read).get("state"),
         suppressed_read_count=0,
         suppressed_reads=[],
         is_active=True,
@@ -845,7 +856,6 @@ async def test_on_site_visitor_departure_gate_state_marks_departure(monkeypatch)
 
 def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    service = AccessEventService()
     event_id = uuid.uuid4()
     captured_at = datetime(2026, 4, 30, 20, 30, tzinfo=UTC)
     event = AccessEvent(
@@ -869,7 +879,7 @@ def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monk
     snapshot_path.parent.mkdir(parents=True)
     snapshot_path.write_bytes(b"jpeg")
 
-    payload = service._access_event_realtime_payload(
+    payload = access_event_realtime_payload(
         event,
         anomaly_count=0,
         visitor_pass=None,
@@ -887,7 +897,6 @@ def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = AccessEventService()
     event_id = uuid.uuid4()
     occurred_at = datetime(2026, 5, 2, 18, 9, 22, tzinfo=UTC)
     calls: dict[str, object] = {}
@@ -917,8 +926,8 @@ async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatc
             calls["event_thumbnail"] = (event_id, width, height)
             return SimpleNamespace(content=b"jpeg", content_type="image/jpeg")
 
-    monkeypatch.setattr(access_events_module, "get_snapshot_manager", lambda: FakeSnapshotManager())
-    monkeypatch.setattr(access_events_module, "get_unifi_protect_service", lambda: FakeProtect())
+    monkeypatch.setattr(access_snapshots_module, "get_snapshot_manager", lambda: FakeSnapshotManager())
+    monkeypatch.setattr(access_snapshots_module, "get_unifi_protect_service", lambda: FakeProtect())
 
     event = AccessEvent(
         id=event_id,
@@ -932,7 +941,7 @@ async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatc
         raw_payload={"best": {"alarm": {"triggers": [{"eventId": "protect-event-1"}]}}},
     )
 
-    await service._capture_event_snapshot(event)
+    await capture_access_event_snapshot(event)
 
     assert calls["event_thumbnail"] == ("protect-event-1", 320, 180)
     assert calls["content"] == b"jpeg"
@@ -940,60 +949,6 @@ async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatc
     assert event.snapshot_path == access_event_snapshot_relative_path(event_id)
     assert event.snapshot_bytes == 1234
     assert event.snapshot_camera == "camera.gate"
-
-
-@pytest.mark.asyncio
-async def test_closed_gate_state_resolves_allowed_read_as_entry() -> None:
-    service = AccessEventService()
-    person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
-
-    direction, resolution = await service._resolve_direction(
-        FakePresenceSession(),
-        plate_read_with_gate_state("closed"),
-        person,
-        allowed=True,
-    )
-
-    assert direction == AccessDirection.ENTRY
-    assert resolution["source"] == "gate_state"
-    assert service._automatic_open_allowed(resolution)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["open", "opening", "closing"])
-async def test_non_closed_gate_state_resolves_present_person_as_exit(state: str) -> None:
-    service = AccessEventService()
-    person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
-
-    direction, resolution = await service._resolve_direction(
-        FakePresenceSession(PresenceState.PRESENT),
-        plate_read_with_gate_state(state),
-        person,
-        allowed=True,
-    )
-
-    assert direction == AccessDirection.EXIT
-    assert resolution["source"] == "gate_state"
-    assert not service._automatic_open_allowed(resolution)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["open", "opening", "closing"])
-async def test_non_closed_gate_state_resolves_absent_known_person_as_entry(state: str) -> None:
-    service = AccessEventService()
-    person = SimpleNamespace(id=uuid.uuid4(), display_name="Cora")
-
-    direction, resolution = await service._resolve_direction(
-        FakePresenceSession(PresenceState.EXITED),
-        plate_read_with_gate_state(state),
-        person,
-        allowed=True,
-    )
-
-    assert direction == AccessDirection.ENTRY
-    assert resolution["source"] == "presence_over_gate_state"
-    assert resolution["gate_state_direction"] == "exit"
-    assert not service._automatic_open_allowed(resolution)
 
 
 @pytest.mark.asyncio
@@ -1298,12 +1253,12 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     async def fake_no_gate_malfunction_context(read):
         return read
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     fake_movement_ledger(service)
 
@@ -1361,12 +1316,12 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     fake_movement_ledger(service)
 
@@ -1420,12 +1375,6 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
             direction=AccessDirection.EXIT,
             decision=AccessDecision.GRANTED,
         )
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=AccessDirection.EXIT,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
 
     async def fake_no_visitor_pass_departure_match(read):
         return read
@@ -1436,14 +1385,14 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
     fake_movement_ledger(service)
 
@@ -1496,17 +1445,11 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
             direction=direction,
             decision=AccessDecision.GRANTED,
         )
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=direction,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
 
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     async def fake_no_gate_malfunction_context(read):
@@ -1515,7 +1458,7 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
     fake_movement_ledger(service)
 
@@ -1575,17 +1518,11 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
             direction=direction,
             decision=AccessDecision.GRANTED,
         )
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=direction,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
 
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     async def fake_no_gate_malfunction_context(read):
@@ -1594,7 +1531,7 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
     fake_movement_ledger(service)
 
@@ -1658,12 +1595,6 @@ async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypat
 
     async def fake_finalize_window(window):
         finalized.append(window.best_read.registration_number)
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=AccessDirection.ENTRY,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
 
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
@@ -1781,7 +1712,6 @@ async def test_ignored_gate_malfunction_unknown_read_emits_realtime_and_audit(mo
 
 @pytest.mark.asyncio
 async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
 
@@ -1795,7 +1725,7 @@ async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
         ),
     )
 
-    outcome = await service._open_gate_for_event(event, person, open_garage_doors=False)
+    outcome = await open_gate_for_access_event(event, person, open_garage_doors=False)
 
     assert outcome.accepted is True
     gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
@@ -1813,11 +1743,10 @@ async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_automatic_gate_skip_writes_skipped_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
 
-    await service._publish_gate_open_skipped(
+    await publish_gate_open_skipped(
         event,
         {"gate_observation": {"state": "open", "observed_at": event.occurred_at.isoformat()}},
         person,
@@ -1834,7 +1763,6 @@ async def test_automatic_gate_skip_writes_skipped_audit(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -1849,9 +1777,9 @@ async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) 
             exception_class="UnsupportedModuleError",
         ),
     )
-    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
-    outcome = await service._open_gate_for_event(event, person, open_garage_doors=False)
+    outcome = await open_gate_for_access_event(event, person, open_garage_doors=False)
 
     assert outcome.accepted is False
     gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
@@ -1920,14 +1848,13 @@ async def test_person_presence_input_boolean_commands_apply_to_all_entities(monk
 
 @pytest.mark.asyncio
 async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     devices = FakeAccessDeviceService()
 
-    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
+    monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
 
-    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+    await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
     garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
     assert garage_audit["outcome"] == "accepted"
@@ -1941,7 +1868,6 @@ async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -1952,10 +1878,10 @@ async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monke
         metadata={"schedule_denied": True},
     )
 
-    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
-    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+    monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
+    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
-    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+    await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
     garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
     assert garage_audit["outcome"] == "rejected"
@@ -1968,7 +1894,6 @@ async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monke
 
 @pytest.mark.asyncio
 async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeypatch) -> None:
-    service = AccessEventService()
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -1978,10 +1903,10 @@ async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeyp
         detail="Home Assistant rejected the command.",
     )
 
-    monkeypatch.setattr(access_events_module, "get_access_device_service", lambda: devices)
-    monkeypatch.setattr(access_events_module, "get_notification_service", lambda: notifications)
+    monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
+    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
-    await service._open_garage_doors_for_event(event, person, "Automatic LPR grant")
+    await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
     garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
     assert garage_audit["outcome"] == "failed"
@@ -2016,13 +1941,13 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
     async def fake_no_visitor_pass_departure_match(read):
         return read
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     fake_movement_ledger(service)
 
     first_seen = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
@@ -2064,13 +1989,29 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
+    async def fake_publish_suppressed_read(read, *, reason):
+        await fake_publish(
+            "plate_read.suppressed",
+            {
+                "registration_number": read.registration_number,
+                "detected_registration_number": read.registration_number,
+                "source": read.source,
+                "reason": reason,
+            },
+        )
+
+    async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
+        return None
+
+    async def fake_exact_resolution_suppression_reason(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
+    monkeypatch.setattr(service, "_publish_suppressed_read", fake_publish_suppressed_read)
+    monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
+    monkeypatch.setattr(service, "_exact_resolution_suppression_reason", fake_exact_resolution_suppression_reason)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
     first_seen = datetime(2026, 4, 30, 12, 23, 36, tzinfo=UTC)
@@ -2101,678 +2042,6 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
             },
         )
     ]
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_suppresses_stationary_denied_plate(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MJ17MDZ", first_seen, event_id="event-1", device_id="camera-device"),
-    )
-
-    await service._handle_queued_read(
-        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=55), event_id="event-2", device_id="camera-device")
-    )
-
-    assert service._pending == []
-    assert published == [
-        (
-            "plate_read.suppressed",
-            {
-                "registration_number": "MJ17MDZ",
-                "detected_registration_number": "MJ17MDZ",
-                "source": "test",
-                "reason": "vehicle_session_already_active",
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_suppresses_same_protect_event_ocr_variant(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen, event_id="shared-event"))
-
-    await service._handle_queued_read(
-        plate_read_with_context("SA73YVL", first_seen + timedelta(seconds=20), event_id="shared-event")
-    )
-
-    assert service._pending == []
-    suppressed = [payload for event_type, payload in published if event_type == "plate_read.suppressed"]
-    assert suppressed[0]["reason"] == "vehicle_session_already_active"
-    assert published[0][1]["registration_number"] == "SA73YVL"
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_suppresses_arrival_ocr_noise_from_same_camera(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-    annotated = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_annotate_suppressed_session_read(_read, suppression):
-        annotated.append(suppression)
-
-    async def fake_no_gate_malfunction_context(read):
-        return read
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MD25VNO", first_seen, camera_id="gate-camera", device_id="camera-device"),
-        direction=AccessDirection.ENTRY,
-        decision=AccessDecision.GRANTED,
-    )
-
-    read = plate_read_with_context(
-        "ADZ5U",
-        first_seen + timedelta(seconds=18),
-        state="open",
-        camera_id="gate-camera",
-        device_id="camera-device",
-    )
-    await service._handle_queued_read(
-        PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source="unifi_protect_lpr_reconciliation",
-            captured_at=read.captured_at,
-            raw_payload=read.raw_payload,
-        )
-    )
-
-    assert service._pending == []
-    assert annotated[0].matched_by == "movement_session_arrival_ocr_noise"
-    assert published == [
-        (
-            "plate_read.suppressed",
-            {
-                "registration_number": "ADZ5U",
-                "detected_registration_number": "ADZ5U",
-                "source": "unifi_protect_lpr_reconciliation",
-                "reason": "vehicle_session_already_active",
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_does_not_suppress_camera_read_outside_arrival_noise_window(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_no_gate_malfunction_context(read):
-        return read
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MD25VNO", first_seen, camera_id="gate-camera"),
-        direction=AccessDirection.ENTRY,
-        decision=AccessDecision.GRANTED,
-    )
-
-    await service._handle_queued_read(
-        plate_read_with_context("ADZ5U", first_seen + timedelta(seconds=60), camera_id="gate-camera")
-    )
-
-    assert len(service._pending) == 1
-    assert published == []
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_does_not_suppress_explicit_exit_as_arrival_ocr_noise(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_no_gate_malfunction_context(read):
-        return read
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MD25VNO", first_seen, camera_id="gate-camera"),
-        direction=AccessDirection.ENTRY,
-        decision=AccessDecision.GRANTED,
-    )
-    raw_payload = dict(plate_read_with_context("ADZ5U", first_seen + timedelta(seconds=18), camera_id="gate-camera").raw_payload)
-    raw_payload["direction"] = "exit"
-
-    await service._handle_queued_read(
-        PlateRead(
-            registration_number="ADZ5U",
-            confidence=1.0,
-            source="unifi_protect_lpr_reconciliation",
-            captured_at=first_seen + timedelta(seconds=18),
-            raw_payload=raw_payload,
-        )
-    )
-
-    assert len(service._pending) == 1
-    assert published == []
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_suppresses_post_exit_closed_gate_linger(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return ["MD25VNO"]
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MD25VNO", first_seen, state="open", event_id="exit-event"),
-        direction=AccessDirection.EXIT,
-        decision=AccessDecision.GRANTED,
-    )
-
-    await service._handle_queued_read(
-        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=70), state="closed", event_id="later-event")
-    )
-
-    assert service._pending == []
-    assert published[0][0] == "plate_read.suppressed"
-    assert published[0][1]["reason"] == "vehicle_session_already_active"
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_allows_return_entry_after_exit_idle_expired(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=30.0,
-    )
-    tracker = VehiclePresenceTracker()
-    finalized = []
-
-    async def fake_active_vehicle_registrations():
-        return ["AGS7X"]
-
-    async def fake_finalize_window(window):
-        finalized.append(window.best_read.registration_number)
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=AccessDirection.ENTRY,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
-
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
-    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
-
-    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context(
-            "AGS7X",
-            first_seen,
-            state="open",
-            event_id="exit-event",
-            device_id="942A6FD09D64",
-        ),
-        direction=AccessDirection.EXIT,
-        decision=AccessDecision.GRANTED,
-    )
-
-    return_read = plate_read_with_context(
-        "AGS7X",
-        first_seen + timedelta(minutes=52),
-        state="closed",
-        event_id="return-event",
-        device_id="942A6FD09D64",
-    )
-    await tracker.record_unifi_payload(
-        return_read.raw_payload,
-        registration_number=return_read.registration_number,
-        received_at=return_read.captured_at,
-    )
-
-    await service._handle_queued_read(return_read)
-
-    assert finalized == ["AGS7X"]
-    assert service._pending == []
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_ignores_current_lpr_webhook_presence_evidence_after_idle(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=30.0,
-    )
-    tracker = VehiclePresenceTracker()
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
-    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MJ17MDZ", first_seen, event_id="previous-event"),
-    )
-
-    read = plate_read_with_context(
-        "MJ17MDZ",
-        first_seen + timedelta(seconds=31),
-        event_id="current-event",
-    )
-    await tracker.record_unifi_payload(
-        read.raw_payload,
-        registration_number=read.registration_number,
-        received_at=read.captured_at,
-    )
-    published.clear()
-
-    await service._handle_queued_read(read)
-
-    assert [event_type for event_type, _payload in published] == []
-    assert len(service._pending) == 1
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_allows_departure_state_after_entry(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    finalized = []
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return ["MD25VNO"]
-
-    async def fake_finalize_window(window):
-        finalized.append(window.best_read.registration_number)
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=AccessDirection.EXIT,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
-    async def fake_no_gate_malfunction_context(read):
-        return read
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 14, 40, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MD25VNO", first_seen, state="closed", event_id="entry-event"),
-        direction=AccessDirection.ENTRY,
-        decision=AccessDecision.GRANTED,
-    )
-
-    await service._handle_queued_read(
-        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=70), state="open", event_id="exit-event")
-    )
-
-    assert finalized == ["MD25VNO"]
-    assert published == []
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_presence_evidence_extends_suppression_after_idle(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=30.0,
-    )
-    tracker = VehiclePresenceTracker()
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_annotate_suppressed_session_read(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_annotate_suppressed_session_read", fake_annotate_suppressed_session_read)
-    monkeypatch.setattr(access_events_module, "get_vehicle_presence_tracker", lambda: tracker)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(
-        service,
-        plate_read_with_context("MJ17MDZ", first_seen, camera_id="camera-1"),
-    )
-    await tracker.record_unifi_realtime_payload(
-        {"camera": {"id": "camera-1", "detections": {"active": ["vehicle"]}}},
-        received_at=first_seen + timedelta(seconds=31),
-    )
-
-    await service._handle_queued_read(
-        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=31), camera_id="camera-1")
-    )
-
-    assert service._pending == []
-    suppressed = [payload for event_type, payload in published if event_type == "plate_read.suppressed"]
-    assert suppressed[0]["reason"] == "vehicle_session_already_active"
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_does_not_suppress_different_exact_known_vehicle(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=180.0,
-    )
-    finalized = []
-
-    async def fake_active_vehicle_registrations():
-        return ["MD25VNO"]
-
-    async def fake_finalize_window(window):
-        finalized.append(window.best_read.registration_number)
-        return FinalizedPlateEvent(
-            event_id=str(uuid.uuid4()),
-            direction=AccessDirection.ENTRY,
-            decision=AccessDecision.GRANTED,
-            occurred_at=window.best_read.captured_at,
-        )
-
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen, event_id="shared-event", camera_id="camera-1"))
-
-    await service._handle_queued_read(
-        plate_read_with_context("MD25VNO", first_seen + timedelta(seconds=10), event_id="shared-event", camera_id="camera-1")
-    )
-
-    assert finalized == ["MD25VNO"]
-
-
-@pytest.mark.asyncio
-async def test_vehicle_session_idle_expiry_allows_new_event(monkeypatch) -> None:
-    service = AccessEventService()
-    service._runtime = SimpleNamespace(
-        lpr_similarity_threshold=0.78,
-        lpr_debounce_quiet_seconds=2.5,
-        lpr_debounce_max_seconds=6.0,
-        lpr_vehicle_session_idle_seconds=30.0,
-    )
-    published = []
-
-    async def fake_active_vehicle_registrations():
-        return []
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    async def fake_read_with_visitor_pass_departure_match(read):
-        return read
-
-    async def fake_vehicle_session_db_fallback(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
-    monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-    monkeypatch.setattr(service, "_vehicle_session_db_fallback", fake_vehicle_session_db_fallback)
-
-    first_seen = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    remember_session(service, plate_read_with_context("MJ17MDZ", first_seen))
-
-    await service._handle_queued_read(
-        plate_read_with_context("MJ17MDZ", first_seen + timedelta(seconds=31))
-    )
-
-    assert published == []
-    assert len(service._pending) == 1
-
-
-@pytest.mark.asyncio
-async def test_suppressed_vehicle_session_read_updates_event_payload(monkeypatch) -> None:
-    service = AccessEventService()
-    event_id = uuid.uuid4()
-    occurred_at = datetime(2026, 5, 2, 12, 36, 16, tzinfo=UTC)
-    event = SimpleNamespace(
-        id=event_id,
-        occurred_at=occurred_at,
-        registration_number="MJ17MDZ",
-        raw_payload={
-            VEHICLE_SESSION_PAYLOAD_KEY: {
-                "id": str(event_id),
-                "registration_number": "MJ17MDZ",
-                "normalized_registration_number": "MJ17MDZ",
-                "started_at": occurred_at.isoformat(),
-                "last_seen_at": occurred_at.isoformat(),
-                "protect_event_ids": ["event-1"],
-                "ocr_variants": ["MJ17MDZ"],
-                "suppressed_read_count": 0,
-                "suppressed_reads": [],
-            }
-        },
-    )
-    fake_db = SimpleNamespace(committed=False)
-
-    class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def get(self, _model, _id):
-            return event
-
-        async def commit(self):
-            fake_db.committed = True
-
-    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: FakeSession())
-    read = plate_read_with_context(
-        "MJ17MDZ",
-        occurred_at + timedelta(seconds=20),
-        event_id="event-2",
-        state="closed",
-    )
-    session = ActiveVehicleSession(
-        event_id=str(event_id),
-        source="test",
-        registration_number="MJ17MDZ",
-        normalized_registration_number="MJ17MDZ",
-        started_at=occurred_at,
-        last_seen_at=occurred_at,
-        direction=AccessDirection.DENIED,
-        decision=AccessDecision.DENIED,
-        protect_event_ids={"event-1"},
-    )
-
-    await service._annotate_suppressed_session_read(
-        read,
-        access_events_module.VehicleSessionSuppression(
-            session=session,
-            reason="vehicle_session_already_active",
-            matched_by="registration_number",
-            evidence={"source": "webhook", "active": True, "observed_at": read.captured_at.isoformat()},
-        ),
-    )
-
-    payload = event.raw_payload[VEHICLE_SESSION_PAYLOAD_KEY]
-    assert fake_db.committed
-    assert payload["suppressed_read_count"] == 1
-    assert payload["last_seen_at"] == read.captured_at.isoformat()
-    assert payload["protect_event_ids"] == ["event-1", "event-2"]
-    assert payload["suppressed_reads"][0]["matched_by"] == "registration_number"
 
 
 @pytest.mark.asyncio
@@ -2962,7 +2231,6 @@ def test_dvla_compliance_alert_helpers() -> None:
 
 
 def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -> None:
-    service = AccessEventService()
     event = SimpleNamespace(
         id=uuid.uuid4(),
         raw_payload={
@@ -2981,7 +2249,7 @@ def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -
         occurred_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
     )
 
-    facts = service._notification_facts(
+    facts = notification_facts(
         event,
         person=None,
         vehicle=None,
@@ -3010,7 +2278,6 @@ def test_notification_facts_use_person_pronouns(
     object_pronoun: str,
     possessive_determiner: str,
 ) -> None:
-    service = AccessEventService()
     event = SimpleNamespace(
         id=uuid.uuid4(),
         raw_payload={"telemetry": {"trace_id": "trace-1"}},
@@ -3029,7 +2296,7 @@ def test_notification_facts_use_person_pronouns(
         group=SimpleNamespace(name="Family"),
     )
 
-    facts = service._notification_facts(event, person=person, vehicle=None, message="Granted")
+    facts = notification_facts(event, person=person, vehicle=None, message="Granted")
 
     assert facts["object_pronoun"] == object_pronoun
     assert facts["possessive_determiner"] == possessive_determiner
@@ -3053,7 +2320,6 @@ def test_notification_facts_use_person_pronouns(
     ],
 )
 def test_authorized_entry_message_uses_person_pronouns(pronouns: str | None, expected: str) -> None:
-    service = AccessEventService()
     person = SimpleNamespace(first_name="Jason", display_name="Jason Smith", pronouns=pronouns)
     vehicle = SimpleNamespace(
         make="Tesla",
@@ -3062,11 +2328,10 @@ def test_authorized_entry_message_uses_person_pronouns(pronouns: str | None, exp
         registration_number="PE70DHX",
     )
 
-    assert service._authorized_entry_message(person, vehicle) == expected
+    assert authorized_entry_message(person, vehicle) == expected
 
 
 def test_authorized_entry_message_uses_them_for_unknown_unset_pronouns() -> None:
-    service = AccessEventService()
     person = SimpleNamespace(first_name="Taylor", display_name="Taylor Smith", pronouns=None)
     vehicle = SimpleNamespace(
         make="Tesla",
@@ -3076,6 +2341,6 @@ def test_authorized_entry_message_uses_them_for_unknown_unset_pronouns() -> None
     )
 
     assert (
-        service._authorized_entry_message(person, vehicle)
+        authorized_entry_message(person, vehicle)
         == "Taylor's Tesla Model Y has been detected at the gate. I've let them in."
     )

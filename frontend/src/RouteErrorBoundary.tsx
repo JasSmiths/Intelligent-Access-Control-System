@@ -1,7 +1,7 @@
 import { AlertTriangle } from "lucide-react";
 import React from "react";
 
-import { EmptyState } from "./shared";
+import { EmptyState } from "./ui/primitives";
 
 export class RouteErrorBoundary extends React.Component<
   { children: React.ReactNode; view: string },

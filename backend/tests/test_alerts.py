@@ -25,8 +25,7 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.services.access_events import AccessEventService
-from app.services.alert_snapshots import delete_alert_snapshot
-from app.services.snapshots import access_event_snapshot_relative_path
+from app.services.snapshots import access_event_snapshot_relative_path, get_snapshot_manager
 
 
 def anomaly(registration_number: str, created_at: datetime) -> Anomaly:
@@ -104,7 +103,7 @@ async def test_unknown_plate_anomaly_is_warning(tmp_path, monkeypatch: pytest.Mo
 
 
 def test_open_unknown_plate_alerts_group_by_plate_and_local_day(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     first = datetime(2026, 4, 27, 18, 24, tzinfo=UTC)
     second = first + timedelta(hours=2)
     rows = [
@@ -141,7 +140,7 @@ def test_open_unknown_plate_alerts_group_by_plate_and_local_day(tmp_path, monkey
 
 
 def test_resolved_alert_serialization_retains_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     row = anomaly("BK26MKF", datetime(2026, 4, 27, 18, 24, tzinfo=UTC))
     row.resolved_at = datetime(2026, 4, 27, 19, 0, tzinfo=UTC)
     row.context = {
@@ -221,7 +220,7 @@ def test_alert_action_resolves_and_reopens_with_note() -> None:
 async def test_resolving_alert_retains_snapshot_for_future_purge(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     row = anomaly("BK26MKF", datetime(2026, 4, 27, 18, 24, tzinfo=UTC))
     snapshot_path = tmp_path / "alert-snapshots" / f"{row.id}.jpg"
     snapshot_path.parent.mkdir(parents=True)
@@ -265,7 +264,7 @@ async def test_resolving_alert_retains_snapshot_for_future_purge(
 async def test_resolved_alert_snapshot_endpoint_serves_retained_file(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     row = anomaly("BK26MKF", datetime(2026, 4, 27, 18, 24, tzinfo=UTC))
     row.resolved_at = datetime(2026, 4, 27, 19, 0, tzinfo=UTC)
     snapshot_path = tmp_path / "alert-snapshots" / f"{row.id}.jpg"
@@ -325,7 +324,7 @@ async def test_event_snapshot_endpoint_serves_retained_file(
 def test_delete_alert_snapshot_removes_file_and_context(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     row = anomaly("BK26MKF", datetime(2026, 4, 27, 18, 24, tzinfo=UTC))
     snapshot_path = tmp_path / "alert-snapshots" / f"{row.id}.jpg"
     snapshot_path.parent.mkdir(parents=True)
@@ -339,7 +338,7 @@ def test_delete_alert_snapshot_removes_file_and_context(
         },
     }
 
-    delete_alert_snapshot(row)
+    get_snapshot_manager().delete_alert_snapshot(row)
 
     assert not snapshot_path.exists()
     assert "snapshot" not in row.context

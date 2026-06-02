@@ -13,7 +13,13 @@ from app.modules.access_devices.base import (
 )
 from app.modules.gate.base import GateState
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
-from app.modules.home_assistant.covers import DEFAULT_CLOSE_SERVICE, DEFAULT_OPEN_SERVICE, normalize_cover_state, title_from_entity_id
+from app.modules.home_assistant.covers import (
+    DEFAULT_CLOSE_SERVICE,
+    DEFAULT_OPEN_SERVICE,
+    gate_state_from_cover_state,
+    normalize_cover_state,
+    title_from_entity_id,
+)
 from app.services.settings import get_runtime_config
 
 
@@ -90,7 +96,7 @@ class HomeAssistantAccessDeviceProvider:
             state = await self._client.get_state(binding.external_id)
         except Exception as exc:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
-        return map_home_assistant_gate_state(str(state.state))
+        return gate_state_from_cover_state(str(state.state))
 
     async def command_cover(
         self,
@@ -119,7 +125,7 @@ class HomeAssistantAccessDeviceProvider:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
         return AccessDeviceCommandResult(
             accepted=True,
-            state=map_home_assistant_gate_state(str(state.state)),
+            state=gate_state_from_cover_state(str(state.state)),
             detail=reason,
             provider=self.provider_key,
             external_id=binding.external_id,
@@ -129,18 +135,3 @@ class HomeAssistantAccessDeviceProvider:
     async def subscribe_state_changes(self) -> AsyncIterator[dict[str, Any]]:
         async for message in self._client.subscribe_state_changed():
             yield message
-
-
-def map_home_assistant_gate_state(state: str) -> GateState:
-    normalized = state.lower()
-    if normalized in {"open", "on", "unlocked"}:
-        return GateState.OPEN
-    if normalized == "opening":
-        return GateState.OPENING
-    if normalized == "closing":
-        return GateState.CLOSING
-    if normalized in {"closed", "off", "locked"}:
-        return GateState.CLOSED
-    if normalized == "fault":
-        return GateState.FAULT
-    return GateState.UNKNOWN

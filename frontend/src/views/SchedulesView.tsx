@@ -16,19 +16,12 @@ X
 } from "lucide-react";
 import React from "react";
 
-import {
-api,
-Badge,
-BadgeTone,
-createActionConfirmation,
-EmptyState,
-matches,
-Schedule,
-scheduleDays,
-ScheduleTimeBlock,
-ScheduleTimeBlocks,
-useSettings
-} from "../shared";
+import { api, createActionConfirmation } from "../api/client";
+import { matches, scheduleDays } from "../lib/format";
+import { useSettings } from "../lib/settings";
+import { Badge, EmptyState } from "../ui/primitives";
+import type { Schedule, ScheduleTimeBlock, ScheduleTimeBlocks } from "../api/types";
+import type { BadgeTone } from "../ui/primitives";
 
 
 

@@ -265,57 +265,27 @@ async def _test_home_assistant(values: dict[str, Any]) -> None:
 
 
 async def _test_esphome(values: dict[str, Any]) -> None:
-    import asyncio
-    import importlib
-
     runtime = await get_runtime_config()
-    if not values and runtime.esphome_devices:
-        provider = get_access_device_provider("esphome")
-        verify_live_device = getattr(provider, "verify_live_device", None)
-        if verify_live_device is None:
-            status = await provider.status(refresh=True)
-            if not status.connected:
-                raise ValueError(status.last_error or "No configured ESPHome devices connected.")
-            return
-        enabled_devices = [
-            device
-            for device in runtime.esphome_devices
-            if device.get("enabled", True) and str(device.get("host") or "").strip()
-        ]
-        if not enabled_devices:
-            raise ValueError("No enabled ESPHome devices are configured.")
-        for device in enabled_devices:
-            await verify_live_device(str(device["id"]))
+    provider = get_access_device_provider("esphome")
+    verify_live_device = getattr(provider, "verify_live_device", None)
+    if verify_live_device is None:
+        status = await provider.status(refresh=True)
+        if not status.connected:
+            raise ValueError(status.last_error or "No configured ESPHome devices connected.")
         return
-    host = str(values.get("esphome_host") or runtime.esphome_host or "").strip()
-    port = int(values.get("esphome_port") or runtime.esphome_port or 6053)
-    encryption_key = str(values.get("esphome_api_encryption_key") or runtime.esphome_api_encryption_key or "").strip()
-    legacy_password = str(values.get("esphome_legacy_password") or runtime.esphome_legacy_password or "").strip() or None
-    timeout = float(values.get("esphome_timeout_seconds") or runtime.esphome_timeout_seconds or 30.0)
-    if not host:
-        raise ValueError("ESPHome host is required.")
-    if not encryption_key:
-        raise ValueError("ESPHome API encryption key is required.")
-    aio = importlib.import_module("aioesphomeapi")
-    client = aio.APIClient(
-        address=host,
-        port=port,
-        password=legacy_password,
-        noise_psk=encryption_key,
-    )
-    try:
-        await asyncio.wait_for(client.start_resolve_host(), timeout=min(timeout, 15.0))
-        await asyncio.wait_for(client.start_connection(), timeout=timeout)
-        await asyncio.wait_for(client.finish_connection(login=legacy_password is not None), timeout=timeout)
-        entities, _services = await asyncio.wait_for(client.list_entities_services(), timeout=10.0)
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-    covers = [entity for entity in entities if entity.__class__.__name__ == "CoverInfo"]
-    if not covers:
-        raise ValueError("ESPHome connected, but no cover entities were discovered.")
+    enabled_devices = [
+        device
+        for device in runtime.esphome_devices
+        if device.get("enabled", True) and str(device.get("host") or "").strip()
+    ]
+    if not enabled_devices:
+        raise ValueError("No enabled ESPHome devices are configured.")
+    requested_device = str(values.get("device_id") or "").strip()
+    target_devices = [device for device in enabled_devices if str(device.get("id") or "") == requested_device] if requested_device else enabled_devices
+    if not target_devices:
+        raise ValueError("Requested ESPHome device is not configured or enabled.")
+    for device in target_devices:
+        await verify_live_device(str(device["id"]))
 
 
 async def _test_apprise(values: dict[str, Any]) -> None:

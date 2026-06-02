@@ -20,12 +20,6 @@ from app.services.snapshots import (
     access_event_snapshot_url,
     apply_snapshot_to_access_event,
 )
-from app.services.notification_snapshots import (
-    delete_notification_snapshot,
-    notification_snapshot_content_type,
-    notification_snapshot_path,
-    store_notification_snapshot,
-)
 from app.services.snapshot_recovery import find_protect_snapshot_evidence_by_plate_time
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
@@ -225,38 +219,6 @@ def test_access_event_snapshot_payload_uses_event_metadata(tmp_path, monkeypatch
     }
 
 
-def test_snapshot_manager_archives_existing_legacy_access_event_snapshot(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    manager = SnapshotManager()
-    event_id = uuid4()
-    relative_path = access_event_snapshot_relative_path(event_id)
-    primary = tmp_path / relative_path
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"legacy-jpeg")
-    metadata = SimpleNamespace(
-        relative_path=relative_path,
-        url=access_event_snapshot_url(event_id),
-        camera="camera.gate",
-        captured_at=datetime(2026, 4, 30, 20, 45, tzinfo=UTC),
-        content_type=SNAPSHOT_CONTENT_TYPE,
-        bytes=len(b"legacy-jpeg"),
-        width=320,
-        height=180,
-    )
-
-    assert manager.ensure_access_event_archive(metadata)
-
-    archive = tmp_path / access_event_snapshot_archive_relative_path(event_id)
-    manifest = tmp_path / access_event_snapshot_manifest_relative_path(event_id)
-    assert archive.read_bytes() == b"legacy-jpeg"
-    primary.unlink()
-    assert manager.resolve_path(relative_path).read_bytes() == b"legacy-jpeg"
-    assert f'"primary_path":"{relative_path}"' in manifest.read_text()
-
-
 def test_access_event_snapshot_payload_suppresses_missing_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     event_id = uuid4()
@@ -306,23 +268,24 @@ def test_access_event_snapshot_payload_can_skip_availability_check(
     }
 
 
-def test_notification_snapshot_wrapper_routes_through_snapshot_manager(
+def test_notification_snapshots_are_owned_by_snapshot_manager(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    manager = SnapshotManager()
 
-    stored = store_notification_snapshot(b"png-bytes", "image/png")
+    stored = manager.store_notification_snapshot(b"png-bytes", "image/png")
     filename = Path(stored.path).name
 
-    assert stored.path == notification_snapshot_path(filename)
+    assert stored.path == manager.notification_snapshot_path(filename)
     assert stored.url_path == f"/api/v1/notification-snapshots/{filename}"
     assert stored.content_type == "image/png"
-    assert notification_snapshot_content_type(stored.path) == "image/png"
+    assert manager.notification_snapshot_content_type(stored.path) == "image/png"
     assert stored.path.read_bytes() == b"png-bytes"
     assert stored.path.parent == tmp_path / "notification-snapshots"
 
-    delete_notification_snapshot(stored.path)
+    manager.delete_snapshot_path(stored.path)
     assert not stored.path.exists()
 
 
@@ -336,7 +299,7 @@ def test_notification_delete_refuses_access_event_snapshots(
     path.parent.mkdir(parents=True)
     path.write_bytes(b"durable")
 
-    delete_notification_snapshot(path)
+    SnapshotManager().delete_snapshot_path(path)
 
     assert path.exists()
 

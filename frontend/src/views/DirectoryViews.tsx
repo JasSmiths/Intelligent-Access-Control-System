@@ -20,29 +20,13 @@ Zap
 } from "lucide-react";
 import React from "react";
 
-import {
-activeManagedCovers,
-api,
-Badge,
-BadgeTone,
-createActionConfirmation,
-EmptyState,
-fileToDataUrl,
-Group,
-HomeAssistantDiscovery,
-HomeAssistantManagedCover,
-HomeAssistantMobileAppService,
-initials,
-matches,
-mediaSource,
-PanelHeader,
-Person,
-Schedule,
-titleCase,
-titleFromEntityId,
-useScheduleDefaultPolicyOptionLabel,
-Vehicle
-} from "../shared";
+import { api, createActionConfirmation } from "../api/client";
+import { activeManagedCovers, initials, matches, titleCase, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
+import { fileToDataUrl, mediaSource } from "../lib/media";
+import { titleFromEntityId } from "../lib/settings";
+import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
+import type { Group, HomeAssistantDiscovery, HomeAssistantManagedCover, HomeAssistantMobileAppService, Person, Schedule, Vehicle } from "../api/types";
+import type { BadgeTone } from "../ui/primitives";
 
 type PersonPronouns = NonNullable<Person["pronouns"]>;
 type PersonPronounFormValue = PersonPronouns | "";

@@ -1,0 +1,30 @@
+{
+  "id": "rule-authorized-entry",
+  "name": "Resident arrival alert",
+  "trigger_event": "authorized_entry",
+  "is_active": true,
+  "conditions": [],
+  "actions": [
+    {
+      "id": "action-1",
+      "type": "in_app",
+      "target_mode": "all",
+      "target_ids": [],
+      "title": "Steph arrived",
+      "message": "Steph arrived in Tesla Model Y at 08:15",
+      "title_template": "@FirstName arrived",
+      "message_template": "@DisplayName arrived in @VehicleName at @Time",
+      "gate_malfunction_stages": [],
+      "media": {
+        "attach_camera_snapshot": false,
+        "camera_id": ""
+      },
+      "actionable": {
+        "enabled": false,
+        "action": ""
+      },
+      "snapshot": null
+    }
+  ]
+}
+

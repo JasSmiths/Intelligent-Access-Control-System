@@ -41,7 +41,6 @@ class Settings(BaseSettings):
     public_base_url: AnyHttpUrl | None = None
     root_path: str = ""
     auto_create_schema: bool = True
-    legacy_schema_bootstrap: bool = False
     seed_demo_data: bool = False
 
     auth_secret_key: str = ""
@@ -58,7 +57,6 @@ class Settings(BaseSettings):
 
     home_assistant_url: AnyHttpUrl | None = None
     home_assistant_token: str | None = None
-    home_assistant_gate_entity_id: str | None = None
     home_assistant_gate_open_service: str = "cover.open_cover"
     home_assistant_tts_service: str = "tts.cloud_say"
     home_assistant_default_media_player: str | None = None
@@ -100,7 +98,6 @@ class Settings(BaseSettings):
         "public_base_url",
         "home_assistant_url",
         "home_assistant_token",
-        "home_assistant_gate_entity_id",
         "home_assistant_default_media_player",
         "apprise_urls",
         "openai_api_key",

@@ -1,0 +1,19 @@
+{
+  "event_id": "44444444-4444-4444-4444-444444444444",
+  "access_event_id": "44444444-4444-4444-4444-444444444444",
+  "person_id": "22222222-2222-2222-2222-222222222222",
+  "vehicle_id": "33333333-3333-3333-3333-333333333333",
+  "registration_number": "PE70DHX",
+  "direction": "exit",
+  "decision": "granted",
+  "confidence": 0.96,
+  "source": "ubiquiti",
+  "occurred_at": "2026-05-31T17:42:00+00:00",
+  "event_type": "access_event.finalized",
+  "timing_classification": "normal",
+  "anomaly_count": 0,
+  "visitor_pass_id": null,
+  "visitor_name": null,
+  "visitor_pass_mode": null
+}
+

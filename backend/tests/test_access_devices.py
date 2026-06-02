@@ -24,11 +24,13 @@ class FakeProvider:
         name: str,
         *,
         unavailable: bool = False,
+        accepted: bool = True,
         state: GateState = GateState.OPENING,
         command_states: list[GateState] | None = None,
     ) -> None:
         self.name = name
         self.unavailable = unavailable
+        self.accepted = accepted
         self.state = state
         self.command_states = list(command_states or [])
         self.commands: list[tuple[str, str]] = []
@@ -45,7 +47,7 @@ class FakeProvider:
         if self.command_states:
             self.state = self.command_states.pop(0)
         return AccessDeviceCommandResult(
-            accepted=True,
+            accepted=self.accepted,
             state=self.state,
             detail=reason,
             provider=self.name,
@@ -59,6 +61,10 @@ async def _wait_for_command(client: "FakeESPHomeClient") -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("ESPHome command was not sent")
+
+
+async def _noop_remember_state(*_args, **_kwargs) -> None:
+    return None
 
 
 def test_access_device_provider_registry_returns_singletons() -> None:
@@ -91,7 +97,10 @@ async def test_access_device_command_uses_failover_only_for_unavailable_primary(
         },
     )
 
-    outcome = await AccessDeviceService()._command_with_failover(device, "open", "test")
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "open", "test")
 
     assert outcome.accepted is True
     assert outcome.used_provider == "esphome"
@@ -117,7 +126,10 @@ async def test_access_device_command_uses_configured_binding_when_primary_missin
         bindings={"esphome": AccessDeviceBinding("esphome", "garage_door")},
     )
 
-    outcome = await AccessDeviceService()._command_with_failover(device, "open", "test")
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "open", "test")
 
     assert outcome.accepted is True
     assert outcome.used_provider == "esphome"
@@ -126,7 +138,7 @@ async def test_access_device_command_uses_configured_binding_when_primary_missin
 
 
 @pytest.mark.asyncio
-async def test_access_device_command_retries_primary_when_open_not_confirmed(monkeypatch) -> None:
+async def test_access_device_command_does_not_repeat_after_accepted_unverified_state(monkeypatch) -> None:
     primary = FakeProvider(
         "esphome",
         state=GateState.CLOSED,
@@ -140,7 +152,6 @@ async def test_access_device_command_retries_primary_when_open_not_confirmed(mon
     monkeypatch.setattr(access_devices_module, "get_access_device_provider", lambda _name: primary)
     monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(access_devices_module, "COMMAND_RETRY_DELAY_SECONDS", 0.0)
 
     device = AccessDeviceEntity(
         key="mums_garage_door",
@@ -149,17 +160,22 @@ async def test_access_device_command_retries_primary_when_open_not_confirmed(mon
         bindings={"esphome": AccessDeviceBinding("esphome", "garage_door")},
     )
 
-    outcome = await AccessDeviceService()._command_with_failover(device, "open", "test")
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "open", "test")
 
     assert outcome.accepted is True
     assert outcome.used_provider == "esphome"
     assert outcome.failover_used is False
-    assert primary.commands == [("garage_door", "open"), ("garage_door", "open")]
-    assert [attempt.verified for attempt in outcome.attempts] == [False, True]
+    assert outcome.verified is False
+    assert outcome.metadata["accepted_unverified"] is True
+    assert primary.commands == [("garage_door", "open")]
+    assert [attempt.verified for attempt in outcome.attempts] == [False]
 
 
 @pytest.mark.asyncio
-async def test_access_device_command_fails_over_when_primary_never_opens(monkeypatch) -> None:
+async def test_access_device_command_does_not_fail_over_after_accepted_unverified_state(monkeypatch) -> None:
     primary = FakeProvider("home_assistant", state=GateState.CLOSED)
     failover = FakeProvider("esphome", state=GateState.OPENING)
 
@@ -174,7 +190,6 @@ async def test_access_device_command_fails_over_when_primary_never_opens(monkeyp
     )
     monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(access_devices_module, "COMMAND_RETRY_DELAY_SECONDS", 0.0)
 
     device = AccessDeviceEntity(
         key="mums_garage_door",
@@ -186,31 +201,176 @@ async def test_access_device_command_fails_over_when_primary_never_opens(monkeyp
         },
     )
 
-    outcome = await AccessDeviceService()._command_with_failover(device, "open", "test")
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "open", "test")
 
     assert outcome.accepted is True
-    assert outcome.used_provider == "esphome"
-    assert outcome.failover_used is True
-    assert primary.commands == [
-        ("cover.mums_garage_door", "open"),
-        ("cover.mums_garage_door", "open"),
-    ]
-    assert failover.commands == [("garage_door", "open")]
+    assert outcome.used_provider == "home_assistant"
+    assert outcome.failover_used is False
+    assert outcome.verified is False
+    assert outcome.metadata["accepted_unverified"] is True
+    assert primary.commands == [("cover.mums_garage_door", "open")]
+    assert failover.commands == []
     assert any(attempt.confirmation_failed for attempt in outcome.attempts if attempt.provider == "home_assistant")
 
 
 @pytest.mark.asyncio
-async def test_access_device_command_rejects_when_no_provider_confirms_open(monkeypatch) -> None:
-    primary = FakeProvider("esphome", state=GateState.CLOSED)
+async def test_access_device_close_retries_same_provider_before_failover(monkeypatch) -> None:
+    primary = FakeProvider(
+        "home_assistant",
+        state=GateState.OPEN,
+        command_states=[GateState.OPEN, GateState.OPEN],
+    )
+    failover = FakeProvider("esphome", state=GateState.CLOSED)
+
+    async def fake_runtime_config():
+        return SimpleNamespace(gate_control_provider="home_assistant", gate_failover_provider="esphome")
+
+    monkeypatch.setattr(access_devices_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        access_devices_module,
+        "get_access_device_provider",
+        lambda name: primary if name == "home_assistant" else failover,
+    )
+    monkeypatch.setattr(access_devices_module, "CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
+
+    device = AccessDeviceEntity(
+        key="main_garage_door",
+        kind="garage_door",
+        name="Main Garage Door",
+        bindings={
+            "home_assistant": AccessDeviceBinding("home_assistant", "cover.main_garage_door"),
+            "esphome": AccessDeviceBinding("esphome", "athom_garage_door"),
+        },
+    )
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "close", "test")
+
+    assert outcome.accepted is True
+    assert outcome.verified is True
+    assert outcome.used_provider == "esphome"
+    assert outcome.failover_used is True
+    assert primary.commands == [
+        ("cover.main_garage_door", "close"),
+        ("cover.main_garage_door", "close"),
+    ]
+    assert failover.commands == [("athom_garage_door", "close")]
+
+
+@pytest.mark.asyncio
+async def test_access_device_close_tries_failover_once_before_failure(monkeypatch) -> None:
+    primary = FakeProvider(
+        "home_assistant",
+        state=GateState.OPEN,
+        command_states=[GateState.OPEN, GateState.OPEN],
+    )
+    failover = FakeProvider(
+        "esphome",
+        state=GateState.OPEN,
+        command_states=[GateState.OPEN, GateState.OPEN],
+    )
+
+    async def fake_runtime_config():
+        return SimpleNamespace(gate_control_provider="home_assistant", gate_failover_provider="esphome")
+
+    monkeypatch.setattr(access_devices_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        access_devices_module,
+        "get_access_device_provider",
+        lambda name: primary if name == "home_assistant" else failover,
+    )
+    monkeypatch.setattr(access_devices_module, "CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
+
+    device = AccessDeviceEntity(
+        key="main_garage_door",
+        kind="garage_door",
+        name="Main Garage Door",
+        bindings={
+            "home_assistant": AccessDeviceBinding("home_assistant", "cover.main_garage_door"),
+            "esphome": AccessDeviceBinding("esphome", "athom_garage_door"),
+        },
+    )
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "close", "test")
+
+    assert outcome.accepted is False
+    assert outcome.verified is False
+    assert primary.commands == [
+        ("cover.main_garage_door", "close"),
+        ("cover.main_garage_door", "close"),
+    ]
+    assert failover.commands == [("athom_garage_door", "close")]
+    assert [attempt.provider for attempt in outcome.attempts] == [
+        "home_assistant",
+        "home_assistant",
+        "esphome",
+    ]
+    assert "did not report closed" in (outcome.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_access_device_close_retry_can_confirm_without_failover(monkeypatch) -> None:
+    primary = FakeProvider(
+        "home_assistant",
+        state=GateState.OPEN,
+        command_states=[GateState.OPEN, GateState.CLOSED],
+    )
+    failover = FakeProvider("esphome", state=GateState.CLOSED)
+
+    async def fake_runtime_config():
+        return SimpleNamespace(gate_control_provider="home_assistant", gate_failover_provider="esphome")
+
+    monkeypatch.setattr(access_devices_module, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        access_devices_module,
+        "get_access_device_provider",
+        lambda name: primary if name == "home_assistant" else failover,
+    )
+    monkeypatch.setattr(access_devices_module, "CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
+
+    device = AccessDeviceEntity(
+        key="main_garage_door",
+        kind="garage_door",
+        name="Main Garage Door",
+        bindings={
+            "home_assistant": AccessDeviceBinding("home_assistant", "cover.main_garage_door"),
+            "esphome": AccessDeviceBinding("esphome", "athom_garage_door"),
+        },
+    )
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "close", "test")
+
+    assert outcome.accepted is True
+    assert outcome.verified is True
+    assert outcome.used_provider == "home_assistant"
+    assert outcome.failover_used is False
+    assert primary.commands == [
+        ("cover.main_garage_door", "close"),
+        ("cover.main_garage_door", "close"),
+    ]
+    assert failover.commands == []
+
+
+@pytest.mark.asyncio
+async def test_access_device_command_rejects_when_provider_rejects_before_hardware_acceptance(monkeypatch) -> None:
+    primary = FakeProvider("esphome", accepted=False, state=GateState.FAULT)
 
     async def fake_runtime_config():
         return SimpleNamespace(gate_control_provider="esphome", gate_failover_provider="none")
 
     monkeypatch.setattr(access_devices_module, "get_runtime_config", fake_runtime_config)
     monkeypatch.setattr(access_devices_module, "get_access_device_provider", lambda _name: primary)
-    monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(access_devices_module, "COMMAND_CONFIRMATION_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(access_devices_module, "COMMAND_RETRY_DELAY_SECONDS", 0.0)
 
     device = AccessDeviceEntity(
         key="mums_garage_door",
@@ -219,12 +379,15 @@ async def test_access_device_command_rejects_when_no_provider_confirms_open(monk
         bindings={"esphome": AccessDeviceBinding("esphome", "garage_door")},
     )
 
-    outcome = await AccessDeviceService()._command_with_failover(device, "open", "test")
+    service = AccessDeviceService()
+    monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
+
+    outcome = await service._command_with_failover(device, "open", "test")
 
     assert outcome.accepted is False
     assert outcome.state is GateState.FAULT
-    assert primary.commands == [("garage_door", "open"), ("garage_door", "open")]
-    assert "did not report" in (outcome.detail or "")
+    assert primary.commands == [("garage_door", "open")]
+    assert outcome.detail == "test"
 
 
 @pytest.mark.asyncio

@@ -1508,26 +1508,9 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .notifications-layout {
-    grid-template-columns: 250px minmax(0, 1fr);
-  }
-
-  .notification-side-panel {
-    grid-column: 1 / -1;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .notification-flow-canvas {
-    grid-template-columns: 1fr;
-  }
-
   .presence-summary-card,
   .chart-card {
     grid-column: span 2;
-  }
-
-  .simulator-form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .schedule-card-grid {
@@ -1569,9 +1552,7 @@
   .brand div:last-child,
   .brand-copy,
   .nav-item span,
-  .site-switcher span,
   .profile-switcher span:not(.profile-photo),
-  .site-switcher > svg:last-child,
   .profile-switcher > svg:last-child,
   .sidebar-status .sidebar-status-copy {
     display: none;
@@ -1582,7 +1563,6 @@
     padding: 0;
   }
 
-  .site-switcher,
   .profile-switcher {
     grid-template-columns: 1fr;
     justify-items: center;
@@ -1635,8 +1615,6 @@
   .dashboard-page,
   .view-stack,
   .dashboard-grid,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid,
   .card,
   .table-card,
@@ -1648,31 +1626,21 @@
   .dashboard-page > *,
   .view-stack > *,
   .dashboard-grid > *,
-  .reports-grid > *,
-  .integrations-grid > *,
   .settings-grid > * {
     min-width: 0;
     max-width: 100%;
   }
 
-  .bento-list,
-  .provider-grid,
   .integration-tile-grid,
   .protect-camera-grid,
   .schedule-card-grid,
   .schedule-modal-grid,
   .settings-form-grid,
   .ha-setup-grid,
-  .slot-grid,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .notifications-layout,
-  .notification-picker-grid,
-  .workflow-notification-shell,
   .workflow-editor-modal-grid {
     grid-template-columns: 1fr;
   }
@@ -1693,21 +1661,10 @@
     grid-template-columns: 240px minmax(0, 1fr);
   }
 
-  .workflow-rule-table,
-  .notification-preview-rail,
   .workflow-editor-modal-grid .workflow-builder-panel,
   .workflow-editor-modal-grid .notification-preview-panel {
     position: static;
     max-height: none;
-  }
-
-  .notification-side-panel {
-    grid-column: auto;
-    grid-template-columns: 1fr;
-  }
-
-  .ha-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .span-2,
@@ -1871,8 +1828,6 @@
   .dashboard-page,
   .view-stack,
   .dashboard-grid,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid,
   .card,
   .table-card,
@@ -2056,28 +2011,12 @@
     grid-template-columns: 1fr;
   }
 
-  .workflow-selected-card,
-  .workflow-rule-main {
+  .workflow-selected-card {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .workflow-rule-row {
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
-    gap: 12px;
-    padding: 14px;
-  }
-
-  .workflow-rule-controls {
-    justify-content: space-between;
   }
 
   .workflow-selected-card svg {
     display: none;
-  }
-
-  .notification-preview-card-inline {
-    flex-basis: 86vw;
   }
 
   .topbar-left,
@@ -2159,8 +2098,6 @@
 
   .dashboard-page,
   .view-stack,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid {
     padding: 18px 14px calc(22px + env(safe-area-inset-bottom) + var(--alfred-launcher-clearance));
   }
@@ -2171,21 +2108,12 @@
   }
 
   .dashboard-grid,
-  .bento-list,
-  .provider-grid,
   .integration-tile-grid,
   .protect-camera-grid,
   .visitor-pass-grid,
   .settings-form-grid,
   .ha-setup-grid,
-  .slot-grid,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .presence-mapping-row {
     grid-template-columns: 1fr;
   }
 
@@ -2208,10 +2136,7 @@
     width: min(52vw, 180px);
   }
 
-  .ha-tabs,
   .ha-section-heading,
-  .ha-device-title,
-  .ha-entity-composer,
   .schedule-policy-card,
   .passes-toolbar,
   .users-hero.passes-hero,
@@ -2225,7 +2150,7 @@
   .protect-analysis-sections,
   .protect-backup-row,
   .protect-analysis-box,
-  .ha-cover-row {
+  .protect-analysis-box {
     grid-template-columns: 1fr;
   }
 
@@ -2245,47 +2170,11 @@
     justify-content: flex-start;
   }
 
-  .ha-tab {
-    grid-template-columns: 28px minmax(0, 1fr);
-    min-height: 54px;
-  }
-
   .notification-editor-header,
   .notification-editor-actions,
-  .notification-event-lock,
-  .notification-channel-title,
-  .notification-subtitle,
   .integration-category-header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .notification-channel-tabs,
-  .notification-endpoint-list,
-  .notification-add-group > div,
-  .notification-mode-tabs,
-  .notification-severity-row,
-  .notification-snapshot-controls,
-  .notification-variable-table button {
-    grid-template-columns: 1fr;
-  }
-
-  .notification-channel-tab {
-    grid-template-columns: 20px minmax(0, 1fr) max-content;
-  }
-
-  .notification-mode-tabs {
-    width: 100%;
-  }
-
-  .notification-test-button {
-    justify-self: stretch;
-  }
-
-  .ha-tab svg {
-    width: 28px;
-    height: 28px;
-    padding: 6px;
   }
 
   .apprise-manager-header,
@@ -2467,20 +2356,6 @@
     grid-template-columns: 1fr;
   }
 
-  .visitor-pass-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .visitor-pass-action-buttons {
-    width: 100%;
-    justify-content: stretch;
-  }
-
-  .visitor-pass-action-buttons .secondary-button {
-    flex: 1 1 0;
-  }
-
   .apprise-url-head {
     display: none;
   }
@@ -2561,13 +2436,8 @@
   }
 
   .anomaly-feed-row,
-  .timeline-row,
   .log-line {
     grid-template-columns: 1fr;
-  }
-
-  .timeline-row .event-dot {
-    display: none;
   }
 
   .event-snapshot-cell {
@@ -2583,10 +2453,6 @@
   .event-snapshot-preview {
     width: 180px;
     height: 102px;
-  }
-
-  .simulator-form {
-    grid-template-columns: 1fr;
   }
 
   .field-grid,
@@ -2673,46 +2539,8 @@
     min-width: 520px;
   }
 
-  .telemetry-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .telemetry-tabs {
-    display: flex;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .telemetry-tab {
-    min-width: 220px;
-  }
-
-  .telemetry-row-button {
-    grid-template-columns: 34px minmax(0, 1fr) 18px;
-  }
-
-  .telemetry-row-meta {
-    grid-column: 2 / -1;
-    justify-content: flex-start;
-  }
-
-  .trace-waterfall,
-  .audit-detail,
   .telemetry-detail-loading {
     padding-left: 12px;
-  }
-
-  .trace-summary-grid,
-  .audit-diff-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .trace-artifact {
-    grid-template-columns: 88px minmax(0, 1fr);
-  }
-
-  .trace-artifact img {
-    width: 88px;
   }
 
   .chat-widget {
@@ -3022,8 +2850,6 @@
 
   .dashboard-page,
   .view-stack,
-  .reports-grid,
-  .integrations-grid,
   .settings-grid {
     padding-inline: 10px;
   }
@@ -3133,7 +2959,6 @@
   .primary-button,
   .secondary-button,
   .chat-pill,
-  .site-switcher,
   .profile-switcher {
     transition: border-color 160ms ease, background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
   }
@@ -3142,7 +2967,6 @@
   .primary-button:not(:disabled):hover,
   .secondary-button:not(:disabled):hover,
   .chat-pill:hover,
-  .site-switcher:hover,
   .profile-switcher:hover {
     transform: translateY(-1px);
   }
@@ -3201,18 +3025,5 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-@media (max-width: 768px) {
-  .logs-live-actions .compact-search {
-    height: 36px;
-    min-height: 36px;
-    max-width: none;
-    flex: 0 0 auto;
-  }
-
-  .logs-live-actions .compact-search input {
-    min-height: 34px;
   }
 }

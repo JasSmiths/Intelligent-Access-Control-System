@@ -13,10 +13,8 @@ from app.modules.notifications.base import NotificationDeliveryError
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.notifications import (
     get_notification_service,
-    legacy_gate_malfunction_stage,
     normalize_actions,
     normalize_conditions,
-    normalize_gate_malfunction_stages,
     normalize_rule_payload,
     normalize_trigger_event,
     notification_context_from_payload,
@@ -162,31 +160,14 @@ async def update_notification_rule(
     )
     rule = await get_rule_or_404(session, rule_id)
     before = rule_audit_snapshot(rule)
-    legacy_stage = legacy_gate_malfunction_stage(request.trigger_event) if request.trigger_event is not None else ""
     if request.name is not None:
         rule.name = request.name.strip()
     if request.trigger_event is not None:
         rule.trigger_event = normalize_trigger_event(request.trigger_event)
-        if legacy_stage and request.actions is None:
-            rule.actions = [
-                {
-                    **action,
-                    "gate_malfunction_stages": [legacy_stage],
-                }
-                for action in normalize_actions(rule.actions)
-            ]
     if request.conditions is not None:
         rule.conditions = normalize_conditions(request.conditions)
     if request.actions is not None:
         actions = normalize_actions(request.actions)
-        if legacy_stage:
-            actions = [
-                {
-                    **action,
-                    "gate_malfunction_stages": normalize_gate_malfunction_stages([legacy_stage]),
-                }
-                for action in actions
-            ]
         if not actions:
             raise HTTPException(status_code=400, detail="At least one notification action is required.")
         rule.actions = actions

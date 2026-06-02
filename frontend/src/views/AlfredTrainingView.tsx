@@ -1,7 +1,10 @@
 import { Bot,Check,Download,Link2,Loader2,RefreshCw,ThumbsDown,ThumbsUp,X } from "lucide-react";
 import React from "react";
 
-import { api,Badge,createActionConfirmation,titleCase,useSettings } from "../shared";
+import { api, createActionConfirmation } from "../api/client";
+import { titleCase } from "../lib/format";
+import { useSettings } from "../lib/settings";
+import { Badge } from "../ui/primitives";
 
 type AlfredTrainingSource = {
   kind: "user_feedback" | "self_learning" | "manual_training" | "seed" | "system" | string;

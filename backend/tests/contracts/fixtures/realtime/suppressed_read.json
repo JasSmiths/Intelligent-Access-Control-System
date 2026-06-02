@@ -1,0 +1,8 @@
+{
+  "movement_state": "suppressed",
+  "reason": "exact_known_vehicle_plate_already_resolved_in_debounce_window",
+  "kind": "same_movement_noise",
+  "registration_number": "PE70DHX",
+  "source": "ubiquiti"
+}
+

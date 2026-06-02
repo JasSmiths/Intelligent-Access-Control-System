@@ -25,7 +25,7 @@ from app.modules.access_devices.base import (
 from app.modules.access_devices.registry import get_access_device_provider
 from app.modules.access_devices.registry import access_device_provider_keys
 from app.modules.gate.base import GateState
-from app.modules.home_assistant.covers import legacy_gate_entities, normalize_cover_entities
+from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
 
@@ -33,11 +33,12 @@ logger = get_logger(__name__)
 
 
 STATE_POLL_INTERVAL_SECONDS = 10.0
-COMMAND_PROVIDER_MAX_ATTEMPTS = 2
+COMMAND_PROVIDER_MAX_ATTEMPTS = 1
+CLOSE_COMMAND_PROVIDER_MAX_ATTEMPTS = 2
 COMMAND_CONFIRMATION_TIMEOUT_SECONDS = 5.0
+CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS = 60.0
 COMMAND_CONFIRMATION_POLL_SECONDS = 0.5
 COMMAND_STATE_READ_TIMEOUT_SECONDS = 4.0
-COMMAND_RETRY_DELAY_SECONDS = 0.75
 COMMAND_EXPECTED_STATES: dict[str, set[GateState]] = {
     "open": {GateState.OPENING, GateState.OPEN},
     "close": {GateState.CLOSING, GateState.CLOSED},
@@ -69,6 +70,10 @@ class AccessDeviceOperationResult:
     attempts: list[AccessDeviceProviderAttempt] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def verified(self) -> bool:
+        return any(attempt.verified for attempt in self.attempts)
+
     def as_payload(self) -> dict[str, Any]:
         return {
             "entity_id": self.device.key,
@@ -82,6 +87,7 @@ class AccessDeviceOperationResult:
             "primary_provider": self.primary_provider,
             "used_provider": self.used_provider,
             "failover_used": self.failover_used,
+            "verified": self.verified,
             "attempts": [attempt.__dict__ for attempt in self.attempts],
             "metadata": self.metadata,
         }
@@ -451,7 +457,12 @@ class AccessDeviceService:
         for index, provider_name in enumerate(provider_names):
             binding = device.bindings[provider_name]
             provider = get_access_device_provider(provider_name)
-            for attempt_number in range(1, COMMAND_PROVIDER_MAX_ATTEMPTS + 1):
+            max_attempts = (
+                CLOSE_COMMAND_PROVIDER_MAX_ATTEMPTS
+                if action == "close" and index == 0
+                else COMMAND_PROVIDER_MAX_ATTEMPTS
+            )
+            for attempt_number in range(1, max_attempts + 1):
                 started_at = datetime.now(tz=UTC)
                 try:
                     result = await provider.command_cover(binding, action, reason)
@@ -515,6 +526,12 @@ class AccessDeviceService:
                     action,
                     initial_state=result.state,
                     started_at=started_at,
+                    expected_states={GateState.CLOSED} if action == "close" else None,
+                    timeout_seconds=(
+                        CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS
+                        if action == "close"
+                        else COMMAND_CONFIRMATION_TIMEOUT_SECONDS
+                    ),
                 )
                 attempts.append(
                     AccessDeviceProviderAttempt(
@@ -551,20 +568,62 @@ class AccessDeviceService:
                             "provider_attempt": attempt_number,
                         },
                     )
-                if attempt_number < COMMAND_PROVIDER_MAX_ATTEMPTS:
+                if action == "close":
+                    if attempt_number < max_attempts:
+                        logger.warning(
+                            "access_device_close_retrying_after_unverified_state",
+                            extra={
+                                "device_key": device.key,
+                                "device_name": device.name,
+                                "provider": provider_name,
+                                "attempt": attempt_number,
+                                "state": confirmed_state.value,
+                                "detail": confirmation_detail,
+                            },
+                        )
+                        continue
                     logger.warning(
-                        "access_device_command_retrying_after_unverified_state",
+                        "access_device_close_provider_unverified_after_retries",
                         extra={
                             "device_key": device.key,
                             "device_name": device.name,
                             "provider": provider_name,
-                            "action": action,
-                            "attempt": attempt_number,
+                            "attempts": max_attempts,
                             "state": confirmed_state.value,
                             "detail": confirmation_detail,
                         },
                     )
-                    await asyncio.sleep(COMMAND_RETRY_DELAY_SECONDS)
+                    break
+                logger.warning(
+                    "access_device_command_accepted_but_unverified",
+                    extra={
+                        "device_key": device.key,
+                        "device_name": device.name,
+                        "provider": provider_name,
+                        "action": action,
+                        "attempt": attempt_number,
+                        "state": confirmed_state.value,
+                        "detail": confirmation_detail,
+                    },
+                )
+                return AccessDeviceOperationResult(
+                    device=device,
+                    action=action,
+                    accepted=True,
+                    state=confirmed_state,
+                    detail=confirmation_detail or result.detail,
+                    primary_provider=provider_names[0],
+                    used_provider=provider_name,
+                    failover_used=index > 0,
+                    attempts=attempts,
+                    metadata={
+                        **result.metadata,
+                        "verified": False,
+                        "verified_state": confirmed_state.value,
+                        "provider_attempt": attempt_number,
+                        "accepted_unverified": True,
+                    },
+                )
 
             if index < len(provider_names) - 1:
                 logger.warning(
@@ -591,16 +650,19 @@ class AccessDeviceService:
         *,
         initial_state: GateState,
         started_at: datetime,
+        expected_states: set[GateState] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[GateState, bool, str | None]:
-        expected_states = COMMAND_EXPECTED_STATES.get(action)
+        expected_states = expected_states or COMMAND_EXPECTED_STATES.get(action)
         if not expected_states:
             return initial_state, True, None
+        timeout_seconds = COMMAND_CONFIRMATION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
         if initial_state in expected_states:
             return initial_state, True, None
 
         last_state = initial_state
         last_error: str | None = None
-        deadline = asyncio.get_running_loop().time() + COMMAND_CONFIRMATION_TIMEOUT_SECONDS
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
         while True:
             cached_state = self._confirmed_cached_state(device.key, started_at)
             if cached_state in expected_states:
@@ -629,7 +691,7 @@ class AccessDeviceService:
         expected = "/".join(sorted(state.value for state in expected_states))
         detail = (
             f"{provider_name} accepted {action}, but {device.name} did not report "
-            f"{expected} within {COMMAND_CONFIRMATION_TIMEOUT_SECONDS:.1f}s"
+            f"{expected} within {timeout_seconds:.1f}s"
         )
         if last_error:
             detail = f"{detail}; last state check failed: {last_error}"
@@ -1007,7 +1069,7 @@ class AccessDeviceService:
             return None
 
 
-async def seed_access_devices_from_legacy_settings() -> None:
+async def seed_access_devices_from_settings() -> None:
     config = await get_runtime_config()
     async with AsyncSessionLocal() as session:
         existing = {
@@ -1021,8 +1083,8 @@ async def seed_access_devices_from_legacy_settings() -> None:
         gate_entities = normalize_cover_entities(
             config.home_assistant_gate_entities,
             default_open_service=config.home_assistant_gate_open_service,
-        ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
-        await _seed_legacy_entities(
+        )
+        await _seed_configured_entities(
             session,
             existing,
             gate_entities,
@@ -1033,7 +1095,7 @@ async def seed_access_devices_from_legacy_settings() -> None:
             config.home_assistant_garage_door_entities,
             default_open_service=config.home_assistant_gate_open_service,
         )
-        await _seed_legacy_entities(
+        await _seed_configured_entities(
             session,
             existing,
             garage_entities,
@@ -1043,7 +1105,7 @@ async def seed_access_devices_from_legacy_settings() -> None:
         await session.commit()
 
 
-async def _seed_legacy_entities(
+async def _seed_configured_entities(
     session: AsyncSession,
     existing: dict[str, AccessDevice],
     entities: list[dict[str, Any]],

@@ -10,18 +10,10 @@ ShieldAlert
 } from "lucide-react";
 import React from "react";
 
-import {
-api,
-Badge,
-BadgeTone,
-EmptyState,
-formatDate,
-isAbortError,
-matches,
-movementSagaDisplay,
-titleCase,
-Toolbar
-} from "../shared";
+import { api, isAbortError } from "../api/client";
+import { formatDate, matches, movementSagaDisplay, titleCase } from "../lib/format";
+import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import type { BadgeTone } from "../ui/primitives";
 
 type GateCommand = {
   id: string;

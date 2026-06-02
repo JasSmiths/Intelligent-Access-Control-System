@@ -18,7 +18,7 @@ from app.api.v1 import webhooks, whatsapp as whatsapp_api
 from app.models import VisitorPass
 from app.models.enums import UserRole, VisitorPassStatus, VisitorPassType
 from app.modules.notifications.base import NotificationContext
-from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, LEGACY_DEFAULT_REPLACEMENTS, SECRET_KEYS
+from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, SECRET_KEYS
 from app.services import whatsapp_messaging
 from app.services.visitor_passes import visitor_pass_whatsapp_history
 from app.services.whatsapp_messaging import (
@@ -134,9 +134,6 @@ def test_whatsapp_dynamic_settings_are_seeded_and_secret() -> None:
 
     assert DEFAULT_DYNAMIC_SETTINGS["whatsapp_graph_api_version"][1] == "v25.0"
     assert DEFAULT_DYNAMIC_SETTINGS["whatsapp_visitor_pass_template_name"][1] == "iacs_visitor_welcome"
-    assert LEGACY_DEFAULT_REPLACEMENTS["whatsapp_visitor_pass_template_name"] == {
-        "visitor_pass_registration_request": "iacs_visitor_welcome",
-    }
     assert DEFAULT_DYNAMIC_SETTINGS["whatsapp_visitor_pass_template_language"][1] == "en"
     assert {"whatsapp_access_token", "whatsapp_webhook_verify_token", "whatsapp_app_secret"}.issubset(SECRET_KEYS)
 

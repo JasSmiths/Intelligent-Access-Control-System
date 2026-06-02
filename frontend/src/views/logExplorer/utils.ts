@@ -1,17 +1,8 @@
 import { AlertTriangle,CheckCircle2,DoorOpen,LogIn,LogOut,RefreshCcw,Terminal } from "lucide-react";
 
-import {
-AuditLog,
-BadgeTone,
-formatDate,
-isRecord,
-levelTone,
-nullableString,
-numberPayload,
-RealtimeMessage,
-stringPayload,
-titleCase
-} from "../../shared";
+import { formatDate, isRecord, numberPayload, stringPayload, titleCase } from "../../lib/format";
+import type { AuditLog } from "../../api/types";
+import type { BadgeTone } from "../../ui/primitives";
 import {
 auditCategories,
 auditCategorySources,
@@ -29,7 +20,6 @@ LogsFilters,
 LogSourceKey,
 SavedLogsFilter,
 TelemetrySpan,
-TelemetryStorageSummary,
 TelemetrySummary,
 TelemetryTrace,
 TelemetryTraceDetail
@@ -37,7 +27,6 @@ TelemetryTraceDetail
 import { deriveNarrativeLogItem as deriveNarrativeLogItemForSearch } from "./narrative";
 
 const LOG_SEARCH_JSON_MAX_CHARS = 4000;
-const LIVE_SUMMARY_JSON_MAX_CHARS = 1500;
 
 export function formatLogMegabytes(size: number) {
   const value = Math.max(0, size);
@@ -253,46 +242,6 @@ export function auditRecord(log: AuditLog): LogRecord {
   };
 }
 
-export function liveRecord(message: RealtimeMessage, index: number): LogRecord {
-  const action = message.type;
-  const timestamp = message.created_at || new Date().toISOString();
-  const payload = message.payload || {};
-  const category = stringPayload(payload.category) || liveCategory(message.type);
-  const source = liveSource(message.type, category);
-  const subject =
-    stringPayload(payload.target_label) ||
-    stringPayload(payload.target_id) ||
-    stringPayload(payload.registration_number) ||
-    stringPayload(payload.id) ||
-    "Realtime";
-  const level = stringPayload(payload.level) || (message.type.includes("failed") || message.type.includes("error") ? "error" : "info");
-  const outcome = stringPayload(payload.outcome) || (level === "error" ? "failed" : "success");
-  return {
-    id: `live:${message.type}:${message.created_at || index}:${stringPayload(payload.id)}`,
-    kind: "live",
-    source,
-    timestamp,
-    category,
-    sourceLabel: sourceLabel(source),
-    sourceDetail: "Realtime",
-    action: titleCase(action.replace(/\./g, " ")),
-    actionDetail: action,
-    subject,
-    subjectDetail: stringPayload(payload.action) || stringPayload(payload.actor),
-    status: outcome,
-    level,
-    outcome,
-    durationMs: null,
-    actor: stringPayload(payload.actor) || "System",
-    traceId: nullableString(payload.trace_id),
-    requestId: nullableString(payload.request_id),
-    summary: compactJsonForLog(payload, LIVE_SUMMARY_JSON_MAX_CHARS),
-    searchText: [action, category, subject, compactJsonForLog(payload)].join(" ").toLowerCase(),
-    tone: levelTone(level),
-    rawRealtime: message
-  };
-}
-
 export function applyLocalFilters(records: LogRecord[], filters: LogsFilters, source: LogSourceKey) {
   const rawQuery = filters.query.trim().toLowerCase();
   const wantsSlow = filters.slowOnly || /\b(slow|latency|high latency|high-latency|took too long)\b/.test(rawQuery);
@@ -304,8 +253,7 @@ export function applyLocalFilters(records: LogRecord[], filters: LogsFilters, so
   const actor = filters.actor.trim().toLowerCase();
   const subject = filters.subject.trim().toLowerCase();
   return records.filter((record) => {
-    if (source !== "all" && source !== record.source && source !== "live") return false;
-    if (source === "live" && record.kind !== "live") return false;
+    if (source !== "all" && source !== record.source) return false;
     if (wantsSlow && !recordLooksSlow(record)) return false;
     if (query && !searchableRecordText(record).includes(query)) return false;
     if (actor && !record.actor.toLowerCase().includes(actor) && !record.sourceLabel.toLowerCase().includes(actor)) return false;
@@ -353,48 +301,6 @@ function recordMatchesStatus(record: LogRecord, status: string) {
   if (status === "warning") return record.level === "warning";
   if (status === "error") return record.status === "error" || record.level === "error" || record.outcome === "failed";
   return record.status === status || record.outcome === status;
-}
-
-export function auditLogFromRealtimePayload(payload: Record<string, unknown>): AuditLog | null {
-  const candidate = isRecord(payload.log) ? payload.log : payload;
-  if (
-    typeof candidate.id !== "string" ||
-    typeof candidate.timestamp !== "string" ||
-    typeof candidate.category !== "string" ||
-    typeof candidate.action !== "string" ||
-    typeof candidate.actor !== "string" ||
-    typeof candidate.outcome !== "string" ||
-    typeof candidate.level !== "string"
-  ) {
-    return null;
-  }
-  return {
-    id: candidate.id,
-    timestamp: candidate.timestamp,
-    category: candidate.category,
-    action: candidate.action,
-    actor: candidate.actor,
-    actor_user_id: nullableString(candidate.actor_user_id),
-    target_entity: nullableString(candidate.target_entity),
-    target_id: nullableString(candidate.target_id),
-    target_label: nullableString(candidate.target_label),
-    diff: isRecord(candidate.diff) ? candidate.diff : {},
-    metadata: isRecord(candidate.metadata) ? candidate.metadata : {},
-    outcome: candidate.outcome,
-    level: candidate.level,
-    trace_id: nullableString(candidate.trace_id),
-    request_id: nullableString(candidate.request_id)
-  };
-}
-
-export function realtimeLogKey(log: RealtimeMessage) {
-  return [
-    log.type,
-    log.created_at || "",
-    stringPayload(log.payload.id),
-    stringPayload(log.payload.action),
-    stringPayload(log.payload.category)
-  ].join("|");
 }
 
 function gateMalfunctionTraceId(record: GateMalfunctionRecord) {
@@ -611,22 +517,6 @@ function isSavedFilter(value: unknown): value is SavedLogsFilter {
   );
 }
 
-function liveCategory(type: string) {
-  if (type.startsWith("telemetry.")) return "telemetry";
-  if (type.startsWith("audit.")) return "audit";
-  if (type.includes("gate")) return "gate_malfunction";
-  if (type.includes("maintenance")) return "maintenance_mode";
-  if (type.includes("whatsapp") || type.includes("discord") || type.includes("notification")) return "integrations";
-  return "realtime";
-}
-
-function liveSource(type: string, category: string): LogSourceKey {
-  if (category in traceCategorySources) return traceCategorySources[category];
-  if (category in auditCategorySources) return auditCategorySources[category];
-  if (type.includes("chat") || type.includes("alfred")) return "ai";
-  return "live";
-}
-
 function auditSource(log: AuditLog): LogSourceKey {
   if (log.action.startsWith("maintenance_mode.")) return "maintenance";
   return auditCategorySources[log.category] ?? "crud";
@@ -639,18 +529,6 @@ export function metricFromSummary(summary: TelemetrySummary | null, key: LogSour
   const traceCategory = Object.entries(traceCategorySources).find(([, source]) => source === key)?.[0];
   const auditCategory = Object.entries(auditCategorySources).find(([, source]) => source === key)?.[0];
   return (traceCategory ? summary.traces.by_category[traceCategory] || 0 : 0) + (auditCategory ? summary.audit.by_category[auditCategory] || 0 : 0);
-}
-
-export function summaryMetricCards(summary: TelemetrySummary | null, storage: TelemetryStorageSummary | null, liveCount: number) {
-  const errors = (summary?.traces.by_level.error || 0) + (summary?.audit.by_level.error || 0) + (summary?.audit.by_outcome.failed || 0);
-  const warnings = (summary?.traces.by_level.warning || 0) + (summary?.audit.by_level.warning || 0);
-  return {
-    live: liveCount,
-    errors,
-    warnings,
-    storage: formatLogMegabytes(storage?.total_size_bytes || summary?.storage.total_size_bytes || 0),
-    audit: summary?.audit.total || 0
-  };
 }
 
 export function formattedTimestamp(value: string) {
@@ -668,10 +546,6 @@ export function sourceUsesTraces(source: LogSourceKey) {
 
 export function sourceUsesAudit(source: LogSourceKey) {
   return source === "all" || Boolean(auditCategories[source]);
-}
-
-export function firstRecord(records: LogRecord[], selectedId: string | null) {
-  return records.find((record) => record.id === selectedId) || records[0] || null;
 }
 
 export {

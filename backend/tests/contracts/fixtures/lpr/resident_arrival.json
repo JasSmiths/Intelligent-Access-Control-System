@@ -1,0 +1,27 @@
+{
+  "registrationNumber": "PE70DHX",
+  "confidence": 0.97,
+  "capturedAt": "2026-05-31T08:15:00+00:00",
+  "alarm": {
+    "name": "Gate LPR",
+    "triggers": [
+      {
+        "key": "license_plate_unknown",
+        "value": "PE70DHX",
+        "group": {
+          "name": "PE70DHX"
+        },
+        "device": "gate-lpr-camera",
+        "eventId": "protect-event-arrival",
+        "zones": {
+          "line": [],
+          "zone": [
+            "driveway"
+          ],
+          "loiter": []
+        }
+      }
+    ]
+  }
+}
+

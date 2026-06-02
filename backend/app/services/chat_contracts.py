@@ -45,13 +45,6 @@ SCHEDULE_TOOL_NAMES = (
     "override_schedule",
     "verify_schedule_access",
 )
-VISITOR_PASS_TOOL_NAMES = (
-    "query_visitor_passes",
-    "get_visitor_pass",
-    "create_visitor_pass",
-    "update_visitor_pass",
-    "cancel_visitor_pass",
-)
 NOTIFICATION_TOOL_NAMES = (
     "query_notification_catalog",
     "query_notification_workflows",
@@ -235,35 +228,6 @@ SUPPORTED_INTENTS = {
     "General",
 }
 
-SCHEDULE_DAY_ALIASES = {
-    "mon": 0,
-    "monday": 0,
-    "tue": 1,
-    "tues": 1,
-    "tuesday": 1,
-    "wed": 2,
-    "wednesday": 2,
-    "thu": 3,
-    "thur": 3,
-    "thurs": 3,
-    "thursday": 3,
-    "fri": 4,
-    "friday": 4,
-    "sat": 5,
-    "saturday": 5,
-    "sun": 6,
-    "sunday": 6,
-}
-
-SCHEDULE_DAY_PATTERN = (
-    r"mon(?:day)?(?:'s|s)?|"
-    r"tue(?:s|sday)?(?:'s|s)?|"
-    r"wed(?:s|nesday)?(?:'s|s)?|"
-    r"thu(?:r|rs|rsday)?(?:'s|s)?|"
-    r"fri(?:day)?(?:'s|s)?|"
-    r"sat(?:urday)?(?:'s|s)?|"
-    r"sun(?:day)?(?:'s|s)?"
-)
 CHAT_FILE_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((/api/v1/ai/chat/files/[^)]+)\)")
 CHAT_FILE_URL_PATTERN = re.compile(r"\s*/api/v1/ai/chat/files/[A-Za-z0-9_-]+\b")
 DEFAULT_CHAT_TIMEZONE = "Europe/London"

@@ -1,4 +1,5 @@
-import { AuditLog,BadgeTone,RealtimeMessage } from "../../shared";
+import type { AuditLog, RealtimeMessage } from "../../api/types";
+import type { BadgeTone } from "../../ui/primitives";
 
 export type TelemetrySpan = {
   id: string;

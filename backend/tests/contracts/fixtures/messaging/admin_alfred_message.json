@@ -1,0 +1,14 @@
+{
+  "provider": "whatsapp",
+  "response_text": "Gate status is closed.",
+  "pending_action": false,
+  "client_context": {
+    "source": "messaging",
+    "messaging_provider": "whatsapp",
+    "provider_channel_id": "phone-number-1",
+    "provider_guild_id": null,
+    "is_direct_message": true,
+    "author_display_name": "Jas"
+  }
+}
+

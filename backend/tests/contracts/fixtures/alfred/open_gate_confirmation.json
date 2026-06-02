@@ -1,0 +1,16 @@
+{
+  "opened": false,
+  "closed": false,
+  "accepted": false,
+  "action": "open",
+  "requires_confirmation": true,
+  "target": "Top Gate",
+  "device": {
+    "kind": "gate",
+    "entity_id": "cover.top_gate",
+    "name": "Top Gate"
+  },
+  "confirmation_field": "confirm",
+  "detail": "Opening gates and garage doors is a real-world action. Use the chat confirmation action before I continue."
+}
+

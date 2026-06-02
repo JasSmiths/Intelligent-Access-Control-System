@@ -8,21 +8,10 @@ Search
 } from "lucide-react";
 import React from "react";
 
-import {
-AlertSeverity,
-alertSeverityLabel,
-alertSeverityTone,
-Anomaly,
-api,
-Badge,
-EmptyState,
-formatDate,
-isActionableAlert,
-isAbortError,
-MetricCard,
-titleCase,
-Toolbar
-} from "../shared";
+import { api, isAbortError } from "../api/client";
+import { alertSeverityLabel, alertSeverityTone, formatDate, isActionableAlert, titleCase } from "../lib/format";
+import { Badge, EmptyState, MetricCard, Toolbar } from "../ui/primitives";
+import type { AlertSeverity, Anomaly } from "../api/types";
 
 
 

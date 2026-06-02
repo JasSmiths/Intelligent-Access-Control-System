@@ -216,65 +216,6 @@
   resize: vertical;
 }
 
-.avatar {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--muted-strong);
-  font-weight: 560;
-}
-
-.bar-chart {
-  display: grid;
-  gap: 14px;
-  padding-top: 2px;
-}
-
-.bar-row {
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) 24px;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-
-.bar-track {
-  height: 10px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-soft);
-}
-
-.bar-fill {
-  height: 100%;
-  min-width: 6px;
-  border-radius: 999px;
-}
-
-.fill-0 {
-  background: var(--green);
-}
-
-.fill-1 {
-  background: var(--gray);
-}
-
-.fill-2 {
-  background: var(--red);
-}
-
-.sim-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
 .view-stack {
   display: grid;
   gap: 14px;
@@ -773,19 +714,6 @@ tr:last-child td {
   transform: translateY(0);
 }
 
-.bento-list,
-.provider-grid,
-.slot-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.vehicle-card {
-  display: grid;
-  gap: 8px;
-}
-
 .top-charts-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1076,16 +1004,12 @@ tr:last-child td {
   letter-spacing: 0;
 }
 
-.reports-grid,
-.integrations-grid,
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 
-.reports-grid .card,
-.integrations-grid .card,
 .settings-grid .card {
   min-height: 140px;
 }
@@ -2725,27 +2649,6 @@ tr:last-child td {
 .alfred-training-list {
   display: grid;
   gap: 10px;
-}
-
-.alfred-training-subhead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 28px;
-  padding: 0 2px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.alfred-training-subhead span {
-  min-width: 24px;
-  min-height: 24px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--muted-strong);
 }
 
 .alfred-training-item {

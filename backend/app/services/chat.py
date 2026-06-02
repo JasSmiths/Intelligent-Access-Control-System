@@ -40,7 +40,6 @@ from app.services.alfred.answer_contracts import (
     verify_answer_draft,
 )
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
-from app.services.chat_routing import ChatRoutingMixin
 from app.services.chat_contracts import (
     CHAT_FILE_LINK_PATTERN,
     CHAT_FILE_URL_PATTERN,
@@ -53,7 +52,6 @@ from app.services.chat_contracts import (
     RELEVANT_HISTORY_SCAN_LIMIT,
     SUPPORTED_INTENTS,
     SYSTEM_PROMPT,
-    VISITOR_PASS_TOOL_NAMES,
     ChatTurnResult,
     IntentRoute,
     IntentRouterError,
@@ -67,7 +65,7 @@ from app.services.type_helpers import as_dict, as_list
 logger = get_logger(__name__)
 
 
-class ChatService(ChatRoutingMixin):
+class ChatService:
     def __init__(self) -> None:
         self._tools: dict[str, AgentTool] = build_agent_tools()
 
@@ -911,7 +909,7 @@ class ChatService(ChatRoutingMixin):
         result = LlmResult(text="")
         route = route or IntentRoute(("General",), 0.5, True, "default route")
         if provider.name == "local":
-            raise IntentRouterError("Alfred 3.0 ReAct tool routing requires a hosted LLM provider.")
+            raise IntentRouterError("Alfred 3.0 ReAct tool routing requires a configured hosted LLM provider.")
 
         for iteration in range(MAX_AGENT_TOOL_ITERATIONS):
             result = await self._provider_complete(
@@ -1004,9 +1002,6 @@ class ChatService(ChatRoutingMixin):
                         )
                     )
             tool_results.extend(native_results)
-            conflict_result = await self._schedule_conflict_response(session_id, memory, tool_results)
-            if conflict_result:
-                return conflict_result
             if any(
                 isinstance(result.get("output"), dict) and result["output"].get("requires_confirmation")
                 for result in native_results
@@ -1494,391 +1489,13 @@ class ChatService(ChatRoutingMixin):
             actor_context=actor_context,
         )
 
-    async def _handle_guided_visitor_pass_flow(
-        self,
-        session_id: uuid.UUID,
-        message: str,
-        memory: dict[str, Any],
-        *,
-        actor_context: dict[str, Any] | None,
-        provider_name: str,
-        status_callback: StatusCallback | None,
-    ) -> ChatTurnResult | None:
-        pending = memory.get("pending_visitor_pass_create")
-        if isinstance(pending, dict):
-            return await self._continue_visitor_pass_create(
-                session_id,
-                message,
-                memory,
-                pending,
-                actor_context=actor_context,
-                provider_name=provider_name,
-                status_callback=status_callback,
-            )
-
-        return None
-
-    async def _continue_visitor_pass_create(
-        self,
-        session_id: uuid.UUID,
-        message: str,
-        memory: dict[str, Any],
-        pending: dict[str, Any],
-        *,
-        actor_context: dict[str, Any] | None,
-        provider_name: str,
-        status_callback: StatusCallback | None,
-    ) -> ChatTurnResult | None:
-        lower = message.lower().strip()
-        if self._is_pending_visitor_pass_create_cancel_message(lower):
-            memory.pop("pending_visitor_pass_create", None)
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(session_id, "No problem - I cancelled that Visitor Pass setup.")
-        if self._looks_like_visitor_pass_cancel_request(lower) or self._should_abandon_pending_visitor_pass_create(lower):
-            memory.pop("pending_visitor_pass_create", None)
-            await self._save_memory(session_id, memory)
-            return None
-
-        runtime = await get_runtime_config()
-        visitor_name = (
-            self._visitor_name_from_message(message)
-            or str(pending.get("visitor_name") or "").strip()
-            or None
-        )
-        expected_time = (
-            self._visitor_expected_time_from_message(message, runtime.site_timezone)
-            or str(pending.get("expected_time") or "").strip()
-            or None
-        )
-        window_minutes = self._visitor_window_from_message(lower) or int(pending.get("window_minutes") or 30)
-        if not visitor_name or not expected_time:
-            memory["pending_visitor_pass_create"] = {
-                "visitor_name": visitor_name,
-                "expected_time": expected_time,
-                "window_minutes": window_minutes,
-            }
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(
-                session_id,
-                self._visitor_pass_missing_details_text(visitor_name, expected_time),
-            )
-
-        return await self._prepare_visitor_pass_confirmation(
-            session_id,
-            memory,
-            visitor_name=visitor_name,
-            expected_time=expected_time,
-            window_minutes=window_minutes,
-            actor_context=actor_context,
-            provider_name=provider_name,
-            user_message=message,
-            status_callback=status_callback,
-        )
-
-    async def _prepare_visitor_pass_confirmation(
-        self,
-        session_id: uuid.UUID,
-        memory: dict[str, Any],
-        *,
-        visitor_name: str,
-        expected_time: str,
-        window_minutes: int,
-        actor_context: dict[str, Any] | None,
-        provider_name: str,
-        user_message: str,
-        status_callback: StatusCallback | None,
-    ) -> ChatTurnResult:
-        call = ToolCall(
-            "guided-create-visitor-pass",
-            "create_visitor_pass",
-            {
-                "visitor_name": visitor_name,
-                "expected_time": expected_time,
-                "window_minutes": window_minutes,
-                "confirm": False,
-            },
-        )
-        tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
-        output = as_dict(tool_result.get("output"))
-        if not output.get("requires_confirmation"):
-            memory.pop("pending_visitor_pass_create", None)
-            await self._save_memory(session_id, memory)
-            text = str(output.get("detail") or output.get("error") or "I could not prepare that Visitor Pass.")
-            return await self._direct_response(session_id, text, tool_results=[tool_result])
-
-        memory.pop("pending_visitor_pass_create", None)
-        memory["last_visitor_name"] = visitor_name
-        await self._save_memory(session_id, memory)
-        route = IntentRoute(("Visitor_Passes",), 0.95, False, "guided visitor pass creation")
-        selected_tools = [self._tools[name] for name in VISITOR_PASS_TOOL_NAMES if name in self._tools]
-        pending_action = await self._store_pending_agent_action(
-            session_id,
-            tool_result,
-            [tool_result],
-            route,
-            selected_tools,
-            provider_name=provider_name,
-            user_message=user_message,
-            user_id=str(((actor_context or {}).get("user") or {}).get("id") or ""),
-            actor_context=actor_context or {},
-            iteration=0,
-        )
-        if status_callback:
-            await status_callback(
-                {
-                    "event": "chat.confirmation_required",
-                    "phase": "awaiting_confirmation",
-                    "agents_running": 0,
-                    "active_tool_calls": 0,
-                    **pending_action,
-                }
-            )
-        return await self._direct_response(
-            session_id,
-            str(output.get("detail") or f"Create a Visitor Pass for {visitor_name}?"),
-            tool_results=[tool_result],
-            pending_action=pending_action,
-        )
-
-    def _visitor_pass_missing_details_text(self, visitor_name: str | None, expected_time: str | None) -> str:
-        if not visitor_name and not expected_time:
-            return "Sure - who is visiting, and when should I expect them?"
-        if not visitor_name:
-            return "What is the visitor's name?"
-        return f"What time should I expect {visitor_name}?"
-
-    async def _handle_guided_schedule_flow(
-        self,
-        session_id: uuid.UUID,
-        message: str,
-        memory: dict[str, Any],
-        *,
-        status_callback: StatusCallback | None,
-    ) -> ChatTurnResult | None:
-        pending = memory.get("pending_schedule_create")
-        if isinstance(pending, dict):
-            return await self._continue_schedule_create(session_id, message, memory, pending, status_callback=status_callback)
-
-        return None
-
-    async def _continue_schedule_create(
-        self,
-        session_id: uuid.UUID,
-        message: str,
-        memory: dict[str, Any],
-        pending: dict[str, Any],
-        *,
-        status_callback: StatusCallback | None,
-    ) -> ChatTurnResult:
-        lower = message.lower().strip()
-        if lower in {"cancel", "stop", "never mind", "nevermind"}:
-            memory.pop("pending_schedule_create", None)
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(session_id, "No problem - I cancelled that schedule setup.")
-
-        stage = str(pending.get("stage") or "name")
-        if stage == "confirm_update":
-            name = str(pending.get("name") or "").strip()
-            time_blocks = pending.get("time_blocks") if isinstance(pending.get("time_blocks"), dict) else None
-            revised_time_blocks = self._parse_schedule_time_blocks(message)
-            if revised_time_blocks:
-                time_blocks = revised_time_blocks
-                pending["time_blocks"] = revised_time_blocks
-                memory["pending_schedule_create"] = pending
-                await self._save_memory(session_id, memory)
-                return await self._ask_to_update_existing_schedule(session_id, memory, name=name, time_blocks=revised_time_blocks)
-            if self._is_confirmation_message(lower) and name and time_blocks:
-                return await self._update_existing_schedule_from_chat(
-                    session_id,
-                    name=name,
-                    time_blocks=time_blocks,
-                    status_callback=status_callback,
-                    memory=memory,
-                )
-            if self._is_rejection_message(lower):
-                memory.pop("pending_schedule_create", None)
-                await self._save_memory(session_id, memory)
-                return await self._direct_response(session_id, f"Okay, I left {name or 'that schedule'} unchanged.")
-            if name and time_blocks:
-                return await self._ask_to_update_existing_schedule(session_id, memory, name=name, time_blocks=time_blocks)
-            memory["pending_schedule_create"] = {"stage": "name"}
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(session_id, "What should I call the schedule?")
-
-        if stage == "name":
-            name = self._clean_schedule_name(message)
-            if not name:
-                return await self._direct_response(session_id, "What should I call the new schedule?")
-            time_blocks = self._parse_schedule_time_blocks(message)
-            pending = {"stage": "time_blocks", "name": name}
-            memory["pending_schedule_create"] = pending
-            await self._save_memory(session_id, memory)
-            if time_blocks:
-                return await self._create_schedule_from_chat(
-                    session_id,
-                    name=name,
-                    time_blocks=time_blocks,
-                    status_callback=status_callback,
-                    memory=memory,
-                )
-            return await self._direct_response(
-                session_id,
-                f"Got it: {name}. What days and times should it allow? For example: Monday to Friday 08:00-17:00, weekends 10:00-14:00, or 24/7.",
-            )
-
-        name = str(pending.get("name") or "").strip()
-        if not name:
-            memory["pending_schedule_create"] = {"stage": "name"}
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(session_id, "What should I call the new schedule?")
-
-        time_blocks = self._parse_schedule_time_blocks(message)
-        if not time_blocks and self._refers_to_previous_timeframe(lower):
-            previous_attempt = str(pending.get("last_time_attempt") or "")
-            if previous_attempt:
-                time_blocks = self._parse_schedule_time_blocks(previous_attempt)
-        if not time_blocks:
-            pending["last_time_attempt"] = message
-            memory["pending_schedule_create"] = pending
-            await self._save_memory(session_id, memory)
-            return await self._direct_response(
-                session_id,
-                "I could not read that as a schedule yet. Try days plus a time range, for example: Wednesdays and Fridays 6am to 7pm, weekdays 08:00-17:00, or 24/7.",
-            )
-
-        return await self._create_schedule_from_chat(
-            session_id,
-            name=name,
-            time_blocks=time_blocks,
-            status_callback=status_callback,
-            memory=memory,
-        )
-
-    async def _create_schedule_from_chat(
-        self,
-        session_id: uuid.UUID,
-        *,
-        name: str,
-        time_blocks: dict[str, list[dict[str, str]]],
-        status_callback: StatusCallback | None,
-        memory: dict[str, Any],
-    ) -> ChatTurnResult:
-        call = ToolCall(
-            "guided-create-schedule",
-            "create_schedule",
-            {"name": name, "time_blocks": time_blocks},
-        )
-        tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
-        output = tool_result.get("output", {})
-        if output.get("created") and isinstance(output.get("schedule"), dict):
-            memory.pop("pending_schedule_create", None)
-            await self._save_memory(session_id, memory)
-            schedule = output["schedule"]
-            text = f"Created {schedule.get('name', name)} with {schedule.get('summary', 'the requested allowed time')}."
-        elif output.get("error_code") == "schedule_exists" or output.get("error") == "Schedule already exists.":
-            return await self._ask_to_update_existing_schedule(session_id, memory, name=name, time_blocks=time_blocks)
-        else:
-            memory.pop("pending_schedule_create", None)
-            await self._save_memory(session_id, memory)
-            text = output.get("detail") or output.get("error") or "I could not create that schedule."
-        return await self._direct_response(session_id, text, tool_results=[tool_result])
-
-    async def _schedule_conflict_response(
-        self,
-        session_id: uuid.UUID,
-        memory: dict[str, Any],
-        tool_results: list[dict[str, Any]],
-    ) -> ChatTurnResult | None:
-        for result in tool_results:
-            if result.get("name") != "create_schedule":
-                continue
-            output = as_dict(result.get("output"))
-            if output.get("error_code") != "schedule_exists":
-                continue
-            arguments = as_dict(result.get("arguments"))
-            name = str(output.get("schedule_name") or arguments.get("name") or "").strip()
-            time_blocks = arguments.get("time_blocks")
-            if not isinstance(time_blocks, dict):
-                natural_text = " ".join(
-                    str(arguments.get(key) or "").strip()
-                    for key in ("time_description", "description")
-                    if str(arguments.get(key) or "").strip()
-                )
-                time_blocks = self._parse_schedule_time_blocks(natural_text) if natural_text else None
-            if name and isinstance(time_blocks, dict):
-                return await self._ask_to_update_existing_schedule(
-                    session_id,
-                    memory,
-                    name=name,
-                    time_blocks=time_blocks,
-                )
-        return None
-
-    async def _ask_to_update_existing_schedule(
-        self,
-        session_id: uuid.UUID,
-        memory: dict[str, Any],
-        *,
-        name: str,
-        time_blocks: dict[str, list[dict[str, str]]],
-    ) -> ChatTurnResult:
-        memory["pending_schedule_create"] = {
-            "stage": "confirm_update",
-            "name": name,
-            "time_blocks": time_blocks,
-        }
-        await self._save_memory(session_id, memory)
-        summary = self._chat_schedule_summary(time_blocks)
-        text = (
-            f"{name} already exists. Do you want me to replace its allowed times with {summary}? "
-            "This will update the existing schedule rather than create a duplicate."
-        )
-        tool_result = {
-            "call_id": "guided-confirm-update-schedule",
-            "name": "update_schedule",
-            "arguments": {"schedule_name": name, "time_blocks": time_blocks, "confirm": False},
-            "output": {
-                "requires_confirmation": True,
-                "schedule_name": name,
-                "time_blocks": time_blocks,
-                "summary": summary,
-                "detail": text,
-            },
-        }
-        return await self._direct_response(session_id, text, tool_results=[tool_result])
-
-    async def _update_existing_schedule_from_chat(
-        self,
-        session_id: uuid.UUID,
-        *,
-        name: str,
-        time_blocks: dict[str, list[dict[str, str]]],
-        status_callback: StatusCallback | None,
-        memory: dict[str, Any],
-    ) -> ChatTurnResult:
-        call = ToolCall(
-            "guided-update-schedule",
-            "update_schedule",
-            {"schedule_name": name, "time_blocks": time_blocks, "confirm": True},
-        )
-        tool_result = await self._execute_tool_call(session_id, call, status_callback=status_callback)
-        memory.pop("pending_schedule_create", None)
-        await self._save_memory(session_id, memory)
-        output = tool_result.get("output", {})
-        if output.get("updated") and isinstance(output.get("schedule"), dict):
-            schedule = output["schedule"]
-            text = f"Updated {schedule.get('name', name)} to {schedule.get('summary', self._chat_schedule_summary(time_blocks))}."
-        else:
-            text = output.get("detail") or output.get("error") or f"I could not update {name}."
-        return await self._direct_response(session_id, text, tool_results=[tool_result])
-
     async def _direct_response(
         self,
         session_id: uuid.UUID,
         text: str,
         *,
         tool_results: list[dict[str, Any]] | None = None,
-        provider: str = "guided",
+        provider: str = "system",
         pending_action: dict[str, Any] | None = None,
         user_message_id: uuid.UUID | None = None,
     ) -> ChatTurnResult:
@@ -2537,9 +2154,6 @@ class ChatService(ChatRoutingMixin):
 
         latest_user = next((row for row in reversed(rows) if row.role == "user"), None)
         latest_content = latest_user.content if latest_user else ""
-        if memory.get("pending_schedule_create") or memory.get("pending_visitor_pass_create"):
-            return rows[-MAX_RELEVANT_HISTORY_MESSAGES:]
-
         relevant_terms = self._history_terms(latest_content)
         for key in ("last_subject", "last_person", "last_group", "last_visitor_name"):
             relevant_terms.update(self._history_terms(str(memory.get(key) or "")))

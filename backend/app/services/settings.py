@@ -10,14 +10,12 @@ from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.session import AsyncSessionLocal
 from app.models import SystemSetting
-from app.modules.home_assistant.covers import legacy_gate_entities, normalize_cover_entities
+from app.modules.home_assistant.covers import normalize_cover_entities
 
 
 SECRET_KEYS = {
     "home_assistant_token",
     "esphome_devices",
-    "esphome_api_encryption_key",
-    "esphome_legacy_password",
     "apprise_urls",
     "discord_bot_token",
     "whatsapp_access_token",
@@ -35,18 +33,6 @@ SECRET_KEYS = {
 }
 
 CLEARABLE_SECRET_KEYS = {"apprise_urls", "dependency_update_backup_mount_options"}
-
-LEGACY_DEFAULT_REPLACEMENTS = {
-    "openai_model": {"gpt-5": "gpt-4o"},
-    "gemini_model": {"gemini-2.5-flash": "gemini-1.5-pro"},
-    "anthropic_model": {"claude-sonnet-4-5": "claude-3-5-sonnet-latest"},
-    "ollama_model": {"llama3.1": "llama3"},
-    "whatsapp_visitor_pass_template_name": {
-        "visitor_pass_registration_request": "iacs_visitor_welcome",
-    },
-}
-
-OBSOLETE_DYNAMIC_SETTINGS = {"notification_rules", "home_assistant_presence_entities", "alfred_agent_mode"}
 
 
 class UnknownDynamicSettingsError(ValueError):
@@ -78,11 +64,7 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "Seconds without matching plate or vehicle detections before a physical gate visit is considered finished.",
     ),
     "lpr_similarity_threshold": ("lpr", settings.lpr_similarity_threshold, "Plate similarity threshold."),
-    "lpr_allowed_smart_zones": (
-        "lpr",
-        ["default"],
-        "Legacy UniFi smart-zone diagnostic list. Smart zones are not used to accept or reject LPR events.",
-    ),
+    "lpr_allowed_smart_zones": ("lpr", ["default"], "UniFi smart-zone diagnostic list used for LPR zone-status visibility."),
     "lpr_zone_filter_mode": (
         "lpr",
         "shadow",
@@ -120,10 +102,9 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "home_assistant_url": ("integrations", str(settings.home_assistant_url) if settings.home_assistant_url else "", "Home Assistant base URL."),
     "home_assistant_token": ("integrations", settings.home_assistant_token or "", "Home Assistant long-lived access token."),
-    "home_assistant_gate_entity_id": ("integrations", settings.home_assistant_gate_entity_id or "", "Gate entity ID."),
     "home_assistant_gate_entities": (
         "integrations",
-        legacy_gate_entities(settings.home_assistant_gate_entity_id or "", settings.home_assistant_gate_open_service),
+        [],
         "Configured Home Assistant gate cover entities.",
     ),
     "home_assistant_gate_open_service": ("integrations", settings.home_assistant_gate_open_service, "Cover open service."),
@@ -134,11 +115,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "home_assistant_tts_service": ("integrations", settings.home_assistant_tts_service, "TTS service name."),
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
-    "esphome_host": ("integrations", "", "ESPHome native API host or IP address."),
-    "esphome_port": ("integrations", 6053, "ESPHome native API port."),
-    "esphome_api_encryption_key": ("integrations", "", "ESPHome native API encryption key."),
-    "esphome_legacy_password": ("integrations", "", "Optional legacy ESPHome API password."),
-    "esphome_timeout_seconds": ("integrations", 30.0, "ESPHome native API connection timeout."),
     "esphome_devices": ("integrations", "[]", "Configured ESPHome native API devices."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
     "discord_bot_token": ("integrations", "", "Discord bot token."),
@@ -321,17 +297,11 @@ class RuntimeConfig:
     gate_failover_provider: str
     home_assistant_url: str
     home_assistant_token: str
-    home_assistant_gate_entity_id: str
     home_assistant_gate_entities: list[dict[str, Any]]
     home_assistant_gate_open_service: str
     home_assistant_garage_door_entities: list[dict[str, Any]]
     home_assistant_tts_service: str
     home_assistant_default_media_player: str
-    esphome_host: str
-    esphome_port: int
-    esphome_api_encryption_key: str
-    esphome_legacy_password: str
-    esphome_timeout_seconds: float
     esphome_devices: list[dict[str, Any]]
     apprise_urls: str
     discord_bot_token: str
@@ -412,8 +382,8 @@ def invalidate_runtime_config_cache() -> None:
 def public_value(record: SystemSetting) -> Any:
     if record.is_secret:
         encrypted = str(record.value.get("encrypted") or "")
-        legacy_plain = str(record.value.get("plain") or "")
-        return bool(encrypted or legacy_plain)
+        plain_secret = str(record.value.get("plain") or "")
+        return bool(encrypted or plain_secret)
     return record.value.get("plain")
 
 
@@ -486,12 +456,6 @@ def normalize_esphome_device_id(value: str) -> str:
 
 def normalize_esphome_devices(
     value: Any,
-    *,
-    legacy_host: str = "",
-    legacy_port: int = 6053,
-    legacy_encryption_key: str = "",
-    legacy_password: str = "",
-    legacy_timeout_seconds: float = 30.0,
 ) -> list[dict[str, Any]]:
     devices: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -520,23 +484,8 @@ def normalize_esphome_devices(
                     or item.get("noise_psk")
                     or ""
                 ),
-                "legacy_password": str(item.get("legacy_password") or item.get("password") or ""),
                 "timeout_seconds": float(item.get("timeout_seconds") or 30.0),
                 "enabled": bool_value(item.get("enabled", True)),
-            }
-        )
-    raw_was_blank = not isinstance(value, list) and not str(value or "").strip()
-    if not devices and raw_was_blank and str(legacy_host or "").strip():
-        devices.append(
-            {
-                "id": "default",
-                "name": "ESPHome Device",
-                "host": str(legacy_host or "").strip(),
-                "port": int(legacy_port or 6053),
-                "encryption_key": str(legacy_encryption_key or ""),
-                "legacy_password": str(legacy_password or ""),
-                "timeout_seconds": float(legacy_timeout_seconds or 30.0),
-                "enabled": True,
             }
         )
     return devices
@@ -563,48 +512,8 @@ async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
             )
         )
     records = (await session.scalars(select(SystemSetting))).all()
-    records_by_key = {record.key: record for record in records}
     for record in records:
         _migrate_secret_record(record)
-    for record in records:
-        if record.key in OBSOLETE_DYNAMIC_SETTINGS:
-            await session.delete(record)
-            records_by_key.pop(record.key, None)
-
-    legacy_gate_entity_record = records_by_key.get("home_assistant_gate_entity_id")
-    gate_entities_record = records_by_key.get("home_assistant_gate_entities")
-    if legacy_gate_entity_record and gate_entities_record:
-        legacy_gate_entity_id = str(decrypted_value(legacy_gate_entity_record) or "")
-        configured_gate_entities = normalize_cover_entities(decrypted_value(gate_entities_record))
-        if legacy_gate_entity_id and not configured_gate_entities:
-            gate_open_service_record = records_by_key.get("home_assistant_gate_open_service")
-            gate_open_service = (
-                str(decrypted_value(gate_open_service_record))
-                if gate_open_service_record
-                else settings.home_assistant_gate_open_service
-            )
-            gate_entities_record.value = setting_payload(
-                "home_assistant_gate_entities",
-                legacy_gate_entities(legacy_gate_entity_id, gate_open_service),
-            )
-    visitor_template_record = records_by_key.get("whatsapp_visitor_pass_template_name")
-    visitor_template_language_record = records_by_key.get("whatsapp_visitor_pass_template_language")
-    if visitor_template_record and visitor_template_language_record:
-        template_name = str(decrypted_value(visitor_template_record) or "").strip()
-        template_language = str(decrypted_value(visitor_template_language_record) or "").strip()
-        if template_name == "iacs_visitor_welcome" and template_language == "en_GB":
-            visitor_template_language_record.value = setting_payload("whatsapp_visitor_pass_template_language", "en")
-    for record in records:
-        if record.key in OBSOLETE_DYNAMIC_SETTINGS:
-            continue
-        plain_value = record.value.get("plain")
-        replacement = (
-            LEGACY_DEFAULT_REPLACEMENTS.get(record.key, {}).get(plain_value)
-            if isinstance(plain_value, str)
-            else None
-        )
-        if replacement:
-            record.value = {"plain": replacement}
     await session.commit()
 
 
@@ -616,7 +525,9 @@ async def get_runtime_config() -> RuntimeConfig:
         return _RUNTIME_CONFIG_CACHE
 
     async with AsyncSessionLocal() as session:
-        records = (await session.scalars(select(SystemSetting))).all()
+        records = (
+            await session.scalars(select(SystemSetting).where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS))))
+        ).all()
 
     values = {
         key: default
@@ -659,7 +570,6 @@ async def get_runtime_config() -> RuntimeConfig:
         ),
         home_assistant_url=str(values["home_assistant_url"] or ""),
         home_assistant_token=str(values["home_assistant_token"] or ""),
-        home_assistant_gate_entity_id=str(values["home_assistant_gate_entity_id"] or ""),
         home_assistant_gate_entities=normalize_cover_entities(
             values["home_assistant_gate_entities"],
             default_open_service=str(values["home_assistant_gate_open_service"]),
@@ -671,19 +581,7 @@ async def get_runtime_config() -> RuntimeConfig:
         ),
         home_assistant_tts_service=str(values["home_assistant_tts_service"]),
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
-        esphome_host=str(values["esphome_host"] or "").strip(),
-        esphome_port=int(values["esphome_port"] or 6053),
-        esphome_api_encryption_key=str(values["esphome_api_encryption_key"] or ""),
-        esphome_legacy_password=str(values["esphome_legacy_password"] or ""),
-        esphome_timeout_seconds=float(values["esphome_timeout_seconds"] or 30.0),
-        esphome_devices=normalize_esphome_devices(
-            values["esphome_devices"],
-            legacy_host=str(values["esphome_host"] or "").strip(),
-            legacy_port=int(values["esphome_port"] or 6053),
-            legacy_encryption_key=str(values["esphome_api_encryption_key"] or ""),
-            legacy_password=str(values["esphome_legacy_password"] or ""),
-            legacy_timeout_seconds=float(values["esphome_timeout_seconds"] or 30.0),
-        ),
+        esphome_devices=normalize_esphome_devices(values["esphome_devices"]),
         apprise_urls=str(values["apprise_urls"] or ""),
         discord_bot_token=str(values["discord_bot_token"] or ""),
         discord_guild_allowlist=string_list_value(values["discord_guild_allowlist"]),
@@ -784,7 +682,7 @@ async def get_runtime_config() -> RuntimeConfig:
 async def list_settings(category: str | None = None, *, reveal: bool = False) -> list[dict[str, Any]]:
     async with AsyncSessionLocal() as session:
         query = select(SystemSetting).order_by(SystemSetting.category, SystemSetting.key)
-        query = query.where(SystemSetting.key.notin_(OBSOLETE_DYNAMIC_SETTINGS))
+        query = query.where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS)))
         if category:
             query = query.where(SystemSetting.category == category)
         records = (await session.scalars(query)).all()

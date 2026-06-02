@@ -19,19 +19,11 @@ UserRound
 import React from "react";
 import { createPortal } from "react-dom";
 
-import {
-AccessEvent,
-api,
-Badge,
-formatDate,
-initials,
-matches,
-mediaSource,
-Person,
-Presence,
-titleCase,
-TooltipPositionState
-} from "../shared";
+import { api } from "../api/client";
+import { formatDate, initials, matches, titleCase } from "../lib/format";
+import { mediaSource } from "../lib/media";
+import { Badge } from "../ui/primitives";
+import type { AccessEvent, Person, Presence, TooltipPositionState } from "../api/types";
 import type { VisitorPass } from "./PassesView";
 
 type QuickRange = "24h" | "3d" | "7d" | "14d" | "custom";

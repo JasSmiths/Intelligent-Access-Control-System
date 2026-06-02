@@ -41,7 +41,6 @@ from app.services.automation_integration_actions import (
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active, set_mode as set_maintenance_mode
-from app.services.notifications import render_template
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_AUTOMATION,
@@ -55,10 +54,22 @@ from app.services.telemetry import (
 )
 from app.services.type_helpers import as_dict
 from app.services.visitor_passes import serialize_visitor_pass
+from app.services.workflows.catalog import (
+    automation_action_catalog,
+    automation_condition_catalog,
+    automation_trigger_catalog,
+    automation_variables,
+)
+from app.services.workflows.context import (
+    canonical_key,
+    normalize_string_list,
+    referenced_variable_names,
+    render_template,
+    workflow_action_result,
+)
 
 logger = get_logger(__name__)
 
-AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 SCHEDULER_INTERVAL_SECONDS = 15
 MAX_DUE_RULES_PER_TICK = 25
 AI_SCHEDULE_CONFIDENCE_THRESHOLD = 0.65
@@ -77,14 +88,6 @@ WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
 WEBHOOK_SIGNATURE_HEADER = "X-IACS-Webhook-Signature"
 WEBHOOK_TIMESTAMP_HEADER = "X-IACS-Webhook-Timestamp"
 WEBHOOK_NONCE_HEADER = "X-IACS-Webhook-Nonce"
-
-
-@dataclass(frozen=True)
-class AutomationVariable:
-    name: str
-    token: str
-    label: str
-    scope: str
 
 
 @dataclass
@@ -117,292 +120,13 @@ class AutomationContext:
         }
 
 
-TRIGGER_CATALOG: list[dict[str, Any]] = [
-    {
-        "id": "time_date",
-        "label": "Time & Date",
-        "triggers": [
-            {
-                "type": "time.specific_datetime",
-                "label": "Specific Date & Time",
-                "description": "Run at one chosen date/time, or recur from that date/time.",
-                "scopes": ["time", "event"],
-            },
-            {
-                "type": "time.every_x",
-                "label": "Every X",
-                "description": "Run every configured number of minutes, hours, or days.",
-                "scopes": ["time", "event"],
-            },
-            {
-                "type": "time.cron",
-                "label": "Cron Job",
-                "description": "Run from a raw five-field cron expression.",
-                "scopes": ["time", "event"],
-            },
-            {
-                "type": "time.ai_text",
-                "label": "AI Text Input",
-                "description": "Parse natural-language schedule text into cron and optional end date.",
-                "scopes": ["time", "event"],
-            },
-        ],
-    },
-    {
-        "id": "vehicle_detections",
-        "label": "Vehicle Detections",
-        "triggers": [
-            {
-                "type": "vehicle.known_plate",
-                "label": "Known Plate",
-                "description": "A known vehicle is detected.",
-                "scopes": ["person", "vehicle", "event"],
-            },
-            {
-                "type": "vehicle.unknown_plate",
-                "label": "Unknown Plate",
-                "description": "An unknown plate is detected.",
-                "scopes": ["vehicle", "event"],
-            },
-            {
-                "type": "vehicle.outside_schedule",
-                "label": "Outside of Schedule",
-                "description": "A known vehicle is denied by its access schedule.",
-                "scopes": ["person", "vehicle", "event"],
-            },
-        ],
-    },
-    {
-        "id": "maintenance_mode",
-        "label": "Maintenance Mode",
-        "triggers": [
-            {
-                "type": "maintenance_mode.enabled",
-                "label": "Maintenance Mode Enabled",
-                "description": "The global automation kill-switch was enabled.",
-                "scopes": ["maintenance", "event"],
-            },
-            {
-                "type": "maintenance_mode.disabled",
-                "label": "Maintenance Mode Disabled",
-                "description": "The global automation kill-switch was disabled.",
-                "scopes": ["maintenance", "event"],
-            },
-        ],
-    },
-    {
-        "id": "visitor_pass",
-        "label": "Visitor Pass",
-        "triggers": [
-            {
-                "type": "visitor_pass.created",
-                "label": "Visitor Pass Created",
-                "description": "A Visitor Pass was created.",
-                "scopes": ["visitor_pass", "vehicle", "event"],
-            },
-            {
-                "type": "visitor_pass.detected",
-                "label": "Visitor Pass Detected",
-                "description": "A Visitor Pass vehicle was detected.",
-                "scopes": ["visitor_pass", "vehicle", "event"],
-            },
-            {
-                "type": "visitor_pass.used",
-                "label": "Visitor Pass Used",
-                "description": "A Visitor Pass was claimed by an arriving vehicle.",
-                "scopes": ["visitor_pass", "vehicle", "event"],
-            },
-            {
-                "type": "visitor_pass.expired",
-                "label": "Visitor Pass Expired",
-                "description": "A Visitor Pass window expired unused.",
-                "scopes": ["visitor_pass", "event"],
-            },
-        ],
-    },
-    {
-        "id": "ai_agent",
-        "label": "AI Agent",
-        "triggers": [
-            {
-                "type": "ai.phrase_received",
-                "label": "Phrase Received",
-                "description": "Alfred receives a phrase that matches this automation.",
-                "scopes": ["ai", "event"],
-            },
-            {
-                "type": "ai.issue_detected",
-                "label": "Issue Detected",
-                "description": "Alfred autonomously flags an anomaly.",
-                "scopes": ["ai", "event"],
-            },
-        ],
-    },
-    {
-        "id": "webhook",
-        "label": "Webhook",
-        "triggers": [
-            {
-                "type": "webhook.received",
-                "label": "Webhook Received",
-                "description": "A webhook is received on an automation endpoint.",
-                "scopes": ["webhook", "event"],
-            },
-            {
-                "type": "webhook.unrecognized",
-                "label": "Unrecognised Webhook",
-                "description": "A webhook key has no matching active receiver rule.",
-                "scopes": ["webhook", "event"],
-            },
-            {
-                "type": "webhook.new_sender",
-                "label": "New Webhook Sender",
-                "description": "A webhook key is used by an unseen source IP.",
-                "scopes": ["webhook", "event"],
-            },
-        ],
-    },
-]
+TRIGGER_CATALOG = automation_trigger_catalog()
 
-CONDITION_CATALOG: list[dict[str, Any]] = [
-    {
-        "id": "person",
-        "label": "Person",
-        "conditions": [
-            {"type": "person.on_site", "label": "Person On Site", "scopes": ["person"]},
-            {"type": "person.off_site", "label": "Person Off Site", "scopes": ["person"]},
-        ],
-    },
-    {
-        "id": "vehicles",
-        "label": "Vehicles",
-        "conditions": [
-            {"type": "vehicle.on_site", "label": "Vehicle On Site", "scopes": ["vehicle", "person"]},
-            {"type": "vehicle.off_site", "label": "Vehicle Off Site", "scopes": ["vehicle", "person"]},
-        ],
-    },
-    {
-        "id": "maintenance_mode",
-        "label": "Maintenance Mode",
-        "conditions": [
-            {
-                "type": "maintenance_mode.enabled",
-                "label": "Maintenance Mode Enabled",
-                "scopes": ["maintenance"],
-            },
-            {
-                "type": "maintenance_mode.disabled",
-                "label": "Maintenance Mode Disabled",
-                "scopes": ["maintenance"],
-            },
-        ],
-    },
-]
+CONDITION_CATALOG = automation_condition_catalog()
 
-ACTION_CATALOG: list[dict[str, Any]] = [
-    {
-        "id": "notifications",
-        "label": "Notifications",
-        "actions": [
-            {
-                "type": "notification.enable",
-                "label": "Enable Notification",
-                "description": "Enable an existing notification workflow.",
-            },
-            {
-                "type": "notification.disable",
-                "label": "Disable Notification",
-                "description": "Disable an existing notification workflow.",
-            },
-        ],
-    },
-    {
-        "id": "gate_actions",
-        "label": "Gate Actions",
-        "actions": [
-            {
-                "type": "gate.open",
-                "label": "Open the Gate",
-                "description": "Open configured gate entities through the gate controller.",
-            },
-        ],
-    },
-    {
-        "id": "garage_door_actions",
-        "label": "Garage Door Actions",
-        "actions": [
-            {
-                "type": "garage_door.open",
-                "label": "Open Garage Door",
-                "description": "Open one or more configured garage door entities.",
-            },
-            {
-                "type": "garage_door.close",
-                "label": "Close Garage Door",
-                "description": "Close one or more configured garage door entities.",
-            },
-        ],
-    },
-    {
-        "id": "maintenance_mode",
-        "label": "Maintenance Mode",
-        "actions": [
-            {
-                "type": "maintenance_mode.enable",
-                "label": "Enable Maintenance Mode",
-                "description": "Enable the global automation kill-switch.",
-            },
-            {
-                "type": "maintenance_mode.disable",
-                "label": "Disable Maintenance Mode",
-                "description": "Disable the global automation kill-switch.",
-            },
-        ],
-    },
-]
+ACTION_CATALOG = automation_action_catalog()
 
-VARIABLES: list[AutomationVariable] = [
-    AutomationVariable("FirstName", "@FirstName", "First name", "person"),
-    AutomationVariable("LastName", "@LastName", "Last name", "person"),
-    AutomationVariable("DisplayName", "@DisplayName", "Display name", "person"),
-    AutomationVariable("PersonId", "@PersonId", "Person ID", "person"),
-    AutomationVariable("Registration", "@Registration", "Registration", "vehicle"),
-    AutomationVariable("VehicleRegistrationNumber", "@VehicleRegistrationNumber", "Registration number", "vehicle"),
-    AutomationVariable("VehicleId", "@VehicleId", "Vehicle ID", "vehicle"),
-    AutomationVariable("VehicleName", "@VehicleName", "Vehicle display name", "vehicle"),
-    AutomationVariable("VehicleMake", "@VehicleMake", "Vehicle make", "vehicle"),
-    AutomationVariable("VehicleColour", "@VehicleColour", "Vehicle colour", "vehicle"),
-    AutomationVariable("VehicleColor", "@VehicleColor", "Vehicle colour", "vehicle"),
-    AutomationVariable("VisitorPassId", "@VisitorPassId", "Visitor Pass ID", "visitor_pass"),
-    AutomationVariable("VisitorName", "@VisitorName", "Visitor name", "visitor_pass"),
-    AutomationVariable(
-        "VisitorPassVehicleRegistration",
-        "@VisitorPassVehicleRegistration",
-        "Visitor Pass vehicle registration",
-        "visitor_pass",
-    ),
-    AutomationVariable("VisitorPassVehicleMake", "@VisitorPassVehicleMake", "Visitor Pass vehicle make", "visitor_pass"),
-    AutomationVariable(
-        "VisitorPassVehicleColour",
-        "@VisitorPassVehicleColour",
-        "Visitor Pass vehicle colour",
-        "visitor_pass",
-    ),
-    AutomationVariable("VisitorPassDurationOnSite", "@VisitorPassDurationOnSite", "Visitor Pass duration", "visitor_pass"),
-    AutomationVariable("MaintenanceModeReason", "@MaintenanceModeReason", "Maintenance reason", "maintenance"),
-    AutomationVariable("MaintenanceModeDuration", "@MaintenanceModeDuration", "Maintenance duration", "maintenance"),
-    AutomationVariable("WebhookKey", "@WebhookKey", "Webhook key", "webhook"),
-    AutomationVariable("WebhookSenderIp", "@WebhookSenderIp", "Webhook sender IP", "webhook"),
-    AutomationVariable("AlfredPhrase", "@AlfredPhrase", "Alfred phrase", "ai"),
-    AutomationVariable("AlfredIssue", "@AlfredIssue", "Alfred issue", "ai"),
-    AutomationVariable("OccurredAt", "@OccurredAt", "Event timestamp", "event"),
-    AutomationVariable("Date", "@Date", "Event date", "time"),
-    AutomationVariable("Time", "@Time", "Event time", "time"),
-    AutomationVariable("EventType", "@EventType", "Event type", "event"),
-    AutomationVariable("Subject", "@Subject", "Subject", "event"),
-    AutomationVariable("Message", "@Message", "Message", "event"),
-    AutomationVariable("Source", "@Source", "Source", "event"),
-]
+VARIABLES = automation_variables()
 
 VARIABLE_BY_NAME = {variable.name.lower(): variable for variable in VARIABLES}
 TRIGGER_SCOPES = {
@@ -925,9 +649,9 @@ class AutomationService:
             "summary, confidence, ambiguity_notes. Use a five-field cron expression or null. "
             "Use ISO-8601 datetimes with timezone offsets. Do not include markdown."
         )
-        provider = get_llm_provider(runtime.llm_provider)
         raw_text = ""
         try:
+            provider = get_llm_provider(runtime.llm_provider)
             result = await complete_with_provider_options(
                 provider,
                 [
@@ -949,11 +673,18 @@ class AutomationService:
             raw_text = result.text
             parsed = json_object_from_text(raw_text)
         except Exception as exc:
-            parsed = deterministic_schedule_parse(text, now=now, timezone_name=timezone_name)
-            parsed["provider_error"] = str(exc)
+            parsed = {
+                "summary": text,
+                "confidence": 0.0,
+                "ambiguity_notes": [f"Schedule parser failed: {exc}"],
+            }
 
         if not parsed:
-            parsed = deterministic_schedule_parse(text, now=now, timezone_name=timezone_name)
+            parsed = {
+                "summary": text,
+                "confidence": 0.0,
+                "ambiguity_notes": ["Schedule parser returned no usable JSON."],
+            }
         return validate_schedule_parse(parsed, now=now, timezone_name=timezone_name, raw_text=raw_text)
 
     async def handle_webhook(
@@ -1257,25 +988,14 @@ class AutomationService:
     ) -> dict[str, Any]:
         missing = context_missing_references(context, action)
         if missing:
-            return {
-                "id": action["id"],
-                "type": action["type"],
-                "status": "skipped",
-                "reason": "context_missing",
-                "missing_variables": missing,
-            }
+            return workflow_action_result(action, "skipped", reason="context_missing", missing_variables=missing)
         action_type = str(action["type"])
         if (
             await is_maintenance_mode_active()
             and action_type != "maintenance_mode.disable"
             and action_paused_by_maintenance_mode(action_type)
         ):
-            return {
-                "id": action["id"],
-                "type": action_type,
-                "status": "skipped",
-                "reason": "maintenance_mode",
-            }
+            return workflow_action_result(action, "skipped", reason="maintenance_mode")
         if action_type in {"notification.enable", "notification.disable"}:
             return await self._toggle_notification_rule(session, action, active=action_type.endswith("enable"))
         if action_type == "gate.open":
@@ -1292,18 +1012,17 @@ class AutomationService:
                     },
                 )
             )
-            return {
-                "id": action["id"],
-                "type": action_type,
-                "status": "success" if outcome.accepted else "failed",
-                "accepted": outcome.accepted,
-                "state": outcome.state.value,
-                "detail": outcome.detail,
-                "intent_id": outcome.intent.intent_id,
-                "command_id": outcome.command_id,
-                "mechanically_confirmed": outcome.mechanically_confirmed,
-                "requires_reconciliation": outcome.requires_reconciliation,
-            }
+            return workflow_action_result(
+                action,
+                "success" if outcome.accepted else "failed",
+                accepted=outcome.accepted,
+                state=outcome.state.value,
+                detail=outcome.detail,
+                intent_id=outcome.intent.intent_id,
+                command_id=outcome.command_id,
+                mechanically_confirmed=outcome.mechanically_confirmed,
+                requires_reconciliation=outcome.requires_reconciliation,
+            )
         if action_type in {"garage_door.open", "garage_door.close"}:
             return await self._command_garage_doors(session, action, context, rule=rule)
         if integration_action_for_type(action_type):
@@ -1316,18 +1035,8 @@ class AutomationService:
                 source=f"Automation: {rule.name}",
                 reason=reason,
             )
-            return {
-                "id": action["id"],
-                "type": action_type,
-                "status": "success",
-                "maintenance_mode": status,
-            }
-        return {
-            "id": action["id"],
-            "type": action_type,
-            "status": "failed",
-            "error": "unknown_action",
-        }
+            return workflow_action_result(action, "success", maintenance_mode=status)
+        return workflow_action_result(action, "failed", error="unknown_action")
 
     async def _toggle_notification_rule(
         self,
@@ -1339,20 +1048,9 @@ class AutomationService:
         config = as_dict(action.get("config"))
         rule = await resolve_notification_rule(session, config)
         if not rule:
-            return {
-                "id": action["id"],
-                "type": action["type"],
-                "status": "failed",
-                "error": "notification_rule_not_found",
-            }
+            return workflow_action_result(action, "failed", error="notification_rule_not_found")
         rule.is_active = active
-        return {
-            "id": action["id"],
-            "type": action["type"],
-            "status": "success",
-            "notification_rule_id": str(rule.id),
-            "is_active": active,
-        }
+        return workflow_action_result(action, "success", notification_rule_id=str(rule.id), is_active=active)
 
     async def _command_garage_doors(
         self,
@@ -1364,12 +1062,7 @@ class AutomationService:
     ) -> dict[str, Any]:
         devices = await automation_garage_targets(action)
         if not devices:
-            return {
-                "id": action["id"],
-                "type": action["type"],
-                "status": "failed",
-                "error": "garage_door_not_configured",
-            }
+            return workflow_action_result(action, "failed", error="garage_door_not_configured")
         command = "open" if action["type"] == "garage_door.open" else "close"
         reason = render_action_reason(action, context, rule)
         outcomes = []
@@ -1383,13 +1076,12 @@ class AutomationService:
                 )
             )
         failed = [outcome for outcome in outcomes if not outcome["accepted"]]
-        return {
-            "id": action["id"],
-            "type": action["type"],
-            "status": "failed" if failed else "success",
-            "outcomes": outcomes,
-            "error": "; ".join(str(item.get("detail") or item["entity_id"]) for item in failed) if failed else None,
-        }
+        return workflow_action_result(
+            action,
+            "failed" if failed else "success",
+            outcomes=outcomes,
+            error="; ".join(str(item.get("detail") or item["entity_id"]) for item in failed) if failed else None,
+        )
 
     async def _garage_command_outcome(
         self,
@@ -1433,7 +1125,7 @@ def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
         "id": str(value.get("id") or uuid.uuid4()),
         "name": str(value.get("name") or "Automation Rule").strip()[:160],
         "description": str(value.get("description") or "").strip(),
-        "is_active": value.get("is_active", value.get("enabled", True)) is not False,
+        "is_active": value.get("is_active", True) is not False,
         "triggers": triggers,
         "trigger_keys": trigger_keys_for_triggers(triggers),
         "conditions": normalize_conditions(value.get("conditions")),
@@ -1454,7 +1146,7 @@ def normalize_triggers(value: Any, *, generate_webhook_keys: bool = False) -> li
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
             continue
-        trigger_type = str(raw.get("type") or raw.get("trigger_key") or "").strip()
+        trigger_type = str(raw.get("type") or "").strip()
         if trigger_type not in allowed:
             continue
         config = as_dict(raw.get("config"))
@@ -1519,9 +1211,7 @@ def normalize_trigger_config(
             if key_was_generated or is_high_entropy_webhook_key(webhook_key)
             else "legacy",
             "require_hmac": bool_config(config.get("require_hmac")),
-            "allowed_source_ips": normalize_string_list(
-                config.get("allowed_source_ips", config.get("source_allowlist", []))
-            ),
+            "allowed_source_ips": normalize_string_list(config.get("allowed_source_ips")),
             "rate_limit_per_minute": safe_int(
                 config.get("rate_limit_per_minute"),
                 default=WEBHOOK_RATE_LIMIT_PER_MINUTE,
@@ -1607,12 +1297,12 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
 def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[str, Any]:
     if action_type.startswith("notification."):
         return {
-            "notification_rule_id": optional_text(config.get("notification_rule_id") or config.get("rule_id")),
-            "notification_rule_name": optional_text(config.get("notification_rule_name") or config.get("rule_name")),
+            "notification_rule_id": optional_text(config.get("notification_rule_id")),
+            "notification_rule_name": optional_text(config.get("notification_rule_name")),
         }
     if action_type.startswith("garage_door."):
         return {
-            "target_entity_ids": normalize_string_list(config.get("target_entity_ids", config.get("entity_ids", [])))
+            "target_entity_ids": normalize_string_list(config.get("target_entity_ids"))
         }
     if integration_action_for_type(action_type):
         return integration_action_config(action_type, config)
@@ -2044,19 +1734,6 @@ def context_missing_references(context: AutomationContext, value: Any) -> list[s
     return sorted(set(missing))
 
 
-def referenced_variable_names(value: Any) -> set[str]:
-    names: set[str] = set()
-    if isinstance(value, str):
-        names.update(match.group(1) for match in AT_TOKEN_PATTERN.finditer(value))
-    elif isinstance(value, dict):
-        for item in value.values():
-            names.update(referenced_variable_names(item))
-    elif isinstance(value, list):
-        for item in value:
-            names.update(referenced_variable_names(item))
-    return names
-
-
 def render_with_context(template: str, context: AutomationContext) -> str:
     return render_template(template, context.variables)
 
@@ -2234,75 +1911,6 @@ def cron_next(expression: str, now: datetime, timezone: Any) -> datetime:
     return croniter(expression, localized).get_next(datetime)
 
 
-def deterministic_schedule_parse(text: str, *, now: datetime, timezone_name: str) -> dict[str, Any]:
-    lower = text.lower()
-    day_map = {
-        "monday": 1,
-        "tuesday": 2,
-        "wednesday": 3,
-        "thursday": 4,
-        "friday": 5,
-        "saturday": 6,
-        "sunday": 0,
-    }
-    day = next((value for label, value in day_map.items() if label in lower), None)
-    time_match = re.search(r"\b([01]?\d|2[0-3])(?::([0-5]\d))?\s*(am|pm)?\b", lower)
-    if day is not None and time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2) or 0)
-        meridiem = time_match.group(3)
-        if meridiem == "pm" and hour < 12:
-            hour += 12
-        if meridiem == "am" and hour == 12:
-            hour = 0
-        end_at = None
-        until_match = re.search(r"until\s+(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)", lower)
-        if until_match:
-            month_names = {
-                "january": 1,
-                "february": 2,
-                "march": 3,
-                "april": 4,
-                "may": 5,
-                "june": 6,
-                "july": 7,
-                "august": 8,
-                "september": 9,
-                "october": 10,
-                "november": 11,
-                "december": 12,
-            }
-            month_text = until_match.group(2)
-            month = month_names.get(month_text)
-            if not month:
-                month = next((number for label, number in month_names.items() if label.startswith(month_text[:3])), None)
-            if month:
-                candidate = datetime(now.year, month, int(until_match.group(1)), 23, 59, 59, tzinfo=timezone_for(timezone_name))
-                if candidate < now:
-                    candidate = candidate.replace(year=now.year + 1)
-                end_at = candidate.isoformat()
-        return {
-            "cron_expression": f"{minute} {hour} * * {day}",
-            "run_at": None,
-            "start_at": None,
-            "end_at": end_at,
-            "timezone": timezone_name,
-            "summary": text,
-            "confidence": 0.7,
-            "ambiguity_notes": [],
-        }
-    return {
-        "cron_expression": None,
-        "run_at": None,
-        "start_at": None,
-        "end_at": None,
-        "timezone": timezone_name,
-        "summary": text,
-        "confidence": 0.0,
-        "ambiguity_notes": ["Could not parse schedule deterministically."],
-    }
-
-
 def validate_schedule_parse(
     parsed: dict[str, Any],
     *,
@@ -2420,20 +2028,6 @@ def safe_int(value: Any, *, default: int = 1, minimum: int | None = None) -> int
     if minimum is not None:
         parsed = max(minimum, parsed)
     return parsed
-
-
-def normalize_string_list(value: Any) -> list[str]:
-    if isinstance(value, (str, bytes)):
-        iterable: list[Any] = [value]
-    elif isinstance(value, list):
-        iterable = value
-    else:
-        iterable = []
-    return [str(item).strip() for item in iterable if str(item).strip()]
-
-
-def canonical_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def parse_uuid(value: Any) -> uuid.UUID | None:

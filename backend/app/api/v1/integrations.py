@@ -167,7 +167,6 @@ class ESPHomeDeviceRequest(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=6053, ge=1, le=65535)
     encryption_key: str | None = Field(default=None, max_length=512)
-    legacy_password: str | None = Field(default=None, max_length=512)
     timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
     enabled: bool = True
     confirmation_token: str | None = Field(default=None, max_length=160)
@@ -178,7 +177,6 @@ class ESPHomeDevicePatchRequest(BaseModel):
     host: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     encryption_key: str | None = Field(default=None, max_length=512)
-    legacy_password: str | None = Field(default=None, max_length=512)
     timeout_seconds: float | None = Field(default=None, ge=5.0, le=120.0)
     enabled: bool | None = None
     confirmation_token: str | None = Field(default=None, max_length=160)
@@ -277,8 +275,6 @@ async def update_esphome_device(
         device["port"] = int(updates["port"])
     if "encryption_key" in updates and updates["encryption_key"] is not None:
         device["encryption_key"] = str(updates["encryption_key"] or "")
-    if "legacy_password" in updates and updates["legacy_password"] is not None:
-        device["legacy_password"] = str(updates["legacy_password"] or "")
     if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
         device["timeout_seconds"] = float(updates["timeout_seconds"])
     if "enabled" in updates and updates["enabled"] is not None:
@@ -742,7 +738,14 @@ async def cover_command(
             target_label=device.name,
             outcome="failed",
             level="error",
-            metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
+            metadata={
+                "reason": request.reason,
+                "state": outcome.state.value,
+                "detail": outcome.detail,
+                "verified": outcome.verified,
+                "used_provider": outcome.used_provider,
+                "failover_used": outcome.failover_used,
+            },
         )
         await _commit_if_supported(session)
         raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
@@ -755,7 +758,14 @@ async def cover_command(
         target_entity="Cover",
         target_id=device.key,
         target_label=device.name,
-        metadata={"reason": request.reason, "state": outcome.state.value, "detail": outcome.detail},
+        metadata={
+            "reason": request.reason,
+            "state": outcome.state.value,
+            "detail": outcome.detail,
+            "verified": outcome.verified,
+            "used_provider": outcome.used_provider,
+            "failover_used": outcome.failover_used,
+        },
     )
     await _commit_if_supported(session)
     return {
@@ -767,6 +777,7 @@ async def cover_command(
         "detail": request.reason,
         "used_provider": outcome.used_provider,
         "failover_used": outcome.failover_used,
+        "verified": outcome.verified,
     }
 
 
@@ -953,7 +964,6 @@ def _esphome_device_summary(device: dict) -> dict:
         "timeout_seconds": float(device.get("timeout_seconds") or 30.0),
         "enabled": bool(device.get("enabled", True)),
         "encryption_key_configured": bool(str(device.get("encryption_key") or "").strip()),
-        "legacy_password_configured": bool(str(device.get("legacy_password") or "").strip()),
     }
 
 
@@ -964,7 +974,6 @@ def _esphome_device_from_request(device_id: str, request: ESPHomeDeviceRequest) 
         "host": request.host.strip(),
         "port": request.port,
         "encryption_key": str(request.encryption_key or ""),
-        "legacy_password": str(request.legacy_password or ""),
         "timeout_seconds": request.timeout_seconds,
         "enabled": request.enabled,
     }

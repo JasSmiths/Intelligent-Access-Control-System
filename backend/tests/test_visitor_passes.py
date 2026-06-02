@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.ai import tools as ai_tools
+from app.ai.tool_groups import visitor_passes_handlers as visitor_pass_tools
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.access_events import AccessEventService
@@ -94,7 +95,7 @@ async def test_visitor_pass_status_changed_domain_event_preserves_payload_shape(
 
 
 @pytest.mark.asyncio
-async def test_refresh_statuses_publishes_compatible_status_changed_event(monkeypatch) -> None:
+async def test_refresh_statuses_publishes_status_changed_event_payload(monkeypatch) -> None:
     service = VisitorPassService()
     expected = datetime(2026, 4, 29, 15, 0, tzinfo=UTC)
     row = visitor_pass(expected_time=expected, window_minutes=30)
@@ -647,7 +648,7 @@ async def test_departure_duration_is_recorded_for_same_plate() -> None:
 
 
 def test_api_status_filter_parser_accepts_multi_status_values() -> None:
-    statuses = ai_tools._visitor_pass_statuses_from_arguments(
+    statuses = visitor_pass_tools._visitor_pass_statuses_from_arguments(
         {"statuses": ["active", "scheduled", "used", "bogus"]}
     )
 

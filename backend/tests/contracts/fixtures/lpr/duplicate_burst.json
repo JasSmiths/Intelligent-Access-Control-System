@@ -1,0 +1,20 @@
+{
+  "resolved_window": {
+    "source": "ubiquiti",
+    "registration_number": "PE70DHX",
+    "first_seen": "2026-05-31T08:15:00+00:00",
+    "debounce_expires_at": "2026-05-31T08:15:06+00:00",
+    "gate_cycle_expires_at": "2026-05-31T08:15:45+00:00",
+    "direction": "entry",
+    "decision": "granted"
+  },
+  "read": {
+    "source": "ubiquiti",
+    "registration_number": "PE70DHX",
+    "captured_at": "2026-05-31T08:15:02+00:00",
+    "gate_state": "opening",
+    "direction_hint": "entry",
+    "has_known_vehicle_match": true
+  }
+}
+

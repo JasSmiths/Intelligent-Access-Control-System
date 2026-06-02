@@ -1,11 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 import uuid
 
 import pytest
 
-from app.modules.gate.home_assistant import HomeAssistantGateController
 from app.models import (
     GateMalfunctionNotificationOutbox,
     GateMalfunctionState,
@@ -331,48 +330,3 @@ async def test_manual_recheck_override_requires_confirmation() -> None:
 
     assert result["requires_confirmation"] is True
     assert result["confirmation_field"] == "confirm"
-
-
-@pytest.mark.asyncio
-async def test_recovery_gate_open_bypasses_configured_schedule(monkeypatch) -> None:
-    calls: list[str] = []
-
-    class FakeClient:
-        async def call_service(self, service_name, service_data):
-            calls.append(service_name)
-            assert service_data == {"entity_id": "cover.top_gate"}
-            return {}
-
-        async def get_state(self, entity_id):
-            assert entity_id == "cover.top_gate"
-            return SimpleNamespace(state="open")
-
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_gate_entities=[
-                {
-                    "entity_id": "cover.top_gate",
-                    "name": "Top Gate",
-                    "enabled": True,
-                    "schedule_id": "blocked-schedule",
-                }
-            ],
-            home_assistant_gate_open_service="cover.open_cover",
-            home_assistant_gate_entity_id="",
-            site_timezone="UTC",
-            schedule_default_policy="deny",
-        )
-
-    async def schedule_should_not_run(*args, **kwargs):
-        raise AssertionError("Recovery attempts must bypass gate access schedules.")
-
-    monkeypatch.setattr("app.modules.gate.home_assistant.get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr("app.modules.gate.home_assistant.evaluate_schedule_id", schedule_should_not_run)
-
-    result = await HomeAssistantGateController(cast(Any, FakeClient())).open_gate(
-        "recovery",
-        bypass_schedule=True,
-    )
-
-    assert result.accepted is True
-    assert calls == ["cover.open_cover"]

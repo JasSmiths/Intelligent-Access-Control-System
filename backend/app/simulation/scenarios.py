@@ -32,6 +32,7 @@ from app.models.enums import (
 )
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services.access import hardware as access_hardware_module
 from app.services import access_events as access_events_module
 from app.services.access_events import (
     GATE_OBSERVATION_PAYLOAD_KEY,
@@ -148,9 +149,6 @@ class HardwareFreeAccessEventService(AccessEventService):
         super().__init__()
         self._recorder = recorder
 
-    async def _capture_event_snapshot(self, event: AccessEvent, *, trace: Any | None = None) -> None:
-        return None
-
     async def _dvla_enrichment_for_event(self, **_kwargs: Any) -> dict[str, str | None] | None:
         return None
 
@@ -177,111 +175,6 @@ class HardwareFreeAccessEventService(AccessEventService):
             "confidence": 0.0,
             "reason": "Hardware-free simulation does not call camera vision.",
         }
-
-    async def _open_gate_for_event(
-        self,
-        event: AccessEvent,
-        person: Person | None,
-        *,
-        open_garage_doors: bool,
-        trace: Any | None = None,
-        dvla_enrichment: dict[str, str | None] | None = None,
-        movement_saga_id: str | None = None,
-    ) -> GateCommandOutcome:
-        started_at = datetime.now(tz=UTC)
-        reason = (
-            f"Simulated automatic LPR grant for {event.registration_number}"
-            f"{f' ({person.display_name})' if person else ''}"
-        )
-        action = {
-            "action": "gate.open",
-            "event_id": str(event.id),
-            "registration_number": event.registration_number,
-            "accepted": True,
-            "state": GateState.OPENING.value,
-            "detail": reason,
-        }
-        self._recorder.gate_actions.append(action)
-        await self._audit_automatic_hardware_command(
-            action="gate.open.automatic",
-            event=event,
-            person=person,
-            target_entity="Gate",
-            target_label="Simulated Gate",
-            outcome="accepted",
-            level="info",
-            metadata={
-                "controller": "simulation",
-                "reason": reason,
-                "accepted": True,
-                "state": GateState.OPENING.value,
-                "detail": reason,
-            },
-        )
-        await event_bus.publish("gate.open_requested", action)
-        if open_garage_doors:
-            await self._open_garage_doors_for_event(
-                event,
-                person,
-                reason,
-                trace=trace,
-                dvla_enrichment=dvla_enrichment,
-            )
-        return GateCommandOutcome(
-            intent=GateCommandIntent(
-                reason=reason,
-                source="simulation",
-                event_id=str(event.id),
-                movement_saga_id=movement_saga_id,
-                registration_number=event.registration_number,
-                actor="Simulation",
-            ),
-            accepted=True,
-            state=GateState.OPENING,
-            detail=reason,
-            started_at=started_at,
-            completed_at=datetime.now(tz=UTC),
-            mechanically_confirmed=True,
-            reconciliation_required=False,
-        )
-
-    async def _publish_gate_open_skipped(
-        self,
-        event: AccessEvent,
-        direction_resolution: dict[str, Any],
-        person: Person | None = None,
-    ) -> None:
-        self._recorder.gate_actions.append(
-            {
-                "action": "gate.open",
-                "event_id": str(event.id),
-                "registration_number": event.registration_number,
-                "accepted": False,
-                "state": (direction_resolution.get("gate_observation") or {}).get("state") or GateState.UNKNOWN.value,
-                "detail": "Skipped because the simulated gate was not closed at plate-read time.",
-            }
-        )
-        await super()._publish_gate_open_skipped(event, direction_resolution, person)
-
-    async def _open_garage_doors_for_event(
-        self,
-        event: AccessEvent,
-        person: Person | None,
-        reason: str,
-        *,
-        trace: Any | None = None,
-        dvla_enrichment: dict[str, str | None] | None = None,
-    ) -> None:
-        if person and person.garage_door_entity_ids:
-            self._recorder.garage_actions.append(
-                {
-                    "action": "garage_door.open",
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "entity_ids": list(person.garage_door_entity_ids),
-                    "detail": reason,
-                }
-            )
 
     async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
         simulation = _read_simulation_payload(read)
@@ -326,6 +219,9 @@ class HardwareFreePatchScope:
         self._original_publish_attr = event_bus.__dict__.get("publish")
         self._original_notification_service = access_events_module.get_notification_service
         self._original_leaderboard_service = access_events_module.get_leaderboard_service
+        self._original_snapshot_capture = access_events_module.capture_access_event_snapshot
+        self._original_gate_open = access_events_module.open_gate_for_access_event
+        self._original_gate_skip = access_events_module.publish_gate_open_skipped
 
     async def __aenter__(self) -> "HardwareFreePatchScope":
         async def capture_publish(event_type: str, payload: dict[str, Any]) -> None:
@@ -337,12 +233,107 @@ class HardwareFreePatchScope:
                 }
             )
 
+        async def capture_snapshot(_event: AccessEvent, *, trace: Any | None = None) -> None:
+            return None
+
+        async def capture_gate_open(
+            event: AccessEvent,
+            person: Person | None,
+            *,
+            open_garage_doors: bool,
+            trace: Any | None = None,
+            dvla_enrichment: dict[str, str | None] | None = None,
+            movement_saga_id: str | None = None,
+        ) -> GateCommandOutcome:
+            started_at = datetime.now(tz=UTC)
+            reason = (
+                f"Simulated automatic LPR grant for {event.registration_number}"
+                f"{f' ({person.display_name})' if person else ''}"
+            )
+            action = {
+                "action": "gate.open",
+                "event_id": str(event.id),
+                "registration_number": event.registration_number,
+                "accepted": True,
+                "state": GateState.OPENING.value,
+                "detail": reason,
+            }
+            self._recorder.gate_actions.append(action)
+            await access_hardware_module.audit_automatic_hardware_command(
+                action="gate.open.automatic",
+                event=event,
+                person=person,
+                target_entity="Gate",
+                target_label="Simulated Gate",
+                outcome="accepted",
+                level="info",
+                metadata={
+                    "controller": "simulation",
+                    "reason": reason,
+                    "accepted": True,
+                    "state": GateState.OPENING.value,
+                    "detail": reason,
+                },
+            )
+            await event_bus.publish("gate.open_requested", action)
+            if open_garage_doors and person and person.garage_door_entity_ids:
+                self._recorder.garage_actions.append(
+                    {
+                        "action": "garage_door.open",
+                        "event_id": str(event.id),
+                        "registration_number": event.registration_number,
+                        "entity_ids": list(person.garage_door_entity_ids),
+                        "detail": reason,
+                    }
+                )
+            return GateCommandOutcome(
+                intent=GateCommandIntent(
+                    reason=reason,
+                    source="simulation",
+                    event_id=str(event.id),
+                    movement_saga_id=movement_saga_id,
+                    registration_number=event.registration_number,
+                    actor="Simulation",
+                ),
+                accepted=True,
+                state=GateState.OPENING,
+                detail=reason,
+                started_at=started_at,
+                completed_at=datetime.now(tz=UTC),
+                mechanically_confirmed=True,
+                reconciliation_required=False,
+            )
+
+        async def capture_gate_skip(
+            event: AccessEvent,
+            direction_resolution: dict[str, Any],
+            person: Person | None = None,
+        ) -> None:
+            self._recorder.gate_actions.append(
+                {
+                    "action": "gate.open",
+                    "event_id": str(event.id),
+                    "registration_number": event.registration_number,
+                    "accepted": False,
+                    "state": (direction_resolution.get("gate_observation") or {}).get("state")
+                    or GateState.UNKNOWN.value,
+                    "detail": "Skipped because the simulated gate was not closed at plate-read time.",
+                }
+            )
+            await access_hardware_module.publish_gate_open_skipped(event, direction_resolution, person)
+
         event_bus.publish = capture_publish  # type: ignore[method-assign]
         access_events_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)  # type: ignore[assignment]
         access_events_module.get_leaderboard_service = lambda: _FakeLeaderboardService()  # type: ignore[assignment]
+        access_events_module.capture_access_event_snapshot = capture_snapshot
+        access_events_module.open_gate_for_access_event = capture_gate_open
+        access_events_module.publish_gate_open_skipped = capture_gate_skip
         return self
 
     async def __aexit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        access_events_module.publish_gate_open_skipped = self._original_gate_skip
+        access_events_module.open_gate_for_access_event = self._original_gate_open
+        access_events_module.capture_access_event_snapshot = self._original_snapshot_capture
         access_events_module.get_leaderboard_service = self._original_leaderboard_service  # type: ignore[assignment]
         access_events_module.get_notification_service = self._original_notification_service  # type: ignore[assignment]
         if self._had_publish_attr:

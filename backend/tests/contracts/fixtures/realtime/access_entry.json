@@ -1,0 +1,25 @@
+{
+  "event_id": "11111111-1111-1111-1111-111111111111",
+  "access_event_id": "11111111-1111-1111-1111-111111111111",
+  "person_id": "22222222-2222-2222-2222-222222222222",
+  "vehicle_id": "33333333-3333-3333-3333-333333333333",
+  "registration_number": "PE70DHX",
+  "direction": "entry",
+  "decision": "granted",
+  "confidence": 0.97,
+  "source": "ubiquiti",
+  "occurred_at": "2026-05-31T08:15:00+00:00",
+  "event_type": "access_event.finalized",
+  "timing_classification": "normal",
+  "anomaly_count": 0,
+  "visitor_pass_id": null,
+  "visitor_name": null,
+  "visitor_pass_mode": null,
+  "snapshot_url": null,
+  "snapshot_captured_at": null,
+  "snapshot_bytes": null,
+  "snapshot_width": null,
+  "snapshot_height": null,
+  "snapshot_camera": null
+}
+

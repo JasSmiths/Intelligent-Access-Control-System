@@ -1,4 +1,4 @@
-import { isRecord,nullableString,stringPayload,titleCase } from "../../shared";
+import { isRecord, stringPayload, titleCase } from "../../lib/format";
 import { sourceTabs,timeRangeOptions } from "./constants";
 import type {
   LogRecord,

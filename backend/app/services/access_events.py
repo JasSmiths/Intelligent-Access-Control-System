@@ -2,11 +2,11 @@ import asyncio
 import json
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
 from functools import lru_cache
-from typing import Any, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
@@ -27,7 +27,6 @@ from app.models import (
     Anomaly,
     LprIngestEvent,
     MovementSagaRecord,
-    MovementSessionRecord,
     Person,
     Presence,
     Vehicle,
@@ -45,11 +44,21 @@ from app.models.enums import (
     VisitorPassType,
 )
 from app.modules.notifications.base import NotificationContext
-from app.services.alert_snapshots import alert_snapshot_metadata_from_event
-from app.services.access_devices import get_access_device_service
+from app.services.access.hardware import (
+    open_gate_for_access_event,
+    publish_gate_open_skipped,
+)
+from app.services.access.payloads import (
+    access_event_realtime_payload,
+    authorized_entry_message,
+    notification_facts,
+    vehicle_display_name,
+)
+from app.services.access.snapshots import capture_access_event_snapshot
+from app.services.snapshots import alert_snapshot_metadata_from_event
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
-from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
+from app.services.gate_commands import GateCommandOutcome
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_ingest import (
@@ -63,6 +72,24 @@ from app.services.lpr_zone_shadow import (
     get_lpr_zone_shadow_service,
 )
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.movement.presence import commit_presence_for_event
+from app.services.movement.sessions import (
+    ARRIVAL_GATE_STATES,
+    DEPARTURE_GATE_STATES,
+    VEHICLE_SESSION_PAYLOAD_KEY,
+    MovementSessionService,
+    candidate_registration_numbers as _candidate_registration_numbers,
+    coerce_access_direction,
+    coerce_gate_state,
+    datetime_from_payload,
+    detected_registration_number as _detected_registration_number,
+    explicit_direction_from_read,
+    gate_observation_from_read,
+    known_vehicle_plate_match_from_read as _known_vehicle_plate_match_from_read,
+    normalize_registration_number,
+    plates_are_similar,
+    read_direction_hint,
+)
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.movement_fsm import (
     CameraTieBreakerEvidence,
@@ -76,16 +103,6 @@ from app.services.notifications import get_notification_service
 from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
 from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config
-from app.services.snapshots import (
-    SNAPSHOT_HEIGHT,
-    SNAPSHOT_WIDTH,
-    access_event_snapshot_relative_path,
-    access_event_snapshot_url,
-    access_event_snapshot_payload,
-    apply_snapshot_to_access_event,
-    get_snapshot_manager,
-)
-from app.services.snapshot_recovery import protect_event_id_from_access_event
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     TELEMETRY_CATEGORY_LPR,
@@ -95,12 +112,16 @@ from app.services.telemetry import (
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_visual_detections import (
-    get_vehicle_presence_tracker,
     get_vehicle_visual_detection_recorder,
 )
 from app.services.visitor_passes import get_visitor_pass_service, serialize_visitor_pass
 
 logger = get_logger(__name__)
+
+__all__ = [
+    "AccessEventService",
+    "get_access_event_service",
+]
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_preserve_gate_observation"
@@ -113,45 +134,11 @@ LPR_INGEST_EVENT_PAYLOAD_KEY = "_iacs_lpr_ingest_event"
 WEBHOOK_TRACE_PAYLOAD_KEY = "webhook_trace"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
-VEHICLE_SESSION_PAYLOAD_KEY = "vehicle_session"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
-ARRIVAL_GATE_STATES = {GateState.CLOSED}
-DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
-EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS = 60.0
-ARRIVAL_OCR_NOISE_SUPPRESSION_SECONDS = 45.0
-ARRIVAL_OCR_NOISE_CLOCK_SKEW_SECONDS = 2.0
-MAX_SUPPRESSED_SESSION_READS = 20
 MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
 PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
 WORKER_STALL_QUEUE_SECONDS = 60.0
 CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.60
-PERSON_NOTIFICATION_PRONOUNS = {
-    "he/him": ("him", "his"),
-    "she/her": ("her", "her"),
-}
-SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME = {
-    "jason": "he/him",
-    "john": "he/him",
-    "james": "he/him",
-    "david": "he/him",
-    "michael": "he/him",
-    "paul": "he/him",
-    "mark": "he/him",
-    "peter": "he/him",
-    "stephen": "he/him",
-    "steven": "he/him",
-    "sarah": "she/her",
-    "steph": "she/her",
-    "stephanie": "she/her",
-    "sylvia": "she/her",
-    "emma": "she/her",
-    "olivia": "she/her",
-    "amelia": "she/her",
-    "ava": "she/her",
-    "charlotte": "she/her",
-    "grace": "she/her",
-}
-
 def dvla_mot_alert_required(mot_status: str | None) -> bool:
     normalized = (mot_status or "").strip().casefold().replace("_", " ")
     return bool(normalized and normalized not in {"valid", "not required"})
@@ -159,11 +146,6 @@ def dvla_mot_alert_required(mot_status: str | None) -> bool:
 
 def dvla_tax_alert_required(tax_status: str | None) -> bool:
     return bool(tax_status and tax_status.strip().casefold() not in {"taxed", "sorn"})
-
-
-def _known_vehicle_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
-    match = (read.raw_payload or {}).get(KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY)
-    return match if isinstance(match, dict) else None
 
 
 def _is_exact_known_vehicle_plate_match(read: PlateRead) -> bool:
@@ -185,22 +167,17 @@ def _is_visitor_pass_plate_match(read: PlateRead) -> bool:
     return bool(_visitor_pass_plate_match_from_read(read))
 
 
-def _detected_registration_number(read: PlateRead) -> str:
-    match = _known_vehicle_plate_match_from_read(read)
-    return str(match.get("detected_registration_number") or read.registration_number) if match else read.registration_number
-
-
-def _candidate_registration_numbers(read: PlateRead) -> tuple[str, ...]:
-    candidates = [read.registration_number, *getattr(read, "candidate_registration_numbers", ())]
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for candidate in candidates:
-        plate = re.sub(r"[^A-Za-z0-9]", "", str(candidate or "")).upper()
-        if not plate or plate in seen:
-            continue
-        seen.add(plate)
-        normalized.append(plate)
-    return tuple(normalized)
+def _plate_read_with_payload(
+    read: PlateRead,
+    raw_payload: dict[str, Any],
+    *,
+    registration_number: str | None = None,
+) -> PlateRead:
+    return replace(
+        read,
+        registration_number=registration_number or read.registration_number,
+        raw_payload=raw_payload,
+    )
 
 
 @dataclass
@@ -229,57 +206,8 @@ class DebounceWindow:
 @dataclass(frozen=True)
 class ResolvedPlateWindow:
     source: str
-    registration_number: str
     first_seen: datetime
     debounce_expires_at: datetime
-    gate_cycle_expires_at: datetime
-    direction: AccessDirection | None = None
-    decision: AccessDecision | None = None
-
-
-@dataclass(frozen=True)
-class FinalizedPlateEvent:
-    event_id: str
-    direction: AccessDirection
-    decision: AccessDecision
-    occurred_at: datetime
-
-
-@dataclass
-class VehicleSessionContext:
-    source: str
-    registration_number: str
-    normalized_registration_number: str
-    camera_id: str | None = None
-    device_id: str | None = None
-    protect_event_ids: set[str] = field(default_factory=set)
-
-
-@dataclass
-class ActiveVehicleSession:
-    event_id: str
-    source: str
-    registration_number: str
-    normalized_registration_number: str
-    started_at: datetime
-    last_seen_at: datetime
-    direction: AccessDirection
-    decision: AccessDecision
-    movement_session_id: str | None = None
-    debounce_expires_at: datetime | None = None
-    gate_cycle_expires_at: datetime | None = None
-    idle_expires_at: datetime | None = None
-    camera_id: str | None = None
-    device_id: str | None = None
-    protect_event_ids: set[str] = field(default_factory=set)
-
-
-@dataclass
-class VehicleSessionSuppression:
-    session: ActiveVehicleSession
-    reason: str
-    matched_by: str
-    evidence: dict[str, Any] | None = None
 
 
 class AccessEventService:
@@ -300,6 +228,10 @@ class AccessEventService:
         self._movement_direction_fsm = MovementDirectionFSM()
         self._movement_suppression_fsm = MovementSuppressionFSM()
         self._movement_ledger = get_movement_ledger_repository()
+        self._movement_sessions = MovementSessionService(
+            ledger_provider=lambda: self._movement_ledger,
+            session_factory=lambda: AsyncSessionLocal(),
+        )
         self._lpr_ingest_repository = LprIngestRepository()
         self._started_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
@@ -362,7 +294,6 @@ class AccessEventService:
             "worker_running": worker_running,
             "queue_depth": queue_depth,
             "pending_windows": len(self._pending),
-            "active_vehicle_sessions": 0,
             "movement_sessions_source": "durable",
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "last_heartbeat_at": self._last_heartbeat_at.isoformat() if self._last_heartbeat_at else None,
@@ -394,7 +325,7 @@ class AccessEventService:
             )
             return
         read = await self._read_with_gate_observation(read)
-        gate_observation = self._gate_observation_from_read(read)
+        gate_observation = gate_observation_from_read(read)
         logger.info(
             "plate_read_received",
             extra={
@@ -427,9 +358,9 @@ class AccessEventService:
         ingest = raw_payload.get(INGEST_METADATA_PAYLOAD_KEY)
         ingest = ingest if isinstance(ingest, dict) else {}
         webhook_received_at = (
-            self._datetime_from_payload(existing.get("received_at"))
-            or self._datetime_from_payload(existing.get("webhook_received_at"))
-            or self._datetime_from_payload(ingest.get("webhook_received_at"))
+            datetime_from_payload(existing.get("received_at"))
+            or datetime_from_payload(existing.get("webhook_received_at"))
+            or datetime_from_payload(ingest.get("webhook_received_at"))
             or received_at
         )
         captured_to_webhook_ms = (
@@ -452,14 +383,7 @@ class AccessEventService:
             "webhook_received_at": webhook_received_at.astimezone(UTC).isoformat(),
             "captured_to_webhook_ms": captured_to_webhook_ms,
         }
-        return PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload)
 
     def _webhook_trace_from_read(self, read: PlateRead) -> dict[str, Any]:
         payload = (read.raw_payload or {}).get(WEBHOOK_TRACE_PAYLOAD_KEY)
@@ -512,39 +436,6 @@ class AccessEventService:
             return True
         return await self._lpr_ingest_repo().claim_for_processing(ingest_id)
 
-    async def _mark_lpr_ingest_window_succeeded(
-        self,
-        window: DebounceWindow,
-        *,
-        access_event_id: uuid.UUID,
-        movement_saga_id: uuid.UUID | None,
-    ) -> None:
-        ids = [ingest_id for read in window.reads if (ingest_id := self._lpr_ingest_event_id_from_read(read))]
-        if not ids:
-            return
-        await self._lpr_ingest_repo().mark_ids_succeeded(
-            ids,
-            access_event_id=access_event_id,
-            movement_saga_id=movement_saga_id,
-        )
-
-    async def _mark_lpr_ingest_ids_succeeded_in_session(
-        self,
-        session: AsyncSession,
-        ids: list[uuid.UUID],
-        *,
-        access_event_id: uuid.UUID | None,
-        movement_saga_id: uuid.UUID | None,
-    ) -> None:
-        if not ids:
-            return
-        await self._lpr_ingest_repo().mark_ids_succeeded_in_session(
-            session,
-            ids,
-            access_event_id=access_event_id,
-            movement_saga_id=movement_saga_id,
-        )
-
     async def _mark_lpr_ingest_succeeded(
         self,
         read: PlateRead,
@@ -559,16 +450,6 @@ class AccessEventService:
             ingest_id,
             access_event_id=access_event_id,
             movement_saga_id=movement_saga_id,
-        )
-
-    async def _mark_lpr_ingest_skipped(self, read: PlateRead, *, reason: str) -> None:
-        await self._mark_lpr_ingest_terminal(read, status=LPR_INGEST_STATUS_SKIPPED, detail=reason)
-
-    async def _mark_lpr_ingest_failed(self, read: PlateRead, exc: Exception) -> None:
-        await self._mark_lpr_ingest_terminal(
-            read,
-            status=LPR_INGEST_STATUS_FAILED,
-            detail=self._safe_exception_detail(exc),
         )
 
     async def _mark_lpr_ingest_terminal(self, read: PlateRead, *, status: str, detail: str) -> None:
@@ -602,14 +483,7 @@ class AccessEventService:
             "idempotency_key": row.idempotency_key,
             "status": row.status,
         }
-        return PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload)
 
     def _read_from_lpr_ingest_event(self, row: LprIngestEvent) -> PlateRead:
         payload = dict(row.normalized_payload or {})
@@ -657,7 +531,7 @@ class AccessEventService:
         detail: str | None = None
         try:
             gate = get_gate_controller("configured")
-            state = self._coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
+            state = coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
         except UnsupportedModuleError as exc:
             state = GateState.UNKNOWN
             detail = str(exc)
@@ -680,14 +554,7 @@ class AccessEventService:
             "controller": "configured",
             "detail": detail,
         }
-        return PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload)
 
     def _should_preserve_supplied_gate_observation(self, read: PlateRead) -> bool:
         raw_payload = read.raw_payload or {}
@@ -718,7 +585,11 @@ class AccessEventService:
                         continue
                     if await is_maintenance_mode_active():
                         self._clear_pending_reads()
-                        await self._mark_lpr_ingest_skipped(read, reason="maintenance_mode_active")
+                        await self._mark_lpr_ingest_terminal(
+                            read,
+                            status=LPR_INGEST_STATUS_SKIPPED,
+                            detail="maintenance_mode_active",
+                        )
                         await self._publish_terminal_read(
                             read,
                             "plate_read.skipped",
@@ -833,7 +704,11 @@ class AccessEventService:
         )
         if self._stop_event.is_set() or attempt >= MAX_PLATE_READ_PROCESSING_ATTEMPTS:
             logger.error("plate_read_processing_failed_permanently", extra=payload)
-            await self._mark_lpr_ingest_failed(read, exc)
+            await self._mark_lpr_ingest_terminal(
+                read,
+                status=LPR_INGEST_STATUS_FAILED,
+                detail=self._safe_exception_detail(exc),
+            )
             await event_bus.publish("plate_read.failed", payload)
             return False
 
@@ -905,14 +780,7 @@ class AccessEventService:
     def _read_with_processing_attempt(self, read: PlateRead, attempt: int) -> PlateRead:
         raw_payload = dict(read.raw_payload or {})
         raw_payload[PROCESSING_ATTEMPT_PAYLOAD_KEY] = attempt
-        return PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload)
 
     async def _sleep_until_retry(self, seconds: float) -> None:
         if seconds <= 0:
@@ -946,9 +814,16 @@ class AccessEventService:
                 await self._publish_suppressed_read(read, reason=exact_suppression_reason)
                 return
 
-            vehicle_session_suppression = await self._vehicle_session_suppression(read)
+            vehicle_session_suppression = await self._movement_sessions.suppression_for_read(
+                read,
+                runtime=self._runtime,
+            )
             if vehicle_session_suppression:
-                await self._annotate_suppressed_session_read(read, vehicle_session_suppression)
+                await self._movement_sessions.annotate_suppressed_read(
+                    read,
+                    vehicle_session_suppression,
+                    runtime=self._runtime,
+                )
                 await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
                 return
 
@@ -961,10 +836,11 @@ class AccessEventService:
         window = self._add_to_debounce_window(read)
         if _is_exact_known_vehicle_plate_match(read):
             window = self._pop_exact_known_plate_window(window)
-            await self._finalize_exact_known_plate_window(window)
+            await self._finalize_window_or_fail(window, reason="exact_known_vehicle_plate")
         elif _is_visitor_pass_plate_match(read):
             window = self._pop_related_read_window(window, read)
-            await self._finalize_visitor_pass_window(window, read)
+            if await self._finalize_window_or_fail(window, reason="visitor_pass_departure_plate"):
+                self._remember_visitor_pass_resolution(window, read)
 
     async def _suppress_by_live_lpr_zone_filter(self, read: PlateRead) -> bool:
         mode = getattr(self._runtime, "lpr_zone_filter_mode", "shadow") if self._runtime else "shadow"
@@ -1015,8 +891,9 @@ class AccessEventService:
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
         for window in self._pending:
             best = window.best_read
-            if read.source == best.source and self._is_similar_plate(
-                read.registration_number, best.registration_number
+            threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
+            if read.source == best.source and plates_are_similar(
+                read.registration_number, best.registration_number, threshold
             ):
                 window.reads.append(read)
                 window.updated_at = read.captured_at
@@ -1050,14 +927,7 @@ class AccessEventService:
 
         raw_payload = dict(read.raw_payload or {})
         raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY] = best_match
-        return PlateRead(
-            registration_number=str(best_match["registration_number"]),
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload, registration_number=str(best_match["registration_number"]))
 
     async def _active_vehicle_registrations(self) -> list[str]:
         async with AsyncSessionLocal() as session:
@@ -1069,8 +939,8 @@ class AccessEventService:
         return [str(registration) for registration in registrations]
 
     async def _read_with_gate_malfunction_context(self, read: PlateRead) -> PlateRead:
-        gate_observation = self._gate_observation_from_read(read)
-        gate_state = self._coerce_gate_state(gate_observation.get("state"))
+        gate_observation = gate_observation_from_read(read)
+        gate_state = coerce_gate_state(gate_observation.get("state"))
         if gate_state not in DEPARTURE_GATE_STATES:
             return read
 
@@ -1086,17 +956,10 @@ class AccessEventService:
 
         raw_payload = dict(read.raw_payload or {})
         raw_payload[GATE_MALFUNCTION_PAYLOAD_KEY] = malfunction.as_payload()
-        return PlateRead(
-            registration_number=read.registration_number,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload)
 
     async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
-        gate_observation = self._gate_observation_from_read(read)
+        gate_observation = gate_observation_from_read(read)
         gate_malfunction = _gate_malfunction_from_read(read) or {}
         detail = {
             "registration_number": read.registration_number,
@@ -1111,7 +974,11 @@ class AccessEventService:
             "reason": "gate_malfunction_unknown_vehicle",
         }
         logger.info("plate_read_ignored_during_gate_malfunction", extra=detail)
-        await self._mark_lpr_ingest_skipped(read, reason="gate_malfunction_unknown_vehicle")
+        await self._mark_lpr_ingest_terminal(
+            read,
+            status=LPR_INGEST_STATUS_SKIPPED,
+            detail="gate_malfunction_unknown_vehicle",
+        )
         await event_bus.publish("plate_read.ignored", detail)
         try:
             async with AsyncSessionLocal() as session:
@@ -1134,7 +1001,7 @@ class AccessEventService:
             )
 
     async def _read_with_visitor_pass_departure_match(self, read: PlateRead) -> PlateRead:
-        plate = self._normalize_registration_number(read.registration_number)
+        plate = normalize_registration_number(read.registration_number)
         if not plate:
             return read
 
@@ -1172,14 +1039,7 @@ class AccessEventService:
             "visitor_pass_id": str(visitor_pass_id),
             "registration_number": plate,
         }
-        return PlateRead(
-            registration_number=plate,
-            confidence=read.confidence,
-            source=read.source,
-            captured_at=read.captured_at,
-            raw_payload=raw_payload,
-            candidate_registration_numbers=read.candidate_registration_numbers,
-        )
+        return _plate_read_with_payload(read, raw_payload, registration_number=plate)
 
     def _known_vehicle_plate_match(
         self,
@@ -1187,14 +1047,14 @@ class AccessEventService:
         stored_registration_numbers: list[str],
         threshold: float,
     ) -> dict[str, Any] | None:
-        detected = self._normalize_registration_number(detected_registration_number)
+        detected = normalize_registration_number(detected_registration_number)
         if not detected:
             return None
 
         best_match: dict[str, Any] | None = None
         for stored_registration_number in stored_registration_numbers:
             stored_lookup = str(stored_registration_number).strip().upper().replace(" ", "")
-            stored = self._normalize_registration_number(stored_lookup)
+            stored = normalize_registration_number(stored_lookup)
             if not stored:
                 continue
             similarity = 1.0 if detected == stored else SequenceMatcher(a=detected, b=stored).ratio()
@@ -1220,25 +1080,6 @@ class AccessEventService:
             ):
                 best_match = candidate
         return best_match
-
-    def _normalize_registration_number(self, registration_number: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]", "", registration_number).upper()
-
-    async def _finalize_exact_known_plate_window(self, window: DebounceWindow) -> None:
-        try:
-            finalized = await self._finalize_window(window)
-        except Exception as exc:
-            logger.exception(
-                "access_event_finalize_failed",
-                extra={
-                    "candidate_count": len(window.reads),
-                    "best_registration_number": window.best_read.registration_number,
-                    "reason": "exact_known_vehicle_plate",
-                },
-            )
-            await self._handle_finalize_failure(window, exc, reason="exact_known_vehicle_plate")
-            return
-        self._remember_exact_plate_resolution(window, finalized)
 
     def _pop_exact_known_plate_window(self, window: DebounceWindow) -> DebounceWindow:
         exact_read = next(
@@ -1278,14 +1119,6 @@ class AccessEventService:
             reads=reads,
         )
 
-    def _window_overlaps_exact_read(
-        self,
-        window: DebounceWindow,
-        exact_read: PlateRead,
-        max_seconds: float,
-    ) -> bool:
-        return self._window_overlaps_anchor_read(window, exact_read, max_seconds)
-
     def _window_overlaps_anchor_read(
         self,
         window: DebounceWindow,
@@ -1294,32 +1127,6 @@ class AccessEventService:
     ) -> bool:
         anchor_at = anchor_read.captured_at
         return window.first_seen <= anchor_at <= window.first_seen + timedelta(seconds=max_seconds)
-
-    async def _finalize_visitor_pass_window(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
-        try:
-            await self._finalize_window(window)
-        except Exception as exc:
-            logger.exception(
-                "access_event_finalize_failed",
-                extra={
-                    "candidate_count": len(window.reads),
-                    "best_registration_number": window.best_read.registration_number,
-                    "reason": "visitor_pass_departure_plate",
-                },
-            )
-            await self._handle_finalize_failure(window, exc, reason="visitor_pass_departure_plate")
-            return
-        self._remember_visitor_pass_resolution(window, anchor_read)
-
-    def _remember_exact_plate_resolution(
-        self,
-        window: DebounceWindow,
-        finalized: FinalizedPlateEvent | None = None,
-    ) -> None:
-        # Durable movement sessions are now the source of truth for exact-read
-        # suppression. The method remains as a compatibility hook for older
-        # tests/callers that finalized through this path.
-        return None
 
     async def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
         match = _known_vehicle_plate_match_from_read(read)
@@ -1341,8 +1148,8 @@ class AccessEventService:
                 source=read.source,
                 registration_number=read.registration_number,
                 captured_at=read.captured_at,
-                gate_state=self._coerce_gate_state(self._gate_observation_from_read(read).get("state")),
-                direction_hint=self._read_direction_hint(read),
+                gate_state=coerce_gate_state(gate_observation_from_read(read).get("state")),
+                direction_hint=read_direction_hint(read),
                 has_known_vehicle_match=bool(match),
             ),
             (
@@ -1360,36 +1167,13 @@ class AccessEventService:
         )
         return decision.reason
 
-    def _read_direction_hint(self, read: PlateRead) -> AccessDirection | None:
-        gate_state = self._coerce_gate_state(self._gate_observation_from_read(read).get("state"))
-        if gate_state in ARRIVAL_GATE_STATES:
-            return AccessDirection.ENTRY
-        if gate_state in DEPARTURE_GATE_STATES:
-            return AccessDirection.EXIT
-        explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
-        if explicit in {"entry", "enter", "arrival", "in"}:
-            return AccessDirection.ENTRY
-        if explicit in {"exit", "leave", "departure", "out"}:
-            return AccessDirection.EXIT
-        return None
-
-    def _read_direction_conflicts_with_resolution(
-        self,
-        read: PlateRead,
-        direction: AccessDirection | None,
-    ) -> bool:
-        hint = self._read_direction_hint(read)
-        return bool(direction and hint and hint != direction)
-
     def _remember_visitor_pass_resolution(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
         max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
         self._recent_visitor_pass_resolutions.append(
             ResolvedPlateWindow(
                 source=anchor_read.source,
-                registration_number=anchor_read.registration_number,
                 first_seen=window.first_seen,
                 debounce_expires_at=window.first_seen + timedelta(seconds=max_seconds),
-                gate_cycle_expires_at=window.first_seen + timedelta(seconds=max_seconds),
             )
         )
 
@@ -1454,568 +1238,6 @@ class AccessEventService:
             await session.commit()
             return saga
 
-    async def _vehicle_session_suppression(self, read: PlateRead) -> VehicleSessionSuppression | None:
-        context = self._vehicle_session_context_from_read(read)
-        if not context.normalized_registration_number:
-            return None
-        idle_seconds = self._vehicle_session_idle_seconds()
-        return await self._vehicle_session_db_fallback(read, context, idle_seconds)
-
-    def _vehicle_session_idle_seconds(self) -> float:
-        configured = (
-            getattr(self._runtime, "lpr_vehicle_session_idle_seconds", None)
-            if self._runtime
-            else settings.lpr_vehicle_session_idle_seconds
-        )
-        if configured is None:
-            configured = settings.lpr_vehicle_session_idle_seconds
-        try:
-            value = float(configured)
-        except (TypeError, ValueError):
-            value = settings.lpr_vehicle_session_idle_seconds
-        return max(10.0, value)
-
-    def _vehicle_session_match(
-        self,
-        session: ActiveVehicleSession,
-        context: VehicleSessionContext,
-        read: PlateRead,
-    ) -> str | None:
-        if self._read_matches_different_known_vehicle(session, read):
-            return None
-        same_source = read.source == session.source
-        same_plate = (
-            context.normalized_registration_number == session.normalized_registration_number
-            or self._is_similar_plate(
-                context.normalized_registration_number,
-                session.normalized_registration_number,
-            )
-        )
-        if same_plate:
-            return "registration_number" if same_source else "cross_source_registration_number"
-
-        same_event = bool(context.protect_event_ids & session.protect_event_ids)
-        if same_event:
-            return "protect_event_id" if same_source else "cross_source_protect_event_id"
-
-        if self._read_looks_like_arrival_ocr_noise(session, context, read):
-            return "arrival_ocr_noise"
-
-        return None
-
-    def _read_matches_different_known_vehicle(
-        self,
-        session: ActiveVehicleSession,
-        read: PlateRead,
-    ) -> bool:
-        match = _known_vehicle_plate_match_from_read(read)
-        if not match:
-            return False
-        matched_registration = self._normalize_registration_number(
-            str(match.get("registration_number") or match.get("normalized_registration_number") or "")
-        )
-        return bool(matched_registration and matched_registration != session.normalized_registration_number)
-
-    def _read_looks_like_arrival_ocr_noise(
-        self,
-        session: ActiveVehicleSession,
-        context: VehicleSessionContext,
-        read: PlateRead,
-    ) -> bool:
-        if session.direction != AccessDirection.ENTRY or session.decision != AccessDecision.GRANTED:
-            return False
-        if self._read_has_explicit_exit_direction(read):
-            return False
-        if not self._vehicle_session_same_camera_or_device(session, context):
-            return False
-        earliest = session.started_at - timedelta(seconds=ARRIVAL_OCR_NOISE_CLOCK_SKEW_SECONDS)
-        latest = session.started_at + timedelta(seconds=ARRIVAL_OCR_NOISE_SUPPRESSION_SECONDS)
-        return earliest <= read.captured_at <= latest
-
-    def _vehicle_session_same_camera_or_device(
-        self,
-        session: ActiveVehicleSession,
-        context: VehicleSessionContext,
-    ) -> bool:
-        return bool(
-            (context.camera_id and session.camera_id and context.camera_id == session.camera_id)
-            or (context.device_id and session.device_id and context.device_id == session.device_id)
-        )
-
-    def _read_has_explicit_exit_direction(self, read: PlateRead) -> bool:
-        explicit = str((read.raw_payload or {}).get("direction") or (read.raw_payload or {}).get("Direction") or "").lower()
-        return explicit in {"exit", "leave", "departure", "out"}
-
-    async def _vehicle_session_presence_evidence(
-        self,
-        session: ActiveVehicleSession,
-        context: VehicleSessionContext,
-        read: PlateRead,
-        idle_seconds: float,
-    ) -> dict[str, Any] | None:
-        evidence = await get_vehicle_presence_tracker().recent_evidence(
-            registration_number=context.registration_number,
-            event_ids=context.protect_event_ids | session.protect_event_ids,
-            camera_id=context.camera_id or session.camera_id,
-            device_id=context.device_id or session.device_id,
-            observed_at=read.captured_at,
-            max_age_seconds=idle_seconds,
-        )
-        if evidence and self._presence_evidence_is_current_lpr_read(evidence, context, read):
-            return None
-        return evidence
-
-    def _presence_evidence_is_current_lpr_read(
-        self,
-        evidence: dict[str, Any],
-        context: VehicleSessionContext,
-        read: PlateRead,
-    ) -> bool:
-        if evidence.get("source") != "webhook" or evidence.get("source_detail") != "ubiquiti_lpr_webhook":
-            return False
-        observed_at = self._datetime_from_payload(evidence.get("observed_at"))
-        if not observed_at:
-            return False
-        age_seconds = abs((read.captured_at.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds())
-        if age_seconds > 1.0:
-            return False
-
-        evidence_event_id = str(evidence.get("event_id") or "").strip()
-        if evidence_event_id and evidence_event_id in context.protect_event_ids:
-            return True
-
-        evidence_registration = self._normalize_registration_number(str(evidence.get("registration_number") or ""))
-        return bool(
-            evidence_registration
-            and evidence_registration == context.normalized_registration_number
-        )
-
-    async def _vehicle_session_db_fallback(
-        self,
-        read: PlateRead,
-        context: VehicleSessionContext,
-        idle_seconds: float,
-    ) -> VehicleSessionSuppression | None:
-        lookup_horizon = timedelta(seconds=max(idle_seconds * 3, 3600.0))
-        async with AsyncSessionLocal() as session:
-            rows = await self._movement_ledger.movement_sessions_for_active_read(
-                session,
-                source=None,
-                captured_at=read.captured_at,
-                lookup_horizon=lookup_horizon,
-                limit=100,
-            )
-
-        for event in rows:
-            candidate = self._vehicle_session_from_record(event)
-            if not candidate:
-                continue
-            matched_by = self._vehicle_session_match(candidate, context, read)
-            if not matched_by:
-                continue
-            if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(read, candidate):
-                continue
-            if self._read_is_entry_after_exit_idle_expired(read, candidate, idle_seconds):
-                continue
-            evidence = await self._vehicle_session_presence_evidence(candidate, context, read, idle_seconds)
-            if read.captured_at <= candidate.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
-                return VehicleSessionSuppression(
-                    session=candidate,
-                    reason="vehicle_session_already_active",
-                    matched_by=f"movement_session_{matched_by}",
-                    evidence=evidence,
-                )
-        return None
-
-    def _read_is_departure_after_entry_session(
-        self,
-        read: PlateRead,
-        session: ActiveVehicleSession,
-    ) -> bool:
-        if not (
-            session.direction == AccessDirection.ENTRY
-            and self._read_direction_hint(read) == AccessDirection.EXIT
-        ):
-            return False
-        gate_cycle_expires_at = session.last_seen_at + timedelta(
-            seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS
-        )
-        return read.captured_at > (session.gate_cycle_expires_at or gate_cycle_expires_at)
-
-    def _read_is_entry_after_exit_idle_expired(
-        self,
-        read: PlateRead,
-        session: ActiveVehicleSession,
-        idle_seconds: float,
-    ) -> bool:
-        return (
-            session.direction == AccessDirection.EXIT
-            and self._read_direction_hint(read) == AccessDirection.ENTRY
-            and read.captured_at > (session.idle_expires_at or session.last_seen_at + timedelta(seconds=idle_seconds))
-        )
-
-    async def _annotate_suppressed_session_read(
-        self,
-        read: PlateRead,
-        suppression: VehicleSessionSuppression,
-    ) -> None:
-        context = self._vehicle_session_context_from_read(read)
-        session = suppression.session
-        session.last_seen_at = max(session.last_seen_at, read.captured_at)
-        session.protect_event_ids.update(context.protect_event_ids)
-        session.camera_id = session.camera_id or context.camera_id
-        session.device_id = session.device_id or context.device_id
-        suppressed_read_payload = self._suppressed_session_read_payload(read, suppression)
-
-        if session.movement_session_id:
-            try:
-                movement_session_uuid = uuid.UUID(session.movement_session_id)
-            except ValueError:
-                movement_session_uuid = None
-            if movement_session_uuid:
-                async with AsyncSessionLocal() as db:
-                    row = await db.get(MovementSessionRecord, movement_session_uuid)
-                    if row:
-                        await self._movement_ledger.record_movement_session_suppression(
-                            db,
-                            row,
-                            read_captured_at=read.captured_at,
-                            idle_expires_at=read.captured_at + timedelta(seconds=self._vehicle_session_idle_seconds()),
-                            protect_event_ids=context.protect_event_ids,
-                            ocr_variants=self._ocr_variants_for_reads((read,)),
-                            last_gate_state=self._gate_observation_from_read(read).get("state"),
-                            reason=suppression.reason,
-                            matched_by=suppression.matched_by,
-                            presence_evidence=self._vehicle_presence_evidence_payload(suppression.evidence)
-                            if suppression.evidence
-                            else None,
-                            suppressed_read_payload=suppressed_read_payload,
-                        )
-                        await db.commit()
-
-        try:
-            event_uuid = uuid.UUID(session.event_id)
-        except ValueError:
-            return
-
-        async with AsyncSessionLocal() as db:
-            event = await db.get(AccessEvent, event_uuid)
-            if not event:
-                return
-            payload = dict(event.raw_payload or {})
-            vehicle_session = payload.get(VEHICLE_SESSION_PAYLOAD_KEY)
-            vehicle_session = dict(vehicle_session) if isinstance(vehicle_session, dict) else {}
-            vehicle_session.setdefault("id", str(event.id))
-            vehicle_session.setdefault("started_at", event.occurred_at.isoformat())
-            vehicle_session.setdefault("registration_number", event.registration_number)
-            vehicle_session.setdefault(
-                "normalized_registration_number",
-                self._normalize_registration_number(event.registration_number),
-            )
-            vehicle_session["last_seen_at"] = read.captured_at.isoformat()
-            vehicle_session["last_gate_state"] = self._gate_observation_from_read(read).get("state")
-            vehicle_session["suppressed_read_count"] = int(vehicle_session.get("suppressed_read_count") or 0) + 1
-            vehicle_session["last_suppressed_reason"] = suppression.reason
-            vehicle_session["last_matched_by"] = suppression.matched_by
-            if suppression.evidence:
-                vehicle_session["last_presence_evidence"] = self._vehicle_presence_evidence_payload(suppression.evidence)
-
-            protect_event_ids = set(self._string_list(vehicle_session.get("protect_event_ids")))
-            protect_event_ids.update(context.protect_event_ids)
-            vehicle_session["protect_event_ids"] = sorted(protect_event_ids)
-
-            ocr_variants = set(self._string_list(vehicle_session.get("ocr_variants")))
-            ocr_variants.add(_detected_registration_number(read))
-            ocr_variants.add(read.registration_number)
-            ocr_variants.update(_candidate_registration_numbers(read))
-            vehicle_session["ocr_variants"] = sorted(value for value in ocr_variants if value)
-
-            suppressed_reads = vehicle_session.get("suppressed_reads")
-            suppressed_reads = list(suppressed_reads) if isinstance(suppressed_reads, list) else []
-            suppressed_reads.append(suppressed_read_payload)
-            vehicle_session["suppressed_reads"] = suppressed_reads[-MAX_SUPPRESSED_SESSION_READS:]
-
-            payload[VEHICLE_SESSION_PAYLOAD_KEY] = vehicle_session
-            event.raw_payload = payload
-            await db.commit()
-
-    def _initial_vehicle_session_payload(
-        self,
-        window: DebounceWindow,
-        read: PlateRead,
-        event: AccessEvent,
-    ) -> dict[str, Any]:
-        context = self._vehicle_session_context_from_read(read)
-        variants = {
-            _detected_registration_number(item)
-            for item in window.reads
-            if _detected_registration_number(item)
-        }
-        variants.update(item.registration_number for item in window.reads if item.registration_number)
-        for item in window.reads:
-            variants.update(_candidate_registration_numbers(item))
-        return {
-            "id": str(event.id),
-            "source": read.source,
-            "registration_number": read.registration_number,
-            "normalized_registration_number": context.normalized_registration_number,
-            "started_at": window.first_seen.isoformat(),
-            "last_seen_at": window.updated_at.isoformat(),
-            "direction": event.direction.value,
-            "decision": event.decision.value,
-            "camera_id": context.camera_id,
-            "device_id": context.device_id,
-            "protect_event_ids": sorted(context.protect_event_ids),
-            "ocr_variants": sorted(variants),
-            "last_gate_state": self._gate_observation_from_read(read).get("state"),
-            "suppressed_read_count": 0,
-            "suppressed_reads": [],
-        }
-
-    def _ocr_variants_for_reads(self, reads: Iterable[PlateRead]) -> list[str]:
-        variants: set[str] = set()
-        for item in reads:
-            detected = _detected_registration_number(item)
-            if detected:
-                variants.add(detected)
-            if item.registration_number:
-                variants.add(item.registration_number)
-            variants.update(_candidate_registration_numbers(item))
-        return sorted(value for value in variants if value)
-
-    async def _remember_vehicle_session(
-        self,
-        event: AccessEvent,
-        window: DebounceWindow,
-        read: PlateRead,
-        *,
-        movement_saga_id: uuid.UUID | str | None = None,
-    ) -> None:
-        context = self._vehicle_session_context_from_read(read)
-        if not context.normalized_registration_number:
-            return
-        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
-        debounce_expires_at = window.first_seen + timedelta(seconds=max_seconds)
-        gate_cycle_expires_at = debounce_expires_at
-        if event.decision == AccessDecision.GRANTED:
-            gate_cycle_expires_at = max(
-                gate_cycle_expires_at,
-                window.first_seen + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
-            )
-        idle_expires_at = window.updated_at + timedelta(seconds=self._vehicle_session_idle_seconds())
-        async with AsyncSessionLocal() as session:
-            await self._movement_ledger.upsert_movement_session(
-                session,
-                session_key=f"movement-session:{event.id}",
-                source=read.source,
-                access_event_id=event.id,
-                movement_saga_id=movement_saga_id,
-                registration_number=read.registration_number,
-                normalized_registration_number=context.normalized_registration_number,
-                started_at=window.first_seen,
-                last_seen_at=window.updated_at,
-                direction=event.direction,
-                decision=event.decision,
-                debounce_expires_at=debounce_expires_at,
-                gate_cycle_expires_at=gate_cycle_expires_at,
-                idle_expires_at=idle_expires_at,
-                camera_id=context.camera_id,
-                device_id=context.device_id,
-                protect_event_ids=context.protect_event_ids,
-                ocr_variants=self._ocr_variants_for_reads(window.reads),
-                last_gate_state=self._gate_observation_from_read(read).get("state"),
-            )
-            await session.commit()
-
-    def _vehicle_session_from_event(self, event: AccessEvent) -> ActiveVehicleSession | None:
-        payload = dict(event.raw_payload or {})
-        session_payload = payload.get(VEHICLE_SESSION_PAYLOAD_KEY)
-        session_payload = session_payload if isinstance(session_payload, dict) else {}
-        best_payload = payload.get("best")
-        context = self._vehicle_session_context_from_payload(
-            best_payload if isinstance(best_payload, dict) else {},
-            source=event.source,
-            registration_number=event.registration_number,
-        )
-        normalized = str(
-            session_payload.get("normalized_registration_number")
-            or context.normalized_registration_number
-            or self._normalize_registration_number(event.registration_number)
-        )
-        if not normalized:
-            return None
-        last_seen_at = self._datetime_from_payload(session_payload.get("last_seen_at")) or event.occurred_at
-        started_at = self._datetime_from_payload(session_payload.get("started_at")) or event.occurred_at
-        return ActiveVehicleSession(
-            movement_session_id=None,
-            event_id=str(event.id),
-            source=event.source,
-            registration_number=event.registration_number,
-            normalized_registration_number=normalized,
-            started_at=started_at,
-            last_seen_at=last_seen_at,
-            direction=event.direction,
-            decision=event.decision,
-            camera_id=str(session_payload.get("camera_id") or context.camera_id or "") or None,
-            device_id=str(session_payload.get("device_id") or context.device_id or "") or None,
-            protect_event_ids=set(self._string_list(session_payload.get("protect_event_ids")))
-            | context.protect_event_ids,
-        )
-
-    def _vehicle_session_from_record(self, row: MovementSessionRecord) -> ActiveVehicleSession | None:
-        normalized = str(row.normalized_registration_number or "").strip()
-        if not normalized:
-            return None
-        return ActiveVehicleSession(
-            movement_session_id=str(row.id),
-            event_id=str(row.access_event_id) if row.access_event_id else "",
-            source=row.source,
-            registration_number=row.registration_number,
-            normalized_registration_number=normalized,
-            started_at=row.started_at,
-            last_seen_at=row.last_seen_at,
-            direction=row.direction,
-            decision=row.decision,
-            debounce_expires_at=row.debounce_expires_at,
-            gate_cycle_expires_at=row.gate_cycle_expires_at,
-            idle_expires_at=row.idle_expires_at,
-            camera_id=row.camera_id,
-            device_id=row.device_id,
-            protect_event_ids=set(self._string_list(row.protect_event_ids)),
-        )
-
-    def _vehicle_session_context_from_read(self, read: PlateRead) -> VehicleSessionContext:
-        return self._vehicle_session_context_from_payload(
-            read.raw_payload or {},
-            source=read.source,
-            registration_number=read.registration_number,
-        )
-
-    def _vehicle_session_context_from_payload(
-        self,
-        payload: dict[str, Any],
-        *,
-        source: str,
-        registration_number: str,
-    ) -> VehicleSessionContext:
-        return VehicleSessionContext(
-            source=source,
-            registration_number=registration_number,
-            normalized_registration_number=self._normalize_registration_number(registration_number),
-            camera_id=self._first_payload_value(payload, ("cameraId", "camera_id", "sensorId", "sensor_id")),
-            device_id=self._first_payload_value(payload, ("device", "deviceId", "device_id")),
-            protect_event_ids=set(self._payload_values(payload, ("eventId", "event_id")))
-            | self._event_ids_from_paths(payload),
-        )
-
-    def _suppressed_session_read_payload(
-        self,
-        read: PlateRead,
-        suppression: VehicleSessionSuppression,
-    ) -> dict[str, Any]:
-        context = self._vehicle_session_context_from_read(read)
-        return {
-            "registration_number": read.registration_number,
-            "detected_registration_number": _detected_registration_number(read),
-            "captured_at": read.captured_at.isoformat(),
-            "confidence": read.confidence,
-            "source": read.source,
-            "gate_state": self._gate_observation_from_read(read).get("state"),
-            "reason": suppression.reason,
-            "matched_by": suppression.matched_by,
-            "protect_event_ids": sorted(context.protect_event_ids),
-            "presence_evidence": self._vehicle_presence_evidence_payload(suppression.evidence)
-            if suppression.evidence
-            else None,
-        }
-
-    def _vehicle_presence_evidence_payload(self, evidence: dict[str, Any]) -> dict[str, Any]:
-        keys = (
-            "source",
-            "source_detail",
-            "active",
-            "observed_at",
-            "registration_number",
-            "event_id",
-            "camera_id",
-            "device_id",
-            "age_seconds",
-        )
-        return {key: evidence.get(key) for key in keys if evidence.get(key) is not None}
-
-    def _payload_values(self, value: Any, keys: tuple[str, ...]) -> list[str]:
-        normalized_keys = {self._payload_key(key) for key in keys}
-        found: list[str] = []
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if self._payload_key(str(key)) in normalized_keys:
-                    found.extend(self._scalar_payload_values(item))
-                found.extend(self._payload_values(item, keys))
-        elif isinstance(value, list):
-            for item in value:
-                found.extend(self._payload_values(item, keys))
-        return self._dedupe_strings(found)
-
-    def _scalar_payload_values(self, value: Any) -> list[str]:
-        if value is None or isinstance(value, bool):
-            return []
-        if isinstance(value, str | int | float):
-            text = str(value).strip()
-            return [text] if text else []
-        if isinstance(value, list):
-            return [item for value_item in value for item in self._scalar_payload_values(value_item)]
-        return []
-
-    def _first_payload_value(self, value: Any, keys: tuple[str, ...]) -> str | None:
-        values = self._payload_values(value, keys)
-        return values[0] if values else None
-
-    def _event_ids_from_paths(self, value: Any) -> set[str]:
-        ids: set[str] = set()
-        for path in self._payload_values(value, ("eventPath", "eventLocalLink", "event_local_link")):
-            match = re.search(r"/event/([^/?#]+)", path)
-            if match:
-                ids.add(match.group(1))
-        return ids
-
-    def _payload_key(self, key: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", key.lower())
-
-    def _string_list(self, value: Any) -> list[str]:
-        if isinstance(value, list):
-            return self._dedupe_strings(str(item).strip() for item in value if str(item).strip())
-        if isinstance(value, str) and value.strip():
-            return [value.strip()]
-        return []
-
-    def _dedupe_strings(self, values: Any) -> list[str]:
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            text = str(value).strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            deduped.append(text)
-        return deduped
-
-    def _datetime_from_payload(self, value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value if value.tzinfo else value.replace(tzinfo=UTC)
-        if not isinstance(value, str) or not value.strip():
-            return None
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-    def _is_similar_plate(self, left: str, right: str) -> bool:
-        if left == right:
-            return True
-        threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
-        return SequenceMatcher(a=left, b=right).ratio() >= threshold
-
     async def _flush_expired_windows(self) -> None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
@@ -2037,17 +1259,7 @@ class AccessEventService:
 
         self._pending = waiting
         for window in ready:
-            try:
-                await self._finalize_window(window)
-            except Exception as exc:
-                logger.exception(
-                    "access_event_finalize_failed",
-                    extra={
-                        "candidate_count": len(window.reads),
-                        "best_registration_number": window.best_read.registration_number,
-                    },
-                )
-                await self._handle_finalize_failure(window, exc, reason="debounce_window_expired")
+            await self._finalize_window_or_fail(window, reason="debounce_window_expired")
 
     async def _flush_all_pending(self) -> None:
         if await is_maintenance_mode_active():
@@ -2056,17 +1268,7 @@ class AccessEventService:
         pending = self._pending
         self._pending = []
         for window in pending:
-            try:
-                await self._finalize_window(window)
-            except Exception as exc:
-                logger.exception(
-                    "access_event_finalize_failed",
-                    extra={
-                        "candidate_count": len(window.reads),
-                        "best_registration_number": window.best_read.registration_number,
-                    },
-                )
-                await self._handle_finalize_failure(window, exc, reason="service_stopping")
+            await self._finalize_window_or_fail(window, reason="service_stopping")
 
     async def _handle_finalize_failure(
         self,
@@ -2104,17 +1306,33 @@ class AccessEventService:
             candidate_count=len(window.reads),
         )
 
-    async def _finalize_window(self, window: DebounceWindow) -> FinalizedPlateEvent | None:
+    async def _finalize_window_or_fail(self, window: DebounceWindow, *, reason: str) -> bool:
+        try:
+            await self._finalize_window(window)
+            return True
+        except Exception as exc:
+            logger.exception(
+                "access_event_finalize_failed",
+                extra={
+                    "candidate_count": len(window.reads),
+                    "best_registration_number": window.best_read.registration_number,
+                    "reason": reason,
+                },
+            )
+            await self._handle_finalize_failure(window, exc, reason=reason)
+            return False
+
+    async def _finalize_window(self, window: DebounceWindow) -> None:
         if await is_maintenance_mode_active():
             self._clear_pending_reads()
-            return None
+            return
         read = window.best_read
         direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
         webhook_trace = self._webhook_trace_for_window(window)
         webhook_received_at = (
-            self._datetime_from_payload(webhook_trace.get("received_at"))
-            or self._datetime_from_payload(webhook_trace.get("captured_at"))
+            datetime_from_payload(webhook_trace.get("received_at"))
+            or datetime_from_payload(webhook_trace.get("captured_at"))
             or window.first_seen
         )
         captured_to_webhook_ms = self._float_from_payload(webhook_trace.get("captured_to_webhook_ms"))
@@ -2226,7 +1444,7 @@ class AccessEventService:
                 "Direction Classification",
                 attributes={
                     "allowed": allowed,
-                    "gate_observation": self._gate_observation_from_read(direction_read),
+                    "gate_observation": gate_observation_from_read(direction_read),
                     "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 },
             )
@@ -2337,9 +1555,15 @@ class AccessEventService:
             )
             event.raw_payload = {
                 **(event.raw_payload or {}),
-                VEHICLE_SESSION_PAYLOAD_KEY: self._initial_vehicle_session_payload(window, read, event),
+                VEHICLE_SESSION_PAYLOAD_KEY: self._movement_sessions.initial_payload(
+                    window.reads,
+                    first_seen=window.first_seen,
+                    updated_at=window.updated_at,
+                    read=read,
+                    event=event,
+                ),
             }
-            await self._capture_event_snapshot(event, trace=trace)
+            await capture_access_event_snapshot(event, trace=trace)
 
             if visitor_pass:
                 visitor_service = get_visitor_pass_service()
@@ -2405,13 +1629,13 @@ class AccessEventService:
                 visitor_pass_realtime_payload = serialize_visitor_pass(visitor_pass)
             else:
                 visitor_pass_realtime_payload = None
-            access_event_realtime_payload = self._access_event_realtime_payload(
+            access_realtime_payload = access_event_realtime_payload(
                 event,
                 anomaly_count=len(anomalies),
                 visitor_pass=visitor_pass,
                 visitor_pass_mode=visitor_pass_mode,
             )
-            await self._mark_lpr_ingest_ids_succeeded_in_session(
+            await self._lpr_ingest_repo().mark_ids_succeeded_in_session(
                 session,
                 [
                     ingest_id
@@ -2434,7 +1658,7 @@ class AccessEventService:
             )
 
         if gate_command_required:
-            gate_outcome = await self._open_gate_for_event(
+            gate_outcome = await open_gate_for_access_event(
                 event,
                 person,
                 open_garage_doors=True,
@@ -2493,14 +1717,17 @@ class AccessEventService:
                         extra={"event_id": str(event.id), "registration_number": event.registration_number},
                     )
         elif gate_open_skipped:
-            await self._publish_gate_open_skipped(event, direction_resolution, person)
+            await publish_gate_open_skipped(event, direction_resolution, person)
 
         if not (gate_command_required and gate_outcome and not gate_outcome.accepted):
-            await self._remember_vehicle_session(
+            await self._movement_sessions.remember_session(
                 event,
-                window,
-                read,
+                window.reads,
+                first_seen=window.first_seen,
+                updated_at=window.updated_at,
+                read=read,
                 movement_saga_id=movement_saga.id if movement_saga else None,
+                runtime=self._runtime,
             )
         if presence_updated and person:
             try:
@@ -2531,11 +1758,11 @@ class AccessEventService:
         )
         saga_payload = (event.raw_payload or {}).get("movement_saga")
         if isinstance(saga_payload, dict):
-            access_event_realtime_payload["movement_saga"] = saga_payload
+            access_realtime_payload["movement_saga"] = saga_payload
 
         await event_bus.publish(
             "access_event.finalized",
-            access_event_realtime_payload,
+            access_realtime_payload,
         )
         if visitor_pass and visitor_pass_realtime_payload:
             await event_bus.publish(
@@ -2564,11 +1791,11 @@ class AccessEventService:
                     event_type="authorized_entry",
                     subject=f"{person.display_name} arrived at the gate",
                     severity=AnomalySeverity.INFO.value,
-                    facts=self._notification_facts(
+                    facts=notification_facts(
                         event,
                         person,
                         vehicle,
-                        self._authorized_entry_message(person, vehicle),
+                        authorized_entry_message(person, vehicle),
                         dvla_enrichment=dvla_enrichment,
                     ),
                 )
@@ -2580,7 +1807,7 @@ class AccessEventService:
                     event_type=anomaly.anomaly_type.value,
                     subject=event.registration_number,
                     severity=anomaly.severity.value,
-                    facts=self._notification_facts(
+                    facts=notification_facts(
                         event,
                         person,
                         vehicle,
@@ -2604,13 +1831,6 @@ class AccessEventService:
                 "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
             },
         )
-        return FinalizedPlateEvent(
-            event_id=str(event.id),
-            direction=direction,
-            decision=decision,
-            occurred_at=event.occurred_at,
-        )
-
     async def _record_lpr_zone_shadow_decision(
         self,
         read: PlateRead,
@@ -2666,7 +1886,7 @@ class AccessEventService:
                 "matched": bool(vehicle),
                 "vehicle_id": str(vehicle.id) if vehicle else None,
                 "person_id": str(vehicle.person_id) if vehicle and vehicle.person_id else None,
-                "vehicle": self._vehicle_display_name(vehicle, read.registration_number) if vehicle else None,
+                "vehicle": vehicle_display_name(vehicle, read.registration_number) if vehicle else None,
                 "owner": vehicle.owner.display_name if vehicle and vehicle.owner else None,
                 "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
             }
@@ -2823,7 +2043,7 @@ class AccessEventService:
         vehicle: Vehicle | None,
         allowed: bool,
     ) -> dict[str, Any]:
-        explicit_direction = self._explicit_direction_from_read(read)
+        explicit_direction = explicit_direction_from_read(read)
         return {
             "source": read.source,
             "captured_at": read.captured_at.isoformat(),
@@ -2831,7 +2051,7 @@ class AccessEventService:
             "allowed": allowed,
             "person_id": str(person.id) if person else None,
             "vehicle_id": str(vehicle.id) if vehicle else None,
-            "gate_observation": self._gate_observation_from_read(read),
+            "gate_observation": gate_observation_from_read(read),
             "explicit_direction": explicit_direction.value if explicit_direction else None,
             "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
             "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(read),
@@ -2859,134 +2079,6 @@ class AccessEventService:
             "detail": detail,
             "gate": gate_outcome.as_payload() if gate_outcome else None,
         }
-        return payload
-
-    async def _capture_event_snapshot(
-        self,
-        event: AccessEvent,
-        *,
-        trace: Any | None = None,
-    ) -> None:
-        if not event.id:
-            return
-        manager = get_snapshot_manager()
-        protect_event_id = protect_event_id_from_access_event(event)
-        span = (
-            trace.start_span(
-                "Capture Access Event Snapshot",
-                category=TELEMETRY_CATEGORY_INTEGRATIONS,
-                attributes={
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "camera": GATE_CAMERA_IDENTIFIER,
-                },
-            )
-            if trace
-            else None
-        )
-        capture_error: Exception | None = None
-        metadata = None
-        source = "camera_snapshot"
-        try:
-            metadata = await manager.capture_access_event_snapshot(
-                event.id,
-                camera=GATE_CAMERA_IDENTIFIER,
-            )
-        except Exception as exc:
-            capture_error = exc
-            logger.info(
-                "access_event_snapshot_capture_skipped",
-                extra={
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "camera": GATE_CAMERA_IDENTIFIER,
-                    "error": str(exc),
-                    "fallback_protect_event_id": protect_event_id,
-                },
-            )
-
-        if metadata is None and protect_event_id:
-            try:
-                media = await get_unifi_protect_service().event_thumbnail(
-                    protect_event_id,
-                    width=SNAPSHOT_WIDTH,
-                    height=SNAPSHOT_HEIGHT,
-                )
-                metadata = await manager.store_image(
-                    media.content,
-                    relative_path=access_event_snapshot_relative_path(event.id),
-                    url=access_event_snapshot_url(event.id),
-                    camera=GATE_CAMERA_IDENTIFIER,
-                    captured_at=event.occurred_at,
-                )
-                source = "protect_event_thumbnail"
-            except Exception as exc:
-                logger.info(
-                    "access_event_snapshot_thumbnail_capture_skipped",
-                    extra={
-                        "event_id": str(event.id),
-                        "registration_number": event.registration_number,
-                        "protect_event_id": protect_event_id,
-                        "error": str(exc),
-                    },
-                )
-                if capture_error is None:
-                    capture_error = exc
-
-        if metadata is None:
-            if span:
-                output = {
-                    "captured": False,
-                    "reason": "capture_failed" if capture_error else "unifi_protect_unconfigured",
-                    "protect_event_id": protect_event_id,
-                }
-                if capture_error:
-                    span.finish(status="error", error=capture_error, output_payload=output)
-                else:
-                    span.finish(output_payload=output)
-            return
-
-        apply_snapshot_to_access_event(event, metadata)
-        if span:
-            span.finish(
-                output_payload={
-                    "captured": True,
-                    "source": source,
-                    "protect_event_id": protect_event_id,
-                    "snapshot_path": metadata.relative_path,
-                    "bytes": metadata.bytes,
-                    "width": metadata.width,
-                    "height": metadata.height,
-                }
-            )
-
-    def _access_event_realtime_payload(
-        self,
-        event: AccessEvent,
-        *,
-        anomaly_count: int,
-        visitor_pass: VisitorPass | None,
-        visitor_pass_mode: str | None,
-    ) -> dict[str, Any]:
-        payload = {
-            "event_id": str(event.id),
-            "access_event_id": str(event.id),
-            "person_id": str(event.person_id) if event.person_id else None,
-            "vehicle_id": str(event.vehicle_id) if event.vehicle_id else None,
-            "registration_number": event.registration_number,
-            "direction": event.direction.value,
-            "decision": event.decision.value,
-            "confidence": event.confidence,
-            "source": event.source,
-            "occurred_at": event.occurred_at.isoformat(),
-            "event_type": "access_event.finalized",
-            "timing_classification": event.timing_classification.value,
-            "anomaly_count": anomaly_count,
-            "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
-            "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
-            "visitor_pass_mode": visitor_pass_mode if visitor_pass else None,
-        }
-        payload.update(access_event_snapshot_payload(event))
         return payload
 
     async def _dvla_enrichment_for_event(
@@ -3067,7 +2159,7 @@ class AccessEventService:
             return True
 
         gate_observation = direction_resolution.get("gate_observation") or {}
-        gate_state = self._coerce_gate_state(gate_observation.get("state")) if isinstance(gate_observation, dict) else GateState.UNKNOWN
+        gate_state = coerce_gate_state(gate_observation.get("state")) if isinstance(gate_observation, dict) else GateState.UNKNOWN
         return gate_state in ARRIVAL_GATE_STATES
 
     def _dvla_cache_date(self, timezone_name: str) -> date:
@@ -3149,7 +2241,7 @@ class AccessEventService:
                     event_type="expired_mot_detected",
                     subject=f"Expired MOT detected for {event.registration_number}",
                     severity=AnomalySeverity.WARNING.value,
-                    facts=self._notification_facts(
+                    facts=notification_facts(
                         event,
                         person,
                         vehicle,
@@ -3164,7 +2256,7 @@ class AccessEventService:
                     event_type="expired_tax_detected",
                     subject=f"Expired tax detected for {event.registration_number}",
                     severity=AnomalySeverity.WARNING.value,
-                    facts=self._notification_facts(
+                    facts=notification_facts(
                         event,
                         person,
                         vehicle,
@@ -3176,374 +2268,6 @@ class AccessEventService:
 
         for context in notifications:
             await get_notification_service().notify(context)
-
-    async def _open_gate_for_event(
-        self,
-        event: AccessEvent,
-        person: Person | None,
-        *,
-        open_garage_doors: bool,
-        trace: Any | None = None,
-        dvla_enrichment: dict[str, str | None] | None = None,
-        movement_saga_id: str | None = None,
-    ) -> GateCommandOutcome:
-        reason = (
-            f"Automatic LPR grant for {event.registration_number}"
-            f"{f' ({person.display_name})' if person else ''}"
-        )
-        gate_opened = False
-        gate_span = (
-            trace.start_span(
-                "Gate Command Saga - Open",
-                category=TELEMETRY_CATEGORY_INTEGRATIONS,
-                attributes={
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "controller": "configured",
-                },
-                input_payload={"reason": reason},
-            )
-            if trace
-            else None
-        )
-        outcome = await get_gate_command_coordinator().execute_open(
-            GateCommandIntent(
-                reason=reason,
-                source="automatic_lpr_grant",
-                event_id=str(event.id),
-                movement_saga_id=movement_saga_id,
-                registration_number=event.registration_number,
-                actor="Access Event Automation",
-                idempotency_key=f"gate-command:open:default:event:{event.id}",
-                metadata={
-                    "movement_saga_id": movement_saga_id,
-                    "person_id": str(getattr(person, "id", "")) if person else None,
-                    "vehicle_id": str(getattr(event, "vehicle_id", "")) if getattr(event, "vehicle_id", None) else None,
-                },
-            )
-        )
-        if gate_span:
-            gate_span.finish(
-                status="ok" if outcome.accepted else "error",
-                output_payload=outcome.as_payload(),
-                error=None if outcome.accepted else outcome.detail,
-            )
-        event_type = "gate.open_requested" if outcome.accepted else "gate.open_failed"
-        audit_outcome = "accepted" if outcome.accepted else "rejected"
-        audit_level = "info" if outcome.accepted else "warning"
-        if outcome.exception_class == "UnsupportedModuleError":
-            audit_outcome = "failed"
-            audit_level = "error"
-            logger.error(
-                "gate_controller_unavailable",
-                extra={
-                    "registration_number": event.registration_number,
-                    "event_id": str(event.id),
-                    "error": outcome.detail,
-                },
-            )
-        else:
-            if outcome.accepted:
-                if outcome.requires_reconciliation:
-                    logger.warning(
-                        "gate_open_requested_pending_reconciliation",
-                        extra={
-                            "registration_number": event.registration_number,
-                            "event_id": str(event.id),
-                            "state": outcome.state.value,
-                            "intent_id": outcome.intent.intent_id,
-                        },
-                    )
-                else:
-                    logger.info(
-                        "gate_open_requested_for_access_event",
-                        extra={
-                            "registration_number": event.registration_number,
-                            "event_id": str(event.id),
-                            "state": outcome.state.value,
-                            "used_provider": outcome.metadata.get("used_provider"),
-                            "primary_provider": outcome.metadata.get("primary_provider"),
-                            "failover_used": outcome.metadata.get("failover_used"),
-                            "access_device_outcomes": outcome.metadata.get("access_device_outcomes"),
-                        },
-                    )
-            else:
-                logger.error(
-                    "gate_open_failed_for_access_event",
-                    extra={
-                        "registration_number": event.registration_number,
-                        "event_id": str(event.id),
-                        "state": outcome.state.value,
-                        "detail": outcome.detail,
-                    },
-                )
-
-        await self._audit_automatic_hardware_command(
-            action="gate.open.automatic",
-            event=event,
-            person=person,
-            target_entity="Gate",
-            target_label="Automatic Gate",
-            outcome=audit_outcome,
-            level=audit_level,
-            metadata={
-                "controller": "configured",
-                "reason": reason,
-                **outcome.as_payload(),
-            },
-        )
-        await event_bus.publish(
-            event_type,
-            {
-                "event_id": str(event.id),
-                "registration_number": event.registration_number,
-                "accepted": outcome.accepted,
-                "state": outcome.state.value,
-                "detail": outcome.detail,
-                "intent_id": outcome.intent.intent_id,
-                "mechanically_confirmed": outcome.mechanically_confirmed,
-                "requires_reconciliation": outcome.requires_reconciliation,
-            },
-        )
-        gate_opened = outcome.accepted
-        if not outcome.accepted:
-            await get_notification_service().notify(
-                NotificationContext(
-                    event_type="gate_open_failed",
-                    subject=event.registration_number,
-                    severity=AnomalySeverity.CRITICAL.value,
-                    facts=self._notification_facts(
-                        event,
-                        person,
-                        event.vehicle,
-                        outcome.detail or "Automatic gate open command failed.",
-                        dvla_enrichment=dvla_enrichment,
-                    ),
-                )
-            )
-
-        if gate_opened and open_garage_doors:
-            await self._open_garage_doors_for_event(
-                event,
-                person,
-                reason,
-                trace=trace,
-                dvla_enrichment=dvla_enrichment,
-            )
-        return outcome
-
-    async def _publish_gate_open_skipped(
-        self, event: AccessEvent, direction_resolution: dict[str, Any], person: Person | None = None
-    ) -> None:
-        gate_observation = direction_resolution.get("gate_observation") or {}
-        detail = (
-            "Automatic gate and garage-door commands require the top gate "
-            "to be closed at plate-read time."
-        )
-        await self._audit_automatic_hardware_command(
-            action="gate.open.automatic",
-            event=event,
-            person=person,
-            target_entity="Gate",
-            target_label="Automatic Gate",
-            outcome="skipped",
-            level="warning",
-            metadata={
-                    "controller": "configured",
-                "reason": "gate_state_not_closed_at_plate_read_time",
-                "state": gate_observation.get("state") or GateState.UNKNOWN.value,
-                "gate_observation": gate_observation,
-                "direction_resolution": direction_resolution,
-                "detail": detail,
-                "garage_doors_skipped": True,
-            },
-        )
-        await event_bus.publish(
-            "gate.open_skipped",
-            {
-                "event_id": str(event.id),
-                "registration_number": event.registration_number,
-                "state": gate_observation.get("state") or GateState.UNKNOWN.value,
-                "detail": detail,
-            },
-        )
-
-    async def _open_garage_doors_for_event(
-        self,
-        event: AccessEvent,
-        person: Person | None,
-        reason: str,
-        *,
-        trace: Any | None = None,
-        dvla_enrichment: dict[str, str | None] | None = None,
-    ) -> None:
-        if not person or not person.garage_door_entity_ids:
-            return
-
-        selected_ids = set(person.garage_door_entity_ids)
-        service = get_access_device_service()
-        devices = [
-            device
-            for device in await service.list_devices(kind="garage_door", enabled_only=True)
-            if device.key in selected_ids
-        ]
-        if not devices:
-            return
-
-        for device in devices:
-            garage_span = (
-                trace.start_span(
-                    "Garage Door Command",
-                    category=TELEMETRY_CATEGORY_INTEGRATIONS,
-                    attributes={
-                        "event_id": str(event.id),
-                        "entity_id": device.key,
-                        "name": device.name,
-                    },
-                    input_payload={"reason": reason, "action": "open"},
-                )
-                if trace
-                else None
-            )
-            outcome = await service.command_device(
-                device.key,
-                "open",
-                reason,
-                schedule_source="garage_door",
-            )
-            if garage_span:
-                garage_span.finish(
-                    status="ok" if outcome.accepted else "error",
-                    output_payload=outcome.as_payload(),
-                    error=None if outcome.accepted else outcome.detail,
-                )
-            event_type = "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed"
-            schedule_denied = bool(outcome.metadata.get("schedule_denied")) if hasattr(outcome, "metadata") else False
-            await self._audit_automatic_hardware_command(
-                action="garage_door.open.automatic",
-                event=event,
-                person=person,
-                target_entity="GarageDoor",
-                target_id=device.key,
-                target_label=device.name,
-                outcome="accepted" if outcome.accepted else "rejected" if schedule_denied else "failed",
-                level="info" if outcome.accepted else "warning" if schedule_denied else "error",
-                metadata={
-                    "controller": outcome.used_provider or outcome.primary_provider or "configured",
-                    "reason": reason,
-                    "accepted": outcome.accepted,
-                    "state": "schedule_denied" if schedule_denied else outcome.state.value,
-                    "detail": outcome.detail,
-                    "failover_used": outcome.failover_used,
-                    "attempts": [attempt.__dict__ for attempt in outcome.attempts],
-                    **({"schedule_denied": True} if schedule_denied else {}),
-                },
-            )
-            await event_bus.publish(
-                event_type,
-                {
-                    "event_id": str(event.id),
-                    "registration_number": event.registration_number,
-                    "person_id": str(person.id),
-                    "person": person.display_name,
-                    "entity_id": device.key,
-                    "name": device.name,
-                    "accepted": outcome.accepted,
-                    "state": outcome.state.value,
-                    "detail": outcome.detail,
-                },
-            )
-            if outcome.accepted:
-                logger.info(
-                    "garage_door_open_requested_for_access_event",
-                    extra={
-                        "registration_number": event.registration_number,
-                        "event_id": str(event.id),
-                        "person_id": str(person.id),
-                        "entity_id": device.key,
-                        "state": outcome.state.value,
-                        "used_provider": outcome.used_provider,
-                        "primary_provider": outcome.primary_provider,
-                        "failover_used": outcome.failover_used,
-                        "attempts": [attempt.__dict__ for attempt in outcome.attempts],
-                        "metadata": outcome.metadata,
-                    },
-                )
-                continue
-
-            logger.error(
-                "garage_door_open_failed_for_access_event",
-                extra={
-                    "registration_number": event.registration_number,
-                    "event_id": str(event.id),
-                    "person_id": str(person.id),
-                    "entity_id": device.key,
-                    "detail": outcome.detail,
-                },
-            )
-            await get_notification_service().notify(
-                NotificationContext(
-                    event_type="garage_door_open_failed",
-                    subject=event.registration_number,
-                    severity=AnomalySeverity.CRITICAL.value,
-                    facts=self._notification_facts(
-                        event,
-                        person,
-                        event.vehicle,
-                        outcome.detail or f"Automatic garage door open command failed for {device.name}.",
-                        dvla_enrichment=dvla_enrichment,
-                        garage_door=device.name,
-                        entity_id=device.key,
-                    ),
-                )
-            )
-
-    async def _audit_automatic_hardware_command(
-        self,
-        *,
-        action: str,
-        event: AccessEvent,
-        person: Person | None,
-        target_entity: str,
-        outcome: str,
-        level: str,
-        target_id: str | None = None,
-        target_label: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        vehicle = getattr(event, "vehicle", None)
-        vehicle_id = getattr(event, "vehicle_id", None) or getattr(vehicle, "id", None)
-        person_id = getattr(person, "id", None) or getattr(event, "person_id", None)
-        command_metadata = {
-            "source": "automatic_lpr_grant",
-            "access_event_id": str(event.id),
-            "registration_number": event.registration_number,
-            "direction": event.direction.value if hasattr(event.direction, "value") else str(event.direction),
-            "decision": event.decision.value if hasattr(event.decision, "value") else str(event.decision),
-            "person_id": str(person_id) if person_id else None,
-            "person": person.display_name if person else None,
-            "vehicle_id": str(vehicle_id) if vehicle_id else None,
-            "vehicle_registration_number": getattr(vehicle, "registration_number", None),
-            "event_source": getattr(event, "source", None),
-            "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
-            **(metadata or {}),
-        }
-        async with AsyncSessionLocal() as session:
-            row = await write_audit_log(
-                session,
-                category=TELEMETRY_CATEGORY_INTEGRATIONS,
-                action=action,
-                actor="Access Event Automation",
-                target_entity=target_entity,
-                target_id=target_id,
-                target_label=target_label,
-                outcome=outcome,
-                level=level,
-                metadata=command_metadata,
-            )
-            await session.commit()
-            await session.refresh(row)
-        await event_bus.publish("audit.log.created", audit_log_event_payload(row))
 
     async def _vehicle_visual_detection_for_read(
         self,
@@ -3588,112 +2312,6 @@ class AccessEventService:
             )
         return match
 
-    def _notification_facts(
-        self,
-        event: AccessEvent,
-        person: Person | None,
-        vehicle: Vehicle | None,
-        message: str,
-        *,
-        dvla_enrichment: dict[str, Any] | None = None,
-        **extra: Any,
-    ) -> dict[str, str]:
-        group = person.group if person else None
-        vehicle_display_name = self._vehicle_display_name(vehicle, event.registration_number)
-        dvla = dvla_enrichment or {}
-        vehicle_make = self._fact_text(dvla.get("make")) or (vehicle.make if vehicle else "") or ""
-        visual_detection = self._vehicle_visual_detection_from_event(event)
-        detected_vehicle_type = self._fact_text(
-            visual_detection.get("observed_vehicle_type")
-            or visual_detection.get("vehicle_type")
-            or visual_detection.get("detected_vehicle_type")
-        )
-        detected_vehicle_colour = self._fact_text(
-            visual_detection.get("observed_vehicle_color")
-            or visual_detection.get("observed_vehicle_colour")
-            or visual_detection.get("vehicle_color")
-            or visual_detection.get("vehicle_colour")
-            or visual_detection.get("detected_vehicle_color")
-            or visual_detection.get("detected_vehicle_colour")
-        )
-        dvla_colour = self._fact_text(dvla.get("colour"))
-        vehicle_colour = (
-            (dvla_colour or (vehicle.color if vehicle else "") or detected_vehicle_colour)
-            if vehicle
-            else (detected_vehicle_colour or dvla_colour)
-        )
-        object_pronoun, possessive_determiner = self._person_notification_pronouns(person)
-        facts = {
-            "message": message,
-            "access_event_id": str(event.id),
-            "telemetry_trace_id": str(((event.raw_payload or {}).get("telemetry") or {}).get("trace_id") or ""),
-            "first_name": person.first_name if person else "",
-            "last_name": person.last_name if person else "",
-            "display_name": person.display_name if person else "",
-            "group_name": group.name if group else "",
-            "vehicle_registration_number": event.registration_number,
-            "registration_number": event.registration_number,
-            "vehicle_display_name": vehicle_display_name,
-            "vehicle_make": vehicle_make,
-            "vehicle_type": detected_vehicle_type,
-            "vehicle_model": vehicle.model if vehicle and vehicle.model else "",
-            "vehicle_color": vehicle_colour,
-            "vehicle_colour": vehicle_colour,
-            "detected_vehicle_type": detected_vehicle_type,
-            "detected_vehicle_color": detected_vehicle_colour,
-            "detected_vehicle_colour": detected_vehicle_colour,
-            "mot_status": self._fact_text(dvla.get("mot_status")),
-            "mot_expiry": self._fact_text(dvla.get("mot_expiry")),
-            "tax_status": self._fact_text(dvla.get("tax_status")),
-            "tax_expiry": self._fact_text(dvla.get("tax_expiry")),
-            "object_pronoun": object_pronoun,
-            "possessive_determiner": possessive_determiner,
-            "direction": event.direction.value,
-            "decision": event.decision.value,
-            "source": event.source,
-            "timing_classification": event.timing_classification.value,
-            "occurred_at": event.occurred_at.isoformat(),
-        }
-        facts.update({key: self._fact_text(value) for key, value in extra.items()})
-        return facts
-
-    def _vehicle_visual_detection_from_event(self, event: AccessEvent) -> dict[str, Any]:
-        payload = (event.raw_payload or {}).get(VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY)
-        return payload if isinstance(payload, dict) else {}
-
-    def _fact_text(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, (date, datetime)):
-            return value.isoformat()
-        return str(value)
-
-    def _person_notification_pronouns(self, person: Person | None) -> tuple[str, str]:
-        pronouns = str(getattr(person, "pronouns", None) or "").strip().casefold()
-        if not pronouns and person:
-            first_name = str(getattr(person, "first_name", "") or "").strip().casefold()
-            pronouns = SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME.get(first_name, "")
-        return PERSON_NOTIFICATION_PRONOUNS.get(pronouns, ("them", "their"))
-
-    def _authorized_entry_message(self, person: Person, vehicle: Vehicle | None) -> str:
-        first_name = person.first_name or person.display_name.split(" ", 1)[0]
-        possessive = f"{first_name}'" if first_name.lower().endswith("s") else f"{first_name}'s"
-        object_pronoun, _possessive_determiner = self._person_notification_pronouns(person)
-        vehicle_label = self._vehicle_display_name(vehicle, "")
-        if vehicle_label:
-            return (
-                f"{possessive} {vehicle_label} has been detected at the gate. "
-                f"I've let {object_pronoun} in."
-            )
-        return f"{person.display_name} has been detected at the gate. I've let {object_pronoun} in."
-
-    def _vehicle_display_name(self, vehicle: Vehicle | None, fallback: str) -> str:
-        if not vehicle:
-            return fallback
-        parts = [vehicle.make, vehicle.model]
-        label = " ".join(part for part in parts if part)
-        return label or vehicle.description or vehicle.registration_number or fallback
-
     async def _resolve_direction(
         self,
         session: AsyncSession,
@@ -3704,8 +2322,8 @@ class AccessEventService:
         vehicle: Vehicle | None = None,
         trace: Any | None = None,
     ) -> tuple[AccessDirection, dict[str, Any]]:
-        gate_observation = self._gate_observation_from_read(read)
-        gate_state = self._coerce_gate_state(gate_observation.get("state")) or GateState.UNKNOWN
+        gate_observation = gate_observation_from_read(read)
+        gate_state = coerce_gate_state(gate_observation.get("state")) or GateState.UNKNOWN
         visitor_pass_match = _visitor_pass_plate_match_from_read(read)
         visitor_pass_departure = isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure"
         gate_malfunction = _gate_malfunction_from_read(read)
@@ -3740,7 +2358,7 @@ class AccessEventService:
                     gate_state=gate_state,
                     gate_observation=gate_observation,
                     presence_state=presence_state,
-                    explicit_direction=self._explicit_direction_from_read(read),
+                    explicit_direction=explicit_direction_from_read(read),
                     visitor_pass_departure=visitor_pass_departure,
                     gate_malfunction=gate_malfunction,
                     previous_live_direction=previous_event.direction if previous_event else None,
@@ -3759,7 +2377,7 @@ class AccessEventService:
                 else await self._resolve_duplicate_arrival_with_camera(read, person)
             )
             camera_tiebreaker = CameraTieBreakerEvidence(
-                direction=self._coerce_access_direction(camera_decision.get("direction")),
+                direction=coerce_access_direction(camera_decision.get("direction")),
                 confidence=self._coerce_confidence(camera_decision.get("confidence")),
                 clear=self._camera_tiebreaker_is_clear(camera_decision),
                 payload=camera_decision,
@@ -3773,41 +2391,9 @@ class AccessEventService:
         presence = await session.get(Presence, person.id)
         return presence.state if presence else None
 
-    async def _person_is_present(self, session: AsyncSession, person: Person) -> bool:
-        return (await self._presence_state_for_person(session, person)) == PresenceState.PRESENT
-
-    def _explicit_direction_from_read(self, read: PlateRead) -> AccessDirection | None:
-        explicit = str(read.raw_payload.get("direction") or read.raw_payload.get("Direction") or "").lower()
-        if explicit in {"entry", "enter", "arrival", "in"}:
-            return AccessDirection.ENTRY
-        if explicit in {"exit", "leave", "departure", "out"}:
-            return AccessDirection.EXIT
-        return None
-
-    def _coerce_access_direction(self, value: Any) -> AccessDirection | None:
-        try:
-            direction = AccessDirection(str(value or "").lower())
-        except ValueError:
-            return None
-        return direction if direction in {AccessDirection.ENTRY, AccessDirection.EXIT} else None
-
-
     def _camera_tiebreaker_is_clear(self, camera_decision: dict[str, Any]) -> bool:
         confidence = self._coerce_confidence(camera_decision.get("confidence"))
         return confidence is not None and confidence >= CAMERA_TIEBREAKER_MIN_CONFIDENCE
-
-    async def _latest_live_vehicle_event(
-        self,
-        session: AsyncSession,
-        vehicle: Vehicle,
-        before: datetime,
-    ) -> AccessEvent | None:
-        return await self._latest_live_person_or_vehicle_event(
-            session,
-            person=None,
-            vehicle=vehicle,
-            before=before,
-        )
 
     async def _latest_live_person_or_vehicle_event(
         self,
@@ -4054,14 +2640,14 @@ class AccessEventService:
 
     def _automatic_open_allowed(self, direction_resolution: dict[str, Any]) -> bool:
         gate_observation = direction_resolution.get("gate_observation") or {}
-        return self._coerce_gate_state(gate_observation.get("state")) == GateState.CLOSED
+        return coerce_gate_state(gate_observation.get("state")) == GateState.CLOSED
 
     def _visitor_pass_candidate_kind(self, read: PlateRead) -> str:
         visitor_pass_match = _visitor_pass_plate_match_from_read(read)
         if isinstance(visitor_pass_match, dict) and visitor_pass_match.get("kind") == "departure":
             return "departure"
-        gate_observation = self._gate_observation_from_read(read)
-        gate_state = self._coerce_gate_state(gate_observation.get("state"))
+        gate_observation = gate_observation_from_read(read)
+        gate_state = coerce_gate_state(gate_observation.get("state"))
         if gate_state in DEPARTURE_GATE_STATES:
             return "departure"
         if gate_state in ARRIVAL_GATE_STATES:
@@ -4088,31 +2674,6 @@ class AccessEventService:
             "window_minutes": visitor_pass.window_minutes,
             "number_plate": visitor_pass.number_plate,
         }
-
-    def _gate_observation_from_read(self, read: PlateRead) -> dict[str, Any]:
-        value = (read.raw_payload or {}).get(GATE_OBSERVATION_PAYLOAD_KEY)
-        if not isinstance(value, dict):
-            return {
-                "state": GateState.UNKNOWN.value,
-                "observed_at": None,
-                "detail": "No gate observation captured.",
-            }
-        state = self._coerce_gate_state(value.get("state")) or GateState.UNKNOWN
-        return {
-            "state": state.value,
-            "observed_at": value.get("observed_at"),
-            "controller": value.get("controller"),
-            "entity_id": value.get("entity_id"),
-            "detail": value.get("detail"),
-        }
-
-    def _coerce_gate_state(self, value: Any) -> GateState | None:
-        if isinstance(value, GateState):
-            return value
-        try:
-            return GateState(str(value or "").lower())
-        except ValueError:
-            return None
 
     async def _classify_timing(
         self, session: AsyncSession, person: Person, direction: AccessDirection, occurred_at: datetime
@@ -4229,31 +2790,9 @@ class AccessEventService:
     async def _update_presence(
         self, session: AsyncSession, person: Person, event: AccessEvent
     ) -> bool:
-        presence = await session.get(Presence, person.id)
-        if not presence:
-            presence = Presence(person_id=person.id)
-            session.add(presence)
-
-        if presence.last_changed_at and event.occurred_at < presence.last_changed_at:
-            logger.info(
-                "presence_update_skipped_for_stale_access_event",
-                extra={
-                    "person_id": str(person.id),
-                    "event_id": str(event.id),
-                    "event_occurred_at": event.occurred_at.isoformat(),
-                    "presence_last_changed_at": presence.last_changed_at.isoformat(),
-                },
-            )
-            return False
-
-        presence.state = (
-            PresenceState.PRESENT
-            if event.direction == AccessDirection.ENTRY
-            else PresenceState.EXITED
-        )
-        presence.last_event_id = event.id
-        presence.last_changed_at = event.occurred_at
-        return True
+        if not getattr(event, "person_id", None) and getattr(person, "id", None):
+            event.person_id = person.id
+        return await commit_presence_for_event(session, event, log_prefix="access_event")
 
 
 def _datetime_delta_ms(end: datetime, start: datetime) -> float:

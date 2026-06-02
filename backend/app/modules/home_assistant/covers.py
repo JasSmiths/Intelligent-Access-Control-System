@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from app.modules.gate.base import GateState
+
 DEFAULT_OPEN_SERVICE = "cover.open_cover"
 DEFAULT_CLOSE_SERVICE = "cover.close_cover"
 
@@ -82,23 +84,6 @@ def enabled_cover_entities(value: Any, *, default_open_service: str = DEFAULT_OP
     ]
 
 
-def legacy_gate_entities(entity_id: str, open_service: str) -> list[dict[str, Any]]:
-    if not entity_id:
-        return []
-    return normalize_cover_entities(
-        [
-            {
-                "entity_id": entity_id,
-                "name": title_from_entity_id(entity_id),
-                "enabled": True,
-                "open_service": open_service,
-                "close_service": DEFAULT_CLOSE_SERVICE,
-            }
-        ],
-        default_open_service=open_service,
-    )
-
-
 def detected_gate_entities(states: list[Any]) -> list[dict[str, Any]]:
     return _detected_cover_entities(states, role="gate")
 
@@ -176,6 +161,10 @@ def normalize_cover_state(state: str) -> str:
     if normalized == "fault":
         return "fault"
     return "unknown"
+
+
+def gate_state_from_cover_state(state: str) -> GateState:
+    return GateState(normalize_cover_state(state))
 
 
 def _detected_cover_entities(states: list[Any], *, role: str) -> list[dict[str, Any]]:

@@ -1,0 +1,14 @@
+{
+  "movement_saga": {
+    "id": "55555555-5555-5555-5555-555555555555",
+    "state": "completed",
+    "reconciliation_required": false,
+    "gate_command_required": true,
+    "presence_committed": true,
+    "failure_detail": null,
+    "updated_at": "2026-05-31T08:16:00+00:00"
+  },
+  "gate_command_id": "66666666-6666-6666-6666-666666666666",
+  "gate_state": "open"
+}
+

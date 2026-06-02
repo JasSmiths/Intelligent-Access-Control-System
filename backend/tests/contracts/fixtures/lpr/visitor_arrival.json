@@ -1,0 +1,27 @@
+{
+  "registrationNumber": "VIS1TOR",
+  "confidence": 0.94,
+  "capturedAt": "2026-05-31T10:30:00+00:00",
+  "alarm": {
+    "name": "Gate LPR",
+    "triggers": [
+      {
+        "key": "license_plate_unknown",
+        "value": "VIS1TOR",
+        "group": {
+          "name": "VIS1TOR"
+        },
+        "device": "gate-lpr-camera",
+        "eventId": "protect-event-visitor",
+        "zones": {
+          "line": [],
+          "zone": [
+            "driveway"
+          ],
+          "loiter": []
+        }
+      }
+    ]
+  }
+}
+

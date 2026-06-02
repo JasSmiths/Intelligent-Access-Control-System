@@ -1,0 +1,23 @@
+{
+  "intent_id": "intent-open-gate-2",
+  "action": "open",
+  "source": "lpr",
+  "controller": "configured",
+  "gate_key": "top_gate",
+  "event_id": "11111111-1111-1111-1111-111111111111",
+  "movement_saga_id": "55555555-5555-5555-5555-555555555555",
+  "command_id": "77777777-7777-7777-7777-777777777777",
+  "registration_number": "PE70DHX",
+  "accepted": false,
+  "state": "fault",
+  "detail": "Provider rejected gate open.",
+  "mechanically_confirmed": false,
+  "requires_reconciliation": false,
+  "exception_class": "RuntimeError",
+  "started_at": "2026-05-31T08:16:00+00:00",
+  "completed_at": "2026-05-31T08:16:01+00:00",
+  "metadata": {
+    "provider": "home_assistant"
+  }
+}
+

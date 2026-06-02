@@ -35,7 +35,6 @@ async def health() -> dict[str, object]:
     return {
         "status": _overall_status(checks),
         "checks": checks,
-        "discord": _legacy_discord_payload(discord),
     }
 
 
@@ -161,15 +160,6 @@ def _overall_status(checks: dict[str, dict[str, Any]]) -> str:
     if "degraded" in statuses:
         return "degraded"
     return "ok"
-
-
-def _legacy_discord_payload(discord: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "configured": discord.get("configured"),
-        "connected": discord.get("connected"),
-        "guild_count": discord.get("guild_count"),
-        "channel_count": discord.get("channel_count"),
-    }
 
 
 def _safe_error(exc: Exception) -> str:

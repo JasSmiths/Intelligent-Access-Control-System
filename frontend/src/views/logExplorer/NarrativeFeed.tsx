@@ -10,15 +10,8 @@ import {
 } from "lucide-react";
 import React from "react";
 
-import {
-  Badge,
-  EmptyState,
-  formatFileSize,
-  isRecord,
-  levelTone,
-  numberPayload,
-  titleCase
-} from "../../shared";
+import { formatFileSize, isRecord, levelTone, numberPayload, titleCase } from "../../lib/format";
+import { Badge, EmptyState } from "../../ui/primitives";
 import type { LogRecord, NarrativeLogItem, TraceDetailState } from "./types";
 import { deriveNarrativeLogItem } from "./narrative";
 import { LprWaterfall } from "./LprWaterfallPanel";

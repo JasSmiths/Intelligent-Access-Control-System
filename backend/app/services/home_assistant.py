@@ -10,11 +10,10 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import GateStateObservation
 from app.modules.gate.base import GateState
-from app.modules.gate.home_assistant import map_home_assistant_gate_state
 from app.modules.home_assistant.client import HomeAssistantClient, get_home_assistant_client
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
-    legacy_gate_entities,
+    gate_state_from_cover_state,
     normalize_cover_entities,
     normalize_cover_state,
 )
@@ -91,7 +90,7 @@ class HomeAssistantIntegrationService:
         gate_entities = normalize_cover_entities(
             config.home_assistant_gate_entities,
             default_open_service=config.home_assistant_gate_open_service,
-        ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+        )
         garage_door_entities = normalize_cover_entities(
             config.home_assistant_garage_door_entities,
             default_open_service=config.home_assistant_gate_open_service,
@@ -104,7 +103,7 @@ class HomeAssistantIntegrationService:
             "last_connected_at": self._last_connected_at.isoformat() if self._last_connected_at else None,
             "last_failure_at": self._last_failure_at.isoformat() if self._last_failure_at else None,
             "listener_running": bool(self._listener and not self._listener.done()),
-            "gate_entity_id": gate_entities[0]["entity_id"] if gate_entities else config.home_assistant_gate_entity_id,
+            "gate_entity_id": gate_entities[0]["entity_id"] if gate_entities else "",
             "gate_entities": [cover_entity_state_payload(entity) for entity in gate_entities],
             "garage_door_entities": [cover_entity_state_payload(entity) for entity in garage_door_entities],
             "default_media_player": config.home_assistant_default_media_player,
@@ -209,7 +208,7 @@ class HomeAssistantIntegrationService:
                     gate_entities = normalize_cover_entities(
                         config.home_assistant_gate_entities,
                         default_open_service=config.home_assistant_gate_open_service,
-                    ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+                    )
                     gate_entity_map = {str(entity["entity_id"]): entity for entity in gate_entities}
                     garage_entity_map = {
                         str(entity["entity_id"]): entity
@@ -334,7 +333,7 @@ class HomeAssistantIntegrationService:
     ) -> None:
         self._remember_state(entity_id, state_value, last_changed=last_changed)
         previous_state = previous_state or self._last_gate_state.value
-        self._last_gate_state = map_home_assistant_gate_state(state_value)
+        self._last_gate_state = gate_state_from_cover_state(state_value)
         if previous_state != self._last_gate_state.value:
             await self._record_gate_state_observation(
                 entity_id,
@@ -369,7 +368,7 @@ class HomeAssistantIntegrationService:
 
     async def _sync_door_state(self, state_value: str, entity_id: str) -> None:
         self._remember_state(entity_id, state_value)
-        door_state = map_home_assistant_gate_state(state_value)
+        door_state = gate_state_from_cover_state(state_value)
         await event_bus.publish(
             "door.state_changed",
             {
@@ -426,7 +425,7 @@ class HomeAssistantIntegrationService:
                 gate_entities = normalize_cover_entities(
                     config.home_assistant_gate_entities,
                     default_open_service=config.home_assistant_gate_open_service,
-                ) or legacy_gate_entities(config.home_assistant_gate_entity_id, config.home_assistant_gate_open_service)
+                )
                 garage_door_entities = normalize_cover_entities(
                     config.home_assistant_garage_door_entities,
                     default_open_service=config.home_assistant_gate_open_service,
@@ -449,7 +448,7 @@ class HomeAssistantIntegrationService:
             if gate_entities:
                 first_gate_state = self._state_cache.get(str(gate_entities[0]["entity_id"]), {}).get("state")
                 if first_gate_state:
-                    self._last_gate_state = map_home_assistant_gate_state(first_gate_state)
+                    self._last_gate_state = gate_state_from_cover_state(first_gate_state)
                 for entity in gate_entities:
                     entity_id = str(entity["entity_id"])
                     cached = self._state_cache.get(entity_id, {})
@@ -518,7 +517,7 @@ class HomeAssistantIntegrationService:
 
     def _cached_gate_state(self, entity_id: str) -> str:
         state = self._state_cache.get(entity_id, {}).get("state")
-        return map_home_assistant_gate_state(state).value if state else GateState.UNKNOWN.value
+        return gate_state_from_cover_state(state).value if state else GateState.UNKNOWN.value
 
     def _latest_cached_state_timestamp(self, entity_ids: list[str]) -> str | None:
         timestamps = [
@@ -594,7 +593,7 @@ class HomeAssistantIntegrationService:
         last_changed: str | None,
         source: str,
     ) -> None:
-        state = map_home_assistant_gate_state(raw_state).value
+        state = gate_state_from_cover_state(raw_state).value
         changed_at = self._parse_datetime(last_changed)
         async with AsyncSessionLocal() as session:
             if changed_at:

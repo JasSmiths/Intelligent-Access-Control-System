@@ -6,16 +6,10 @@ FileImage,
 } from "lucide-react";
 import React from "react";
 
-import {
-AccessEvent,
-Badge,
-formatDate,
-matches,
-mediaVariantUrl,
-movementSagaDisplay,
-Toolbar,
-visitorEventDisplayName
-} from "../shared";
+import { formatDate, matches, movementSagaDisplay, visitorEventDisplayName } from "../lib/format";
+import { mediaVariantUrl } from "../lib/media";
+import { Badge, Toolbar } from "../ui/primitives";
+import type { AccessEvent } from "../api/types";
 
 
 

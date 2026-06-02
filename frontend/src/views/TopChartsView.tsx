@@ -9,22 +9,12 @@ Trophy
 import React from "react";
 import { createPortal } from "react-dom";
 
-import {
-api,
-Badge,
-BadgeTone,
-EmptyState,
-formatDate,
-initials,
-isAbortError,
-matches,
-mediaSource,
-mediaVariantUrl,
-RealtimeMessage,
-titleCase,
-Toolbar,
-TooltipPositionState
-} from "../shared";
+import { api, isAbortError } from "../api/client";
+import { formatDate, initials, matches, titleCase } from "../lib/format";
+import { mediaSource, mediaVariantUrl } from "../lib/media";
+import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import type { RealtimeMessage, TooltipPositionState } from "../api/types";
+import type { BadgeTone } from "../ui/primitives";
 
 
 

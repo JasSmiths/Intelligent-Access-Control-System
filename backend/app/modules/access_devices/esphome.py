@@ -282,18 +282,16 @@ class ESPHomeAccessDeviceProvider:
             return min(default, value)
 
         try:
-            legacy_password = str(device.get("legacy_password") or "").strip() or None
             timeout = float(device.get("timeout_seconds") or CONNECT_TIMEOUT_SECONDS)
             client = aio.APIClient(
                 address=host,
                 port=int(device.get("port") or 6053),
-                password=legacy_password,
                 noise_psk=str(device.get("encryption_key") or "").strip() or None,
             )
             await asyncio.wait_for(client.start_resolve_host(on_stop), timeout=remaining(min(timeout, 15.0)))
             await asyncio.wait_for(client.start_connection(), timeout=remaining(timeout))
             await asyncio.wait_for(
-                client.finish_connection(login=legacy_password is not None),
+                client.finish_connection(login=False),
                 timeout=remaining(CONNECT_TIMEOUT_SECONDS),
             )
             return aio, client
@@ -967,7 +965,6 @@ def _safe_device_metadata(device: dict[str, Any]) -> dict[str, Any]:
         "port": int(device.get("port") or 6053),
         "enabled": bool(device.get("enabled", True)),
         "encryption_key_configured": bool(str(device.get("encryption_key") or "").strip()),
-        "legacy_password_configured": bool(str(device.get("legacy_password") or "").strip()),
     }
 
 
@@ -976,8 +973,6 @@ def _connect_error_detail(exc: Exception) -> str:
         return "Timed out while connecting to ESPHome. Check host, port, encryption key, and reachability."
     detail = str(exc).strip()
     normalized = detail.lower()
-    if "helloresponse, connectresponse" in normalized:
-        return "ESPHome did not answer the legacy login request. Leave legacy password blank unless api.password is configured."
     if "finishing connection cancelled" in normalized or "connection lost" in normalized:
         return "ESPHome native API handshake did not complete. Check the encryption key and port 6053."
     return detail or exc.__class__.__name__

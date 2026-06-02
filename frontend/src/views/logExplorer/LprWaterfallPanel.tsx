@@ -1,15 +1,9 @@
 import { AlertTriangle, Clock3, Terminal } from "lucide-react";
 import React from "react";
 
-import {
-  api,
-  Badge,
-  EmptyState,
-  isAbortError,
-  numberPayload,
-  stringPayload,
-  titleCase
-} from "../../shared";
+import { api, isAbortError } from "../../api/client";
+import { numberPayload, stringPayload, titleCase } from "../../lib/format";
+import { Badge, EmptyState } from "../../ui/primitives";
 import type {
   LprWaterfallResponse,
   LogRecord,

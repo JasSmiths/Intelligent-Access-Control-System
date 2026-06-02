@@ -26,16 +26,12 @@ from app.services.notifications import (
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
     context_variables,
-    gate_malfunction_action_supports_stage,
-    gate_malfunction_fallback_content,
+    gate_malfunction_notification_content,
     gate_malfunction_plain_body,
     home_assistant_notification_actions,
     normalize_actions,
     normalize_conditions,
-    normalize_rule_payload,
     notification_action_buttons,
-    notification_text_looks_like_raw_data,
-    parse_gate_malfunction_llm_content,
     postprocess_gate_malfunction_body,
     presence_condition_matches,
     render_template,
@@ -44,7 +40,6 @@ from app.services.notifications import (
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.home_assistant import HomeAssistantIntegrationService
 from app.services.schedules import schedule_allows_at
-from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, seed_dynamic_settings_for_session
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
@@ -88,32 +83,6 @@ class FakeRuleSession:
         self.rule = None
 
 
-class FakeSettingsSession:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.committed = False
-        self.record = SimpleNamespace(
-            key="notification_rules",
-            value={"plain": [{"id": "legacy-rule"}]},
-        )
-        self.deleted: list[Any] = []
-
-    async def scalars(self, _statement):
-        self.calls += 1
-        if self.calls == 1:
-            return ScalarResult(list(DEFAULT_DYNAMIC_SETTINGS.keys()))
-        return ScalarResult([self.record])
-
-    def add(self, _record) -> None:
-        raise AssertionError("all default settings should already exist in this fake")
-
-    async def delete(self, record) -> None:
-        self.deleted.append(record.key)
-
-    async def commit(self) -> None:
-        self.committed = True
-
-
 class FakeContextRuleSession:
     def __init__(self, rule) -> None:
         self.rule = rule
@@ -132,9 +101,9 @@ class FakeContextRuleSession:
         self.commits += 1
 
 
-def test_render_template_supports_at_mentions_and_legacy_tokens() -> None:
+def test_render_template_supports_current_at_tokens_only() -> None:
     rendered = render_template(
-        "@FirstName arrived in [VehicleName] at @Time",
+        "@FirstName arrived in @VehicleName at @Time",
         {
             "FirstName": "Steph",
             "VehicleName": "2026 Tesla Model Y Dual Motor Long Range",
@@ -245,7 +214,7 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
     }.intersection(events)
 
 
-def test_context_variables_include_vehicle_aliases_and_time() -> None:
+def test_context_variables_include_vehicle_display_fields_and_time() -> None:
     variables = context_variables(
         NotificationContext(
             event_type="authorized_entry",
@@ -265,7 +234,7 @@ def test_context_variables_include_vehicle_aliases_and_time() -> None:
     assert variables["Time"] == "18:42"
 
 
-def test_context_variables_include_integration_degraded_aliases() -> None:
+def test_context_variables_include_integration_degraded_fields() -> None:
     variables = context_variables(
         NotificationContext(
             event_type=INTEGRATION_DEGRADED_EVENT_TYPE,
@@ -290,7 +259,7 @@ def test_context_variables_include_integration_degraded_aliases() -> None:
     assert render_template("@IntegrationName: @IntegrationReason", variables) == "Home Assistant: Unable to reach Home Assistant."
 
 
-def test_context_variables_include_person_pronoun_aliases() -> None:
+def test_context_variables_include_person_pronoun_fields() -> None:
     variables = context_variables(
         NotificationContext(
             event_type="authorized_entry",
@@ -308,7 +277,7 @@ def test_context_variables_include_person_pronoun_aliases() -> None:
     assert render_template("I've let @ObjectPronoun in.", variables) == "I've let her in."
 
 
-def test_context_variables_include_visitor_pass_timeframe_request_aliases() -> None:
+def test_context_variables_include_visitor_pass_timeframe_request_fields() -> None:
     variables = context_variables(
         NotificationContext(
             event_type="visitor_pass_timeframe_change_requested",
@@ -662,37 +631,17 @@ def test_gate_malfunction_triggers_and_variables_are_available() -> None:
     assert variables["LastKnownVehicle"] == "Steph Smith exited in Tesla Model Y"
 
 
-def test_gate_malfunction_legacy_rules_normalize_to_stage_filter() -> None:
-    normalized = normalize_rule_payload(
-        {
-            "name": "Thirty minute voice",
-            "trigger_event": "gate_malfunction_30m",
-            "actions": [
-                {
-                    "type": "voice",
-                    "message_template": "Gate stuck.",
-                }
-            ],
-        }
-    )
-
-    assert normalized["trigger_event"] == GATE_MALFUNCTION_EVENT_TYPE
-    assert normalized["actions"][0]["gate_malfunction_stages"] == ["30m"]
-    assert gate_malfunction_action_supports_stage(normalized["actions"][0], "30m") is True
-    assert gate_malfunction_action_supports_stage(normalized["actions"][0], "60m") is False
-
-
 def test_gate_malfunction_text_post_processing_strips_duplicate_prefixes() -> None:
     body = postprocess_gate_malfunction_body(
         "voice",
         "Attention. Gate Malfunction Update: Gate is still open.",
         previous_notification=True,
-        fallback_body="Gate is still open.",
+        default_body="Gate is still open.",
     )
 
     assert body == "Attention. Gate Malfunction Update: Gate is still open."
 
-    fallback = gate_malfunction_fallback_content(
+    content = gate_malfunction_notification_content(
         "mobile",
         NotificationContext(
             event_type=GATE_MALFUNCTION_EVENT_TYPE,
@@ -707,10 +656,10 @@ def test_gate_malfunction_text_post_processing_strips_duplicate_prefixes() -> No
         ),
         previous_notification=True,
     )
-    assert fallback["title"] == "Gate malfunction resolved"
-    assert fallback["body"].startswith("Gate Malfunction Update:")
-    assert "vehicle" not in fallback["body"].lower()
-    assert "recovery attempts" not in fallback["body"].lower()
+    assert content["title"] == "Gate malfunction resolved"
+    assert content["body"].startswith("Gate Malfunction Update:")
+    assert "vehicle" not in content["body"].lower()
+    assert "recovery attempts" not in content["body"].lower()
 
 
 def test_gate_malfunction_plain_body_is_household_friendly() -> None:
@@ -726,18 +675,6 @@ def test_gate_malfunction_plain_body_is_household_friendly() -> None:
     assert gate_malfunction_plain_body("resolved") == (
         "The gate malfunction has been resolved and the gate is closed again."
     )
-    assert notification_text_looks_like_raw_data('{"malfunction_id": "abc"}') is True
-    assert notification_text_looks_like_raw_data("The gate is still stuck open.") is False
-
-
-def test_gate_malfunction_llm_content_parser_accepts_fenced_json() -> None:
-    assert parse_gate_malfunction_llm_content(
-        '```json\n{"title": "Gate alert", "body": "Top Gate is still open."}\n```'
-    ) == {
-        "title": "Gate alert",
-        "body": "Top Gate is still open.",
-    }
-    assert parse_gate_malfunction_llm_content("Gate alert: still open") is None
 
 
 async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch) -> None:
@@ -771,21 +708,8 @@ async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch
     assert all(action["message"] for action in actions)
 
 
-async def test_gate_malfunction_llm_composer_generates_voice_update(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(llm_provider="openai")
-
-    class FakeProvider:
-        async def complete(self, messages):
-            assert messages[-1].content
-            return SimpleNamespace(
-                text='{"title": " Gate check ", "body": "Attention. Gate Malfunction Update: Top Gate is still open."}'
-            )
-
-    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr("app.services.notifications.get_llm_provider", lambda _provider: FakeProvider())
-
-    content = await NotificationService()._compose_gate_malfunction_content(
+def test_gate_malfunction_content_is_deterministic_current_behavior() -> None:
+    content = gate_malfunction_notification_content(
         "voice",
         NotificationContext(
             event_type=GATE_MALFUNCTION_EVENT_TYPE,
@@ -797,45 +721,11 @@ async def test_gate_malfunction_llm_composer_generates_voice_update(monkeypatch)
                 "malfunction_has_previous_notification": "true",
             },
         ),
+        previous_notification=True,
     )
 
-    assert content["title"] == "Gate check"
-    assert content["body"] == "Attention. Gate Malfunction Update: Top Gate is still open."
-
-
-async def test_gate_malfunction_llm_fallback_records_telemetry_for_invalid_output(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(llm_provider="openai")
-
-    class FakeProvider:
-        async def complete(self, _messages):
-            return SimpleNamespace(text="Top Gate is still open.")
-
-    spans = []
-    monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr("app.services.notifications.get_llm_provider", lambda _provider: FakeProvider())
-    monkeypatch.setattr(
-        NotificationService,
-        "_record_notification_span",
-        lambda _self, *args, **kwargs: spans.append((args, kwargs)),
-    )
-
-    content = await NotificationService()._compose_gate_malfunction_content(
-        "mobile",
-        NotificationContext(
-            event_type=GATE_MALFUNCTION_EVENT_TYPE,
-            subject="Gate malfunction detected",
-            severity="warning",
-            facts={
-                "gate_name": "Top Gate",
-                "malfunction_stage": "initial",
-            },
-        ),
-    )
-
-    assert content["title"] == "Gate malfunction detected"
-    assert "Alfred" in content["body"]
-    assert spans[0][1]["output_payload"]["reason"] == "invalid_llm_content"
+    assert content["title"] == "Gate malfunction 30 minutes stuck"
+    assert content["body"] == "Attention. Gate Malfunction Update: The gate is still stuck open. Alfred is still working on it."
 
 
 async def test_notification_catalog_exposes_single_gate_malfunction_trigger_and_stages(monkeypatch) -> None:
@@ -1005,7 +895,7 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
     ]
 
 
-async def test_mobile_workflow_reports_partial_success_when_fallback_delivers(monkeypatch) -> None:
+async def test_mobile_workflow_reports_partial_success_when_secondary_sender_delivers(monkeypatch) -> None:
     service = NotificationService()
     context = NotificationContext(
         event_type="authorized_entry",
@@ -1179,10 +1069,6 @@ def test_schedule_condition_time_window_uses_existing_scheduler() -> None:
     assert not schedule_allows_at(schedule, datetime(2026, 4, 27, 13, 0, tzinfo=UTC), "UTC")
 
 
-def test_legacy_notification_setting_is_not_seeded() -> None:
-    assert "notification_rules" not in DEFAULT_DYNAMIC_SETTINGS
-
-
 async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatch) -> None:
     async def confirmed(*_args, **_kwargs):
         return None
@@ -1266,26 +1152,6 @@ async def test_notification_rule_create_requires_confirmation_before_write() -> 
 
     assert exc.value.status_code == 428
     assert session.rule is None
-
-
-def test_notification_rule_serialization_normalizes_legacy_gate_malfunction_trigger() -> None:
-    now = datetime(2026, 4, 26, 18, 42, tzinfo=UTC)
-    serialized = notification_api.serialize_rule(
-        SimpleNamespace(
-            id=uuid.uuid4(),
-            name="Old 60 minute alert",
-            trigger_event="gate_malfunction_60m",
-            conditions=[],
-            actions=[{"type": "voice", "message_template": "Gate stuck."}],
-            is_active=True,
-            last_fired_at=None,
-            created_at=now,
-            updated_at=now,
-        )
-    )
-
-    assert serialized["trigger_event"] == GATE_MALFUNCTION_EVENT_TYPE
-    assert serialized["actions"][0]["gate_malfunction_stages"] == ["60m"]
 
 
 async def test_preview_endpoint_resolves_mock_variables() -> None:
@@ -1931,12 +1797,3 @@ async def test_notification_rule_last_fired_timestamp_is_persisted(monkeypatch) 
     assert session.commits == 1
     assert rule.last_fired_at is not None
     assert rule.last_fired_at.tzinfo is not None
-
-
-async def test_startup_seed_prunes_legacy_notification_rules() -> None:
-    session = FakeSettingsSession()
-
-    await seed_dynamic_settings_for_session(session)
-
-    assert session.deleted == ["notification_rules"]
-    assert session.committed is True

@@ -1,4 +1,3 @@
-import json
 import re
 import uuid
 from dataclasses import dataclass, field, replace
@@ -9,7 +8,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRule, NotificationRun, Person, Presence, Schedule
@@ -37,11 +35,7 @@ from app.services.actionable_notifications import (
 )
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.discord_messaging import get_discord_messaging_service
-from app.services.notification_snapshots import (
-    delete_notification_snapshot,
-    notification_snapshot_absolute_url,
-    store_notification_snapshot,
-)
+from app.services.snapshots import get_snapshot_manager
 from app.services.schedules import schedule_allows_at
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry
@@ -53,27 +47,22 @@ from app.services.whatsapp_messaging import (
     visitor_pass_timeframe_button_id,
     visitor_window_label_from_values,
 )
+from app.services.workflows.catalog import (
+    GATE_MALFUNCTION_EVENT_TYPE,
+    INTEGRATION_DEGRADED_EVENT_TYPE,
+    notification_actionable_catalog,
+    notification_trigger_catalog,
+    notification_variable_groups,
+)
+from app.services.workflows.context import canonical_key, normalize_string_list, render_template
 
 logger = get_logger(__name__)
 HomeAssistantClient = DefaultHomeAssistantClient
 
-AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
-LEGACY_TOKEN_PATTERN = re.compile(r"\[([A-Za-z][A-Za-z0-9_]*)\]")
 HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID = "input_boolean.announcements"
 VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE = (
     "Voice Notification suppressed: `input_boolean.announcements` is disabled."
 )
-GATE_MALFUNCTION_EVENT_TYPE = "gate_malfunction"
-INTEGRATION_DEGRADED_EVENT_TYPE = "integration_degraded"
-LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES = {
-    "gate_malfunction_initial": "initial",
-    "gate_malfunction_30m": "30m",
-    "gate_malfunction_60m": "60m",
-    "gate_malfunction_2hrs": "2hrs",
-    "gate_malfunction_fubar": "fubar",
-}
-
-
 def _home_assistant_client() -> DefaultHomeAssistantClient:
     if HomeAssistantClient is DefaultHomeAssistantClient:
         return get_home_assistant_client()
@@ -137,365 +126,9 @@ class NotificationSnapshotAttachment:
     content_type: str
     public_url: str | None
 
-TRIGGER_CATALOG: list[dict[str, Any]] = [
-    {
-        "id": "ai_agents",
-        "label": "AI Agents",
-        "events": [
-            {
-                "value": "agent_anomaly_alert",
-                "label": "AI Anomaly Alert",
-                "severity": "critical",
-                "description": "The AI agent raises an explicit anomaly alert.",
-            },
-        ],
-    },
-    {
-        "id": "compliance",
-        "label": "Compliance",
-        "events": [
-            {
-                "value": "expired_mot_detected",
-                "label": "Expired MOT Detected",
-                "severity": "warning",
-                "description": "DVLA reports a vehicle MOT status other than Valid or Not Required on arrival.",
-            },
-            {
-                "value": "expired_tax_detected",
-                "label": "Expired Tax Detected",
-                "severity": "warning",
-                "description": "DVLA reports a vehicle tax status other than Taxed or SORN on arrival.",
-            },
-        ],
-    },
-    {
-        "id": "gate_actions",
-        "label": "Gate Actions",
-        "events": [
-            {
-                "value": "garage_door_open_failed",
-                "label": "Garage Door Failed",
-                "severity": "critical",
-                "description": "A linked garage door command failed.",
-            },
-            {
-                "value": "gate_open_failed",
-                "label": "Gate Open Failed",
-                "severity": "critical",
-                "description": "The access decision was granted but the gate command failed.",
-            },
-        ],
-    },
-    {
-        "id": "gate_malfunctions",
-        "label": "Gate Malfunctions",
-        "events": [
-            {
-                "value": GATE_MALFUNCTION_EVENT_TYPE,
-                "label": "Gate Malfunction",
-                "severity": "critical",
-                "description": "The primary gate malfunction lifecycle changed stage.",
-            },
-        ],
-    },
-    {
-        "id": "integrations",
-        "label": "Integrations",
-        "events": [
-            {
-                "value": INTEGRATION_DEGRADED_EVENT_TYPE,
-                "label": "Integration Degraded",
-                "severity": "warning",
-                "description": "A configured integration moved into a degraded or unreachable state.",
-            },
-        ],
-    },
-    {
-        "id": "leaderboard",
-        "label": "Leaderboard",
-        "events": [
-            {
-                "value": "leaderboard_overtake",
-                "label": "Leaderboard Overtake",
-                "severity": "info",
-                "description": "A known vehicle takes the top spot on Top Charts.",
-            },
-        ],
-    },
-    {
-        "id": "maintenance_mode",
-        "label": "Maintenance Mode",
-        "events": [
-            {
-                "value": "maintenance_mode_disabled",
-                "label": "Maintenance Mode Disabled",
-                "severity": "info",
-                "description": "The global automation kill-switch was disabled.",
-            },
-            {
-                "value": "maintenance_mode_enabled",
-                "label": "Maintenance Mode Enabled",
-                "severity": "warning",
-                "description": "The global automation kill-switch was enabled.",
-            },
-        ],
-    },
-    {
-        "id": "vehicle_detections",
-        "label": "Vehicle Detections",
-        "events": [
-            {
-                "value": "authorized_entry",
-                "label": "Authorised Vehicle Detected",
-                "severity": "info",
-                "description": "A known vehicle is granted entry inside its access policy.",
-            },
-            {
-                "value": "duplicate_entry",
-                "label": "Duplicate Entry",
-                "severity": "warning",
-                "description": "A person already marked home is detected entering again.",
-            },
-            {
-                "value": "duplicate_exit",
-                "label": "Duplicate Exit",
-                "severity": "info",
-                "description": "A person already marked away is detected exiting again.",
-            },
-            {
-                "value": "outside_schedule",
-                "label": "Outside Schedule",
-                "severity": "warning",
-                "description": "A known vehicle is denied by schedule or access policy.",
-            },
-            {
-                "value": "unauthorized_plate",
-                "label": "Unknown Vehicle Detected",
-                "severity": "warning",
-                "description": "An unknown or inactive vehicle plate is denied.",
-            },
-            {
-                "value": "visitor_pass_vehicle_arrived",
-                "label": "Visitor Pass Vehicle Arrived",
-                "severity": "info",
-                "description": "A vehicle matched to a Visitor Pass has arrived on site.",
-            },
-            {
-                "value": "visitor_pass_vehicle_exited",
-                "label": "Visitor Pass Vehicle Exited",
-                "severity": "info",
-                "description": "A vehicle matched to a Visitor Pass has left the site.",
-            },
-        ],
-    },
-    {
-        "id": "visitor_pass",
-        "label": "Visitor Pass",
-        "events": [
-            {
-                "value": "visitor_pass_arranged",
-                "label": "Visitor Pass Arranged",
-                "severity": "info",
-                "description": "A WhatsApp visitor completed their Visitor Pass setup.",
-            },
-            {
-                "value": "visitor_pass_cancelled",
-                "label": "Visitor Pass Cancelled",
-                "severity": "info",
-                "description": "A scheduled or active Visitor Pass was cancelled.",
-            },
-            {
-                "value": "visitor_pass_created",
-                "label": "Visitor Pass Created",
-                "severity": "info",
-                "description": "A new Visitor Pass was created.",
-            },
-            {
-                "value": "visitor_pass_expired",
-                "label": "Visitor Pass Expired",
-                "severity": "warning",
-                "description": "A Visitor Pass window elapsed without being used.",
-            },
-            {
-                "value": "visitor_pass_timeframe_change_requested",
-                "label": "Visitor Pass Timeframe Change Requested",
-                "severity": "warning",
-                "description": "A WhatsApp visitor requested a Visitor Pass timeframe change that needs Admin approval.",
-            },
-            {
-                "value": "visitor_pass_used",
-                "label": "Visitor Pass Used",
-                "severity": "info",
-                "description": "A Visitor Pass was matched to an arriving vehicle.",
-            },
-        ],
-    },
-]
-
-ACTIONABLE_NOTIFICATION_CATALOG: list[dict[str, Any]] = [
-    {
-        "trigger_event": "unauthorized_plate",
-        "actions": [
-            {
-                "value": GATE_OPEN_ACTION,
-                "label": "Open Gate",
-                "description": "Let the selected Home Assistant mobile recipient open the gate for this unknown plate.",
-            },
-        ],
-    },
-]
-
-VARIABLE_GROUPS: list[dict[str, Any]] = [
-    {
-        "group": "Person",
-        "items": [
-            {"name": "FirstName", "token": "@FirstName", "label": "First name"},
-            {"name": "LastName", "token": "@LastName", "label": "Last name"},
-            {"name": "DisplayName", "token": "@DisplayName", "label": "Display name"},
-            {"name": "GroupName", "token": "@GroupName", "label": "Group name"},
-            {"name": "FirstNamePossessive", "token": "@FirstNamePossessive", "label": "First name possessive"},
-            {"name": "ObjectPronoun", "token": "@ObjectPronoun", "label": "Object pronoun"},
-            {"name": "PossessiveDeterminer", "token": "@PossessiveDeterminer", "label": "Possessive determiner"},
-        ],
-    },
-    {
-        "group": "Vehicle",
-        "items": [
-            {"name": "Registration", "token": "@Registration", "label": "Registration"},
-            {"name": "VehicleRegistrationNumber", "token": "@VehicleRegistrationNumber", "label": "Registration number"},
-            {"name": "VehicleName", "token": "@VehicleName", "label": "Friendly vehicle name"},
-            {"name": "VehicleDisplayName", "token": "@VehicleDisplayName", "label": "Vehicle display name"},
-            {"name": "VehicleMake", "token": "@VehicleMake", "label": "Vehicle make"},
-            {"name": "VehicleType", "token": "@VehicleType", "label": "Vehicle type"},
-            {"name": "VehicleModel", "token": "@VehicleModel", "label": "Vehicle model"},
-            {"name": "VehicleColor", "token": "@VehicleColor", "label": "Vehicle colour"},
-            {"name": "VehicleColour", "token": "@VehicleColour", "label": "Vehicle colour"},
-            {"name": "MotStatus", "token": "@MotStatus", "label": "MOT status"},
-            {"name": "MotExpiry", "token": "@MotExpiry", "label": "MOT expiry"},
-            {"name": "TaxStatus", "token": "@TaxStatus", "label": "Tax status"},
-            {"name": "TaxExpiry", "token": "@TaxExpiry", "label": "Tax expiry"},
-        ],
-    },
-    {
-        "group": "Event",
-        "items": [
-            {"name": "Time", "token": "@Time", "label": "Event time"},
-            {"name": "OccurredAt", "token": "@OccurredAt", "label": "Event timestamp"},
-            {"name": "GateStatus", "token": "@GateStatus", "label": "Gate status"},
-            {"name": "Direction", "token": "@Direction", "label": "Entry or exit"},
-            {"name": "Decision", "token": "@Decision", "label": "Access decision"},
-            {"name": "TimingClassification", "token": "@TimingClassification", "label": "Timing classification"},
-            {"name": "Source", "token": "@Source", "label": "Event source"},
-            {"name": "Severity", "token": "@Severity", "label": "Severity"},
-            {"name": "EventType", "token": "@EventType", "label": "Event type"},
-            {"name": "Subject", "token": "@Subject", "label": "Subject"},
-            {"name": "Message", "token": "@Message", "label": "Message"},
-            {"name": "MaintenanceModeReason", "token": "@MaintenanceModeReason", "label": "Maintenance mode reason"},
-        ],
-    },
-    {
-        "group": "Integration",
-        "items": [
-            {"name": "IntegrationName", "token": "@IntegrationName", "label": "Integration name"},
-            {"name": "IntegrationStatus", "token": "@IntegrationStatus", "label": "Integration status"},
-            {"name": "IntegrationReason", "token": "@IntegrationReason", "label": "Degraded reason"},
-            {"name": "IntegrationLastConnectedAt", "token": "@IntegrationLastConnectedAt", "label": "Last connected at"},
-            {"name": "IntegrationLastFailureAt", "token": "@IntegrationLastFailureAt", "label": "Last failure at"},
-            {"name": "GarageDoor", "token": "@GarageDoor", "label": "Garage door"},
-            {"name": "EntityId", "token": "@EntityId", "label": "Entity ID"},
-        ],
-    },
-    {
-        "group": "Visitor Pass",
-        "items": [
-            {
-                "name": "VisitorName",
-                "token": "@VisitorName",
-                "label": "Visitor name",
-            },
-            {
-                "name": "VisitorPassName",
-                "token": "@VisitorPassName",
-                "label": "Visitor Pass name",
-            },
-            {
-                "name": "VisitorPassRegistration",
-                "token": "@VisitorPassRegistration",
-                "label": "Visitor Pass registration",
-            },
-            {
-                "name": "VisitorPassTimeWindow",
-                "token": "@VisitorPassTimeWindow",
-                "label": "Visitor Pass time window",
-            },
-            {
-                "name": "VisitorPassVehicleRegistration",
-                "token": "@VisitorPassVehicleRegistration",
-                "label": "Visitor Pass vehicle registration",
-            },
-            {
-                "name": "VisitorPassVehicleMake",
-                "token": "@VisitorPassVehicleMake",
-                "label": "Visitor Pass vehicle make",
-            },
-            {
-                "name": "VisitorPassVehicleColour",
-                "token": "@VisitorPassVehicleColour",
-                "label": "Visitor Pass vehicle colour",
-            },
-            {
-                "name": "VisitorPassDurationOnSite",
-                "token": "@VisitorPassDurationOnSite",
-                "label": "Visitor Pass duration on site",
-            },
-            {
-                "name": "VisitorPassCurrentWindow",
-                "token": "@VisitorPassCurrentWindow",
-                "label": "Visitor Pass current window",
-            },
-            {
-                "name": "VisitorPassRequestedWindow",
-                "token": "@VisitorPassRequestedWindow",
-                "label": "Visitor Pass requested window",
-            },
-            {
-                "name": "VisitorPassOriginalTime",
-                "token": "@VisitorPassOriginalTime",
-                "label": "Visitor Pass original time",
-            },
-            {
-                "name": "VisitorPassRequestedTime",
-                "token": "@VisitorPassRequestedTime",
-                "label": "Visitor Pass requested time",
-            },
-            {
-                "name": "VisitorPassVisitorMessage",
-                "token": "@VisitorPassVisitorMessage",
-                "label": "Visitor Pass visitor message",
-            },
-        ],
-    },
-    {
-        "group": "Malfunction",
-        "items": [
-            {"name": "MalfunctionDuration", "token": "@MalfunctionDuration", "label": "Malfunction duration"},
-            {"name": "MalfunctionOpenedTime", "token": "@MalfunctionOpenedTime", "label": "Gate opened time"},
-            {"name": "MalfunctionFixAttemptTime", "token": "@MalfunctionFixAttemptTime", "label": "Latest fix attempt time"},
-            {"name": "MalfunctionFixAttempts", "token": "@MalfunctionFixAttempts", "label": "Fix attempt count"},
-            {"name": "MalfunctionResolutionTime", "token": "@MalfunctionResolutionTime", "label": "Resolution time"},
-            {"name": "MalfunctionStage", "token": "@MalfunctionStage", "label": "Malfunction stage"},
-            {"name": "LastKnownVehicle", "token": "@LastKnownVehicle", "label": "Last known vehicle"},
-        ],
-    },
-    {
-        "group": "Leaderboard",
-        "items": [
-            {"name": "NewWinnerName", "token": "@NewWinnerName", "label": "New winner"},
-            {"name": "OvertakenName", "token": "@OvertakenName", "label": "Overtaken person"},
-            {"name": "ReadCount", "token": "@ReadCount", "label": "Read count"},
-        ],
-    },
-]
+TRIGGER_CATALOG = notification_trigger_catalog()
+ACTIONABLE_NOTIFICATION_CATALOG = notification_actionable_catalog(GATE_OPEN_ACTION)
+VARIABLE_GROUPS = notification_variable_groups()
 
 MOCK_FACTS = {
     "message": "Steph arrived in the 2026 Tesla Model Y Dual Motor Long Range.",
@@ -562,8 +195,8 @@ MOCK_FACTS = {
 class NotificationService:
     """DB-backed notification workflow engine.
 
-    Legacy dynamic-setting rules are intentionally ignored. This service can be
-    invoked directly for tests, and listens for normalized `notification.trigger`
+    DB notification_rules are the only runtime workflow source. This service can
+    be invoked directly for tests, and listens for normalized `notification.trigger`
     events for normal runtime delivery.
     """
 
@@ -681,7 +314,7 @@ class NotificationService:
         raise_on_failure: bool = False,
         rules_override: list[dict[str, Any]] | None = None,
     ) -> ComposedNotification:
-        """Compatibility wrapper.
+        """Dispatch wrapper.
 
         Use enqueue_notification() when the caller wants asynchronous workflow
         delivery, and send_notification_now() when the caller needs immediate
@@ -1151,15 +784,15 @@ class NotificationService:
                 action.get("gate_malfunction_stages")
             )
             if active_context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
-                fallback = gate_malfunction_fallback_content(
+                content = gate_malfunction_notification_content(
                     action_type,
                     active_context,
                     previous_notification=_context_bool(
                         active_context.facts.get("malfunction_has_previous_notification")
                     ),
                 )
-                rendered_title = fallback["title"]
-                rendered_message = fallback["body"]
+                rendered_title = content["title"]
+                rendered_message = content["body"]
             else:
                 rendered_title = render_template(title_template, variables)
                 rendered_message = render_template(message_template, variables)
@@ -1168,7 +801,7 @@ class NotificationService:
                     "id": str(action.get("id") or f"action-{len(rendered_actions) + 1}"),
                     "type": action_type,
                     "target_mode": str(action.get("target_mode") or "all"),
-                    "target_ids": normalize_string_list(action.get("target_ids")),
+                    "target_ids": normalize_string_list(action.get("target_ids"), allow_scalar=False),
                     "title": rendered_title,
                     "message": rendered_message,
                     "title_template": title_template,
@@ -1261,7 +894,13 @@ class NotificationService:
         for action in actions:
             if not gate_malfunction_action_supports_stage(action, stage):
                 continue
-            content = await self._compose_gate_malfunction_content(str(action.get("type") or ""), context)
+            content = gate_malfunction_notification_content(
+                str(action.get("type") or ""),
+                context,
+                previous_notification=_context_bool(
+                    context.facts.get("malfunction_has_previous_notification")
+                ),
+            )
             selected.append(
                 {
                     **action,
@@ -1270,142 +909,6 @@ class NotificationService:
                 }
             )
         return selected
-
-    async def _compose_gate_malfunction_content(
-        self,
-        channel: str,
-        context: NotificationContext,
-    ) -> dict[str, str]:
-        previous_notification = _context_bool(context.facts.get("malfunction_has_previous_notification"))
-        fallback = gate_malfunction_fallback_content(
-            channel,
-            context,
-            previous_notification=previous_notification,
-        )
-        try:
-            runtime = await get_runtime_config()
-            provider_name = str(runtime.llm_provider or "").strip().lower()
-            if not provider_name:
-                self._record_gate_malfunction_content_fallback(
-                    context,
-                    channel,
-                    reason="provider_not_configured",
-                )
-                return fallback
-            if provider_name == "local":
-                self._record_gate_malfunction_content_fallback(
-                    context,
-                    channel,
-                    reason="local_provider",
-                    provider=provider_name,
-                )
-                return fallback
-            provider = get_llm_provider(provider_name)
-            result = await complete_with_provider_options(
-                provider,
-                [
-                    ChatMessageInput(
-                        role="system",
-                        content=(
-                            "You write plain-language gate malfunction notifications for a household. "
-                            "The reader may have no technical knowledge. Return only JSON with string fields "
-                            "title and body. Keep the title under 80 characters and the body under 220 "
-                            "characters. The notification body must be a simple overview of what is happening. "
-                            "Mention Alfred as the system trying to help when the gate is still stuck. Do not "
-                            "include markdown, raw JSON, IDs, timestamps, vehicles, people, users, LPR, Home "
-                            "Assistant, telemetry, recovery attempt counts, internal stage names, or system "
-                            "implementation details. Do not include 'Attention.' or 'Gate Malfunction Update:'; "
-                            "the system adds required prefixes after generation."
-                        ),
-                    ),
-                    ChatMessageInput(
-                        role="user",
-                        content=(
-                            "Create a friendly Gate Malfunction notification for this channel and stage.\n"
-                            f"Channel: {channel or 'notification'}\n"
-                            f"Stage: {GATE_MALFUNCTION_STAGE_LABELS.get(normalize_gate_malfunction_stage(context.facts.get('malfunction_stage')), 'Gate malfunction')}\n"
-                            f"Previous earlier-stage notification sent: {previous_notification}\n"
-                            f"Subject: {context.subject}\n"
-                            f"Severity: {context.severity}\n"
-                            f"Suggested tone and meaning: {gate_malfunction_plain_body(normalize_gate_malfunction_stage(context.facts.get('malfunction_stage')))}"
-                        ),
-                    ),
-                ],
-                max_output_tokens=260,
-                request_purpose="notifications.gate_malfunction_content",
-            )
-            parsed = parse_gate_malfunction_llm_content(result.text)
-            if not parsed:
-                self._record_gate_malfunction_content_fallback(
-                    context,
-                    channel,
-                    reason="invalid_llm_content",
-                    provider=provider_name,
-                )
-                return fallback
-            title = parsed.get("title") or fallback["title"]
-            body = parsed.get("body") or fallback["body"]
-            if notification_text_looks_like_raw_data(body):
-                self._record_gate_malfunction_content_fallback(
-                    context,
-                    channel,
-                    reason="raw_data_in_llm_body",
-                    provider=provider_name,
-                )
-                return fallback
-            if notification_text_looks_like_raw_data(title):
-                title = fallback["title"]
-            return {
-                "title": clean_notification_text(title)[:160] or fallback["title"],
-                "body": postprocess_gate_malfunction_body(
-                    channel,
-                    body,
-                    previous_notification=previous_notification,
-                    fallback_body=fallback["body"],
-                ),
-            }
-        except ProviderNotConfiguredError:
-            self._record_gate_malfunction_content_fallback(
-                context,
-                channel,
-                reason="provider_not_configured",
-            )
-        except Exception as exc:
-            self._record_gate_malfunction_content_fallback(
-                context,
-                channel,
-                reason="llm_generation_failed",
-                error=str(exc),
-            )
-            logger.warning(
-                "gate_malfunction_notification_llm_failed",
-                extra={"event_type": context.event_type, "channel": channel, "error": str(exc)},
-            )
-        return fallback
-
-    def _record_gate_malfunction_content_fallback(
-        self,
-        context: NotificationContext,
-        channel: str,
-        *,
-        reason: str,
-        provider: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        self._record_notification_span(
-            "Gate Malfunction Notification Text Fallback",
-            context,
-            status="error" if error else "ok",
-            error=error,
-            output_payload={
-                "event_type": context.event_type,
-                "channel": channel,
-                "stage": context.facts.get("malfunction_stage"),
-                "reason": reason,
-                "provider": provider,
-                "delivered": False,
-            },
-        )
 
     async def _deliver_action(
         self,
@@ -1592,7 +1095,7 @@ class NotificationService:
         home_assistant_targets: list[str],
     ) -> None:
         if snapshot and not (home_assistant_targets and snapshot.public_url):
-            delete_notification_snapshot(snapshot.path)
+            get_snapshot_manager().delete_snapshot_path(snapshot.path)
 
     async def _send_discord(self, action: dict[str, Any], context: NotificationContext) -> None:
         attachments = await self._snapshot_attachments(action.get("media") or {})
@@ -1604,7 +1107,7 @@ class NotificationService:
             )
         finally:
             for path in attachments:
-                delete_notification_snapshot(path)
+                get_snapshot_manager().delete_snapshot_path(path)
 
     async def _send_whatsapp(self, action: dict[str, Any], context: NotificationContext) -> None:
         await get_whatsapp_messaging_service().send_notification_action(
@@ -1709,7 +1212,7 @@ class NotificationService:
         if not urls:
             return []
         target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"))
+        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
         if target_mode == "all" or "apprise:*" in endpoint_ids or not endpoint_ids:
             return urls
         chosen: list[str] = []
@@ -1726,7 +1229,7 @@ class NotificationService:
 
     async def _select_home_assistant_mobile_targets(self, config, action: dict[str, Any]) -> list[str]:
         target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"))
+        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
         if target_mode == "all" or "home_assistant_mobile:*" in endpoint_ids:
             return await self._all_home_assistant_mobile_targets(config)
 
@@ -1745,7 +1248,7 @@ class NotificationService:
 
     async def _select_voice_targets(self, config, action: dict[str, Any]) -> list[str]:
         target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"))
+        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
         if target_mode == "all" or "home_assistant_tts:*" in endpoint_ids:
             targets = await self._all_media_player_targets(config)
             if targets:
@@ -1917,11 +1420,12 @@ class NotificationService:
         except Exception as exc:
             raise NotificationDeliveryError(f"Unable to capture notification snapshot: {exc}") from exc
 
-        stored = store_notification_snapshot(snapshot.content, snapshot.content_type)
+        manager = get_snapshot_manager()
+        stored = manager.store_notification_snapshot(snapshot.content, snapshot.content_type)
         return NotificationSnapshotAttachment(
             path=str(stored.path),
             content_type=stored.content_type,
-            public_url=notification_snapshot_absolute_url(stored),
+            public_url=manager.notification_snapshot_public_url(stored),
         )
 
     async def _snapshot_attachments(self, media: dict[str, Any]) -> list[str]:
@@ -2302,13 +1806,13 @@ def composed_from_context(context: NotificationContext) -> ComposedNotification:
 
 def context_variables(context: NotificationContext) -> dict[str, str]:
     facts = {
-        _canonical_key(key): "" if value is None else str(value)
+        canonical_key(key): "" if value is None else str(value)
         for key, value in context.facts.items()
     }
 
     def pick(*keys: str, default: str = "") -> str:
         for key in keys:
-            value = facts.get(_canonical_key(key))
+            value = facts.get(canonical_key(key))
             if value:
                 return value
         return default
@@ -2470,17 +1974,6 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
     }
 
 
-def render_template(template: str, variables: dict[str, str]) -> str:
-    by_canonical = {_canonical_key(key): value for key, value in variables.items()}
-
-    def replace_token(match: re.Match[str]) -> str:
-        return by_canonical.get(_canonical_key(match.group(1)), "")
-
-    rendered = AT_TOKEN_PATTERN.sub(replace_token, template)
-    rendered = LEGACY_TOKEN_PATTERN.sub(replace_token, rendered)
-    return rendered.strip()
-
-
 def context_occurred_at(context: NotificationContext) -> datetime:
     raw = context.facts.get("occurred_at") or context.facts.get("created_at") or ""
     if raw:
@@ -2504,12 +1997,7 @@ def snapshot_payload(media: dict[str, Any]) -> dict[str, str | bool] | None:
 
 
 def normalize_trigger_event(value: Any) -> str:
-    event_type = str(value or "").strip()
-    return GATE_MALFUNCTION_EVENT_TYPE if event_type in LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES else event_type
-
-
-def legacy_gate_malfunction_stage(value: Any) -> str:
-    return LEGACY_GATE_MALFUNCTION_TRIGGER_STAGES.get(str(value or "").strip(), "")
+    return str(value or "").strip()
 
 
 def normalize_gate_malfunction_stage(value: Any) -> str:
@@ -2533,27 +2021,7 @@ def gate_malfunction_action_supports_stage(action: dict[str, Any], stage: str) -
     return not stages or normalize_gate_malfunction_stage(stage) in stages
 
 
-def parse_gate_malfunction_llm_content(value: str) -> dict[str, str] | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    title = clean_notification_text(str(parsed.get("title") or ""))
-    body = clean_notification_text(str(parsed.get("body") or ""))
-    if not title and not body:
-        return None
-    return {"title": title, "body": body}
-
-
-def gate_malfunction_fallback_content(
+def gate_malfunction_notification_content(
     channel: str,
     context: NotificationContext,
     *,
@@ -2577,7 +2045,7 @@ def gate_malfunction_fallback_content(
             channel,
             body,
             previous_notification=previous_notification,
-            fallback_body=body or context.subject,
+            default_body=body or context.subject,
         ),
     }
 
@@ -2606,32 +2074,14 @@ def clean_notification_text(value: str) -> str:
     return text
 
 
-def notification_text_looks_like_raw_data(value: str) -> bool:
-    text = str(value or "")
-    lowered = text.lower()
-    if "{" in text or "}" in text or "[" in text or "]" in text:
-        return True
-    return any(
-        marker in lowered
-        for marker in [
-            "malfunction_id",
-            "telemetry",
-            "entity_id",
-            "last_known_vehicle",
-            "registration_number",
-            "fix_attempts",
-        ]
-    )
-
-
 def postprocess_gate_malfunction_body(
     channel: str,
     body: str,
     *,
     previous_notification: bool,
-    fallback_body: str,
+    default_body: str,
 ) -> str:
-    text = clean_notification_text(body) or clean_notification_text(fallback_body)
+    text = clean_notification_text(body) or clean_notification_text(default_body)
     text = strip_gate_malfunction_prefixes(text)
     if previous_notification:
         text = f"{GATE_MALFUNCTION_UPDATE_PREFIX} {text}".strip()
@@ -2668,26 +2118,14 @@ def _context_bool(value: Any) -> bool:
 
 
 def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
-    raw_trigger = value.get("trigger_event") or value.get("event_type") or ""
-    legacy_stage = legacy_gate_malfunction_stage(raw_trigger)
     actions = normalize_actions(value.get("actions"))
-    if legacy_stage:
-        actions = [
-            {
-                **action,
-                "gate_malfunction_stages": normalize_gate_malfunction_stages(
-                    action.get("gate_malfunction_stages") or [legacy_stage]
-                ),
-            }
-            for action in actions
-        ]
     return {
         "id": str(value.get("id") or uuid.uuid4()),
         "name": str(value.get("name") or "Notification Workflow").strip()[:160],
-        "trigger_event": normalize_trigger_event(raw_trigger),
+        "trigger_event": normalize_trigger_event(value.get("trigger_event")),
         "conditions": normalize_conditions(value.get("conditions")),
         "actions": actions,
-        "is_active": value.get("is_active", value.get("enabled", True)) is not False,
+        "is_active": value.get("is_active", True) is not False,
     }
 
 
@@ -2734,7 +2172,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
                 "id": str(raw.get("id") or f"action-{index + 1}"),
                 "type": action_type,
                 "target_mode": str(raw.get("target_mode") or "all"),
-                "target_ids": normalize_string_list(raw.get("target_ids")),
+                "target_ids": normalize_string_list(raw.get("target_ids"), allow_scalar=False),
                 "title_template": str(raw.get("title_template") or ""),
                 "message_template": str(raw.get("message_template") or ""),
                 "gate_malfunction_stages": normalize_gate_malfunction_stages(
@@ -2750,7 +2188,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
 def normalize_media(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     return {
-        "attach_camera_snapshot": bool(raw.get("attach_camera_snapshot") or raw.get("enabled")),
+        "attach_camera_snapshot": bool(raw.get("attach_camera_snapshot")),
         "camera_id": str(raw.get("camera_id") or ""),
     }
 
@@ -2762,12 +2200,6 @@ def normalize_actionable(value: Any) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled")) and action == GATE_OPEN_ACTION,
         "action": action if action == GATE_OPEN_ACTION else "",
     }
-
-
-def normalize_string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item).strip()]
 
 
 def presence_condition_matches(condition: dict[str, Any], present_person_ids: set[str]) -> bool:
@@ -2811,10 +2243,6 @@ def trigger_severity(trigger_event: str) -> str:
             if event["value"] == trigger_event:
                 return str(event["severity"])
     return "info"
-
-
-def _canonical_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
 def _possessive(value: str) -> str:

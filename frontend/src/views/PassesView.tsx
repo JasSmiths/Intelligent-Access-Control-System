@@ -32,26 +32,11 @@ X
 import React from "react";
 import { createPortal } from "react-dom";
 
-import {
-api,
-AuditLog,
-BadgeTone,
-createActionConfirmation,
-EmptyState,
-formatDate,
-fromDateTimeLocal,
-isAbortError,
-isRecord,
-levelTone,
-matches,
-numberPayload,
-RealtimeMessage,
-scheduleDays,
-stringPayload,
-titleCase,
-toDateTimeLocal,
-TooltipPositionState
-} from "../shared";
+import { api, createActionConfirmation, isAbortError } from "../api/client";
+import { formatDate, fromDateTimeLocal, isRecord, levelTone, matches, numberPayload, scheduleDays, stringPayload, titleCase, toDateTimeLocal } from "../lib/format";
+import { EmptyState } from "../ui/primitives";
+import type { AuditLog, RealtimeMessage, TooltipPositionState } from "../api/types";
+import type { BadgeTone } from "../ui/primitives";
 
 
 

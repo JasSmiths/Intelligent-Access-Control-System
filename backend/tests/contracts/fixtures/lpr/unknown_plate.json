@@ -1,0 +1,27 @@
+{
+  "registrationNumber": "NO1DEA",
+  "confidence": 0.91,
+  "capturedAt": "2026-05-31T11:05:00+00:00",
+  "alarm": {
+    "name": "Gate LPR",
+    "triggers": [
+      {
+        "key": "license_plate_unknown",
+        "value": "NO1DEA",
+        "group": {
+          "name": "NO1DEA"
+        },
+        "device": "gate-lpr-camera",
+        "eventId": "protect-event-unknown",
+        "zones": {
+          "line": [],
+          "zone": [
+            "driveway"
+          ],
+          "loiter": []
+        }
+      }
+    ]
+  }
+}
+

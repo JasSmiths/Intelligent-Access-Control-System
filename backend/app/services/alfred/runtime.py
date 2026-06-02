@@ -9,10 +9,6 @@ DEFAULT_MODE = "v3"
 NON_AGENT_PROVIDERS = {"local"}
 
 
-def agent_mode(runtime: Any) -> str:
-    return DEFAULT_MODE
-
-
 def provider_agent_capability(runtime: Any, provider_name: str) -> dict[str, Any]:
     provider = str(provider_name or "").strip().lower()
     configured = _provider_configured(runtime, provider)
@@ -27,7 +23,7 @@ def provider_agent_capability(runtime: Any, provider_name: str) -> dict[str, Any
 
 
 def agent_status_payload(runtime: Any, *, memory_status: dict[str, Any] | None = None) -> dict[str, Any]:
-    mode = agent_mode(runtime)
+    mode = DEFAULT_MODE
     active_provider = str(getattr(runtime, "llm_provider", "local") or "local").strip().lower()
     capability = provider_agent_capability(runtime, active_provider)
     return {
@@ -37,7 +33,7 @@ def agent_status_payload(runtime: Any, *, memory_status: dict[str, Any] | None =
         "provider_capability": capability,
         "v3_ready": mode == DEFAULT_MODE and capability["agent_capable"],
         "local_provider_limitation": (
-            "The local provider is retained for diagnostics and summaries, but it is not capable of Alfred 3.0 free-form agent chat."
+            "The local diagnostics provider is retained for setup/status checks, but it cannot answer Alfred V3 chat."
             if capability["local_provider_limited"]
             else ""
         ),

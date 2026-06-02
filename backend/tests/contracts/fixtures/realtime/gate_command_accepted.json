@@ -1,0 +1,23 @@
+{
+  "intent_id": "intent-open-gate-1",
+  "action": "open",
+  "source": "lpr",
+  "controller": "configured",
+  "gate_key": "top_gate",
+  "event_id": "11111111-1111-1111-1111-111111111111",
+  "movement_saga_id": "55555555-5555-5555-5555-555555555555",
+  "command_id": "66666666-6666-6666-6666-666666666666",
+  "registration_number": "PE70DHX",
+  "accepted": true,
+  "state": "opening",
+  "detail": "Gate command accepted.",
+  "mechanically_confirmed": true,
+  "requires_reconciliation": false,
+  "exception_class": null,
+  "started_at": "2026-05-31T08:15:00+00:00",
+  "completed_at": "2026-05-31T08:15:01+00:00",
+  "metadata": {
+    "provider": "home_assistant"
+  }
+}
+

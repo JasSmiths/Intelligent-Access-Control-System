@@ -1,4 +1,4 @@
-import { isRecord,nullableString,stringPayload,titleCase } from "../../shared";
+import { isRecord, nullableString, stringPayload } from "../../lib/format";
 import { lprWaterfallPhaseLabels,lprWaterfallSlowThresholdsMs } from "./constants";
 import type {
   LprTimingObservation,

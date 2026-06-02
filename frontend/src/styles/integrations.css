@@ -1537,90 +1537,11 @@
   gap: 16px;
 }
 
-.ha-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.ha-tab {
-  min-width: 0;
-  min-height: 58px;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  color: var(--muted-strong);
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-
-.ha-tab:hover {
-  border-color: var(--line);
-  color: var(--text);
-  background: var(--surface);
-}
-
-.ha-tab.active {
-  border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
-  color: var(--text);
-  background: var(--surface);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
-}
-
-.ha-tab svg {
-  width: 32px;
-  height: 32px;
-  display: block;
-  padding: 7px;
-  border-radius: 8px;
-  color: var(--blue);
-  background: var(--blue-soft);
-}
-
-.ha-tab span,
-.ha-tab strong,
-.ha-tab small {
-  display: block;
-  min-width: 0;
-}
-
-.ha-tab strong {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 680;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ha-tab small {
-  overflow: hidden;
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 520;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ha-tab-panel {
   min-height: 440px;
 }
 
-.ha-setup-panel,
-.ha-device-panel,
-.presence-mapping-card {
+.ha-setup-panel {
   display: grid;
   gap: 16px;
   padding: 18px;
@@ -1629,16 +1550,12 @@
   background: color-mix(in srgb, var(--surface-soft) 45%, transparent);
 }
 
-.ha-refresh-button,
-.ha-auto-button,
-.ha-add-button {
+.ha-refresh-button {
   min-height: 40px;
   white-space: nowrap;
 }
 
-.ha-section-heading,
-.ha-device-title,
-.presence-mapping-title {
+.ha-section-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1646,26 +1563,18 @@
 }
 
 .ha-section-heading strong,
-.ha-section-heading span,
-.ha-device-title strong,
-.ha-device-title span,
-.presence-mapping-title strong,
-.presence-mapping-title span {
+.ha-section-heading span {
   display: block;
 }
 
-.ha-section-heading strong,
-.ha-device-title strong,
-.presence-mapping-title strong {
+.ha-section-heading strong {
   color: var(--text);
   font-size: 16px;
   font-weight: 680;
   line-height: 1.25;
 }
 
-.ha-section-heading span,
-.ha-device-title div > span,
-.presence-mapping-title span {
+.ha-section-heading span {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
@@ -1723,179 +1632,6 @@
 
 .ha-grid-wide {
   grid-column: 1 / -1;
-}
-
-.presence-mapping-list {
-  display: grid;
-  gap: 10px;
-}
-
-.presence-mapping-row {
-  min-height: 62px;
-  display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(280px, 1.05fr);
-  align-items: center;
-  gap: 16px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.presence-mapping-row strong,
-.presence-mapping-row span {
-  display: block;
-}
-
-.presence-mapping-row span {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.presence-mapping-row select {
-  min-height: 40px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-radius: 8px;
-  background-color: var(--surface-soft);
-  font-size: 13px;
-}
-
-.ha-device-icon {
-  display: none;
-}
-
-.ha-entity-composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.ha-entity-composer select {
-  min-height: 40px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-radius: 8px;
-  background-color: var(--surface-soft);
-  font-size: 13px;
-}
-
-.ha-cover-list {
-  display: grid;
-  gap: 10px;
-}
-
-.ha-cover-row {
-  min-width: 0;
-  min-height: 62px;
-  display: grid;
-  grid-template-columns: minmax(170px, 0.32fr) minmax(180px, 0.42fr) minmax(170px, 0.34fr) 104px 40px;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.ha-cover-identity {
-  min-width: 0;
-  display: contents;
-}
-
-.ha-cover-row input:not([type="checkbox"]) {
-  width: 100%;
-  min-height: 40px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--text);
-  font-size: 13px;
-}
-
-.ha-cover-identity input {
-  color: var(--text);
-  font-weight: 570;
-}
-
-.ha-cover-identity code {
-  overflow: hidden;
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--muted-strong);
-  font-size: 12px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ha-cover-schedule-select {
-  min-width: 0;
-  min-height: 40px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--text);
-  padding: 0 10px;
-  font-size: 13px;
-}
-
-.entity-toggle {
-  min-width: 104px;
-  min-height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted-strong);
-  background: var(--surface-soft);
-  font-size: 12px;
-  font-weight: 620;
-}
-
-.entity-toggle.active {
-  border-color: color-mix(in srgb, var(--green) 30%, var(--line));
-  color: var(--green);
-  background: var(--green-soft);
-}
-
-.entity-toggle input {
-  width: 13px;
-  height: 13px;
-  accent-color: var(--green);
-}
-
-.ha-entity-empty {
-  min-height: 220px;
-  display: grid;
-  align-content: center;
-  place-items: center;
-  gap: 8px;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 13px;
-  background: var(--surface);
-}
-
-.ha-entity-empty svg {
-  color: var(--muted-strong);
 }
 
 .garage-chip {

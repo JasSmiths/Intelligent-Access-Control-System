@@ -10,13 +10,24 @@ import pytest
 
 from app.ai import tools as ai_tools
 from app.ai import providers as providers_module
-from app.ai.providers import ChatMessageInput, LlmResult, LocalProvider, OpenAIResponsesProvider, ToolCall
+from app.ai.tool_groups import access_diagnostics_handlers as access_diagnostics_tools
+from app.ai.tool_groups import access_incident_handlers as access_incident_tools
+from app.ai.tool_groups import gate_maintenance_handlers as gate_tools
+from app.ai.tool_groups import general_handlers as general_tools
+from app.ai.tool_groups import schedules_handlers as schedule_tools
+from app.ai.providers import (
+    ChatMessageInput,
+    LlmResult,
+    LocalDiagnosticProvider,
+    OpenAIResponsesProvider,
+    ProviderNotConfiguredError,
+    ToolCall,
+)
 from app.api.v1 import ai as ai_api
 from app.services.alfred.feedback import (
     AlfredFeedbackError,
     AlfredFeedbackService,
     DEFAULT_SEEDED_EVAL_EXAMPLES,
-    DEFAULT_SEEDED_LESSONS,
     _eval_training_source,
     _feedback_training_source,
     _lesson_training_source,
@@ -346,51 +357,11 @@ def test_training_sources_describe_user_feedback_reflection_and_seed_data() -> N
 
 
 @pytest.mark.asyncio
-async def test_local_provider_general_response_has_warm_persona() -> None:
-    provider = LocalProvider()
+async def test_local_diagnostic_provider_does_not_generate_alfred_answers() -> None:
+    provider = LocalDiagnosticProvider()
 
-    result = await provider.complete([ChatMessageInput("user", "hello")])
-
-    assert "I'm Alfred" in result.text
-    assert "sensible clipboard" in result.text
-    assert "You asked: hello" in result.text
-
-
-def test_local_provider_confirmation_summary_is_warm_but_clear() -> None:
-    provider = LocalProvider()
-
-    text = provider._summarize_device_open(
-        {
-            "requires_confirmation": True,
-            "action": "open",
-            "device": {"name": "Top Gate"},
-        }
-    )
-
-    assert "confirmation button" in text
-    assert "before I open Top Gate" in text
-    assert "Safety first" in text
-
-
-def test_critical_tool_failure_stays_plain() -> None:
-    provider = LocalProvider()
-
-    text = provider._summarize_device_open(
-        {
-            "action": "open",
-            "device": {"name": "Top Gate"},
-            "opened": False,
-            "detail": "Home Assistant call failed.",
-        }
-    )
-
-    assert text == "I could not open Top Gate: Home Assistant call failed."
-
-
-def test_local_provider_no_records_reply_is_warm() -> None:
-    provider = LocalProvider()
-
-    assert provider._summarize_events({"events": []}) == "I found no matching access events. The logbook is politely blank."
+    with pytest.raises(ProviderNotConfiguredError, match="local diagnostics provider cannot generate Alfred answers"):
+        await provider.complete([ChatMessageInput(role="user", content="Who is home?")])
 
 
 @pytest.mark.asyncio
@@ -545,7 +516,6 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
     monkeypatch.setattr(service, "_append_message", fake_append_message)
     monkeypatch.setattr(service, "_update_memory", lambda *_args, **_kwargs: asyncio.sleep(0))
     monkeypatch.setattr(service, "_pending_action_for_response", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
     monkeypatch.setattr("app.services.chat.event_bus.publish", lambda *_args, **_kwargs: asyncio.sleep(0))
 
     result = await service._handle_message_v3(
@@ -586,7 +556,7 @@ async def test_alfred_v3_planner_receives_actor_context_before_tooling(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_alfred_v3_fails_closed_for_local_provider(monkeypatch) -> None:
+async def test_alfred_v3_fails_closed_for_local_diagnostics_provider(monkeypatch) -> None:
     service = ChatService()
     statuses: list[dict[str, object]] = []
 
@@ -640,10 +610,7 @@ async def test_alfred_v3_planner_failure_does_not_fall_back_to_keyword_routing(m
         return ChatTurnResult(str(session_id), kwargs.get("provider", "provider_error"), text, kwargs.get("tool_results", []), [])
 
     async def fail_execute(*_args, **_kwargs):
-        raise AssertionError("planner failure must not execute deterministic fallback tools")
-
-    def fail_legacy_helper(*_args, **_kwargs):
-        raise AssertionError("planner failure must not use visitor-pass keyword routing")
+        raise AssertionError("planner failure must not execute tools")
 
     async def status_callback(status):
         statuses.append(status)
@@ -653,9 +620,6 @@ async def test_alfred_v3_planner_failure_does_not_fall_back_to_keyword_routing(m
     monkeypatch.setattr("app.services.chat.plan_with_llm", failing_plan)
     monkeypatch.setattr(service, "_direct_response", fake_direct_response)
     monkeypatch.setattr(service, "_execute_tool_batch", fail_execute)
-    monkeypatch.setattr(service, "_looks_like_visitor_pass_request", fail_legacy_helper)
-    monkeypatch.setattr(service, "_looks_like_device_action_request", fail_legacy_helper)
-
     result = await service._handle_message_v3(
         SimpleNamespace(name="openai"),
         SimpleNamespace(llm_provider="openai", openai_api_key="key"),
@@ -1158,7 +1122,7 @@ def test_standard_users_do_not_see_mutation_or_admin_tools() -> None:
     assert "query_alfred_runtime_events" not in names
 
 
-def test_local_provider_is_reported_as_non_agent_capable() -> None:
+def test_local_diagnostics_provider_is_reported_as_non_agent_capable() -> None:
     status = provider_agent_capability(SimpleNamespace(llm_provider="local"), "local")
 
     assert status["configured"] is True
@@ -1332,7 +1296,6 @@ async def _run_simulated_v3_turn(
     monkeypatch.setattr(service, "_store_pending_agent_action", fake_store_pending_agent_action)
     monkeypatch.setattr(service, "_update_memory", lambda *_args, **_kwargs: asyncio.sleep(0))
     monkeypatch.setattr(service, "_pending_action_for_response", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
     monkeypatch.setattr("app.services.chat.alfred_memory_service", Memory())
     monkeypatch.setattr("app.services.chat.alfred_feedback_service", Feedback())
     monkeypatch.setattr("app.services.chat.event_bus.publish", lambda *_args, **_kwargs: asyncio.sleep(0))
@@ -1385,7 +1348,6 @@ async def test_provider_neutral_tool_protocol_runs_tools(monkeypatch) -> None:
 
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_build_messages", fake_build_messages)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
 
     result = await service._run_provider_agent_loop(
         provider,
@@ -1454,7 +1416,6 @@ async def test_react_loop_does_not_expose_raw_tool_json_after_empty_alert_search
 
     monkeypatch.setattr(service, "_execute_tool_batch", fake_execute_tool_batch)
     monkeypatch.setattr(service, "_build_agent_messages", fake_build_agent_messages)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
 
     result = await service._run_provider_agent_loop(
         RawJsonAfterToolProvider(),
@@ -1509,7 +1470,6 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
     async def fake_build_messages(session_id, tool_results, selected_tools, route=None, actor_context=None):
         return [ChatMessageInput("system", "test")]
 
@@ -1530,51 +1490,6 @@ async def test_react_loop_stops_at_max_iterations(monkeypatch) -> None:
     assert len(executed) == 5
     assert "five-step safety limit" in result.text
     assert "did not make anything up from partial tool output" in result.text
-
-
-def test_visitor_pass_query_does_not_start_guided_create_flow() -> None:
-    service = ChatService()
-    message = "Are there any visitor passes setup for today 30th?"
-
-    assert service._looks_like_visitor_pass_query_request(message.lower()) is True
-    assert service._looks_like_visitor_pass_create_request(message.lower()) is False
-
-
-def test_pending_visitor_pass_create_abandons_clear_new_gate_command() -> None:
-    service = ChatService()
-
-    assert service._should_abandon_pending_visitor_pass_create("open the top gate") is True
-    assert service._is_pending_visitor_pass_create_cancel_message("cancel that") is True
-
-
-@pytest.mark.asyncio
-async def test_guided_visitor_pass_flow_does_not_preempt_router_for_new_requests() -> None:
-    service = ChatService()
-
-    result = await service._handle_guided_visitor_pass_flow(
-        uuid.uuid4(),
-        "Chris Starkey is coming tomorrow at approx 11am, create a pass for him",
-        {},
-        actor_context={},
-        provider_name="protocol-test",
-        status_callback=None,
-    )
-
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_guided_schedule_flow_does_not_preempt_router_for_new_requests() -> None:
-    service = ChatService()
-
-    result = await service._handle_guided_schedule_flow(
-        uuid.uuid4(),
-        "Create a gardener schedule for weekdays 8am to 5pm",
-        {},
-        status_callback=None,
-    )
-
-    assert result is None
 
 
 def test_pending_confirmation_uses_stored_arguments() -> None:
@@ -1617,46 +1532,12 @@ async def test_create_schedule_tool_requires_confirmation() -> None:
     assert result["confirmation_field"] == "confirm"
 
 
-def test_time_label_behavior_is_training_not_cleanup() -> None:
-    service = ChatService()
-
-    assert not hasattr(service, "_strip_local_time_labels")
-    assert "never include time zone names" in SYSTEM_PROMPT
-    assert any(item["title"] == "Use the site clock silently" for item in DEFAULT_SEEDED_LESSONS)
-
-
 def test_assistant_text_cleanup_removes_redundant_seconds_parentheses() -> None:
     service = ChatService()
 
     cleaned = service._clean_assistant_text("Steph left this morning at 07:38 (07:38:12).", [])
 
     assert cleaned == "Steph left this morning at 07:38."
-
-
-def test_noop_malfunction_guidance_is_a_lesson_not_keyword_filter() -> None:
-    service = ChatService()
-    seeded_text = " ".join(str(item["lesson"]) for item in DEFAULT_SEEDED_LESSONS)
-
-    assert not hasattr(service, "_should_suppress_tool_result_for_prompt")
-    assert not hasattr(service, "_humanize_robotic_absence_summary")
-    assert "Do not mention inactive malfunctions" in seeded_text
-    assert "exit with their next entry" in seeded_text
-    assert "duration first in Alfred's natural voice" in seeded_text
-    assert any(item["title"] == "Investigate missing access as a full chain" for item in DEFAULT_SEEDED_LESSONS)
-    assert any(item["title"] == "Distinguish absence duration from visit duration" for item in DEFAULT_SEEDED_LESSONS)
-    assert any(item["title"] == "Keep duration answers human" for item in DEFAULT_SEEDED_LESSONS)
-    assert any(item["title"] == "Use the site clock silently" for item in DEFAULT_SEEDED_LESSONS)
-    assert any(
-        isinstance(metadata := item.get("metadata"), dict)
-        and metadata.get("seed") == "sylv_absence_duration_exit_to_entry"
-        for item in DEFAULT_SEEDED_EVAL_EXAMPLES
-    )
-
-
-def test_timezone_auto_learning_uses_prompt_guidance_not_sanitizer() -> None:
-    assert not hasattr(feedback_module, "lesson_text_without_timezone_directives")
-    assert "Never create lessons that tell Alfred to mention time zones" in feedback_module.FEEDBACK_ANALYSIS_PROMPT
-    assert "Never create lessons that tell Alfred to mention time zones" in feedback_module.TURN_REFLECTION_PROMPT
 
 
 @pytest.mark.asyncio
@@ -1690,7 +1571,7 @@ async def test_default_eval_example_seed_is_idempotent(monkeypatch) -> None:
     assert rows[0].metadata_["seed"] == "ash_1818_suppressed_read_incident"
 
 
-def test_messaging_feedback_commands_parse_without_keyword_routing() -> None:
+def test_messaging_feedback_commands_only_parse_feedback_phrases() -> None:
     assert parse_feedback_command("thumbs up") == {"rating": "up", "reason": "", "ideal_answer": ""}
     assert parse_feedback_command("thumbs down Too much detail. ideal: Just say the gate is closed.") == {
         "rating": "down",
@@ -1984,15 +1865,6 @@ async def test_calculate_absence_duration_ongoing_includes_human_answer_hint(mon
     hint = result["answer_hints"][0]
     assert "Ash has been out for 1h 50m since 09 May 2026, 15:50. Still marked away as of 09 May 2026, 17:40" in hint
     assert "avoid robotic audit-log phrasing" in hint
-
-
-def test_absence_persona_uses_training_not_phrase_humanizer() -> None:
-    service = ChatService()
-    seeded_text = " ".join(str(item["lesson"]) for item in DEFAULT_SEEDED_LESSONS)
-
-    assert not hasattr(service, "_humanize_robotic_absence_summary")
-    assert "duration first in Alfred's natural voice" in seeded_text
-    assert "do not sound like an audit export" in SYSTEM_PROMPT
 
 
 def test_assistant_text_cleanup_blocks_raw_json_tool_payloads() -> None:
@@ -2314,11 +2186,6 @@ async def test_reflection_lessons_follow_learning_mode(monkeypatch) -> None:
     assert captured_models == ["gpt-test", "gpt-test"]
 
 
-def test_reflection_learning_has_timezone_training_instruction_without_regex_sanitizer() -> None:
-    assert "Never create lessons that tell Alfred to mention time zones" in feedback_module.TURN_REFLECTION_PROMPT
-    assert not hasattr(feedback_module, "TIMEZONE_DIRECTIVE_FRAGMENT_RE")
-
-
 def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
     tools = ai_tools.build_agent_tools()
 
@@ -2624,7 +2491,7 @@ def test_tools_for_selection_uses_planned_calls_when_selected_names_are_missing(
     assert [tool.name for tool in selected] == ["calculate_absence_duration"]
 
 
-def test_tools_for_selection_falls_back_to_non_general_domains_only() -> None:
+def test_tools_for_selection_uses_domain_selection_when_tool_names_are_missing() -> None:
     tools = ai_tools.build_agent_tools()
     access_selection = parse_planner_selection(
         {
@@ -2784,37 +2651,6 @@ async def test_planned_duration_answer_repairs_timestamp_only_tool_selection(mon
     assert repaired[0]["name"] == "calculate_absence_duration"
 
 
-def test_general_tool_handlers_are_extracted_behind_stable_facade() -> None:
-    tools = ai_tools.build_agent_tools()
-
-    assert tools["resolve_human_entity"].handler.__module__ == "app.ai.tool_groups.general_handlers"
-    assert tools["query_presence"].handler.__module__ == "app.ai.tool_groups.general_handlers"
-    assert tools["get_system_users"].handler.__module__ == "app.ai.tool_groups.general_handlers"
-    assert callable(ai_tools.resolve_human_entity)
-    assert callable(ai_tools.query_presence)
-    assert callable(ai_tools.get_system_users)
-
-
-def test_tool_group_catalogs_use_domain_handler_modules() -> None:
-    tools = ai_tools.build_agent_tools()
-
-    expected_modules = {
-        "query_device_states": "app.ai.tool_groups.gate_maintenance_handlers",
-        "create_visitor_pass": "app.ai.tool_groups.visitor_passes_handlers",
-        "calculate_absence_duration": "app.ai.tool_groups.access_diagnostics_handlers",
-        "query_access_events": "app.ai.tool_groups.access_diagnostics_handlers",
-        "query_alert_activity": "app.ai.tool_groups.access_diagnostics_handlers",
-        "lookup_dvla_vehicle": "app.ai.tool_groups.compliance_cameras_files_handlers",
-        "create_notification_workflow": "app.ai.tool_groups.notifications_handlers",
-        "create_automation": "app.ai.tool_groups.automations_handlers",
-        "update_schedule": "app.ai.tool_groups.schedules_handlers",
-        "query_system_settings": "app.ai.tool_groups.system_operations_handlers",
-    }
-
-    for tool_name, module_name in expected_modules.items():
-        assert tools[tool_name].handler.__module__ == module_name
-
-
 def test_alfred_registry_rejects_confirmation_tools_without_confirmation_field() -> None:
     async def noop_handler(_arguments):
         return {}
@@ -2860,7 +2696,6 @@ async def test_react_loop_executes_read_tools_in_parallel(monkeypatch) -> None:
 
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_build_messages", fake_build_messages)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
 
     before = time.perf_counter()
     result = await service._run_provider_agent_loop(
@@ -2936,7 +2771,6 @@ async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monke
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_load_memory", fake_load_memory)
     monkeypatch.setattr(service, "_save_memory", fake_save_memory)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
 
     before = time.perf_counter()
     result = await service._run_provider_agent_loop(
@@ -3034,7 +2868,6 @@ async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
     monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
     monkeypatch.setattr(service, "_load_memory", fake_load_memory)
     monkeypatch.setattr(service, "_save_memory", fake_save_memory)
-    monkeypatch.setattr(service, "_schedule_conflict_response", no_schedule_conflict)
 
     result = await service._run_provider_agent_loop(
         ActionToolProvider(),
@@ -3151,7 +2984,7 @@ async def test_confirmed_open_gate_finishes_without_reprompt(monkeypatch) -> Non
 
 
 def test_natural_schedule_time_description_normalizes_to_time_blocks() -> None:
-    blocks = ai_tools._time_blocks_from_agent_arguments(
+    blocks = schedule_tools._time_blocks_from_agent_arguments(
         {
             "name": "Gardener",
             "time_description": "Wednesdays and Fridays 6am to 7pm",
@@ -3234,6 +3067,13 @@ def test_access_diagnostic_tools_are_registered() -> None:
     assert tools["test_unifi_alarm_webhook"].requires_confirmation is True
 
 
+def test_tool_facade_does_not_export_private_handler_helpers() -> None:
+    assert callable(ai_tools.diagnose_access_event)
+
+    with pytest.raises(AttributeError):
+        getattr(ai_tools, "_incident_root_cause")
+
+
 def test_suppressed_read_extraction_and_root_cause_chain() -> None:
     person_id = uuid.uuid4()
     vehicle_id = uuid.uuid4()
@@ -3268,7 +3108,7 @@ def test_suppressed_read_extraction_and_root_cause_chain() -> None:
         },
     )
 
-    suppressed = ai_tools._incident_suppressed_read_payloads_from_event(
+    suppressed = access_incident_tools._incident_suppressed_read_payloads_from_event(
         source_event,
         subject_summary={"person_id": str(person_id), "vehicle_id": str(vehicle_id), "plates": ["AGS7X"], "person": "Ash"},
         plates=["AGS7X"],
@@ -3277,7 +3117,7 @@ def test_suppressed_read_extraction_and_root_cause_chain() -> None:
         direction="entry",
         timezone_name="Europe/London",
     )
-    root = ai_tools._incident_root_cause(
+    root = access_incident_tools._incident_root_cause(
         found_iacs=False,
         protect={"available": True, "events": []},
         traces=[],
@@ -3297,7 +3137,7 @@ def test_suppressed_read_incident_builds_backfill_candidate_args() -> None:
     vehicle_id = str(uuid.uuid4())
     source_event_id = str(uuid.uuid4())
 
-    args = ai_tools._backfill_args_from_incident(
+    args = access_incident_tools._backfill_args_from_incident(
         subject={"summary": {"person_id": person_id, "vehicle_id": vehicle_id, "plates": ["AGS7X"]}},
         protect={},
         suppressed_reads=[
@@ -3323,7 +3163,7 @@ def test_suppressed_read_incident_builds_backfill_candidate_args() -> None:
 
 
 def test_lpr_timing_observation_reports_capture_delay() -> None:
-    observation = ai_tools._serialize_lpr_timing_observation(
+    observation = access_diagnostics_tools._serialize_lpr_timing_observation(
         {
             "id": "obs-1",
             "source": "uiprotect_track",
@@ -3406,7 +3246,7 @@ async def test_query_anomalies_can_search_resolved_delivery_alert_notes_and_visu
     async def fake_runtime_config():
         return SimpleNamespace(site_timezone="Europe/London")
 
-    monkeypatch.setattr("app.services.alert_snapshots.settings.data_dir", tmp_path)
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
     monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
     monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
 
@@ -3619,7 +3459,7 @@ async def test_resolve_human_entity_resolves_visitor_pass(monkeypatch) -> None:
     monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
     monkeypatch.setattr(ai_tools, "get_visitor_pass_service", lambda: VisitorPassService())
     monkeypatch.setattr(
-        ai_tools,
+        general_tools,
         "_visitor_pass_agent_payload",
         lambda pass_, timezone_name: {
             "id": str(pass_.id),
@@ -3746,8 +3586,8 @@ async def test_close_device_preview_uses_close_action(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_device_executes_close_cover_command(monkeypatch) -> None:
-    calls: list[str] = []
+async def test_close_device_executes_through_access_device_service(monkeypatch) -> None:
+    calls: list[tuple[str, str, str, dict[str, Any]]] = []
 
     async def fake_runtime_config():
         return SimpleNamespace(
@@ -3761,22 +3601,99 @@ async def test_close_device_executes_close_cover_command(monkeypatch) -> None:
             ],
         )
 
-    async def fake_command_cover(_client, _entity, action, reason):
-        calls.append(action)
-        return SimpleNamespace(accepted=True, state="closed", detail=reason)
+    class FakeAccessDeviceService:
+        async def command_device(self, device_key, action, reason, **kwargs):
+            calls.append((device_key, action, reason, kwargs))
+            return SimpleNamespace(
+                accepted=True,
+                state=SimpleNamespace(value="closed"),
+                detail=reason,
+                verified=True,
+                used_provider="home_assistant",
+                failover_used=False,
+            )
 
     monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(ai_tools, "get_home_assistant_client", lambda: object())
-    monkeypatch.setattr(ai_tools, "command_cover", fake_command_cover)
+    monkeypatch.setattr(ai_tools, "get_access_device_service", lambda: FakeAccessDeviceService())
 
     result = await ai_tools.open_device(
         {"target": "main garage door", "kind": "all", "action": "close", "confirm": True}
     )
 
-    assert calls == ["close"]
+    assert calls == [
+        (
+            "cover.internal_main_garage",
+            "close",
+            "Alfred agent: Alfred agent requested closing Main Garage",
+            {"schedule_source": "garage_door"},
+        )
+    ]
     assert result["closed"] is True
     assert result["opened"] is False
     assert result["audit_event"] == "agent.device_close_requested"
+    assert result["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_open_gate_executes_through_gate_command_coordinator(monkeypatch) -> None:
+    calls = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, exc, _traceback):
+            return None
+
+    async def fake_runtime_config():
+        return SimpleNamespace(
+            home_assistant_gate_entities=[
+                {
+                    "entity_id": "cover.top_gate",
+                    "name": "Top Gate",
+                    "enabled": True,
+                }
+            ],
+            home_assistant_garage_door_entities=[],
+            site_timezone="Europe/London",
+            schedule_default_policy="allow",
+        )
+
+    async def fake_maintenance_mode():
+        return False
+
+    async def fake_evaluate_schedule_id(*_args, **_kwargs):
+        return SimpleNamespace(allowed=True, reason=None)
+
+    class FakeGateCommandCoordinator:
+        async def execute_open(self, intent):
+            calls.append(intent)
+            return SimpleNamespace(
+                accepted=True,
+                state=SimpleNamespace(value="open"),
+                detail="accepted",
+                intent=SimpleNamespace(intent_id="intent-1"),
+                command_id="command-1",
+                mechanically_confirmed=True,
+                requires_reconciliation=False,
+            )
+
+    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(ai_tools, "evaluate_schedule_id", fake_evaluate_schedule_id)
+    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(ai_tools, "is_maintenance_mode_active", fake_maintenance_mode)
+    monkeypatch.setattr(ai_tools, "get_gate_command_coordinator", lambda: FakeGateCommandCoordinator())
+
+    result = await ai_tools.open_gate({"target": "Top Gate", "reason": "operator test", "confirm": True})
+
+    assert len(calls) == 1
+    assert calls[0].source == "alfred"
+    assert calls[0].actor == "Alfred_AI"
+    assert calls[0].reason == "Alfred agent: operator test"
+    assert calls[0].metadata["target_entity_id"] == "cover.top_gate"
+    assert result["opened"] is True
+    assert result["command_id"] == "command-1"
+    assert result["requires_reconciliation"] is False
 
 
 def test_close_device_confirmation_card_uses_close_language() -> None:
@@ -3800,7 +3717,7 @@ def test_close_device_confirmation_card_uses_close_language() -> None:
 
 
 def test_agent_device_log_extra_does_not_overwrite_log_record_name() -> None:
-    extra = ai_tools._log_extra({"name": "Main Garage", "kind": "garage_door"})
+    extra = gate_tools._log_extra({"name": "Main Garage", "kind": "garage_door"})
 
     assert "name" not in extra
     assert extra["device_name"] == "Main Garage"

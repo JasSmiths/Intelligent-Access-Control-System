@@ -15,7 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.db.session import get_db_session
 from app.models import AccessEvent, Anomaly, MovementSagaRecord, Presence, User
 from app.models.enums import AnomalySeverity, AnomalyType
-from app.services.alert_snapshots import alert_snapshot_metadata, alert_snapshot_path
+from app.services.snapshots import alert_snapshot_metadata, alert_snapshot_path
 from app.services.event_bus import event_bus
 from app.services.expected_presence import expected_presence_today
 from app.services.profile_photos import compact_image_bytes
@@ -143,9 +143,7 @@ def _event_movement_saga_payload(
             "failure_detail": movement_saga.failure_detail,
             "updated_at": movement_saga.updated_at.isoformat() if movement_saga.updated_at else None,
         }
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    fallback = raw_payload.get("movement_saga")
-    return fallback if isinstance(fallback, dict) else None
+    return None
 
 
 def _optional_text(value: Any) -> str | None:

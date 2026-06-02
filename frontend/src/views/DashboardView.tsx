@@ -16,33 +16,12 @@ Warehouse
 } from "lucide-react";
 import React from "react";
 
-import {
-AccessEvent,
-activeManagedCovers,
-AlertSeverity,
-Anomaly,
-api,
-Badge,
-BadgeTone,
-createActionConfirmation,
-displayUserName,
-EmptyState,
-ExpectedPresencePerson,
-ExpectedPresenceSummary,
-HomeAssistantManagedCover,
-IntegrationStatus,
-isActionableAlert,
-MaintenanceStatus,
-mediaSource,
-NavigateToView,
-PanelHeader,
-Person,
-Presence,
-titleCase,
-UserAccount,
-Vehicle,
-visitorEventDisplayName
-} from "../shared";
+import { api, createActionConfirmation } from "../api/client";
+import { activeManagedCovers, displayUserName, isActionableAlert, titleCase, visitorEventDisplayName } from "../lib/format";
+import { mediaSource } from "../lib/media";
+import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
+import type { AccessEvent, AlertSeverity, Anomaly, ExpectedPresencePerson, ExpectedPresenceSummary, HomeAssistantManagedCover, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, UserAccount, Vehicle } from "../api/types";
+import type { BadgeTone } from "../ui/primitives";
 
 
 

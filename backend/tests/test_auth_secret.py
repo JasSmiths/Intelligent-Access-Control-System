@@ -144,36 +144,6 @@ async def test_lpr_webhook_secret_empty_update_keeps_existing_value(monkeypatch)
     assert rows[0]["value"] is True
 
 
-@pytest.mark.asyncio
-async def test_startup_migration_reencrypts_legacy_default_settings_and_icloud(monkeypatch) -> None:
-    active_secret = "a" * 48
-    setting = SystemSetting(
-        key="openai_api_key",
-        category="llm",
-        value={"encrypted": encrypt_secret("openai-secret", secret=DEFAULT_AUTH_SECRET_KEY)},
-        is_secret=True,
-        description="OpenAI API key.",
-    )
-    account = ICloudCalendarAccount(
-        apple_id="owner@example.com",
-        encrypted_session_bundle=encrypt_secret('{"session":"legacy"}', secret=DEFAULT_AUTH_SECRET_KEY),
-    )
-    fake_session = FakeSession([setting], [account])
-
-    monkeypatch.setattr(auth_secret_management, "get_auth_secret", lambda: active_secret)
-    monkeypatch.setattr(auth_secret_management, "read_previous_auth_secret", lambda: None)
-    monkeypatch.setattr(auth_secret_management, "clear_previous_auth_secret", lambda *_args: None)
-    monkeypatch.setattr(auth_secret_management, "invalidate_runtime_config_cache", lambda: None)
-    monkeypatch.setattr(auth_secret_management, "AsyncSessionLocal", lambda: fake_session)
-
-    result = await auth_secret_management.migrate_encrypted_payloads_for_active_auth_secret()
-
-    assert result == {"settings": 1, "icloud_accounts": 1}
-    assert decrypt_secret(setting.value["encrypted"], secret=active_secret) == "openai-secret"
-    assert decrypt_secret(account.encrypted_session_bundle, secret=active_secret) == '{"session":"legacy"}'
-    assert fake_session.committed is True
-
-
 def test_jwts_and_actionable_hashes_are_bound_to_current_auth_secret(tmp_path, monkeypatch) -> None:
     path = tmp_path / "auth-secret.key"
     monkeypatch.delenv("IACS_AUTH_SECRET_KEY", raising=False)

@@ -7,9 +7,8 @@ from typing import Any, cast
 
 import pytest
 
-import app.core.crypto as crypto_module
 import app.services.dependency_updates as dependency_updates_module
-from app.models import DependencyUpdateBackup, ExternalDependency, SystemSetting, User
+from app.models import DependencyUpdateBackup, ExternalDependency, User
 from app.services.dependency_updates import (
     DependencyCommandError,
     DependencyUpdateError,
@@ -27,7 +26,6 @@ from app.services.dependency_updates import (
     _update_python_requirement,
     _workspace_root,
 )
-from app.services.settings import SECRET_KEYS, _migrate_secret_record, decrypted_value
 
 
 class _FakeJobLog:
@@ -128,26 +126,6 @@ dependencies = [
     assert discord_row.ecosystem == "python"
     assert discord_row.is_direct is True
     assert discord_row.dependant_area == "Discord Messaging"
-
-
-def test_dependency_backup_mount_options_are_secret_and_legacy_plaintext_is_migrated(monkeypatch) -> None:
-    monkeypatch.setattr(crypto_module, "get_auth_secret", lambda: "test-secret")
-    secret = "username=iacs,password=secret,vers=3.0,rw"
-    record = SystemSetting(
-        key="dependency_update_backup_mount_options",
-        category="updates",
-        value={"plain": secret},
-        is_secret=False,
-        description="Docker local volume mount options.",
-    )
-
-    assert "dependency_update_backup_mount_options" in SECRET_KEYS
-    assert _migrate_secret_record(record) is True
-    assert record.is_secret is True
-    assert "encrypted" in record.value
-    assert "plain" not in record.value
-    assert secret not in json.dumps(record.value)
-    assert decrypted_value(record) == secret
 
 
 @pytest.mark.asyncio

@@ -23,33 +23,13 @@ Zap
 } from "lucide-react";
 import React from "react";
 
-import {
-AccessDevice,
-api,
-Badge,
-CardHeader,
-coerceSettingsPayload,
-createActionConfirmation,
-displayUserName,
-fileToDataUrl,
-formatDate,
-Group,
-MaintenanceStatus,
-mediaSource,
-PanelHeader,
-Person,
-Schedule,
-SettingField,
-SettingFieldDefinition,
-stringifySetting,
-Toolbar,
-UnifiProtectCamera,
-UserAccount,
-UserAvatar,
-UserRole,
-useSettings,
-Vehicle
-} from "../shared";
+import { api, createActionConfirmation } from "../api/client";
+import { displayUserName, formatDate } from "../lib/format";
+import { fileToDataUrl, mediaSource, UserAvatar } from "../lib/media";
+import { coerceSettingsPayload, SettingField, stringifySetting, useSettings } from "../lib/settings";
+import { Badge, CardHeader, PanelHeader, Toolbar } from "../ui/primitives";
+import type { AccessDevice, Group, MaintenanceStatus, Person, Schedule, UnifiProtectCamera, UserAccount, UserRole, Vehicle } from "../api/types";
+import type { SettingFieldDefinition } from "../lib/settings";
 
 
 

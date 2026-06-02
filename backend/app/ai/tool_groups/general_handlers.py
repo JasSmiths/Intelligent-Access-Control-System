@@ -1,7 +1,7 @@
 """General Alfred tool handlers.
 
-These handlers live beside the General tool catalog so new entity/presence
-tools can grow without making the legacy tools facade larger.
+These handlers live beside the General tool catalog so entity/presence tools
+stay owned by their tool group.
 """
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.ai import tools as tools_facade
+from app.ai.tool_groups import _shared as tools_facade
+from app.ai.tool_groups.visitor_passes_handlers import _visitor_pass_agent_payload
 from app.models import Group, Person, Presence, User, Vehicle
 
 
@@ -165,7 +166,7 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                 if visitor_pass.status.value in {"cancelled", "expired"}:
                     score = max(0, score - 25)
                 if score:
-                    payload = tools_facade._visitor_pass_agent_payload(visitor_pass, config.site_timezone)
+                    payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
                     payload.update(
                         {
                             "type": "visitor_pass",

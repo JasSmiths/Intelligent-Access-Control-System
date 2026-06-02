@@ -1,9 +1,6 @@
 import React from "react";
 
-import {
-  api,
-  createActionConfirmation
-} from "../../shared";
+import { api, createActionConfirmation } from "../../api/client";
 import {
   ClearLogsConfirmModal,
   exportVisible,

@@ -31,6 +31,7 @@ ACCESS_EVENT_SNAPSHOT_ROOT = "snapshots/access-events"
 ACCESS_EVENT_SNAPSHOT_ARCHIVE_ROOT = "access-event-snapshot-archive"
 NOTIFICATION_SNAPSHOT_ROOT = "notification-snapshots"
 NOTIFICATION_SNAPSHOT_TTL = timedelta(hours=24)
+ALERT_SNAPSHOT_CONTEXT_KEY = "snapshot"
 ACCESS_EVENT_SNAPSHOT_FILENAME_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jpg$"
 )
@@ -159,6 +160,31 @@ class SnapshotManager:
             logger.debug("snapshot_delete_failed", extra={"path": str(path), "error": str(exc)})
         except FileNotFoundError:
             return
+
+    def notification_snapshot_public_url(self, snapshot: StoredSnapshot) -> str | None:
+        if not settings.public_base_url:
+            return None
+        base_url = str(settings.public_base_url).rstrip("/")
+        return f"{base_url}{snapshot.url_path}"
+
+    def delete_alert_snapshot(self, row: Any) -> None:
+        if getattr(row, "id", None):
+            try:
+                alert_snapshot_path(row.id).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "alert_snapshot_delete_failed",
+                    extra={"alert_id": str(row.id), "error": str(exc)},
+                )
+
+        context = dict(getattr(row, "context", None) or {})
+        if ALERT_SNAPSHOT_CONTEXT_KEY in context:
+            context.pop(ALERT_SNAPSHOT_CONTEXT_KEY, None)
+            row.context = context
+
+    def delete_alert_snapshots(self, rows: list[Any]) -> None:
+        for row in rows:
+            self.delete_alert_snapshot(row)
 
     def ensure_access_event_archive(self, metadata: SnapshotMetadata) -> bool:
         event_id = _access_event_snapshot_id(metadata.relative_path)
@@ -386,6 +412,52 @@ def notification_snapshot_relative_path(filename: str) -> str:
 
 def notification_snapshot_url(filename: str) -> str:
     return f"/api/v1/notification-snapshots/{filename}"
+
+
+def alert_snapshot_path(alert_id: uuid.UUID) -> Path:
+    return settings.data_dir / "alert-snapshots" / f"{alert_id}.jpg"
+
+
+def alert_snapshot_url(alert_id: uuid.UUID) -> str:
+    return f"/api/v1/alerts/{alert_id}/snapshot"
+
+
+def alert_snapshot_metadata(row: Any) -> dict[str, Any] | None:
+    value = (getattr(row, "context", None) or {}).get(ALERT_SNAPSHOT_CONTEXT_KEY)
+    if not isinstance(value, dict):
+        return None
+    url = str(value.get("url") or "")
+    if url.startswith("/api/v1/events/"):
+        event = getattr(row, "event", None)
+        if event:
+            return alert_snapshot_metadata_from_event(event)
+        return value if _event_snapshot_url_exists(url) else None
+    if url.startswith("/api/v1/alerts/") and getattr(row, "id", None) and not alert_snapshot_path(row.id).exists():
+        return None
+    return value
+
+
+def alert_snapshot_metadata_from_event(event: Any) -> dict[str, Any] | None:
+    snapshot = access_event_snapshot_payload(event)
+    if not snapshot.get("snapshot_url"):
+        return None
+    return {
+        "url": snapshot["snapshot_url"],
+        "camera": snapshot.get("snapshot_camera"),
+        "captured_at": snapshot.get("snapshot_captured_at"),
+        "content_type": getattr(event, "snapshot_content_type", None) or "image/jpeg",
+        "bytes": snapshot.get("snapshot_bytes"),
+        "width": snapshot.get("snapshot_width"),
+        "height": snapshot.get("snapshot_height"),
+    }
+
+
+def _event_snapshot_url_exists(url: str) -> bool:
+    try:
+        event_id = uuid.UUID(url.removeprefix("/api/v1/events/").removesuffix("/snapshot"))
+    except ValueError:
+        return False
+    return (settings.data_dir / "snapshots" / "access-events" / f"{event_id}.jpg").exists()
 
 
 def normalize_image_content_type(content_type: str) -> str:

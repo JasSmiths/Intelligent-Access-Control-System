@@ -27,7 +27,6 @@ def _ha_runtime(**overrides):
                 "open_service": "cover.open_cover",
             }
         ],
-        "home_assistant_gate_entity_id": "",
         "home_assistant_gate_open_service": "cover.open_cover",
         "home_assistant_garage_door_entities": [],
         "home_assistant_default_media_player": None,
@@ -202,12 +201,8 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
     assert result["checks"]["maintenance"]["status"] == "maintenance"
     assert result["checks"]["home_assistant"]["status"] == "degraded"
     assert result["checks"]["home_assistant"]["last_error"] == "Home Assistant returned 401: Unauthorized"
-    assert result["discord"] == {
-        "configured": True,
-        "connected": True,
-        "guild_count": 1,
-        "channel_count": 2,
-    }
+    assert result["checks"]["discord"]["guild_count"] == 1
+    assert result["checks"]["discord"]["channel_count"] == 2
 
 
 async def test_home_assistant_client_wraps_network_failures_without_leaking_token(monkeypatch) -> None:

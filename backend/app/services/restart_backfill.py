@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,14 +21,15 @@ from app.models.enums import (
     AnomalySeverity,
     AnomalyType,
     MovementSagaState,
-    PresenceState,
     TimingClassification,
 )
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.gate.base import GateState
 from app.modules.unifi_protect.client import UnifiProtectError
-from app.services.alert_snapshots import alert_snapshot_metadata_from_event
+from app.services.snapshots import alert_snapshot_metadata_from_event
 from app.services.event_bus import event_bus
+from app.services.movement.presence import commit_latest_presence_for_person
+from app.services.movement.sessions import payload_values
 from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
@@ -847,57 +847,12 @@ def backfill_window_start(
 def protect_event_ids_from_payload(payload: Any) -> set[str]:
     if not isinstance(payload, dict):
         return set()
-    candidates = {
-        _nested_value(payload, ("best", "alarm", "triggers", 0, "eventId")),
-        _nested_value(payload, ("best", "alarm", "triggers", 0, "event_id")),
-        _nested_value(payload, ("best", "alarm", "eventId")),
-        _nested_value(payload, ("best", "alarm", "event_id")),
-        _nested_value(payload, ("best", "eventId")),
-        _nested_value(payload, ("best", "event_id")),
-        _nested_value(payload, ("protect_evidence", "event_id")),
-        _nested_value(payload, ("backfill", "protect_event_id")),
-        _nested_value(payload, ("snapshot_recovery", "protect_event_id")),
-    }
-    vehicle_session = payload.get("vehicle_session")
-    if isinstance(vehicle_session, dict):
-        protect_event_ids = vehicle_session.get("protect_event_ids")
-        if isinstance(protect_event_ids, list):
-            candidates.update(protect_event_ids)
-    return {str(candidate).strip() for candidate in candidates if str(candidate or "").strip()}
+    return set(payload_values(payload, ("eventId", "event_id", "protect_event_id", "protect_event_ids")))
 
 
 def _camera_ids_from_access_event(event: AccessEvent) -> set[str]:
     payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    return _payload_values(payload, ("cameraId", "camera_id", "sensorId", "sensor_id"))
-
-
-def _payload_values(value: Any, keys: tuple[str, ...]) -> set[str]:
-    normalized_keys = {_payload_key(key) for key in keys}
-    found: set[str] = set()
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if _payload_key(str(key)) in normalized_keys:
-                found.update(_scalar_payload_values(item))
-            found.update(_payload_values(item, keys))
-    elif isinstance(value, list):
-        for item in value:
-            found.update(_payload_values(item, keys))
-    return found
-
-
-def _scalar_payload_values(value: Any) -> set[str]:
-    if value is None or isinstance(value, bool):
-        return set()
-    if isinstance(value, str | int | float):
-        text = str(value).strip()
-        return {text} if text else set()
-    if isinstance(value, list):
-        return {item for value_item in value for item in _scalar_payload_values(value_item)}
-    return set()
-
-
-def _payload_key(key: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", key.lower())
+    return set(payload_values(payload, ("cameraId", "camera_id", "sensorId", "sensor_id")))
 
 
 def _candidate_ocr_variants(candidate: ProtectBackfillCandidate) -> list[str]:
@@ -1079,24 +1034,7 @@ def _visitor_pass_payload(visitor_pass: VisitorPass | None, mode: str | None) ->
 
 
 async def _update_presence(session: AsyncSession, person: Person, event: AccessEvent) -> None:
-    latest_event = await session.scalar(
-        select(AccessEvent)
-        .where(
-            AccessEvent.person_id == person.id,
-            AccessEvent.decision == AccessDecision.GRANTED,
-            AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-        )
-        .order_by(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc())
-        .limit(1)
-    )
-    target_event = latest_event or event
-    presence = await session.get(Presence, person.id)
-    if not presence:
-        presence = Presence(person_id=person.id)
-        session.add(presence)
-    presence.state = PresenceState.PRESENT if target_event.direction == AccessDirection.ENTRY else PresenceState.EXITED
-    presence.last_event_id = target_event.id
-    presence.last_changed_at = target_event.occurred_at
+    await commit_latest_presence_for_person(session, person, event)
 
 
 def _schedule_evaluation_payload(schedule_evaluation: ScheduleEvaluation | None) -> dict[str, Any]:
@@ -1157,20 +1095,6 @@ def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _nested_value(payload: Any, path: tuple[Any, ...]) -> Any:
-    current = payload
-    for item in path:
-        if isinstance(item, int):
-            if not isinstance(current, list) or len(current) <= item:
-                return None
-            current = current[item]
-        else:
-            if not isinstance(current, dict):
-                return None
-            current = current.get(item)
-    return current
 
 
 def _runtime_state_path() -> Path:

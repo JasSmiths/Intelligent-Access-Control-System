@@ -270,6 +270,134 @@ async def test_reconcile_uses_open_observation_after_command_even_if_current_gat
     assert published == [(str(saga.id), GateState.OPEN.value)]
 
 
+@pytest.mark.asyncio
+async def test_reconcile_standalone_gate_command_fails_when_stale_without_evidence(monkeypatch) -> None:
+    service = MovementReconciliationService()
+    now = datetime.now(tz=UTC)
+    command = GateCommandRecord(
+        id=uuid4(),
+        idempotency_key="manual-stale",
+        source="manual_admin",
+        gate_key="default",
+        controller="configured",
+        reason="dashboard",
+        state=GateCommandState.RECONCILIATION_REQUIRED,
+        accepted=True,
+        requires_reconciliation=True,
+        mechanically_confirmed=False,
+        started_at=now - timedelta(minutes=10),
+        completed_at=now - timedelta(minutes=10),
+    )
+    command.created_at = now - timedelta(minutes=10)
+    command.updated_at = now - timedelta(minutes=10)
+    published: list[tuple[str, str]] = []
+
+    async def fake_gate_open_observation_after_command(_session, _command):
+        return None
+
+    async def fake_current_gate_state():
+        return GateState.CLOSED
+
+    async def fake_publish_failed(row, detail):
+        published.append((str(row.id), detail))
+
+    monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)
+    monkeypatch.setattr(service, "_current_gate_state", fake_current_gate_state)
+    monkeypatch.setattr(service, "_publish_standalone_command_failed", fake_publish_failed)
+
+    count = await service._reconcile_standalone_gate_command(FakeFlushSession(), command)
+
+    assert count == 1
+    assert command.state == GateCommandState.FAILED
+    assert command.requires_reconciliation is False
+    assert command.mechanically_confirmed is False
+    assert "no open/opening gate observation" in command.detail
+    assert published == [(str(command.id), command.detail)]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standalone_gate_command_waits_inside_confirmation_window(monkeypatch) -> None:
+    service = MovementReconciliationService()
+    now = datetime.now(tz=UTC)
+    command = GateCommandRecord(
+        id=uuid4(),
+        idempotency_key="manual-recent",
+        source="manual_admin",
+        gate_key="default",
+        controller="configured",
+        reason="dashboard",
+        state=GateCommandState.RECONCILIATION_REQUIRED,
+        accepted=True,
+        requires_reconciliation=True,
+        mechanically_confirmed=False,
+        started_at=now - timedelta(seconds=15),
+        completed_at=now - timedelta(seconds=15),
+    )
+    command.created_at = now - timedelta(seconds=15)
+    command.updated_at = now - timedelta(seconds=15)
+
+    async def fake_gate_open_observation_after_command(_session, _command):
+        return None
+
+    monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)
+
+    count = await service._reconcile_standalone_gate_command(FakeFlushSession(), command)
+
+    assert count == 0
+    assert command.state == GateCommandState.RECONCILIATION_REQUIRED
+    assert command.requires_reconciliation is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standalone_gate_command_uses_valid_observation(monkeypatch) -> None:
+    service = MovementReconciliationService()
+    now = datetime.now(tz=UTC)
+    command = GateCommandRecord(
+        id=uuid4(),
+        idempotency_key="manual-observed",
+        source="manual_admin",
+        gate_key="default",
+        controller="configured",
+        reason="dashboard",
+        state=GateCommandState.RECONCILIATION_REQUIRED,
+        accepted=True,
+        requires_reconciliation=True,
+        mechanically_confirmed=False,
+        started_at=now - timedelta(seconds=30),
+        completed_at=now - timedelta(seconds=30),
+    )
+    command.created_at = now - timedelta(seconds=30)
+    command.updated_at = now - timedelta(seconds=30)
+    observation = GateStateObservation(
+        gate_entity_id="cover.top_gate",
+        gate_name="Top Gate",
+        state=GateState.OPENING.value,
+        raw_state="opening",
+        previous_state=GateState.CLOSED.value,
+        observed_at=now - timedelta(seconds=29),
+        source="home_assistant_websocket",
+    )
+    published: list[tuple[str, str]] = []
+
+    async def fake_gate_open_observation_after_command(_session, _command):
+        return observation
+
+    async def fake_publish_reconciled(row, state):
+        published.append((str(row.id), state.value))
+
+    monkeypatch.setattr(service, "_gate_open_observation_after_command", fake_gate_open_observation_after_command)
+    monkeypatch.setattr(service, "_publish_standalone_command_reconciled", fake_publish_reconciled)
+
+    count = await service._reconcile_standalone_gate_command(FakeFlushSession(), command)
+
+    assert count == 1
+    assert command.state == GateCommandState.RECONCILED
+    assert command.requires_reconciliation is False
+    assert command.mechanically_confirmed is True
+    assert "Standalone gate command reconciled" in command.detail
+    assert published == [(str(command.id), GateState.OPENING.value)]
+
+
 def test_gate_observation_identity_uses_command_specific_device_ids() -> None:
     service = MovementReconciliationService()
     command = GateCommandRecord(
