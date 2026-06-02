@@ -22,7 +22,7 @@ system:
   stack:
     backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis
     frontend: React 19, TypeScript, Vite, Nginx
-    ui_libs: lucide-react, Tiptap, motion, TanStack Virtual, Monaco, jsondiffpatch
+    ui_libs: lucide-react, TanStack Virtual, Monaco package, jsondiffpatch
     integrations: Home Assistant, ESPHome native API, Apprise, WhatsApp Cloud API, Discord, DVLA VES, UniFi Protect/uiprotect, iCloud Calendar
     ai: local, OpenAI, Gemini, Claude/Anthropic, Ollama
 
@@ -80,13 +80,24 @@ repo:
     alfred_v3: backend/app/services/alfred/*
     alfred_contracts: backend/app/services/chat_contracts.py; answer contracts in backend/app/services/alfred/answer_contracts.py
     alfred_tools_facade: backend/app/ai/tools.py
-    alfred_tool_groups: backend/app/ai/tool_groups/*
+    alfred_tool_groups: backend/app/ai/tool_groups/*; shared handler utilities in backend/app/ai/tool_groups/_shared.py
+    access_events: backend/app/services/access_events.py orchestrates; helpers in backend/app/services/access/*
+    movement_sessions: backend/app/services/movement/sessions.py
+    movement_presence: backend/app/services/movement/presence.py
+    workflows: shared workflow catalogs/context in backend/app/services/workflows/*
+    messaging: backend/app/services/whatsapp_messaging.py facade; implementation in backend/app/services/messaging/*
     access_devices: backend/app/services/access_devices.py; providers in backend/app/modules/access_devices/*
+    gate_commands: backend/app/services/gate_commands.py; physical gate controller in backend/app/modules/gate/access_devices.py
+    snapshots: backend/app/services/snapshots.py SnapshotManager; no alert/notification snapshot wrapper services
     media_helpers: backend/app/api/v1/media.py, backend/app/services/profile_photos.py
   frontend:
-    shell: frontend/src/main.tsx
-    shared: frontend/src/shared.tsx
-    views: frontend/src/views/*
+    bootstrap: frontend/src/main.tsx only mounts frontend/src/app/App.tsx
+    app_shell: frontend/src/app/* owns auth, routing, navigation, realtime, search, theme, toasts, chat launcher, alerts
+    api: frontend/src/api/* owns typed fetch/client modules; feature views should not call fetch directly
+    ui: frontend/src/ui/* owns domain-neutral primitives
+    lib: frontend/src/lib/* owns formatting, media, settings, notification helpers
+    features: frontend/src/features/* owns integrations and workflows; route views are shells/coordinators where possible
+    views: frontend/src/views/* route modules and current larger domain screens
     styles: frontend/src/styles.css imports frontend/src/styles/*
 
 runtime:
@@ -168,7 +179,7 @@ lpr_pipeline:
   webhook: POST /api/v1/webhooks/ubiquiti/lpr
   security: require X-IACS-LPR-Token shared secret + static UNVR source IP/CIDR allowlist before reading payload, including maintenance-mode ignores.
   adapter: backend/app/modules/lpr/ubiquiti.py -> PlateRead(registration_number, confidence, source, captured_at, raw_payload)
-  service: backend/app/services/access_events.py with movement_fsm.py, movement_ledger.py, gate_commands.py
+  service: backend/app/services/access_events.py coordinates access decisions; movement sessions/presence live under backend/app/services/movement/*; hardware/payload/snapshot helpers live under backend/app/services/access/*
   maintenance_mode: accept/ignore webhook; clear queues; no access_event/presence/gate/garage.
   smart_zones: diagnostic only; missing/empty/nonmatching zones never drop valid plate reads.
   debounce: durable movement_sessions drive exact echo, gate-cycle/session, convoy, visitor departure, OCR variant, and arrival_ocr_noise suppression.
@@ -184,7 +195,7 @@ lpr_pipeline:
 
 snapshots:
   owner: backend/app/services/snapshots.py SnapshotManager
-  wrappers: alert_snapshots.py, notification_snapshots.py compatibility only
+  wrappers: alert_snapshots.py and notification_snapshots.py were removed; use SnapshotManager directly
   access: SnapshotManager.capture_access_event_snapshot(); compact JPEG under /app/data/snapshots/access-events/
   db_fields: snapshot_path, content_type, bytes, width, height, captured_at, camera, created_at
   rule: no ad hoc Path.write_bytes/Pillow compression outside SnapshotManager.
@@ -195,7 +206,8 @@ notifications:
   service: backend/app/services/notifications.py
   contract: NotificationContext(event_type, subject, severity, facts)
   storage: notification_rules DB, not system_settings.
-  templates: new UI uses @Variable; renderer also accepts bracket tokens.
+  templates: UI and renderer use @Variable tokens; do not reintroduce bracket-token compatibility.
+  workflow_shared: trigger/action/variable catalogs and template helpers live in backend/app/services/workflows/*
   channels: mobile(Apprise/HA), in_app, WhatsApp, Discord, voice/TTS
   ha_mobile: backend/app/modules/notifications/home_assistant_mobile.py; notify.mobile_app_* body {title,message,data}
   action_context:
@@ -222,18 +234,19 @@ automation:
   maintenance_mode: skips hardware, notification-toggle, WhatsApp sends; maintenance_mode.disable allowed.
   gate_actions: gate.open uses GateCommandCoordinator/idempotency; do not bypass durable command records.
   variables: trigger scopes; unknown/empty/unavailable @Variable => context_missing skip.
+  workflow_shared: use backend/app/services/workflows/* for shared catalogs/context/result helpers; do not duplicate notification/automation catalogs.
 
 integrations:
   home_assistant:
     modules: modules/home_assistant/client.py, modules/home_assistant/covers.py, modules/home_assistant/input_booleans.py, modules/access_devices/home_assistant.py, modules/announcements/home_assistant_tts.py, services/home_assistant.py
     settings: url, token, gate_entities, garage_door_entities, gate_open_service, tts_service, default_media_player
-    rules: gate opens via GateCommandCoordinator/access devices, garage/cover via modules/services only; IACS may toggle configured input_booleans from person presence, but never treats HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
+    rules: gate opens via GateCommandCoordinator/access devices; garage/cover commands via AccessDeviceService; raw HA cover calls belong only inside provider/modules; IACS may toggle configured input_booleans from person presence, but never treats HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
   esphome:
     service: backend/app/modules/access_devices/esphome.py via backend/app/services/access_devices.py
     settings: esphome_devices plus legacy host/port/encryption/password timeout compatibility; encryption key/password are secret settings.
     rules: native API cover commands require accepted+verified state; if multiple devices are configured, bindings need device_id or composite external_id; no raw ESPHome calls outside access-device providers.
   whatsapp:
-    service: backend/app/services/whatsapp_messaging.py
+    service: backend/app/services/whatsapp_messaging.py facade over backend/app/services/messaging/*
     webhooks: GET/POST /api/v1/webhooks/whatsapp
     verify: hub token; X-Hub-Signature-256 if app_secret set; metadata phone_number_id must match config.
     routing: Admin exact normalized users.mobile_phone_number + active Admin -> Alfred; Visitor active/scheduled pass phone -> Visitor Concierge; others denied/audited.
@@ -257,7 +270,7 @@ integrations:
     jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream.
 
 alfred:
-  runtime: services/alfred/* v3; chat.py facade; chat_routing.py contains guided visitor-pass/request helper heuristics only.
+  runtime: services/alfred/* v3; chat.py facade; pre-V3 chat_routing.py was removed.
   behavior:
     mode: v3-only LLM-owned planner -> scoped agent loop; alfred_agent_mode is obsolete and cleaned from dynamic settings.
     fail_closed: provider/planner failure => configuration/retry message; no free-form deterministic answer.
@@ -271,39 +284,52 @@ alfred:
   semantic_cache: Redis TTL cache for semantic_search keyed by query, actor, and limit; cache failure must fall back silently.
   learning: feedback -> sanitized snapshots; review_then_learn requires Admin approval; repair is read-only and never executes mutations.
   tools:
-    registry: build_agent_tools() public API; domain tools in backend/app/ai/tool_groups/*; registry rejects duplicates and unsafe metadata.
+    registry: build_agent_tools() public API; app.ai.tools is a facade/contract module; domain tools and handlers live in backend/app/ai/tool_groups/*; registry rejects duplicates and unsafe metadata.
     metadata: tool group owns categories, safety_level, required_permissions, default_limit, examples/rate limits/return schema when needed.
     safety_levels: read_only, confirmation_required, admin_only; non-read-only tools must require confirmation.
     add_tool: add AgentTool + group metadata; confirmation tools must expose confirm/confirm_send/confirmed and return requires_confirmation before mutation.
-    handlers: keep tool handlers beside their domain catalog when practical; preserve app.ai.tools facade shims for public imports.
+    handlers: keep tool handlers beside their domain catalog when practical; shared utilities belong in backend/app/ai/tool_groups/_shared.py; do not recreate _facade_handlers.py.
+    hardware_tools: gate opens must use GateCommandCoordinator; garage/access-device commands must use AccessDeviceService; no direct Home Assistant/ESPHome/vendor actuation from Alfred handlers.
     planner: domain cards are generated from registry metadata; do not add keyword prefilters or deterministic routing shortcuts.
     tests: update backend/tests/test_chat_agent.py registry surface/permissions/card tests and touched domain tests.
     output: compact JSON; redact secrets/media; state changes require confirmation metadata/tests.
 
 frontend:
-  shell: frontend/src/main.tsx owns auth, global refresh, realtime socket, toasts, theme, sidebar, route Suspense, chat launcher.
-  shared: frontend/src/shared.tsx owns shared types, API client, route keys, realtime/media helpers, formatting, small primitives.
-  views: route/domain modules in frontend/src/views/*; props explicit until server-state phase.
+  bootstrap: frontend/src/main.tsx only renders App and imports styles.
+  app_shell: frontend/src/app/App.tsx composes focused app owners in frontend/src/app/* for auth, routes, navigation, realtime, search, theme, toasts, profile, chat launcher, and alert status.
+  api: frontend/src/api/client.ts is the low-level fetch owner; frontend/src/api/* owns typed resource modules.
+  ui_lib: frontend/src/ui/primitives.tsx contains domain-neutral primitives.
+  lib: frontend/src/lib/* contains formatting/media/settings/notification helpers.
+  features: frontend/src/features/integrations/* and frontend/src/features/workflows/* own provider/workflow feature logic.
+  shared_removed: frontend/src/shared.tsx was removed; do not add new imports through a shared compatibility shim.
+  views: route/domain modules in frontend/src/views/*; keep route shells thin when a feature owner exists.
   styles: operational console, no landing/marketing hero; CSS under frontend/src/styles/*.
   routes: Dashboard, People, Groups, Schedules, Passes, Vehicles, Movements, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training.
   splitting: non-shell routes are React.lazy chunks; do not move route bodies back into main.tsx or raise Vite chunk limits to hide growth.
   design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards/text overflow.
-  api: relative URLs only for LAN/NPM compatibility.
+  api: relative URLs only for LAN/NPM compatibility; direct fetch belongs in frontend/src/api/* only unless explicitly justified.
   css_hazards: never broad-style badge span; keep .badge inline-flex; scope integration header spans to title selectors.
 
 extension_points:
   lpr_adapter: backend/app/modules/lpr/<vendor>.py -> PlateRead; registry if selectable; no vendor schema in AccessEventService.
   movement_fsm: backend/app/services/movement_fsm.py owns deterministic direction/suppression transitions; keep vendor I/O and DB queries outside it.
   movement_ledger: backend/app/services/movement_ledger.py owns durable saga/session/command repository methods and idempotency.
+  movement_session: backend/app/services/movement/sessions.py owns durable session windows, suppression payloads, OCR variants, and suppressed-read explainability.
+  movement_presence: backend/app/services/movement/presence.py owns movement-derived presence commits reused by access, reconciliation, and restart backfill.
   access_device_provider: backend/app/modules/access_devices/<provider>.py -> AccessDeviceProvider; bindings live in access_device_provider_bindings.
   gate_controller: backend/app/modules/gate/access_devices.py is the physical gate controller; add providers under access_devices, not direct access-event logic.
   gate_command: backend/app/services/gate_commands.py serializes physical gate opens for LPR, automations, notifications, admin, and malfunction recovery.
+  access_hardware: backend/app/services/access/hardware.py coordinates access-event hardware side effects through gate/access-device owners.
+  access_payloads: backend/app/services/access/payloads.py owns access realtime/notification payload shaping.
+  access_snapshots: backend/app/services/access/snapshots.py delegates access evidence capture to SnapshotManager.
   notification_sender: backend/app/modules/notifications/<channel>.py -> NotificationSender.send(title, body, NotificationContext); no raw DB/log blobs.
-  notification_trigger_variable: backend/app/services/notifications.py catalogs + rendering/delivery tests.
+  workflow_catalog: backend/app/services/workflows/catalog.py owns shared notification/automation trigger/action/variable catalogs.
+  workflow_context: backend/app/services/workflows/context.py owns @Variable rendering/reference helpers and common action result envelopes.
+  notification_trigger_variable: backend/app/services/notifications.py consumes workflow catalogs + rendering/delivery tests.
   domain_event: add typed publisher in backend/app/services/domain_events.py; keep existing event name/payload compatible and test it.
   automation_action: backend/app/services/automation_integration_actions.py or automations catalog; expose enabled/disabled_reason; dry-run has no side effects.
   ai_tool: add to backend/app/ai/tool_groups/<domain>.py; declare group metadata there; registry assembles; update permission/confirmation tests in backend/tests/test_chat_agent.py.
-  ai_handler: expose handlers through backend/app/ai/tool_groups/<domain>_handlers.py; keep app.ai.tools shims stable while moving bodies.
+  ai_handler: expose handlers through backend/app/ai/tool_groups/<domain>_handlers.py; keep app.ai.tools public facade stable while moving bodies.
 
 commands:
   setup:
@@ -312,9 +338,9 @@ commands:
     - docker compose up --build
   backend:
     syntax: python3 -m compileall -q backend/app
-    tests: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest'
-    one: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
-    alfred_ci: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
+    tests: ./scripts/backend-pytest
+    one: ./scripts/backend-pytest tests/test_dependency_updates.py
+    alfred_ci: docker compose exec -T backend sh -lc 'cd /workspace/backend && /app/.venv/bin/python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && /app/.venv/bin/python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
     restart: docker compose restart backend
   frontend:
     build: cd frontend && npm run build
