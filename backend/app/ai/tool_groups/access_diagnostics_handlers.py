@@ -1830,7 +1830,7 @@ def _duration_intervals(events: list[dict[str, Any]], *, timezone_name: str, sta
     return total, intervals
 
 def _duration_interval_payload(start: datetime, end: datetime | None, timezone_name: str, *, start_field: str, end_field: str, include_seconds: bool, open_end: str | None = None, now: datetime | None = None) -> dict[str, Any]:
-    interval = {start_field: _agent_datetime_iso(start, timezone_name), f"{start_field}_display": _agent_datetime_display(start, timezone_name)}
+    interval: dict[str, Any] = {start_field: _agent_datetime_iso(start, timezone_name), f"{start_field}_display": _agent_datetime_display(start, timezone_name)}
     interval.update({end_field: _agent_datetime_iso(end, timezone_name) if end else open_end, f"{end_field}_display": _agent_datetime_display(end, timezone_name) if end else None})
     if include_seconds:
         seconds = max(0, int(((end or now or _agent_now(timezone_name)) - start).total_seconds()))

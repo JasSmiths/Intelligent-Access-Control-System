@@ -2,7 +2,7 @@
 # ruff: noqa: F403, F405
 
 from app.ai.tool_groups._shared import *
-from app.ai.tool_groups.access_diagnostics_handlers import _access_event_core_fields, _access_event_load_options, _agent_time_fields, _datetime_from_agent_value, _gate_observation_from_event, _serialize_lpr_timing_observation, _trace_id_from_access_event, _vehicle_agent_payload, diagnose_access_event
+from app.ai.tool_groups.access_diagnostics_handlers import _access_event_core_fields, _access_event_load_options, _agent_time_fields, _datetime_from_agent_value, _gate_observation_from_event, _period_bounds, _serialize_lpr_timing_observation, _trace_id_from_access_event, _vehicle_agent_payload, diagnose_access_event
 from app.services.movement.sessions import VEHICLE_SESSION_PAYLOAD_KEY
 
 SUPPRESSED_READ_ROOT_CAUSES = {

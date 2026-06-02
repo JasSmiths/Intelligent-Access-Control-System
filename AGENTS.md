@@ -312,9 +312,9 @@ commands:
     - docker compose up --build
   backend:
     syntax: python3 -m compileall -q backend/app
-    tests: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest'
-    one: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
-    alfred_ci: docker compose exec -T backend sh -lc 'cd /workspace/backend && python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
+    tests: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest'
+    one: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+    alfred_ci: docker compose exec -T backend sh -c 'cd /workspace/backend && python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
     restart: docker compose restart backend
   frontend:
     build: cd frontend && npm run build
