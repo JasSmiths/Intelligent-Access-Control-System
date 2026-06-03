@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+BACKEND_DIR="${REPO_ROOT}/backend"
+
+compose_backend_running() {
+  docker compose ps -q backend >/dev/null 2>&1 || return 1
+  local container_id
+  container_id="$(docker compose ps -q backend 2>/dev/null)"
+  [[ -n "${container_id}" ]] || return 1
+  [[ "$(docker inspect -f '{{.State.Running}}' "${container_id}" 2>/dev/null || true)" == "true" ]]
+}
+
+compose_backend_has_pytest() {
+  docker compose exec -T backend sh -c 'python -c "import pytest"' >/dev/null 2>&1
+}
+
+if compose_backend_running && compose_backend_has_pytest; then
+  exec docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest "$@"' sh "$@"
+fi
+
+if [[ ! -x "${BACKEND_DIR}/.venv/bin/python" ]] \
+  || ! "${BACKEND_DIR}/.venv/bin/python" -c "import pytest" >/dev/null 2>&1; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "pytest is not available and uv is not installed; install uv or rebuild the backend development container." >&2
+    exit 1
+  fi
+  (cd "${BACKEND_DIR}" && uv sync --locked --extra dev --no-editable)
+fi
+
+cd "${BACKEND_DIR}"
+exec "${BACKEND_DIR}/.venv/bin/python" -m pytest "$@"

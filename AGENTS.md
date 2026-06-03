@@ -1,355 +1,143 @@
 # IACS Agent Guide
 
-golden_rules:
-  ask: unclear intent/requirements/architecture => ask before writing.
-  scope: touch only files/functions required by the task; no opportunistic cleanup.
-  simple: prefer the smallest working change; add abstractions only for real complexity.
-  honest: flag uncertainty early; do not fake library/system knowledge.
+This file is the short, high-priority entrypoint for coding agents. Read the
+focused docs under `docs/agent/` when a task touches that area.
 
-system:
-  name: Intelligent Access Control + Presence System
-  purpose: LPR ingest -> movement FSM/Saga -> presence/alerts -> gate/audio/notification orchestration -> realtime ops console -> Alfred AI ops.
-  deploy: docker compose
-  ports:
-    host: {frontend: 8089, backend: 8088, postgres: 5432, redis: 6379}
-    container: {frontend: 80, backend: 8000, postgres: 5432, redis: 6379}
-  proxy:
-    frontend: http://localhost:8089
-    backend: http://localhost:8088
-    frontend_nginx: proxies /api/*, /health, /docs, /openapi.json, WS -> backend:8000
-    websockets: required
-    root_path: IACS_ROOT_PATH blank unless deployed under URL subpath
-  stack:
-    backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis
-    frontend: React 19, TypeScript, Vite, Nginx
-    ui_libs: lucide-react, TanStack Virtual, Monaco package, jsondiffpatch
-    integrations: Home Assistant, ESPHome native API, Apprise, WhatsApp Cloud API, Discord, DVLA VES, UniFi Protect/uiprotect, iCloud Calendar
-    ai: local, OpenAI, Gemini, Claude/Anthropic, Ollama
+## Read Next
 
-hard_rules:
-  api: versioned /api/v1 only; do not add non-versioned API aliases.
-  storage: bind mounts only; Docker named volumes forbidden.
-  generated_ignore: data/, logs/, frontend/node_modules/, frontend/dist/
-  cache: SPA shell no-store for / and /index.html; hashed /assets/* immutable.
-  bootstrap_env_only: ports, DB/Redis URLs, auth secret file/override, CORS/trusted hosts/public URL/root path, module selectors.
-  dynamic_config: system_settings via UI/API; encrypted secrets use Fernet derived from active auth root secret.
-  auth_secret:
-    default: data/backend/auth-secret.key
-    advanced_override: IACS_AUTH_SECRET_KEY
-    rotation: file mode only through UI/API
-  secret_keys:
-    - home_assistant_token
-    - apprise_urls
-    - discord_bot_token
-    - whatsapp_access_token
-    - whatsapp_webhook_verify_token
-    - whatsapp_app_secret
-    - dvla_api_key
-    - unifi_protect_username
-    - unifi_protect_password
-    - unifi_protect_api_key
-    - esphome_api_encryption_key
-    - esphome_legacy_password
-    - lpr_webhook_token
-    - openai_api_key
-    - gemini_api_key
-    - anthropic_api_key
-    - dependency_update_backup_mount_options
-  safety:
-    require_admin_confirmation_audit:
-      - gate/door/cover commands and announcements
-      - access-device config and provider bindings
-      - maintenance changes/overrides
-      - schedule overrides
-      - notification sends/tests and workflow/rule edits
-      - integration connection tests
-      - telemetry purge
-      - UniFi Protect update apply, backup create/restore/delete
-    audit: durable state changes; realtime logs are not audit history.
-    sanitize: never log raw secrets, cookies, tokens, or media blobs.
-    error_policy: never return success unless adapter/provider accepted the operation.
-  modularity: core services consume normalized contracts; vendor I/O stays under backend/app/modules/*.
+- Backend/domain work: `docs/agent/backend.md`
+- Frontend/UI work: `docs/agent/frontend.md`
+- Gate, garage, provider, or hardware-adjacent work: `docs/agent/hardware-safety.md`
 
-repo:
-  backend:
-    entry: backend/app/main.py
-    api_router: backend/app/api/router.py
-    db_models: backend/app/models/core.py
-    settings: backend/app/services/settings.py
-    alfred_facade: backend/app/services/chat.py
-    alfred_v3: backend/app/services/alfred/*
-    alfred_contracts: backend/app/services/chat_contracts.py; answer contracts in backend/app/services/alfred/answer_contracts.py
-    alfred_tools_facade: backend/app/ai/tools.py
-    alfred_tool_groups: backend/app/ai/tool_groups/*; shared handler utilities in backend/app/ai/tool_groups/_shared.py
-    access_events: backend/app/services/access_events.py orchestrates; helpers in backend/app/services/access/*
-    movement_sessions: backend/app/services/movement/sessions.py
-    movement_presence: backend/app/services/movement/presence.py
-    workflows: shared workflow catalogs/context in backend/app/services/workflows/*
-    messaging: backend/app/services/whatsapp_messaging.py facade; implementation in backend/app/services/messaging/*
-    access_devices: backend/app/services/access_devices.py; providers in backend/app/modules/access_devices/*
-    gate_commands: backend/app/services/gate_commands.py; physical gate controller in backend/app/modules/gate/access_devices.py
-    snapshots: backend/app/services/snapshots.py SnapshotManager; no alert/notification snapshot wrapper services
-    media_helpers: backend/app/api/v1/media.py, backend/app/services/profile_photos.py
-  frontend:
-    bootstrap: frontend/src/main.tsx only mounts frontend/src/app/App.tsx
-    app_shell: frontend/src/app/* owns auth, routing, navigation, realtime, search, theme, toasts, chat launcher, alerts
-    api: frontend/src/api/* owns typed fetch/client modules; feature views should not call fetch directly
-    ui: frontend/src/ui/* owns domain-neutral primitives
-    lib: frontend/src/lib/* owns formatting, media, settings, notification helpers
-    features: frontend/src/features/* owns integrations and workflows; route views are shells/coordinators where possible
-    views: frontend/src/views/* route modules and current larger domain screens
-    styles: frontend/src/styles.css imports frontend/src/styles/*
+## Golden Rules
 
-runtime:
-  compose_services: [frontend, backend, updater, postgres, redis]
-  start_order: [database, event_bus, dependency_updates, notifications, automations, discord, visitor_passes, access_devices, access_events, movement_reconciliation, home_assistant, gate_malfunction, unifi_protect, runtime_heartbeat, restart_backfill, missed_event_reconciliation, snapshot_recovery]
-  stop_order: cancel backfill/reconciliation/snapshot/heartbeat tasks, then dependency_updates, unifi_protect, gate_malfunction, home_assistant, movement_reconciliation, access_events, access_devices, visitor_passes, whatsapp, discord, automations, notifications, event_bus.
-  persistence_mounts:
-    - ./data/backend:/app/data
-    - ./data/chat_attachments:/app/data/chat_attachments
-    - ./:/workspace
-    - ./logs/backend:/app/logs
-    - ./backend/app:/app/app:ro
-    - ./logs/frontend:/var/log/nginx
-    - ./data/postgres:/var/lib/postgresql/data
-    - ./data/redis:/data
-    - ./data/backend/dependency-update-backups:/app/update-backups
-    - ./data/backend/dependency-update-cache:/app/data/dependency-update-cache (updater)
-    - /var/run/docker.sock:/var/run/docker.sock (updater only)
+- Ask before writing when intent, safety, requirements, or ownership is unclear.
+- Touch only files needed for the task. No opportunistic cleanup.
+- Prefer the smallest working change. Add abstractions only when they remove real complexity or duplicate ownership.
+- Do not fake system knowledge. Inspect the repo and current runtime state.
+- Never print secrets, tokens, cookies, API keys, passwords, media blobs, or private payloads.
 
-data:
-  tables:
-    identity: users, messaging_identities
-    directory: groups, people, vehicles, vehicle_person_assignments, schedules, schedule_overrides, presence
-    access: access_devices, access_device_provider_bindings, access_events, anomalies, visitor_passes, movement_sagas, movement_sessions, gate_command_records
-    chat: chat_sessions, chat_messages, alfred_memories, alfred_feedback, alfred_lessons, alfred_eval_examples
-    notifications: notification_rules, notification_action_contexts
-    automation: automation_rules, automation_runs, automation_webhook_senders
-    integrations: system_settings, icloud_calendar_accounts, icloud_calendar_sync_runs, external_dependencies, dependency_update_analyses, dependency_update_backups, dependency_update_jobs
-    reports: report_exports
-    safety: action_confirmations, maintenance_mode_state, gate_state_observations, gate_malfunction_states, gate_malfunction_timeline_events, gate_malfunction_notification_outbox
-    telemetry: audit_logs, telemetry_traces, telemetry_spans
-    leaderboard: leaderboard_state
-  filesystem:
-    chat_attachments: data/chat_attachments/
-    access_snapshots: data/backend/snapshots/access-events/
-    notification_snapshots: data/backend/notification-snapshots/
-    telemetry_artifacts: data/backend/telemetry-artifacts/
-    unifi_package: data/backend/unifi-protect-package/
-    unifi_backups: data/backend/unifi-protect-backups/
-    dependency_cache: data/backend/dependency-update-cache/
-    dependency_backups: data/backend/dependency-update-backups/
-    dependency_logs: logs/backend/dependency-updates/
-  schema: Base.metadata.create_all + idempotent transitional columns/indexes; add Alembic when schema stabilizes.
-  seed: no demo seed; first Admin via setup UI/API.
+## System Shape
 
-api:
-  health: GET /, /health, /api/v1/health
-  auth:
-    routes: /api/v1/auth/*
-    behavior: first-run setup if users empty; Argon2; signed HTTP-only JWT cookie; bearer accepted.
-    protected: dashboard APIs, docs/openapi, realtime WS, AI chat WS after setup.
-    public: health, setup/login/status/logout, Ubiquiti webhook, WhatsApp webhook.
-    invariant: last active Admin cannot be deleted/demoted/deactivated.
-  users:
-    routes: /api/v1/users/* Admin CRUD; sidebar preference in users.preferences.
-    profile_media: users expose /api/v1/users/{id}/photo?variant=thumb|full; list responses omit raw data URLs unless explicitly requested.
-  directory:
-    routes: /api/v1/people, /vehicles, /groups, /schedules
-    schedule_precedence: vehicle.schedule_id > person.schedule_id > schedule_default_policy
-    schedule_blocks: Monday-first 30-minute normalized intervals in schedules.time_blocks
-    deletes: vehicles yes; people/groups no hard-delete endpoint
-    media: people/vehicles expose /photo?variant=thumb|full; list APIs default include_media=false and return photo_url/fallback snapshot URL.
-  realtime:
-    system: WS /api/v1/realtime/ws via event_bus; cookie or bearer/query token; client.ping gets connection.pong.
-    alfred: /api/v1/ai/chat, /api/v1/ai/chat/stream, /api/v1/ai/chat/ws, /api/v1/ai/agent/status, /api/v1/ai/feedback, /api/v1/ai/training/*
-    dependency_jobs: WS /api/v1/dependency-updates/jobs/{job_id}/ws
-  confirmations: POST /api/v1/action-confirmations; Admin-only, short-lived, one-use tokens bound to action+payload.
-  access:
-    movements: GET /api/v1/access/movements, /movements/{id}; POST /movements/{id}/reconciliation-required.
-    gate_commands: GET /api/v1/access/gate-commands.
-    event_repair: POST /api/v1/access/events/{event_id}/movement-reconciliation creates/marks a durable saga for historical review.
-    events: /api/v1/events includes compact movement_saga summary when linked.
-    alerts: GET /api/v1/alerts, PATCH /api/v1/alerts/action, GET /api/v1/alerts/{alert_id}/snapshot; no /api/v1/anomalies route.
-    reports: POST /api/v1/reports/person-movements/export; GET /api/v1/reports/{report_id}, /{report_id}/pdf.
-    simulation: POST /api/v1/simulation/arrival/{registration_number}, /misread-sequence/{registration_number}; admin-only /e2e/full-access-flow.
-  access_devices: /api/v1/access-devices CRUD + /bindings/{provider} + /status; current providers home_assistant and esphome; Admin mutates.
+- Name: Intelligent Access Control + Presence System.
+- Purpose: LPR ingest -> movement/session/saga -> access events -> presence/alerts -> gate/garage/notification orchestration -> realtime console -> Alfred AI ops.
+- Deploy: Docker Compose.
+- Host ports: frontend `8089`, backend `8088`, postgres `5432`, redis `6379`.
+- Backend: Python 3.12, FastAPI, SQLAlchemy async, PostgreSQL, Redis.
+- Frontend: React 19, TypeScript, Vite, Nginx.
+- API: versioned `/api/v1` only. Do not add non-versioned API aliases.
+- Storage: bind mounts only. Do not introduce Docker named volumes.
+- Generated/runtime paths to ignore: `data/`, `logs/`, `frontend/node_modules/`, `frontend/dist/`, Python caches.
 
-lpr_pipeline:
-  webhook: POST /api/v1/webhooks/ubiquiti/lpr
-  security: require X-IACS-LPR-Token shared secret + static UNVR source IP/CIDR allowlist before reading payload, including maintenance-mode ignores.
-  adapter: backend/app/modules/lpr/ubiquiti.py -> PlateRead(registration_number, confidence, source, captured_at, raw_payload)
-  service: backend/app/services/access_events.py coordinates access decisions; movement sessions/presence live under backend/app/services/movement/*; hardware/payload/snapshot helpers live under backend/app/services/access/*
-  maintenance_mode: accept/ignore webhook; clear queues; no access_event/presence/gate/garage.
-  smart_zones: diagnostic only; missing/empty/nonmatching zones never drop valid plate reads.
-  debounce: durable movement_sessions drive exact echo, gate-cycle/session, convoy, visitor departure, OCR variant, and arrival_ocr_noise suppression.
-  arrival_noise: unknown/nonmatching same-camera reads within 45s of a granted entry suppress cross-source OCR debris; explicit exits and different known vehicles bypass.
-  direction: MovementDirectionFSM consumes normalized intent; closed=entry+gate.open, open/opening/closing=exit unless presence evidence overrides; unknown => payload then presence.
-  creation: every live decision creates/updates movement_sagas; suppressed reads are durable SUPPRESSED movements, not alerts.
-  event_commit: final granted/denied reads create one access_events row; anomalies include unauthorized_plate/outside_schedule/duplicate_entry/duplicate_exit.
-  gate: entry opens go through GateCommandCoordinator -> AccessDeviceGateController with DB lease/idempotency; presence commits after no gate is needed or after accepted/reconciled command.
-  garage: assigned access-device garage doors open only after accepted gate open and schedule allows; garage commands are audited separately.
-  reconciliation: movement_reconciliation scans stale leases, pending sagas, accepted-but-unverified commands, commits presence when safe, and publishes movement/gate reconciliation events.
-  backfill: restart_backfill creates the same movement saga/session records with hardware side effects suppressed; historical repairs must be explicit/audited.
-  diagnostics: /api/v1/diagnostics/lpr-timing; runtime health reports movement_sessions_source=durable.
+## Hard Safety Rules
 
-snapshots:
-  owner: backend/app/services/snapshots.py SnapshotManager
-  wrappers: alert_snapshots.py and notification_snapshots.py were removed; use SnapshotManager directly
-  access: SnapshotManager.capture_access_event_snapshot(); compact JPEG under /app/data/snapshots/access-events/
-  db_fields: snapshot_path, content_type, bytes, width, height, captured_at, camera, created_at
-  rule: no ad hoc Path.write_bytes/Pillow compression outside SnapshotManager.
-  notification_media: short-lived notification-snapshots with SnapshotManager TTL cleanup.
-  recovery: backend/app/services/snapshot_recovery.py startup repair only.
+- Gate opens must go through `backend/app/services/gate_commands.py` via `GateCommandCoordinator`.
+- Garage/access-device commands must go through `backend/app/services/access_devices.py` via `AccessDeviceService`.
+- Alfred hardware tools must use the same audited owners. Do not call Home Assistant, ESPHome, UniFi, or vendor APIs directly from Alfred handlers.
+- Unknown plates must never trigger hardware.
+- Untrusted LPR input must fail closed before durable side effects.
+- Provider rejection is failure, not success.
+- Accepted-but-unverified gate commands must remain reconcilable.
+- Suppressed LPR reads must be durable and explainable, not silently dropped.
+- Presence follows committed movement/access decisions.
+- Admin confirmation + durable audit are required for gate/door/cover commands, announcements, access-device config, maintenance changes, schedule overrides, notification sends/tests, workflow edits, integration tests, telemetry purge, and UniFi Protect updates/backups.
+- Realtime logs are not audit history.
+- Do not run live hardware commands unless the user explicitly asks for a supervised hardware test and gives the required confirmation.
 
-notifications:
-  service: backend/app/services/notifications.py
-  contract: NotificationContext(event_type, subject, severity, facts)
-  storage: notification_rules DB, not system_settings.
-  templates: UI and renderer use @Variable tokens; do not reintroduce bracket-token compatibility.
-  workflow_shared: trigger/action/variable catalogs and template helpers live in backend/app/services/workflows/*
-  channels: mobile(Apprise/HA), in_app, WhatsApp, Discord, voice/TTS
-  ha_mobile: backend/app/modules/notifications/home_assistant_mobile.py; notify.mobile_app_* body {title,message,data}
-  action_context:
-    table: notification_action_contexts
-    ttl: normal 10m; force 5m
-    token: HMAC(auth_secret_key, token); one-time consume with outcome.
-  bus: publish notification.failed/skipped/sent for UI/logs; Automation Engine must not cycle on notification.* status events.
+## Current V2 Owners
 
-events:
-  bus: backend/app/services/event_bus.py owns realtime transport; preserve existing string event names and payload shapes.
-  transport: Redis Streams fan out across backend workers; websocket sends are queued and slow sockets are dropped.
-  listeners: default scope local for side effects; use scope=all_workers only for safe cache/state listeners.
-  typed_publishers: backend/app/services/domain_events.py wraps event_bus; migrate one event at a time with compatibility tests.
+Backend:
 
-automation:
-  service: backend/app/services/automations.py
-  routes: /api/v1/automations/*
-  model: flat Trigger -> If -> Then
-  storage: automation_rules, automation_runs, automation_webhook_senders
-  scheduler: lifespan every 15s; row locks; recompute next_run_at; disable single-use/expired time-only rules.
-  sources: scheduler, public webhook, event_bus, Alfred
-  cycle_guard: ignore notification.trigger/sent/failed/skipped and automation.run.*
-  dry_run: render context/conditions only; no sends, hardware, or sync timestamps.
-  maintenance_mode: skips hardware, notification-toggle, WhatsApp sends; maintenance_mode.disable allowed.
-  gate_actions: gate.open uses GateCommandCoordinator/idempotency; do not bypass durable command records.
-  variables: trigger scopes; unknown/empty/unavailable @Variable => context_missing skip.
-  workflow_shared: use backend/app/services/workflows/* for shared catalogs/context/result helpers; do not duplicate notification/automation catalogs.
+- App entry/router: `backend/app/main.py`, `backend/app/api/router.py`.
+- Models: `backend/app/models/core.py`.
+- Settings/secrets: `backend/app/services/settings.py`; encrypted secrets derive from active auth root secret.
+- Alfred V3 runtime: `backend/app/services/alfred/*`.
+- Alfred chat facade: `backend/app/services/chat.py`.
+- Alfred tool facade/registry: `backend/app/ai/tools.py`, `backend/app/ai/tool_groups/*`, shared helpers in `backend/app/ai/tool_groups/_shared.py`.
+- Access-event orchestration: `backend/app/services/access_events.py`.
+- Access helpers: `backend/app/services/access/*`.
+- Movement sessions/presence: `backend/app/services/movement/*`, with ledger/FSM/reconciliation in `movement_ledger.py`, `movement_fsm.py`, `movement_reconciliation.py`.
+- Gate commands: `backend/app/services/gate_commands.py`.
+- Access devices/providers: `backend/app/services/access_devices.py`, `backend/app/modules/access_devices/*`.
+- Gate controller adapter: `backend/app/modules/gate/access_devices.py`.
+- Notifications: `backend/app/services/notifications.py`.
+- Automations: `backend/app/services/automations.py`.
+- Shared workflow catalogs/context: `backend/app/services/workflows/*`.
+- WhatsApp facade and implementation: `backend/app/services/whatsapp_messaging.py`, `backend/app/services/messaging/*`.
+- Snapshots: `backend/app/services/snapshots.py` (`SnapshotManager`).
 
-integrations:
-  home_assistant:
-    modules: modules/home_assistant/client.py, modules/home_assistant/covers.py, modules/home_assistant/input_booleans.py, modules/access_devices/home_assistant.py, modules/announcements/home_assistant_tts.py, services/home_assistant.py
-    settings: url, token, gate_entities, garage_door_entities, gate_open_service, tts_service, default_media_player
-    rules: gate opens via GateCommandCoordinator/access devices; garage/cover commands via AccessDeviceService; raw HA cover calls belong only inside provider/modules; IACS may toggle configured input_booleans from person presence, but never treats HA person.* as IACS presence; maintenance syncs input_boolean.top_gate_maintenance_mode.
-  esphome:
-    service: backend/app/modules/access_devices/esphome.py via backend/app/services/access_devices.py
-    settings: esphome_devices plus legacy host/port/encryption/password timeout compatibility; encryption key/password are secret settings.
-    rules: native API cover commands require accepted+verified state; if multiple devices are configured, bindings need device_id or composite external_id; no raw ESPHome calls outside access-device providers.
-  whatsapp:
-    service: backend/app/services/whatsapp_messaging.py facade over backend/app/services/messaging/*
-    webhooks: GET/POST /api/v1/webhooks/whatsapp
-    verify: hub token; X-Hub-Signature-256 if app_secret set; metadata phone_number_id must match config.
-    routing: Admin exact normalized users.mobile_phone_number + active Admin -> Alfred; Visitor active/scheduled pass phone -> Visitor Concierge; others denied/audited.
-    visitor_sandbox: tools only get_pass_details(phone_number), update_visitor_plate(pass_id,new_plate).
-  discord:
-    service: backend/app/services/discord_messaging.py
-    routes: /api/v1/integrations/discord/*
-    config: bot_token secret; guild/channel/user/role/admin_role allowlists; default channel; DM allowed; mention required.
-  unifi_protect:
-    service: backend/app/services/unifi_protect.py
-    module: backend/app/modules/unifi_protect/client.py
-    capabilities: cameras, events, snapshots, thumbnails, videos, websocket updates, package overlays/backups.
-    shutdown: close websocket + aiohttp/session cleanup.
-  dvla:
-    request: POST JSON VRN; never URL query.
-    persist: known vehicle compliance fields only; unknown data stays notification context unless visitor pass claimed.
-  icloud_calendar:
-    sync: today + 14d; notes marker "Open Gate"; creates/updates/cancels visitor_passes with source_reference icloud:<account>:<calendar>:<event>.
-  dependency_updates:
-    scope: pyproject, installed dists, package.json/lock, Dockerfiles, Compose.
-    jobs: apply/restore with offline backup; logs under logs/backend/dependency-updates; WS job stream.
+Frontend:
 
-alfred:
-  runtime: services/alfred/* v3; chat.py facade; pre-V3 chat_routing.py was removed.
-  behavior:
-    mode: v3-only LLM-owned planner -> scoped agent loop; alfred_agent_mode is obsolete and cleaned from dynamic settings.
-    fail_closed: provider/planner failure => configuration/retry message; no free-form deterministic answer.
-    source_of_truth: tool results; never invent people/vehicles/schedules/events/device states/DVLA/telemetry.
-    permissions: actor context before planning; Admin mutation/read tools; standard read-only; visitors sandbox only.
-    confirmations: state-changing tools return requires_confirmation; execute via /api/v1/ai/chat/confirm or WS tool_confirmation.
-    critical_answers: tools may return answer_artifacts; composer verifies required facts and fails closed on raw JSON or unsupported answers.
-    audit: alfred.tool.<tool>, actor Alfred_AI, provider/model/session, sanitized args/outcomes.
-  limits: {MAX_AGENT_TOOL_ITERATIONS: 5, MAX_RELEVANT_HISTORY_MESSAGES: 8, api_message_max_chars: 4000, attachment_max: 25MB}
-  memory: alfred_memories Postgres JSON + optional pgvector; users own user memory; Admin site memory; visitors no durable memory; redact secrets/transient visitor data.
-  semantic_cache: Redis TTL cache for semantic_search keyed by query, actor, and limit; cache failure must fall back silently.
-  learning: feedback -> sanitized snapshots; review_then_learn requires Admin approval; repair is read-only and never executes mutations.
-  tools:
-    registry: build_agent_tools() public API; app.ai.tools is a facade/contract module; domain tools and handlers live in backend/app/ai/tool_groups/*; registry rejects duplicates and unsafe metadata.
-    metadata: tool group owns categories, safety_level, required_permissions, default_limit, examples/rate limits/return schema when needed.
-    safety_levels: read_only, confirmation_required, admin_only; non-read-only tools must require confirmation.
-    add_tool: add AgentTool + group metadata; confirmation tools must expose confirm/confirm_send/confirmed and return requires_confirmation before mutation.
-    handlers: keep tool handlers beside their domain catalog when practical; shared utilities belong in backend/app/ai/tool_groups/_shared.py; do not recreate _facade_handlers.py.
-    hardware_tools: gate opens must use GateCommandCoordinator; garage/access-device commands must use AccessDeviceService; no direct Home Assistant/ESPHome/vendor actuation from Alfred handlers.
-    planner: domain cards are generated from registry metadata; do not add keyword prefilters or deterministic routing shortcuts.
-    tests: update backend/tests/test_chat_agent.py registry surface/permissions/card tests and touched domain tests.
-    output: compact JSON; redact secrets/media; state changes require confirmation metadata/tests.
+- Bootstrap only: `frontend/src/main.tsx`.
+- App shell owners: `frontend/src/app/*`.
+- Typed API owners: `frontend/src/api/*`.
+- Domain-neutral primitives: `frontend/src/ui/*`.
+- Shared helpers: `frontend/src/lib/*`.
+- Feature owners: `frontend/src/features/integrations/*`, `frontend/src/features/workflows/*`.
+- Route views: `frontend/src/views/*`.
+- Styles: `frontend/src/styles.css` imports `frontend/src/styles/*`.
+- `frontend/src/shared.tsx` was removed. Do not recreate a shared compatibility shim.
 
-frontend:
-  bootstrap: frontend/src/main.tsx only renders App and imports styles.
-  app_shell: frontend/src/app/App.tsx composes focused app owners in frontend/src/app/* for auth, routes, navigation, realtime, search, theme, toasts, profile, chat launcher, and alert status.
-  api: frontend/src/api/client.ts is the low-level fetch owner; frontend/src/api/* owns typed resource modules.
-  ui_lib: frontend/src/ui/primitives.tsx contains domain-neutral primitives.
-  lib: frontend/src/lib/* contains formatting/media/settings/notification helpers.
-  features: frontend/src/features/integrations/* and frontend/src/features/workflows/* own provider/workflow feature logic.
-  shared_removed: frontend/src/shared.tsx was removed; do not add new imports through a shared compatibility shim.
-  views: route/domain modules in frontend/src/views/*; keep route shells thin when a feature owner exists.
-  styles: operational console, no landing/marketing hero; CSS under frontend/src/styles/*.
-  routes: Dashboard, People, Groups, Schedules, Passes, Vehicles, Movements, Top Charts, Events, Alerts, Reports, API & Integrations, Logs/Telemetry/Audit, Settings, Alfred Training.
-  splitting: non-shell routes are React.lazy chunks; do not move route bodies back into main.tsx or raise Vite chunk limits to hide growth.
-  design: fixed desktop sidebar; bento cards; radius 8px; lucide icons; status badges; light/dark/system; no nested cards/text overflow.
-  api: relative URLs only for LAN/NPM compatibility; direct fetch belongs in frontend/src/api/* only unless explicitly justified.
-  css_hazards: never broad-style badge span; keep .badge inline-flex; scope integration header spans to title selectors.
+Removed legacy paths:
 
-extension_points:
-  lpr_adapter: backend/app/modules/lpr/<vendor>.py -> PlateRead; registry if selectable; no vendor schema in AccessEventService.
-  movement_fsm: backend/app/services/movement_fsm.py owns deterministic direction/suppression transitions; keep vendor I/O and DB queries outside it.
-  movement_ledger: backend/app/services/movement_ledger.py owns durable saga/session/command repository methods and idempotency.
-  movement_session: backend/app/services/movement/sessions.py owns durable session windows, suppression payloads, OCR variants, and suppressed-read explainability.
-  movement_presence: backend/app/services/movement/presence.py owns movement-derived presence commits reused by access, reconciliation, and restart backfill.
-  access_device_provider: backend/app/modules/access_devices/<provider>.py -> AccessDeviceProvider; bindings live in access_device_provider_bindings.
-  gate_controller: backend/app/modules/gate/access_devices.py is the physical gate controller; add providers under access_devices, not direct access-event logic.
-  gate_command: backend/app/services/gate_commands.py serializes physical gate opens for LPR, automations, notifications, admin, and malfunction recovery.
-  access_hardware: backend/app/services/access/hardware.py coordinates access-event hardware side effects through gate/access-device owners.
-  access_payloads: backend/app/services/access/payloads.py owns access realtime/notification payload shaping.
-  access_snapshots: backend/app/services/access/snapshots.py delegates access evidence capture to SnapshotManager.
-  notification_sender: backend/app/modules/notifications/<channel>.py -> NotificationSender.send(title, body, NotificationContext); no raw DB/log blobs.
-  workflow_catalog: backend/app/services/workflows/catalog.py owns shared notification/automation trigger/action/variable catalogs.
-  workflow_context: backend/app/services/workflows/context.py owns @Variable rendering/reference helpers and common action result envelopes.
-  notification_trigger_variable: backend/app/services/notifications.py consumes workflow catalogs + rendering/delivery tests.
-  domain_event: add typed publisher in backend/app/services/domain_events.py; keep existing event name/payload compatible and test it.
-  automation_action: backend/app/services/automation_integration_actions.py or automations catalog; expose enabled/disabled_reason; dry-run has no side effects.
-  ai_tool: add to backend/app/ai/tool_groups/<domain>.py; declare group metadata there; registry assembles; update permission/confirmation tests in backend/tests/test_chat_agent.py.
-  ai_handler: expose handlers through backend/app/ai/tool_groups/<domain>_handlers.py; keep app.ai.tools public facade stable while moving bodies.
+- `backend/app/ai/tool_groups/_facade_handlers.py`
+- `backend/app/services/chat_routing.py`
+- `backend/app/modules/gate/home_assistant.py`
+- `backend/app/services/alert_snapshots.py`
+- `backend/app/services/notification_snapshots.py`
 
-commands:
-  setup:
-    - cp .env.example .env
-    - mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backend logs/frontend
-    - docker compose up --build
-  backend:
-    syntax: python3 -m compileall -q backend/app
-    tests: ./scripts/backend-pytest
-    one: ./scripts/backend-pytest tests/test_dependency_updates.py
-    alfred_ci: docker compose exec -T backend sh -lc 'cd /workspace/backend && /app/.venv/bin/python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && /app/.venv/bin/python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
-    restart: docker compose restart backend
-  frontend:
-    build: cd frontend && npm run build
-    install_build: cd frontend && npm ci && npm run build
-    rebuild: docker compose up -d --build frontend
-  compose: docker compose config && docker compose ps
-  smoke_readonly:
-    - curl -fsS http://localhost:8089/api/v1/health
-    - curl -fsS http://localhost:8089/api/v1/auth/status
-  smoke_authenticated:
-    - curl -fsS http://localhost:8089/api/v1/maintenance/status
-    - curl -fsS http://localhost:8089/api/v1/leaderboard
+## Core Behavior Contracts
+
+Preserve coverage and behavior for:
+
+- LPR arrival/exit.
+- Known resident, visitor, and unknown vehicle decisions.
+- Duplicate/OCR/session suppression as durable movement records.
+- Gate command audit, idempotency, failure, and reconciliation.
+- Movement reconciliation and restart backfill without hardware side effects.
+- Presence updates from committed movement/access decisions.
+- Notification rule evaluation, preview/test, actionable contexts, and partial delivery success.
+- Automation scheduler/webhook/dry-run behavior and gate-command safety.
+- WhatsApp visitor sandbox/privacy/abuse safeguards and Admin-to-Alfred routing.
+- Alfred V3 planner, permissions, memory, confirmation before mutation, and fail-closed provider behavior.
+- Integration status/config/test/save/reset flows.
+
+Contract tests live in `backend/tests/contracts/` with golden fixtures.
+
+## Validation Commands
+
+Use repo-supported commands and the running Docker stack when available.
+
+```bash
+docker compose config
+python3 -m compileall -q backend/app
+python3 -m compileall -q backend/tests/contracts
+./scripts/backend-pytest tests/contracts
+./scripts/backend-pytest
+cd frontend && npm run build
+cd frontend && npm test
+git diff --check
+```
+
+Targeted Alfred CI:
+
+```bash
+docker compose exec -T backend sh -lc 'cd /workspace/backend && /app/.venv/bin/python -m ruff check app/ai/tool_groups app/services/alfred app/services/chat.py app/services/domain_events.py && /app/.venv/bin/python -m mypy app/ai/tool_groups app/services/alfred/memory.py app/services/domain_events.py'
+```
+
+Smoke checks:
+
+```bash
+curl -fsS http://localhost:8089/api/v1/health
+curl -fsS http://localhost:8089/api/v1/auth/status
+docker compose ps
+```
+
+## Development Notes
+
+- Prefer `rg`/`rg --files` for search.
+- Use structured parsers/APIs over ad hoc string manipulation.
+- Keep feature-specific frontend logic inside its feature or route owner.
+- Keep vendor I/O under `backend/app/modules/*` or provider modules.
+- Do not reintroduce runtime schema bootstrap compatibility or old setting aliases.
+- Do not move code just to move it; V2 progress means deletion, consolidation, reduced public surface, or clearer ownership.

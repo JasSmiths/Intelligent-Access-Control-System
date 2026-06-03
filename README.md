@@ -45,17 +45,19 @@ debugging.
 
 ## Tests
 
-The backend image installs the project dev extras, including `pytest` and
-`pytest-asyncio`, so tests can be run from the live Compose container:
+The backend image and backend virtualenv install the project dev extras,
+including `pytest` and `pytest-asyncio`. Use the repo test wrapper so pytest is
+resolved consistently from the live Compose container when available, or from
+`backend/.venv` otherwise:
 
 ```bash
-docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest'
+./scripts/backend-pytest
 ```
 
 For a focused test file:
 
 ```bash
-docker compose exec -T backend sh -c 'cd /workspace/backend && python -m pytest tests/test_dependency_updates.py'
+./scripts/backend-pytest tests/test_dependency_updates.py
 ```
 
 Frontend guardrail tests run with Vitest:
