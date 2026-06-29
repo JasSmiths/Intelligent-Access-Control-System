@@ -161,6 +161,63 @@ Those are not the critical private fallback surface, but they may need to stay
 enabled because current `uiprotect` uses public event/device websockets for
 typed public caches.
 
+## Official Integration API Gap Check
+
+Use this check before deciding whether IACS can remove a private endpoint.
+Compare the exact IACS behavior, not just a similarly named Protect feature,
+against both the official documentation and the configured console.
+
+Official documentation source checked on 2026-06-29:
+
+```text
+https://developer.ui.com/protect/v7.1.83/gettingstarted
+https://developer.ui.com/protect/v7.1.83/get-v1cameras
+https://developer.ui.com/protect/v7.1.83/get-v1camerasidsnapshot
+https://developer.ui.com/protect/v7.1.83/get-v1subscribeevents
+```
+
+The official API has these useful equivalents:
+
+| IACS need | Official Integration API status |
+| --- | --- |
+| API-key authentication | Supported by the Integration API. |
+| Application/version probe | Supported by `GET /proxy/protect/integration/v1/meta/info`. |
+| Camera list | Supported by `GET /proxy/protect/integration/v1/cameras`. |
+| Live camera snapshot | Supported by `GET /proxy/protect/integration/v1/cameras/{id}/snapshot`. Use `channel=package` for package cameras. |
+| Public realtime event messages | Documented as `WSS /proxy/protect/integration/v1/subscribe/events`. |
+| Public realtime device messages | Documented as `WSS /proxy/protect/integration/v1/subscribe/devices`. |
+| Alarm Manager webhook test | Supported by `POST /proxy/protect/integration/v1/alarm-manager/webhook/{id}`. This is a mutation/test path and still needs admin confirmation in IACS. |
+
+The official API does not currently cover these private dependencies:
+
+| IACS need | Official API gap |
+| --- | --- |
+| Historical event search/backfill | No documented `GET /v1/events` equivalent in Protect API `v7.1.83`. |
+| Single historical event lookup | No documented `GET /v1/events/{id}` equivalent. |
+| Event thumbnail by event/thumbnail id | No documented event thumbnail endpoint. |
+| Event video export/clip recovery | No documented event video/export endpoint. |
+| LPR candidate/track extraction | No documented `smartDetectTrack` equivalent. The public event schema exposes `smartDetectTypes` including `licensePlate`, but not the candidate plate text, confidence, matched-name, or `detectedThumbnails` payloads IACS records. |
+| Private raw update stream | The official public websockets are useful, but they are not a byte-for-byte replacement for `WSS /proxy/protect/ws/updates?lastUpdateId=...`. |
+
+Read-only live probe used on 2026-06-29:
+
+```text
+GET /proxy/protect/integration/v1/meta/info -> 200
+GET /proxy/protect/integration/v1/cameras -> 200
+GET /proxy/protect/integration/v1/events -> 404
+GET /proxy/protect/integration/v1/events/test/smartDetectTrack -> 404
+```
+
+The websocket paths must be checked with a websocket client, not a plain HTTP
+GET. A normal GET returning 404 does not prove the documented websocket route is
+absent.
+
+Current conclusion: IACS can use the official API for camera inventory, public
+device/event updates, live snapshots, and alarm-manager webhook tests. It still
+needs the private API for historical event recovery, event media, and LPR
+candidate details until Ubiquiti exposes official equivalents for those
+capabilities.
+
 ## Replacement Boundary
 
 If `uiprotect` removes the private API layer entirely, IACS does not need a
