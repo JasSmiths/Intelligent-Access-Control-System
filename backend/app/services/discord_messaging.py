@@ -320,12 +320,12 @@ class DiscordMessagingService:
             )
             await interaction.response.send_message(f"Discord access denied: {reason}.", ephemeral=True)
             return
-        role_ids = incoming.author_role_ids
         provider_user_id = incoming.author_provider_id
-        if not await self.author_is_admin(provider_user_id, role_ids, provider_admin=incoming.author_is_provider_admin):
+        linked_user_id = await self._linked_admin_user_id(provider_user_id)
+        if not linked_user_id:
             logger.info("discord_hitl_denied", extra={"author_id": provider_user_id, "confirmation_id": confirmation_id})
             await interaction.response.send_message(
-                "Admin permission is required to resolve this action. Use a linked IACS Admin account, a configured Discord admin role, or a Discord server admin.",
+                "Admin permission is required to resolve this action. Link this Discord identity to an active IACS Admin account first.",
                 ephemeral=True,
             )
             return
@@ -338,7 +338,7 @@ class DiscordMessagingService:
             session_id=session_id,
             confirmation_id=confirmation_id,
             decision=decision,
-            user_id=await self._linked_user_id(provider_user_id),
+            user_id=linked_user_id,
             user_role="admin",
         )
         await interaction.followup.send(result.response_text[:1900] or "Action resolved.", ephemeral=True)
@@ -363,11 +363,10 @@ class DiscordMessagingService:
         return True, "allowed"
 
     async def author_is_admin(self, provider_user_id: str, role_ids: list[str], *, provider_admin: bool = False) -> bool:
-        if provider_admin:
-            return True
-        config = await load_discord_config()
-        if set(role_ids) & config.admin_role_ids:
-            return True
+        del role_ids, provider_admin
+        return bool(await self._linked_admin_user_id(provider_user_id))
+
+    async def _linked_admin_user_id(self, provider_user_id: str) -> str | None:
         async with AsyncSessionLocal() as session:
             identity = await session.scalar(
                 select(MessagingIdentity)
@@ -376,7 +375,7 @@ class DiscordMessagingService:
                 .where(MessagingIdentity.provider_user_id == provider_user_id)
             )
             user = identity.user if identity else None
-            return bool(user and user.is_active and user.role == UserRole.ADMIN)
+            return str(user.id) if user and user.is_active and user.role == UserRole.ADMIN else None
 
     async def send_notification_action(
         self,
@@ -597,16 +596,6 @@ class DiscordMessagingService:
         if len(matches) > 1:
             logger.warning("discord_channel_name_ambiguous", extra={"requested": identifier, "count": len(matches)})
         return None
-
-    async def _linked_user_id(self, provider_user_id: str) -> str | None:
-        async with AsyncSessionLocal() as session:
-            identity = await session.scalar(
-                select(MessagingIdentity)
-                .where(MessagingIdentity.provider == "discord")
-                .where(MessagingIdentity.provider_user_id == provider_user_id)
-            )
-            return str(identity.user_id) if identity and identity.user_id else None
-
 
 def incoming_from_interaction(interaction: Any, text: str) -> IncomingChatMessage:
     guild = getattr(interaction, "guild", None)

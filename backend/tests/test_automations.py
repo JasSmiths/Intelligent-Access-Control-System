@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 import pytest
+from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 from app.ai import tools as ai_tools
@@ -673,6 +674,77 @@ def test_webhook_hmac_and_source_policy_helpers() -> None:
     )
     assert automations.webhook_source_allowed("192.0.2.10", ["192.0.2.0/24"])
     assert not automations.webhook_source_allowed("198.51.100.10", ["192.0.2.0/24"])
+
+
+class FakeNonceSession:
+    def __init__(self, *, existing: bool = False, flush_error: bool = False) -> None:
+        self.existing = existing
+        self.flush_error = flush_error
+        self.added: list[object] = []
+        self.last_scalar_statement = ""
+
+    async def execute(self, _statement):
+        return None
+
+    async def scalar(self, _statement):
+        self.last_scalar_statement = str(_statement)
+        return uuid.uuid4() if self.existing else None
+
+    def add(self, row) -> None:
+        self.added.append(row)
+
+    async def flush(self) -> None:
+        if self.flush_error:
+            raise IntegrityError("insert", {}, Exception("duplicate"))
+
+    async def rollback(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_webhook_nonce_recorder_rejects_replay() -> None:
+    now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
+    session = FakeNonceSession()
+
+    await automations.remember_webhook_nonce(
+        session,
+        "hook-key",
+        "192.0.2.10",
+        nonce="nonce-a",
+        signature_timestamp=str(int(now.timestamp())),
+        window_seconds=300,
+    )
+
+    assert len(session.added) == 1
+    nonce_row = session.added[0]
+    assert nonce_row.nonce_hash == automations.webhook_nonce_hash("nonce-a")
+    assert nonce_row.expires_at == now + timedelta(seconds=300)
+    assert "source_ip" not in session.last_scalar_statement
+
+    with pytest.raises(automations.AutomationError):
+        await automations.remember_webhook_nonce(
+            FakeNonceSession(existing=True),
+            "hook-key",
+            "192.0.2.10",
+            nonce="nonce-a",
+            signature_timestamp=str(int(now.timestamp())),
+            window_seconds=300,
+        )
+
+
+@pytest.mark.asyncio
+async def test_webhook_nonce_recorder_rejects_concurrent_duplicate() -> None:
+    now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
+
+    with pytest.raises(automations.AutomationError):
+        await automations.remember_webhook_nonce(
+            FakeNonceSession(flush_error=True),
+            "hook-key",
+            "192.0.2.10",
+            nonce="nonce-a",
+            signature_timestamp=str(int(now.timestamp())),
+            window_seconds=300,
+        )
 
 
 @pytest.mark.asyncio

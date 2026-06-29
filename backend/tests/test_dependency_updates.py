@@ -229,18 +229,35 @@ def test_generated_compose_override_records_host_mounted_remote_storage(tmp_path
     generated_path = tmp_path / GENERATED_COMPOSE
     nfs = generated_path.read_text()
     assert "mode: nfs" in nfs
-    assert "host_path: nas.local:/volume/iacs" in nfs
-    assert "addr=nas.local,rw" in nfs
+    assert 'host_path: "nas.local:/volume/iacs"' in nfs
+    assert 'mount_options: "addr=nas.local,rw"' in nfs
     assert "volumes:" not in nfs
     assert stat.S_IMODE(generated_path.stat().st_mode) == 0o600
 
     service._write_generated_compose_override("samba", "//nas/iacs", "username=iacs,vers=3.0,rw")
     samba = generated_path.read_text()
     assert "mode: samba" in samba
-    assert "host_path: //nas/iacs" in samba
-    assert "username=iacs,vers=3.0,rw" in samba
+    assert 'host_path: "//nas/iacs"' in samba
+    assert 'mount_options: "username=iacs,vers=3.0,rw"' in samba
     assert "volumes:" not in samba
     assert stat.S_IMODE(generated_path.stat().st_mode) == 0o600
+
+
+def test_generated_compose_override_quotes_storage_scalars(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("IACS_WORKSPACE_DIR", str(tmp_path))
+    service = DependencyUpdateService()
+
+    service._write_generated_compose_override(
+        "samba",
+        "//nas/iacs\nvolumes:\n  injected: {}",
+        "username=iacs,password=secret\nx-bad: true",
+    )
+    generated = (tmp_path / GENERATED_COMPOSE).read_text()
+
+    assert "\n  injected: {}" not in generated
+    assert "\nx-bad: true" not in generated
+    assert "\\nvolumes:" in generated
+    assert "\\nx-bad:" in generated
 
 
 def test_manifest_snapshot_excludes_generated_compose_override(tmp_path, monkeypatch) -> None:

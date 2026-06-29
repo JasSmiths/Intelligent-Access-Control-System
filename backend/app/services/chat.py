@@ -18,6 +18,7 @@ from app.ai.providers import (
     get_llm_provider,
 )
 from app.ai.tools import AgentTool, build_agent_tools, get_chat_tool_context, set_chat_tool_context
+from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import ChatMessage, ChatSession, Person, User, Vehicle
@@ -58,11 +59,14 @@ from app.services.chat_contracts import (
     StatusCallback,
 )
 from app.services.event_bus import event_bus
-from app.services.settings import get_runtime_config
+from app.services.settings import SECRET_KEYS, get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log, sanitize_payload
 from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
+
+PENDING_SECRET_MARKER = "__iacs_encrypted_pending_secret__"
+SECRET_ARGUMENT_NAME_PARTS = ("secret", "token", "password", "api_key", "mount_options")
 
 
 class ChatService:
@@ -238,6 +242,7 @@ class ChatService:
                 "user",
                 self._confirmation_user_message(tool_name, {"confirmation_id": confirmation_id}),
             )
+            await self._clear_pending_agent_action(session_uuid)
             try:
                 tool_result = await self._execute_tool_call(
                     session_uuid,
@@ -255,8 +260,6 @@ class ChatService:
                     "arguments": call.arguments,
                     "output": {"error": str(exc)[:500], "status": "failed"},
                 }
-            finally:
-                await self._clear_pending_agent_action(session_uuid)
 
             tool_results = [item for item in as_list(pending.get("tool_results")) if isinstance(item, dict)]
             tool_results.append(tool_result)
@@ -2495,7 +2498,10 @@ class ChatService:
             "id": confirmation_id,
             "session_id": str(session_id),
             "tool_name": str(pending_result.get("name") or ""),
-            "arguments": pending_result.get("arguments") if isinstance(pending_result.get("arguments"), dict) else {},
+            "arguments": self._protect_pending_arguments(
+                str(pending_result.get("name") or ""),
+                pending_result.get("arguments") if isinstance(pending_result.get("arguments"), dict) else {},
+            ),
             "preview_output": pending_result.get("output") if isinstance(pending_result.get("output"), dict) else {},
             "tool_results": self._tool_results_for_prompt(tool_results),
             "route": {
@@ -2644,11 +2650,54 @@ class ChatService:
         return "Confirm"
 
     def _confirmed_arguments_for_pending(self, pending: dict[str, Any]) -> dict[str, Any]:
-        arguments = dict(as_dict(pending.get("arguments")))
+        arguments = self._restore_pending_arguments(as_dict(pending.get("arguments")))
         output = as_dict(pending.get("preview_output"))
         confirmation_field = str(output.get("confirmation_field") or "confirm")
         arguments[confirmation_field] = True
         return arguments
+
+    def _protect_pending_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            str(key): self._protect_pending_value(value, key=str(key), tool_name=tool_name)
+            for key, value in arguments.items()
+        }
+
+    def _protect_pending_value(self, value: Any, *, key: str, tool_name: str) -> Any:
+        if self._pending_argument_is_secret(key, tool_name=tool_name) and value is not None and value != "":
+            return {PENDING_SECRET_MARKER: encrypt_secret(json.dumps(value, default=str, separators=(",", ":")))}
+        if isinstance(value, dict):
+            return {
+                str(child_key): self._protect_pending_value(child_value, key=str(child_key), tool_name=tool_name)
+                for child_key, child_value in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._protect_pending_value(item, key=key, tool_name=tool_name)
+                for item in value
+            ]
+        return value
+
+    def _restore_pending_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        restored = self._restore_pending_value(arguments)
+        return restored if isinstance(restored, dict) else {}
+
+    def _restore_pending_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            encrypted = value.get(PENDING_SECRET_MARKER)
+            if isinstance(encrypted, str):
+                return json.loads(decrypt_secret(encrypted))
+            return {str(key): self._restore_pending_value(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [self._restore_pending_value(item) for item in value]
+        return value
+
+    def _pending_argument_is_secret(self, key: str, *, tool_name: str) -> bool:
+        normalized = key.strip().lower()
+        if normalized in SECRET_KEYS:
+            return True
+        if tool_name == "update_system_settings" and normalized in SECRET_KEYS:
+            return True
+        return any(part in normalized for part in SECRET_ARGUMENT_NAME_PARTS)
 
     def _route_from_pending(self, pending: dict[str, Any]) -> IntentRoute:
         route = as_dict(pending.get("route"))

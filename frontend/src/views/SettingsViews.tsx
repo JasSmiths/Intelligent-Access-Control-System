@@ -1134,9 +1134,19 @@ export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number
     setSaved("");
     setError("");
     try {
+      const newSecret = customSecret.trim() || undefined;
+      const confirmation = await createActionConfirmation(
+        "auth_secret.rotate",
+        { new_secret_provided: Boolean(newSecret) },
+        {
+          target_entity: "AuthSecret",
+          target_label: "Authentication root secret",
+          reason: "Rotate auth root secret"
+        }
+      );
       const payload = {
-        confirmed: true,
-        new_secret: customSecret.trim() || undefined
+        confirmation_token: confirmation.confirmation_token,
+        new_secret: newSecret
       };
       const next = await api.post<AuthSecretStatus>("/api/v1/settings/security/auth-secret/rotate", payload);
       setStatus(next);
@@ -1335,7 +1345,13 @@ export function UsersView({
     if (!window.confirm(`Delete ${displayUserName(user)}?`)) return;
     setError("");
     try {
-      await api.delete(`/api/v1/users/${user.id}`);
+      const confirmation = await createActionConfirmation("user.delete", { user_id: user.id }, {
+        target_entity: "User",
+        target_id: user.id,
+        target_label: displayUserName(user),
+        reason: "Delete user"
+      });
+      await api.delete(`/api/v1/users/${user.id}`, { confirmation_token: confirmation.confirmation_token });
       await loadUsers();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete user");
@@ -1345,7 +1361,14 @@ export function UsersView({
   const toggleActive = async (user: UserAccount) => {
     setError("");
     try {
-      const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, { is_active: !user.is_active });
+      const payload = { is_active: !user.is_active };
+      const confirmation = await createActionConfirmation("user.update", { user_id: user.id, ...payload }, {
+        target_entity: "User",
+        target_id: user.id,
+        target_label: displayUserName(user),
+        reason: payload.is_active ? "Activate user" : "Deactivate user"
+      });
+      const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, { ...payload, confirmation_token: confirmation.confirmation_token });
       if (savedUser.id === currentUser.id) {
         onCurrentUserUpdated(savedUser);
       }
@@ -1358,8 +1381,16 @@ export function UsersView({
   const resetPassword = async (user: UserAccount) => {
     setError("");
     try {
+      const confirmationPayload = { user_id: user.id, generate_password: true };
+      const confirmation = await createActionConfirmation("user.reset_password", confirmationPayload, {
+        target_entity: "User",
+        target_id: user.id,
+        target_label: displayUserName(user),
+        reason: "Reset user password"
+      });
       const result = await api.post<{ temporary_password: string }>(`/api/v1/users/${user.id}/reset-password`, {
-        generate_password: true
+        generate_password: true,
+        confirmation_token: confirmation.confirmation_token
       });
       setSelectedUser(user);
       setTemporaryPassword(result.temporary_password);
@@ -1520,7 +1551,15 @@ export function UserModal({
           generate_password: form.generate_password
         };
         payload.profile_photo_data_url = form.profile_photo_data_url || null;
-        const result = await api.post<{ user: UserAccount; temporary_password: string | null }>("/api/v1/users", payload);
+        const confirmationPayload = { ...payload };
+        delete confirmationPayload.temporary_password;
+        delete confirmationPayload.profile_photo_data_url;
+        const confirmation = await createActionConfirmation("user.create", confirmationPayload, {
+          target_entity: "User",
+          target_label: form.username,
+          reason: "Create user"
+        });
+        const result = await api.post<{ user: UserAccount; temporary_password: string | null }>("/api/v1/users", { ...payload, confirmation_token: confirmation.confirmation_token });
         await onSaved(result.temporary_password, result.user);
       } else if (user) {
         const payload: Record<string, unknown> = {
@@ -1536,7 +1575,15 @@ export function UserModal({
         if (profilePhotoChanged) {
           payload.profile_photo_data_url = form.profile_photo_data_url || null;
         }
-        const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, payload);
+        const confirmationPayload = { ...payload };
+        delete confirmationPayload.profile_photo_data_url;
+        const confirmation = await createActionConfirmation("user.update", { user_id: user.id, ...confirmationPayload }, {
+          target_entity: "User",
+          target_id: user.id,
+          target_label: displayUserName(user),
+          reason: "Update user"
+        });
+        const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, { ...payload, confirmation_token: confirmation.confirmation_token });
         await onSaved(null, savedUser);
       }
     } catch (saveError) {

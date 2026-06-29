@@ -13,10 +13,11 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import HTTPException, Request, Response, WebSocket, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_secret import get_auth_secret
-from app.models import User
+from app.models import RevokedAuthToken, User
 from app.models.enums import UserRole
 from app.services.profile_photos import stored_image_url
 from app.services.settings import get_runtime_config
@@ -168,6 +169,7 @@ async def create_access_token(user: User, *, remember_me: bool = False) -> tuple
     payload = {
         "sub": str(user.id),
         "role": user.role.value,
+        "ver": int(getattr(user, "auth_session_version", 0) or 0),
         "iat": int(now.timestamp()),
         "exp": int(expires_at.timestamp()),
         "jti": secrets.token_urlsafe(18),
@@ -211,7 +213,62 @@ async def authenticate_token(session: AsyncSession, token: str | None) -> User |
     user = await session.get(User, user_id)
     if not user or not user.is_active:
         return None
+    if int(payload.get("ver") or 0) != int(user.auth_session_version or 0):
+        return None
+    if await token_is_revoked(session, payload):
+        return None
     return user
+
+
+async def token_is_revoked(session: AsyncSession, payload: dict[str, Any]) -> bool:
+    jti = payload.get("jti")
+    if not isinstance(jti, str) or not jti:
+        return True
+    await purge_expired_revoked_tokens(session)
+    return bool(
+        await session.scalar(
+            select(RevokedAuthToken.id).where(RevokedAuthToken.jti_hash == token_jti_hash(jti))
+        )
+    )
+
+
+async def revoke_access_token(session: AsyncSession, token: str | None) -> None:
+    payload = _decode_jwt(token) if token else None
+    if not payload:
+        return
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    subject = payload.get("sub")
+    if not isinstance(jti, str) or not jti or not isinstance(exp, int):
+        return
+    try:
+        user_id = uuid.UUID(str(subject)) if subject else None
+    except ValueError:
+        user_id = None
+    session.add(
+        RevokedAuthToken(
+            jti_hash=token_jti_hash(jti),
+            user_id=user_id,
+            expires_at=datetime.fromtimestamp(exp, tz=UTC),
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+
+
+async def purge_expired_revoked_tokens(session: AsyncSession) -> None:
+    rows = (
+        await session.scalars(
+            select(RevokedAuthToken).where(RevokedAuthToken.expires_at <= datetime.now(tz=UTC))
+        )
+    ).all()
+    if not rows:
+        return
+    for row in rows:
+        await session.delete(row)
+    await session.commit()
 
 
 async def authenticate_request(session: AsyncSession, request: Request) -> User | None:
@@ -238,6 +295,14 @@ async def _extract_http_token_async(request: Request) -> str | None:
         return authorization.split(" ", 1)[1].strip()
     runtime = await get_runtime_config()
     return request.cookies.get(runtime.auth_cookie_name)
+
+
+async def extract_http_token(request: Request) -> str | None:
+    return await _extract_http_token_async(request)
+
+
+def token_jti_hash(jti: str) -> str:
+    return hashlib.sha256(jti.encode()).hexdigest()
 
 
 def _encode_jwt(payload: dict[str, Any]) -> str:

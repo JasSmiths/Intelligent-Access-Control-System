@@ -180,10 +180,38 @@ export const integrationsApi = {
   getDependencyJob: (jobId: string) => api.get<DependencyJob>(`/api/v1/dependency-updates/jobs/${jobId}`),
   checkDependency: (dependencyId: string) => api.post<DependencyPackage>(`/api/v1/dependency-updates/packages/${dependencyId}/check`, {}),
   analyzeDependency: (dependencyId: string, targetVersion?: string | null) => api.post<DependencyAnalysis>(`/api/v1/dependency-updates/packages/${dependencyId}/analyze`, { target_version: targetVersion || undefined }),
-  applyDependency: (dependencyId: string, targetVersion?: string | null) => api.post<DependencyJob>(`/api/v1/dependency-updates/packages/${dependencyId}/apply`, { target_version: targetVersion || undefined, confirmed: true }),
-  restoreDependencyBackup: (backupId: string) => api.post<DependencyJob>(`/api/v1/dependency-updates/backups/${backupId}/restore`, { confirmed: true }),
-  saveDependencyStorage: (payload: Record<string, unknown>) => api.post("/api/v1/dependency-updates/storage/config", payload),
-  validateDependencyStorage: () => api.post("/api/v1/dependency-updates/storage/validate", {}),
+  applyDependency: (dependencyId: string, targetVersion?: string | null) => {
+    const body = { target_version: targetVersion || undefined };
+    return confirmedPost<DependencyJob>(
+      `/api/v1/dependency-updates/packages/${dependencyId}/apply`,
+      "dependency_update.apply",
+      { dependency_id: dependencyId, ...body },
+      { target_entity: "ExternalDependency", target_id: dependencyId, target_label: "Dependency update", reason: "Apply dependency update" },
+      body
+    );
+  },
+  restoreDependencyBackup: (backupId: string) =>
+    confirmedPost<DependencyJob>(
+      `/api/v1/dependency-updates/backups/${backupId}/restore`,
+      "dependency_update.restore",
+      { backup_id: backupId },
+      { target_entity: "DependencyUpdateBackup", target_id: backupId, target_label: "Dependency backup", reason: "Restore dependency backup" },
+      {}
+    ),
+  saveDependencyStorage: (payload: Record<string, unknown>) =>
+    confirmedPost(
+      "/api/v1/dependency-updates/storage/config",
+      "dependency_update.storage.configure",
+      payload,
+      { target_entity: "DependencyUpdateStorage", target_label: "Update backup storage", reason: "Configure dependency backup storage" }
+    ),
+  validateDependencyStorage: () =>
+    confirmedPost(
+      "/api/v1/dependency-updates/storage/validate",
+      "dependency_update.storage.validate",
+      {},
+      { target_entity: "DependencyUpdateStorage", target_label: "Update backup storage", reason: "Validate dependency backup storage" }
+    ),
   getAppriseUrls: async () => {
     const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls");
     return result.urls;
@@ -309,7 +337,7 @@ export function createProtectBackup() {
   }, {});
 }
 export function applyProtectUpdate(targetVersion: string) {
-  const payload = { target_version: targetVersion, confirmed: true };
+  const payload = { target_version: targetVersion };
   return confirmedPost<UnifiProtectUpdateApplyResult>("/api/v1/integrations/unifi-protect/update/apply", "unifi_protect.update.apply", payload, {
     target_entity: "UniFiProtect",
     target_label: targetVersion,

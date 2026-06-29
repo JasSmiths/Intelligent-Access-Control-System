@@ -125,7 +125,8 @@ class MessagingBridgeService:
 
             user: User | None = identity.user
             person: Person | None = identity.person
-            user_role = user.role.value if user and user.is_active else ("admin" if is_admin_hint else "standard")
+            linked_admin = bool(user and user.is_active and user.role == UserRole.ADMIN)
+            user_role = user.role.value if user and user.is_active else "standard"
             return MessagingActor(
                 provider=message.provider,
                 provider_user_id=message.author_provider_id,
@@ -133,7 +134,7 @@ class MessagingBridgeService:
                 user_id=str(user.id) if user and user.is_active else None,
                 user_role=user_role,
                 person_id=str(person.id) if person else str(user.person_id) if user and user.person_id else None,
-                is_admin=bool(is_admin_hint or (user and user.is_active and user.role == UserRole.ADMIN)),
+                is_admin=linked_admin,
             )
 
 

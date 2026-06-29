@@ -1,11 +1,13 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import User
 from app.services.auth import authenticate_websocket
 from app.services.dependency_updates import DependencyUpdateError, get_dependency_update_service
@@ -20,7 +22,7 @@ class DependencyAnalyzeRequest(BaseModel):
 
 class DependencyApplyRequest(BaseModel):
     target_version: str | None = Field(default=None, max_length=120)
-    confirmed: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class DependencyCheckAllRequest(BaseModel):
@@ -28,7 +30,7 @@ class DependencyCheckAllRequest(BaseModel):
 
 
 class DependencyRestoreRequest(BaseModel):
-    confirmed: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class DependencyStorageConfigRequest(BaseModel):
@@ -37,6 +39,11 @@ class DependencyStorageConfigRequest(BaseModel):
     mount_options: str | None = Field(default=None, max_length=1200)
     retention_days: str | None = Field(default="", max_length=20)
     min_free_bytes: int = Field(default=1073741824, ge=0)
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class DependencyStorageValidationRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 @router.get("/packages")
@@ -102,12 +109,24 @@ async def apply_dependency_update(
     dependency_id: uuid.UUID,
     request: DependencyApplyRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    payload = {
+        "dependency_id": str(dependency_id),
+        **request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+    }
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="dependency_update.apply",
+        payload=payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
         return await get_dependency_update_service().start_apply_job(
             dependency_id,
             target_version=request.target_version,
-            confirmed=request.confirmed,
+            confirmed=True,
             user=user,
         )
     except DependencyUpdateError as exc:
@@ -132,11 +151,19 @@ async def restore_dependency_backup(
     backup_id: uuid.UUID,
     request: DependencyRestoreRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="dependency_update.restore",
+        payload={"backup_id": str(backup_id)},
+        confirmation_token=request.confirmation_token,
+    )
     try:
         return await get_dependency_update_service().start_restore_job(
             backup_id,
-            confirmed=request.confirmed,
+            confirmed=True,
             user=user,
         )
     except DependencyUpdateError as exc:
@@ -160,7 +187,18 @@ async def dependency_update_storage_status(_: User = Depends(current_user)) -> d
 
 
 @router.post("/storage/validate")
-async def validate_dependency_update_storage(_: User = Depends(admin_user)) -> dict[str, Any]:
+async def validate_dependency_update_storage(
+    request: DependencyStorageValidationRequest | None = Body(default=None),
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="dependency_update.storage.validate",
+        payload={},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     return await get_dependency_update_service().validate_storage()
 
 
@@ -168,9 +206,18 @@ async def validate_dependency_update_storage(_: User = Depends(admin_user)) -> d
 async def configure_dependency_update_storage(
     request: DependencyStorageConfigRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    payload = request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_unset=True)
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="dependency_update.storage.configure",
+        payload=payload,
+        confirmation_token=request.confirmation_token,
+    )
     try:
-        return await get_dependency_update_service().save_storage_config(request.model_dump(exclude_unset=True), user=user)
+        return await get_dependency_update_service().save_storage_config(payload, user=user)
     except DependencyUpdateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

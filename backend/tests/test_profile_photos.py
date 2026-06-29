@@ -5,15 +5,32 @@ from PIL import Image
 
 from app.services.profile_photos import (
     PROFILE_PHOTO_MAX_EDGE_PX,
+    ProfilePhotoError,
     normalize_profile_photo_data_url,
     photo_data_url_to_media,
 )
 
 
 def test_profile_photo_normalizer_leaves_browser_safe_images_unchanged() -> None:
-    data_url = "data:image/png;base64,aGVsbG8="
+    source = BytesIO()
+    Image.new("RGB", (120, 90), "#38bdf8").save(source, format="PNG")
+    data_url = f"data:image/png;base64,{base64.b64encode(source.getvalue()).decode('ascii')}"
 
-    assert normalize_profile_photo_data_url(data_url) == data_url
+    normalized = normalize_profile_photo_data_url(data_url)
+
+    assert normalized is not None
+    assert normalized.startswith("data:image/")
+
+
+def test_profile_photo_normalizer_rejects_svg_active_content() -> None:
+    data_url = "data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIj48L3N2Zz4="
+
+    try:
+        normalize_profile_photo_data_url(data_url)
+    except ProfilePhotoError:
+        pass
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("SVG profile photos must be rejected.")
 
 
 def test_profile_photo_normalizer_converts_heic_to_browser_safe_image() -> None:

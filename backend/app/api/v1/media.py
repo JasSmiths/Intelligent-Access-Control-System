@@ -31,5 +31,5 @@ async def data_url_media_response(
     return Response(
         content=content,
         media_type=content_type,
-        headers={"Cache-Control": "private, max-age=86400"},
+        headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"},
     )

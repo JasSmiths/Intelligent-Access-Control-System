@@ -238,15 +238,20 @@ def test_notify_test_prompt_routes_through_notification_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_admin_counts_as_discord_admin_without_role_lookup(monkeypatch) -> None:
+async def test_provider_admin_requires_linked_iacs_admin(monkeypatch) -> None:
     service = DiscordMessagingService()
 
-    async def fail_config():
-        raise AssertionError("provider admin should short-circuit dynamic config lookup")
+    async def no_linked_admin(_provider_user_id):
+        return None
 
-    monkeypatch.setattr("app.services.discord_messaging.load_discord_config", fail_config)
+    async def linked_admin(_provider_user_id):
+        return "admin-1"
 
-    assert await service.author_is_admin("user-1", [], provider_admin=True) is True
+    monkeypatch.setattr(service, "_linked_admin_user_id", no_linked_admin)
+    assert await service.author_is_admin("user-1", ["admin-role"], provider_admin=True) is False
+
+    monkeypatch.setattr(service, "_linked_admin_user_id", linked_admin)
+    assert await service.author_is_admin("user-1", [], provider_admin=False) is True
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,7 @@ class ConnectionTestRequest(BaseModel):
 
 
 class AuthSecretRotateRequest(BaseModel):
-    confirmed: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
     new_secret: str | None = Field(default=None, max_length=512)
 
 
@@ -86,11 +86,19 @@ async def get_auth_secret_status(_: User = Depends(admin_user)) -> dict[str, obj
 async def rotate_auth_secret_endpoint(
     request: AuthSecretRotateRequest,
     user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
+    await require_confirmed_action(
+        session,
+        user=user,
+        action="auth_secret.rotate",
+        payload={"new_secret_provided": bool(request.new_secret)},
+        confirmation_token=request.confirmation_token,
+    )
     try:
         return await rotate_auth_secret(
             user=user,
-            confirmed=request.confirmed,
+            confirmed=True,
             new_secret=request.new_secret,
         )
     except AuthSecretRotationError as exc:

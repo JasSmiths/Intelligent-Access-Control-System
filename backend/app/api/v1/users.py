@@ -1,13 +1,15 @@
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user
 from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import get_db_session
@@ -90,6 +92,7 @@ class CreateUserRequest(BaseModel):
     is_active: bool = True
     temporary_password: str | None = Field(default=None, min_length=10, max_length=256)
     generate_password: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class CreateUserResponse(BaseModel):
@@ -108,15 +111,21 @@ class UpdateUserRequest(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
     preferences: dict[str, Any] | None = None
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ResetPasswordRequest(BaseModel):
     temporary_password: str | None = Field(default=None, min_length=10, max_length=256)
     generate_password: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 class ResetPasswordResponse(BaseModel):
     temporary_password: str
+
+
+class DeleteUserRequest(BaseModel):
+    confirmation_token: str | None = Field(default=None, max_length=160)
 
 
 @router.get("", response_model=list[UserResponse])
@@ -148,6 +157,19 @@ async def add_user(
     actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> CreateUserResponse:
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token", "temporary_password", "profile_photo_data_url"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    await require_confirmed_action(
+        session,
+        user=actor,
+        action="user.create",
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+    )
     temporary_password = (
         generate_temporary_password()
         if request.generate_password or not request.temporary_password
@@ -202,6 +224,19 @@ async def update_user(
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token", "profile_photo_data_url"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    await require_confirmed_action(
+        session,
+        user=actor,
+        action="user.update",
+        payload={"user_id": str(user_id), **confirmation_payload},
+        confirmation_token=request.confirmation_token,
+    )
     before = user_audit_snapshot(user)
 
     if request.role is not None and request.role != user.role:
@@ -272,6 +307,19 @@ async def reset_password(
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    confirmation_payload = request.model_dump(
+        mode="json",
+        exclude={"confirmation_token", "temporary_password"},
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    await require_confirmed_action(
+        session,
+        user=actor,
+        action="user.reset_password",
+        payload={"user_id": str(user_id), **confirmation_payload},
+        confirmation_token=request.confirmation_token,
+    )
 
     temporary_password = (
         generate_temporary_password()
@@ -279,6 +327,8 @@ async def reset_password(
         else request.temporary_password
     )
     user.password_hash = await hash_password_async(temporary_password)
+    user.auth_session_version = int(user.auth_session_version or 0) + 1
+    user.password_changed_at = datetime.now(tz=UTC)
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_CRUD,
@@ -298,6 +348,7 @@ async def reset_password(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: uuid.UUID,
+    request: DeleteUserRequest | None = Body(default=None),
     actor: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> None:
@@ -309,6 +360,13 @@ async def delete_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete the last active admin account.",
         )
+    await require_confirmed_action(
+        session,
+        user=actor,
+        action="user.delete",
+        payload={"user_id": str(user_id)},
+        confirmation_token=request.confirmation_token if request else None,
+    )
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_CRUD,

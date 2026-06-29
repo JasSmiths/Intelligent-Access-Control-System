@@ -55,7 +55,7 @@ from app.services.alfred.answer_contracts import (
 )
 from app.ai.tool_groups.registry import ToolRegistryError, _validate_tool
 from app.services.alfred.runtime import provider_agent_capability
-from app.services.chat import ChatService, IntentRoute, SYSTEM_PROMPT
+from app.services.chat import ChatService, IntentRoute, PENDING_SECRET_MARKER, SYSTEM_PROMPT
 from app.services.chat_contracts import ChatTurnResult
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
@@ -1504,6 +1504,37 @@ def test_pending_confirmation_uses_stored_arguments() -> None:
     assert confirmed == {"target": "Top Gate", "confirm": True}
 
 
+def test_pending_confirmation_encrypts_secret_arguments(monkeypatch) -> None:
+    monkeypatch.setattr("app.core.crypto.get_auth_secret", lambda: "test-secret")
+    service = ChatService()
+
+    protected = service._protect_pending_arguments(
+        "update_system_settings",
+        {
+            "whatsapp_access_token": "plain-token",
+            "nested": {"mount_options": "username=iacs,password=secret"},
+            "confirm": False,
+        },
+    )
+
+    serialized = json.dumps(protected)
+    assert "plain-token" not in serialized
+    assert "password=secret" not in serialized
+    assert protected["whatsapp_access_token"][PENDING_SECRET_MARKER]
+
+    restored = service._confirmed_arguments_for_pending(
+        {
+            "arguments": protected,
+            "preview_output": {"confirmation_field": "confirm"},
+        }
+    )
+    assert restored == {
+        "whatsapp_access_token": "plain-token",
+        "nested": {"mount_options": "username=iacs,password=secret"},
+        "confirm": True,
+    }
+
+
 @pytest.mark.alfred_critical
 def test_confirmed_terminal_actions_do_not_resume_original_request() -> None:
     service = ChatService()
@@ -2932,6 +2963,7 @@ async def test_confirmed_open_gate_finishes_without_reprompt(monkeypatch) -> Non
         cleared = True
 
     async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
+        assert cleared is True
         executed.append(call)
         return {
             "call_id": call.id,

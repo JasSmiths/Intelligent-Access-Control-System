@@ -1663,8 +1663,8 @@ class DependencyUpdateService:
                 "# Mount the remote share on the host, then bind that mounted path into the containers.\n"
                 "x-iacs-update-backups:\n"
                 f"  mode: {mode}\n"
-                f"  host_path: {host_path}\n"
-                f"  mount_options: {options}\n"
+                f"  host_path: {json.dumps(host_path)}\n"
+                f"  mount_options: {json.dumps(options)}\n"
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)

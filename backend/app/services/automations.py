@@ -12,7 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import (
     AutomationRule,
     AutomationRun,
+    AutomationWebhookNonce,
     AutomationWebhookSender,
     NotificationRule,
     Presence,
@@ -703,6 +704,7 @@ class AutomationService:
         hmac_verified = False
         async with AsyncSessionLocal() as session:
             policies = await webhook_policies_for_key(session, webhook_key)
+            replay_window_seconds = WEBHOOK_HMAC_WINDOW_SECONDS
             if policies:
                 allowed_by_source = [
                     policy
@@ -713,20 +715,33 @@ class AutomationService:
                     raise AutomationError("Automation webhook source is not allowed.")
                 policies = allowed_by_source
                 if any(policy.get("require_hmac") for policy in policies):
+                    replay_window_seconds = min(
+                        int(policy.get("replay_window_seconds") or WEBHOOK_HMAC_WINDOW_SECONDS)
+                        for policy in policies
+                    )
                     if not verify_webhook_hmac(
                         webhook_key,
                         raw_body,
                         signature=signature,
                         timestamp=signature_timestamp,
                         nonce=nonce,
-                        window_seconds=min(
-                            int(policy.get("replay_window_seconds") or WEBHOOK_HMAC_WINDOW_SECONDS)
-                            for policy in policies
-                        ),
+                        window_seconds=replay_window_seconds,
                         now=now,
                     ):
                         await record_rejected_webhook_sender(session, webhook_key, source_ip, now=now)
                         raise AutomationError("Automation webhook signature is invalid or expired.")
+                    try:
+                        await remember_webhook_nonce(
+                            session,
+                            webhook_key,
+                            source_ip,
+                            nonce=nonce,
+                            signature_timestamp=signature_timestamp,
+                            window_seconds=replay_window_seconds,
+                        )
+                    except AutomationError:
+                        await record_rejected_webhook_sender(session, webhook_key, source_ip, now=now)
+                        raise
                     hmac_verified = True
 
             sender = (
@@ -770,10 +785,6 @@ class AutomationService:
                     }
                 )
                 if hmac_verified:
-                    if nonce and sender.last_nonce == nonce:
-                        sender.rejected_count = int(sender.rejected_count or 0) + 1
-                        await session.commit()
-                        raise AutomationError("Automation webhook nonce was already used.")
                     sender.last_nonce = nonce
                     sender.last_signature_at = now
             try:
@@ -1445,6 +1456,48 @@ def verify_webhook_hmac(
     message = b".".join([timestamp_text.encode(), nonce_text.encode(), raw_body or b""])
     expected = hmac.new(webhook_key.encode(), message, hashlib.sha256).hexdigest()
     return hmac.compare_digest(signature_hex, expected)
+
+
+async def remember_webhook_nonce(
+    session: AsyncSession,
+    webhook_key: str,
+    source_ip: str,
+    *,
+    nonce: str | None,
+    signature_timestamp: str | None,
+    window_seconds: int,
+) -> None:
+    nonce_text = optional_text(nonce)
+    signed_at = parse_webhook_timestamp(optional_text(signature_timestamp))
+    if not nonce_text or not signed_at:
+        raise AutomationError("Automation webhook signature is invalid or expired.")
+    expires_at = signed_at + timedelta(seconds=window_seconds)
+    await session.execute(delete(AutomationWebhookNonce).where(AutomationWebhookNonce.expires_at <= datetime.now(tz=UTC)))
+    existing = await session.scalar(
+        select(AutomationWebhookNonce.id)
+        .where(AutomationWebhookNonce.webhook_key == webhook_key)
+        .where(AutomationWebhookNonce.nonce_hash == webhook_nonce_hash(nonce_text))
+    )
+    if existing:
+        raise AutomationError("Automation webhook nonce was already used.")
+    session.add(
+        AutomationWebhookNonce(
+            webhook_key=webhook_key,
+            source_ip=source_ip,
+            nonce_hash=webhook_nonce_hash(nonce_text),
+            signed_at=signed_at,
+            expires_at=expires_at,
+        )
+    )
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise AutomationError("Automation webhook nonce was already used.") from exc
+
+
+def webhook_nonce_hash(nonce: str) -> str:
+    return hashlib.sha256(nonce.encode()).hexdigest()
 
 
 def normalize_webhook_signature(value: str | None) -> str:

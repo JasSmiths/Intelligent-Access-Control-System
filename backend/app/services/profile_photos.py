@@ -28,8 +28,10 @@ def normalize_profile_photo_data_url(value: str | None) -> str | None:
         return None
 
     match = DATA_URL_RE.fullmatch(value)
-    if not match or not match.group("base64"):
+    if not match:
         return value
+    if not match.group("base64"):
+        raise ProfilePhotoError("Profile photo must be a base64-encoded raster image.")
 
     content_type = match.group("content_type").lower()
 
@@ -41,8 +43,6 @@ def normalize_profile_photo_data_url(value: str | None) -> str | None:
             max_edge_px=PROFILE_PHOTO_MAX_EDGE_PX,
         )
     except (OSError, UnidentifiedImageError, ValueError) as exc:
-        if content_type not in HEIF_IMAGE_CONTENT_TYPES:
-            return value
         raise ProfilePhotoError("Profile photo could not be processed.") from exc
 
     return f"data:{output_content_type};base64,{base64.b64encode(output_bytes).decode('ascii')}"
@@ -65,10 +65,8 @@ def photo_data_url_to_media(value: str, *, max_edge_px: int = PHOTO_RESPONSE_MAX
     raw = decode_data_url(match)
     try:
         return compact_image_bytes(raw, content_type, max_edge_px=max_edge_px)
-    except (OSError, UnidentifiedImageError, ValueError):
-        if not content_type.startswith("image/"):
-            raise ProfilePhotoError("Profile photo could not be processed.")
-        return content_type, raw
+    except (OSError, UnidentifiedImageError, ValueError) as exc:
+        raise ProfilePhotoError("Profile photo could not be processed.") from exc
 
 
 def decode_data_url(match: re.Match[str]) -> bytes:

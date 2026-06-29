@@ -6,7 +6,11 @@ import hashlib
 import hmac
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.logging import get_logger
+from app.db.session import AsyncSessionLocal
+from app.models import ProcessedMessagingMessage
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services import whatsapp_messaging as wm
 from app.services.messaging.whatsapp_helpers import *  # noqa: F401,F403
@@ -116,6 +120,11 @@ class WhatsAppWebhookMixin:
                     )
                 for message in messages:
                     if isinstance(message, dict):
+                        if not await self._claim_incoming_provider_message(
+                            message,
+                            phone_number_id=phone_number_id,
+                        ):
+                            continue
                         await self._handle_incoming_message(
                             message,
                             contacts=contacts,
@@ -123,3 +132,26 @@ class WhatsAppWebhookMixin:
                             config=config,
                             signature_verified=signature_verified,
                         )
+
+    async def _claim_incoming_provider_message(self, message: dict[str, Any], *, phone_number_id: str) -> bool:
+        message_id = str(message.get("id") or "").strip()
+        if not message_id:
+            logger.warning("whatsapp_message_missing_provider_id")
+            return True
+        async with AsyncSessionLocal() as session:
+            session.add(
+                ProcessedMessagingMessage(
+                    provider="whatsapp",
+                    provider_message_id=message_id,
+                    provider_channel_id=phone_number_id or None,
+                    author_provider_id=normalize_whatsapp_phone_number(message.get("from")) or None,
+                    received_at=parse_whatsapp_timestamp(message.get("timestamp")),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.info("whatsapp_message_duplicate_ignored", extra={"message_id": message_id})
+                return False
+        return True

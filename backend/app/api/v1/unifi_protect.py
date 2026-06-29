@@ -38,7 +38,6 @@ class ProtectUpdateAnalyzeRequest(BaseModel):
 
 class ProtectUpdateApplyRequest(BaseModel):
     target_version: str | None = Field(default=None, max_length=40)
-    confirmed: bool = False
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
@@ -160,7 +159,7 @@ async def unifi_protect_update_apply(
     try:
         result = await get_unifi_protect_update_service().apply(
             target_version=request.target_version,
-            confirmed=request.confirmed,
+            confirmed=True,
         )
         await write_unifi_audit(
             session,

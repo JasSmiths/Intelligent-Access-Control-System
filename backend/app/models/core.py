@@ -205,6 +205,8 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.STANDARD, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auth_session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
     preferences: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -792,10 +794,25 @@ class AutomationWebhookSender(Base, TimestampMixin):
     rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class AutomationWebhookNonce(Base, TimestampMixin):
+    __tablename__ = "automation_webhook_nonces"
+    __table_args__ = (
+        UniqueConstraint("webhook_key", "nonce_hash", name="ux_automation_webhook_nonce"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    webhook_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    source_ip: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
 Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
 Index("ix_automation_rules_active_next_run", AutomationRule.is_active, AutomationRule.next_run_at)
 Index("ix_automation_rules_active_created", AutomationRule.is_active, AutomationRule.created_at.desc())
 Index("ix_automation_runs_rule_started", AutomationRun.rule_id, AutomationRun.started_at.desc())
+Index("ix_automation_webhook_nonces_expires", AutomationWebhookNonce.expires_at)
 
 
 class LeaderboardState(Base, TimestampMixin):
@@ -1184,6 +1201,20 @@ class ReportExport(Base, TimestampMixin):
     created_by: Mapped[User | None] = relationship()
 
 
+class ProcessedMessagingMessage(Base, TimestampMixin):
+    __tablename__ = "processed_messaging_messages"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_message_id", name="ux_processed_messaging_message_provider_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    provider_message_id: Mapped[str] = mapped_column(String(180), nullable=False, index=True)
+    provider_channel_id: Mapped[str | None] = mapped_column(String(180), index=True)
+    author_provider_id: Mapped[str | None] = mapped_column(String(180), index=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class VisitorPass(Base, TimestampMixin):
     __tablename__ = "visitor_passes"
 
@@ -1362,6 +1393,18 @@ class ChatSession(Base, TimestampMixin):
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+
+
+class RevokedAuthToken(Base, TimestampMixin):
+    __tablename__ = "revoked_auth_tokens"
+    __table_args__ = (
+        UniqueConstraint("jti_hash", name="ux_revoked_auth_tokens_jti_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    jti_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class ChatMessage(Base, TimestampMixin):

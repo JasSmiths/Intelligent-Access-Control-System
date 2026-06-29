@@ -10,6 +10,7 @@ import uuid
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
+from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 from app.ai.providers import LlmResult
@@ -18,8 +19,9 @@ from app.api.v1 import webhooks, whatsapp as whatsapp_api
 from app.models import VisitorPass
 from app.models.enums import UserRole, VisitorPassStatus, VisitorPassType
 from app.modules.notifications.base import NotificationContext
-from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, SECRET_KEYS
 from app.services import whatsapp_messaging
+from app.services.messaging import whatsapp_webhook as whatsapp_webhook_module
+from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, SECRET_KEYS
 from app.services.visitor_passes import visitor_pass_whatsapp_history
 from app.services.whatsapp_messaging import (
     WhatsAppIntegrationConfig,
@@ -768,6 +770,48 @@ async def test_status_webhook_tracks_visitor_message_received_and_read(monkeypat
         ("447700900123", "message_received", "wamid.out.1"),
         ("447700900123", "message_read", "wamid.out.1"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_incoming_whatsapp_message_claim_rejects_duplicate_provider_id(monkeypatch) -> None:
+    service = get_whatsapp_messaging_service()
+    added: list[Any] = []
+    fail_next_commit = False
+
+    class FakeSession:
+        def add(self, row):
+            added.append(row)
+
+        async def commit(self):
+            if fail_next_commit:
+                raise IntegrityError("insert", {}, Exception("duplicate"))
+
+        async def rollback(self):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return None
+
+    monkeypatch.setattr(whatsapp_webhook_module, "AsyncSessionLocal", lambda: FakeSession())
+
+    first = await service._claim_incoming_provider_message(
+        {"id": "wamid.dedupe", "from": "+44 7700 900123", "timestamp": "1782319200"},
+        phone_number_id="123456789",
+    )
+    fail_next_commit = True
+    second = await service._claim_incoming_provider_message(
+        {"id": "wamid.dedupe", "from": "+44 7700 900123", "timestamp": "1782319200"},
+        phone_number_id="123456789",
+    )
+
+    assert first is True
+    assert second is False
+    assert added[0].provider == "whatsapp"
+    assert added[0].provider_message_id == "wamid.dedupe"
+    assert added[0].author_provider_id == "447700900123"
 
 
 @pytest.mark.asyncio

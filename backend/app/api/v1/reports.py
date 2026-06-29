@@ -56,10 +56,10 @@ async def export_person_movement_report(
 @router.get("/{report_id}")
 async def get_report_export(
     report_id: str,
-    _: User = Depends(current_user),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    row = await load_report_export(session, report_id)
+    row = await load_report_export(session, report_id, actor=actor)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report was not found.")
     return report_export_payload(row)
@@ -68,10 +68,10 @@ async def get_report_export(
 @router.get("/{report_id}/pdf")
 async def download_report_export_pdf(
     report_id: str,
-    _: User = Depends(current_user),
+    actor: User = Depends(current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> FileResponse:
-    row = await load_report_export(session, report_id)
+    row = await load_report_export(session, report_id, actor=actor)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report was not found.")
     try:

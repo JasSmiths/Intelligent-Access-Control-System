@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models import AccessEvent, Person, Presence, ReportExport, User, Vehicle, VisitorPass
-from app.models.enums import AccessDecision, AccessDirection
+from app.models.enums import AccessDecision, AccessDirection, UserRole
 from app.services.profile_photos import stored_image_url
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
@@ -157,12 +157,17 @@ async def create_person_movement_report_export(
     return row
 
 
-async def load_report_export(session: AsyncSession, report_number: str) -> ReportExport | None:
+async def load_report_export(session: AsyncSession, report_number: str, *, actor: User) -> ReportExport | None:
     if not REPORT_ID_RE.fullmatch(report_number.strip()):
         return None
-    return await session.scalar(
+    row = await session.scalar(
         select(ReportExport).where(ReportExport.report_number == report_number.strip())
     )
+    if not row:
+        return None
+    if actor.role == UserRole.ADMIN or row.created_by_user_id == actor.id:
+        return row
+    return None
 
 
 def report_export_payload(row: ReportExport) -> dict[str, Any]:

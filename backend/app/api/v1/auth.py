@@ -21,6 +21,8 @@ from app.services.auth import (
     create_access_token,
     create_user,
     normalize_username,
+    extract_http_token,
+    revoke_access_token,
     serialize_user,
     set_session_cookie,
     verify_password_async,
@@ -165,7 +167,12 @@ async def login(
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
+async def logout(
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
+    await revoke_access_token(session, await extract_http_token(request))
     await clear_session_cookie(response)
     return {"status": "logged_out"}
 
