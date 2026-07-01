@@ -29,6 +29,7 @@ FRONT_DOOR_ENTITY_ID = "binary_sensor.front_door"
 BACK_DOOR_ENTITY_ID = "binary_sensor.back_door"
 MAIN_GARAGE_DOOR_ENTITY_ID = "cover.main_garage_door"
 MUMS_GARAGE_DOOR_ENTITY_ID = "cover.mums_garage_door"
+KEEP_GATE_OPEN_HA_ENTITY_ID = "switch.top_gate_keep_gate_open"
 DOOR_ENTITY_IDS = {
     FRONT_DOOR_ENTITY_ID: "front_door",
     BACK_DOOR_ENTITY_ID: "back_door",
@@ -109,6 +110,9 @@ class HomeAssistantIntegrationService:
             "default_media_player": config.home_assistant_default_media_player,
             "maintenance_mode_entity_id": MAINTENANCE_HA_ENTITY_ID,
             "maintenance_mode_state": self._state_cache.get(MAINTENANCE_HA_ENTITY_ID, {}).get("state"),
+            "keep_gate_open_entity_id": KEEP_GATE_OPEN_HA_ENTITY_ID,
+            "keep_gate_open_state": self._state_cache.get(KEEP_GATE_OPEN_HA_ENTITY_ID, {}).get("state"),
+            "keep_gate_open_active": self._ha_switch_active(KEEP_GATE_OPEN_HA_ENTITY_ID),
             "last_gate_state": self._last_gate_state.value,
             "state_source": "home_assistant_websocket_cache",
         }
@@ -156,6 +160,9 @@ class HomeAssistantIntegrationService:
                     }
                     for row in status["garage_door_entities"]
                 ]
+            status["maintenance_mode_state"] = self._state_cache.get(MAINTENANCE_HA_ENTITY_ID, {}).get("state")
+            status["keep_gate_open_state"] = self._state_cache.get(KEEP_GATE_OPEN_HA_ENTITY_ID, {}).get("state")
+            status["keep_gate_open_active"] = self._ha_switch_active(KEEP_GATE_OPEN_HA_ENTITY_ID)
             refreshed_at = self._latest_cached_state_timestamp(watched_entity_ids)
             if refreshed_at:
                 status["state_refreshed_at"] = refreshed_at
@@ -491,6 +498,7 @@ class HomeAssistantIntegrationService:
             FRONT_DOOR_ENTITY_ID,
             BACK_DOOR_ENTITY_ID,
             MAINTENANCE_HA_ENTITY_ID,
+            KEEP_GATE_OPEN_HA_ENTITY_ID,
             *(str(entity["entity_id"]) for entity in garage_door_entities if entity.get("entity_id")),
         ]
         return list(dict.fromkeys(entity_ids))
@@ -518,6 +526,9 @@ class HomeAssistantIntegrationService:
     def _cached_gate_state(self, entity_id: str) -> str:
         state = self._state_cache.get(entity_id, {}).get("state")
         return gate_state_from_cover_state(state).value if state else GateState.UNKNOWN.value
+
+    def _ha_switch_active(self, entity_id: str) -> bool:
+        return str(self._state_cache.get(entity_id, {}).get("state") or "").strip().lower() == "on"
 
     def _latest_cached_state_timestamp(self, entity_ids: list[str]) -> str | None:
         timestamps = [

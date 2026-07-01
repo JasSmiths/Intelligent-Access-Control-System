@@ -314,6 +314,9 @@ class AccessDeviceService:
             "current_gate_state": current_gate_state,
             "front_door_state": ha_status.get("front_door_state") or "unknown",
             "back_door_state": ha_status.get("back_door_state") or "unknown",
+            "keep_gate_open_entity_id": ha_status.get("keep_gate_open_entity_id"),
+            "keep_gate_open_state": ha_status.get("keep_gate_open_state"),
+            "keep_gate_open_active": bool(ha_status.get("keep_gate_open_active")),
             "state_refreshed_at": self._latest_state_refreshed_at(devices),
         }
 

@@ -164,6 +164,10 @@ async def test_integration_status_display_contract_exposes_safe_redacted_health(
         "state": "off",
         "last_changed": "2026-05-31T08:00:00+00:00",
     }
+    service._state_cache["switch.top_gate_keep_gate_open"] = {
+        "state": "off",
+        "last_changed": "2026-05-31T08:00:00+00:00",
+    }
 
     status = await service.status(refresh=False)
 

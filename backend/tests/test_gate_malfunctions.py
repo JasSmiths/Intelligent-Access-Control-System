@@ -39,6 +39,126 @@ def test_gate_snapshot_marks_opening_open_and_closing_as_unsafe() -> None:
     assert not GateSnapshot("cover.gate", "Gate", GateState.CLOSED, now, now).unsafe_open
 
 
+@pytest.mark.asyncio
+async def test_gate_malfunction_evaluation_pauses_when_keep_gate_open_switch_is_on(monkeypatch) -> None:
+    service = GateMalfunctionService()
+    now = datetime(2026, 5, 2, 18, 9, 3, tzinfo=UTC)
+    calls = []
+
+    async def fake_current_gate_snapshot(*, refresh: bool):
+        return GateSnapshot(
+            "cover.top_gate",
+            "Top Gate",
+            GateState.OPEN,
+            now - timedelta(minutes=10),
+            now,
+            keep_open_active=True,
+            keep_open_entity_id="switch.top_gate_keep_gate_open",
+        )
+
+    async def fake_maintenance_mode_active() -> bool:
+        return False
+
+    async def record_call(*_args, **_kwargs) -> None:
+        calls.append("called")
+
+    monkeypatch.setattr(service, "_current_gate_snapshot", fake_current_gate_snapshot)
+    monkeypatch.setattr("app.services.gate_malfunctions.is_maintenance_mode_active", fake_maintenance_mode_active)
+    monkeypatch.setattr(service, "_declare_if_needed", record_call)
+    monkeypatch.setattr(service, "_execute_due_attempts", record_call)
+    monkeypatch.setattr(service, "_send_due_milestones", record_call)
+    monkeypatch.setattr(service, "_process_due_notifications", record_call)
+
+    await service.evaluate_once()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_current_gate_snapshot_marks_keep_gate_open_switch_active(monkeypatch) -> None:
+    service = GateMalfunctionService()
+
+    class FakeAccessDeviceService:
+        async def status(self, *, refresh: bool):
+            return {
+                "current_gate_state": "open",
+                "gate_entities": [
+                    {
+                        "entity_id": "cover.top_gate",
+                        "name": "Top Gate",
+                        "state": "open",
+                        "state_changed_at": "2026-05-02T18:00:00+00:00",
+                    }
+                ],
+                "keep_gate_open_entity_id": "switch.top_gate_keep_gate_open",
+                "keep_gate_open_state": "on",
+            }
+
+    monkeypatch.setattr("app.services.gate_malfunctions.get_access_device_service", lambda: FakeAccessDeviceService())
+
+    snapshot = await service._current_gate_snapshot(refresh=True)
+
+    assert snapshot.state == GateState.OPEN
+    assert snapshot.keep_open_active is True
+    assert snapshot.keep_open_entity_id == "switch.top_gate_keep_gate_open"
+
+
+@pytest.mark.asyncio
+async def test_gate_malfunction_recovery_attempt_pauses_when_keep_gate_open_switch_is_on(monkeypatch) -> None:
+    service = GateMalfunctionService()
+    malfunction_id = uuid.uuid4()
+    now = datetime(2026, 5, 2, 18, 9, 3, tzinfo=UTC)
+    released = []
+
+    async def fake_claim_attempt(*_args, **_kwargs):
+        return {
+            "claimed": True,
+            "claim_token": "claim-token",
+            "attempt_number": 1,
+            "gate_entity_id": "cover.top_gate",
+            "gate_name": "Top Gate",
+        }
+
+    async def fake_current_gate_snapshot(*, refresh: bool):
+        return GateSnapshot(
+            "cover.top_gate",
+            "Top Gate",
+            GateState.OPEN,
+            now - timedelta(minutes=10),
+            now,
+            keep_open_active=True,
+            keep_open_entity_id="switch.top_gate_keep_gate_open",
+        )
+
+    async def fake_release_attempt_claim(row_id, *, claim_token: str, detail: str):
+        released.append((row_id, claim_token, detail))
+        return {"changed": False, "paused": True, "detail": detail}
+
+    class UnexpectedCoordinator:
+        async def execute_open(self, _intent):
+            raise AssertionError("keep-open pause should prevent recovery gate commands")
+
+    monkeypatch.setattr(service, "_claim_attempt", fake_claim_attempt)
+    monkeypatch.setattr(service, "_current_gate_snapshot", fake_current_gate_snapshot)
+    monkeypatch.setattr(service, "_release_attempt_claim", fake_release_attempt_claim)
+    monkeypatch.setattr("app.services.gate_malfunctions.get_gate_command_coordinator", lambda: UnexpectedCoordinator())
+
+    result = await service._execute_attempt_for_id(
+        malfunction_id,
+        actor="System",
+        reason="Scheduled gate malfunction recovery",
+    )
+
+    assert result["paused"] is True
+    assert released == [
+        (
+            malfunction_id,
+            "claim-token",
+            "switch.top_gate_keep_gate_open is on; gate malfunction recovery is paused.",
+        )
+    ]
+
+
 def test_gate_malfunction_summary_distinguishes_active_resolved_and_fubar() -> None:
     service = GateMalfunctionService()
     opened_at = datetime(2026, 4, 26, 7, 30, tzinfo=UTC)

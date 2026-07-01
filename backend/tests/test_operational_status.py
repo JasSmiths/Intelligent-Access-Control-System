@@ -118,6 +118,9 @@ async def test_home_assistant_status_reports_connected_after_state_refresh(monke
     assert status["degraded"] is False
     assert status["last_error"] is None
     assert status["current_gate_state"] == "closed"
+    assert status["keep_gate_open_entity_id"] == "switch.top_gate_keep_gate_open"
+    assert status["keep_gate_open_state"] == "off"
+    assert status["keep_gate_open_active"] is False
     assert status["state_refreshed_at"]
     assert observations == [("cover.top_gate", "Top Gate", "closed")]
     assert maintenance_states == ["off"]

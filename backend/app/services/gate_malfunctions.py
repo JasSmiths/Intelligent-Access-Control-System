@@ -30,6 +30,7 @@ from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.access_devices import get_access_device_service
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
+from app.services.home_assistant import KEEP_GATE_OPEN_HA_ENTITY_ID
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.notifications import (
     GATE_MALFUNCTION_EVENT_TYPE,
@@ -81,6 +82,8 @@ class GateSnapshot:
     state: GateState
     state_changed_at: datetime | None
     observed_at: datetime
+    keep_open_active: bool = False
+    keep_open_entity_id: str | None = None
 
     @property
     def unsafe_open(self) -> bool:
@@ -392,10 +395,10 @@ class GateMalfunctionService:
                 await self._resolve_for_closed_gate(snapshot, reason="Gate is closed.")
 
             maintenance_active = await is_maintenance_mode_active()
-            if not maintenance_active and snapshot.unsafe_open:
+            if not maintenance_active and not snapshot.keep_open_active and snapshot.unsafe_open:
                 await self._declare_if_needed(snapshot, now)
 
-            if not maintenance_active:
+            if not maintenance_active and not snapshot.keep_open_active:
                 await self._execute_due_attempts(now)
                 await self._send_due_milestones(now)
                 await self._process_due_notifications(now)
@@ -431,6 +434,10 @@ class GateMalfunctionService:
             or primary.get("last_changed")
         )
         state = self._coerce_gate_state(raw_state)
+        keep_open_entity_id = str(status.get("keep_gate_open_entity_id") or KEEP_GATE_OPEN_HA_ENTITY_ID)
+        keep_open_active = bool(status.get("keep_gate_open_active")) or self._state_is_on(
+            status.get("keep_gate_open_state")
+        )
 
         if state == GateState.UNKNOWN:
             try:
@@ -446,6 +453,8 @@ class GateMalfunctionService:
             state=state,
             state_changed_at=changed_at,
             observed_at=observed_at,
+            keep_open_active=keep_open_active,
+            keep_open_entity_id=keep_open_entity_id,
         )
 
     async def _declare_if_needed(self, snapshot: GateSnapshot, now: datetime) -> None:
@@ -676,6 +685,15 @@ class GateMalfunctionService:
                 claim_token=claim_token,
                 snapshot=snapshot,
                 reason="Gate closed before recovery attempt.",
+            )
+        if snapshot.keep_open_active:
+            return await self._release_attempt_claim(
+                malfunction_id,
+                claim_token=claim_token,
+                detail=(
+                    f"{snapshot.keep_open_entity_id or 'Home Assistant keep-gate-open switch'} is on; "
+                    "gate malfunction recovery is paused."
+                ),
             )
         if await is_maintenance_mode_active():
             return await self._release_attempt_claim(
@@ -1619,6 +1637,9 @@ class GateMalfunctionService:
 
     def _coerce_gate_state(self, value: Any) -> GateState:
         return _coerce_gate_state_value(value)
+
+    def _state_is_on(self, value: Any) -> bool:
+        return str(value or "").strip().lower() == "on"
 
     def _parse_datetime(self, value: Any) -> datetime | None:
         if not value:
