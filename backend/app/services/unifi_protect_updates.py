@@ -1,6 +1,7 @@
 import asyncio
 from email.parser import Parser
 from importlib import metadata as importlib_metadata
+import importlib.util
 import json
 import re
 import shutil
@@ -346,35 +347,49 @@ class UnifiProtectUpdateService:
         if staging.exists():
             shutil.rmtree(staging)
         staging.parent.mkdir(parents=True, exist_ok=True)
+        await _run_pip_install(
+            _package_install_command(staging, [f"uiprotect=={version}"], no_deps=True)
+        )
+        requirements = _missing_overlay_requirements(staging)
+        if requirements:
+            await _run_pip_install(_package_install_command(staging, requirements))
+        if target_path.exists():
+            shutil.rmtree(target_path)
+        staging.rename(target_path)
+
+
+def _package_install_command(target_path: Path, packages: list[str], *, no_deps: bool = False) -> list[str]:
+    if importlib.util.find_spec("pip") is not None:
         cmd = [
             sys.executable,
             "-m",
             "pip",
             "install",
             "--no-cache-dir",
-            "--no-deps",
             "--target",
-            str(staging),
-            f"uiprotect=={version}",
+            str(target_path),
         ]
-        await _run_pip_install(cmd)
-        requirements = _missing_overlay_requirements(staging)
-        if requirements:
-            await _run_pip_install(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-cache-dir",
-                    "--target",
-                    str(staging),
-                    *requirements,
-                ]
-            )
-        if target_path.exists():
-            shutil.rmtree(target_path)
-        staging.rename(target_path)
+        if no_deps:
+            cmd.append("--no-deps")
+        return [*cmd, *packages]
+
+    uv = shutil.which("uv")
+    if uv:
+        cmd = [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--no-cache",
+            "--target",
+            str(target_path),
+        ]
+        if no_deps:
+            cmd.append("--no-deps")
+        return [*cmd, *packages]
+
+    raise UnifiProtectUpdateError("Neither pip nor uv is available to install the uiprotect overlay.")
 
 
 async def _run_pip_install(cmd: list[str]) -> None:

@@ -9,6 +9,25 @@ import app.services.unifi_protect_updates as updates_module
 from app.services.unifi_protect_updates import UnifiProtectUpdateError, UnifiProtectUpdateService
 
 
+def test_package_install_command_uses_uv_when_venv_pip_is_absent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(updates_module.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(updates_module.shutil, "which", lambda name: "/usr/local/bin/uv")
+    monkeypatch.setattr(updates_module.sys, "executable", "/app/.venv/bin/python")
+
+    cmd = updates_module._package_install_command(
+        tmp_path,
+        ["uiprotect==15.3.0"],
+        no_deps=True,
+    )
+
+    assert cmd[:5] == ["/usr/local/bin/uv", "pip", "install", "--python", "/app/.venv/bin/python"]
+    assert "--no-cache" in cmd
+    assert "--target" in cmd
+    assert str(tmp_path) in cmd
+    assert "--no-deps" in cmd
+    assert cmd[-1] == "uiprotect==15.3.0"
+
+
 def test_activate_overlay_removes_stale_overlay_paths_and_moves_active_first(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "unifi-protect-package"
     versions_dir = package_root / "versions"
