@@ -391,7 +391,10 @@ function traceDisplay(trace: TelemetryTrace): { title: string; tone: BadgeTone }
   }
   const decision = stringPayload(trace.context.decision).toLowerCase();
   const direction = stringPayload(trace.context.direction).toLowerCase();
+  const externalMode = stringPayload(trace.context.external_admission_mode).toLowerCase();
   const plate = trace.registration_number || "unknown plate";
+  if (externalMode === "arrival") return { title: `External Admission - Plate ${plate}`, tone: "amber" };
+  if (externalMode === "departure") return { title: `External Departure - Plate ${plate}`, tone: "gray" };
   if (decision === "denied") return { title: `Entry Denied - Plate ${plate}`, tone: "red" };
   if (direction === "exit") return { title: `Exit Granted - Plate ${plate}`, tone: "gray" };
   if (decision === "granted") return { title: `Entry Granted - Plate ${plate}`, tone: "green" };

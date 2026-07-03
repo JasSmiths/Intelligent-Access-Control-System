@@ -173,6 +173,8 @@ export function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | n
     visitor_pass_id: stringPayload(event.payload.visitor_pass_id) || null,
     visitor_name: stringPayload(event.payload.visitor_name) || null,
     visitor_pass_mode: stringPayload(event.payload.visitor_pass_mode) || null,
+    external_admission_mode: externalAdmissionMode(event.payload.external_admission_mode),
+    external_admission_source: stringPayload(event.payload.external_admission_source) || null,
     snapshot_url: stringPayload(event.payload.snapshot_url) || null,
     snapshot_captured_at: stringPayload(event.payload.snapshot_captured_at) || null,
     snapshot_bytes: nullableNumber(event.payload.snapshot_bytes),
@@ -181,6 +183,10 @@ export function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | n
     snapshot_camera: stringPayload(event.payload.snapshot_camera) || null,
     movement_saga: movementSagaFromPayload(event.payload.movement_saga)
   };
+}
+function externalAdmissionMode(value: unknown): "arrival" | "departure" | null {
+  const mode = stringPayload(value);
+  return mode === "arrival" || mode === "departure" ? mode : null;
 }
 function movementSagaFromPayload(value: unknown): MovementSagaSummary | null {
   if (!isRecord(value)) return null;

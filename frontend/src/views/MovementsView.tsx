@@ -461,6 +461,10 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
   const physicalAction = payloadString(decisionPayload, "physical_action");
   const payloadDirection = payloadString(decisionPayload, "direction");
   const direction = movement.direction || payloadDirection;
+  const externalAdmission =
+    payloadRecord(decisionPayload, "external_admission") || payloadRecord(intentPayload, "external_admission");
+  const externalAdmissionMode = payloadString(externalAdmission || {}, "mode");
+  const externalAdmissionSource = payloadString(externalAdmission || {}, "source");
   const hardwareSuppressed =
     payloadBoolean(decisionPayload, "hardware_actions_suppressed") || payloadBoolean(intentPayload, "hardware_side_effects_enabled") === false;
 
@@ -486,6 +490,21 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
   }
 
   const rows: MovementExplanation[] = [];
+  if (externalAdmissionMode === "arrival") {
+    rows.push({
+      label: "External Admission",
+      value: "An unknown vehicle was denied while the gate was closed, then the gate opened outside IACS while Protect still showed the vehicle present."
+    });
+  } else if (externalAdmissionMode === "departure") {
+    rows.push({
+      label: "External Departure",
+      value: "This exit was linked to the active externally admitted vehicle session, so it did not create another unauthorised-plate alert."
+    });
+  }
+  if (externalAdmissionSource) {
+    rows.push({ label: "External Source", value: titleCase(externalAdmissionSource) });
+  }
+
   if (decisionSource) {
     rows.push({ label: "Decision Source", value: decisionSourceDescription(decisionSource) });
   } else if (movement.decision) {
@@ -514,7 +533,9 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
   } else if (hardwareSuppressed) {
     rows.push({
       label: "Gate",
-      value: "No gate command was sent because this movement was replayed or recovered with hardware side effects disabled."
+      value: externalAdmissionMode === "arrival"
+        ? "No gate command was sent by IACS; the gate was already opening or open from an external action."
+        : "No gate command was sent because this movement was replayed or recovered with hardware side effects disabled."
     });
   } else if (movement.decision === "denied") {
     rows.push({ label: "Gate", value: "No gate command was sent because the access decision was denied." });
@@ -526,6 +547,8 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
 
   if (movement.presence_committed) {
     rows.push({ label: "Presence", value: "Presence was committed after the movement lifecycle reached a confirmed state." });
+  } else if (externalAdmissionMode) {
+    rows.push({ label: "Presence", value: "No person presence was changed; this unknown plate is tracked through its active vehicle movement session." });
   } else if (movement.reconciliation_required) {
     rows.push({ label: "Presence", value: "Presence is pending because this movement needs reconciliation." });
   } else if (movement.state === "failed") {
@@ -563,6 +586,10 @@ function decisionSourceDescription(source: string): string {
       return "Camera evidence was used to break a presence/gate-state tie.";
     case "default_entry_no_person":
       return "No known person was matched, so the movement defaulted to an entry classification for auditing.";
+    case "external_gate_open":
+      return "The gate opened outside IACS while Protect still showed the unknown vehicle at the gate.";
+    case "external_vehicle_session":
+      return "An active externally admitted unknown-vehicle session was used to resolve this movement.";
     case "gate_malfunction_vehicle_history":
       return "Gate malfunction handling used the previous vehicle movement history to infer direction.";
     case "gate_state":
@@ -588,6 +615,11 @@ function payloadString(payload: Record<string, unknown>, key: string): string | 
 function payloadBoolean(payload: Record<string, unknown>, key: string): boolean | null {
   const value = payload[key];
   return typeof value === "boolean" ? value : null;
+}
+
+function payloadRecord(payload: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = payload[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function statusTone(movement: MovementRecord): BadgeTone {

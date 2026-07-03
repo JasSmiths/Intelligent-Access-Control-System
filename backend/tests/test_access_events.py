@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 import uuid
 
 import pytest
@@ -29,6 +30,7 @@ from app.services.movement import sessions as movement_sessions_module
 from app.services import person_presence_input_booleans as presence_input_booleans_module
 from app.services.access_events import (
     AccessEventService,
+    EXTERNAL_ADMISSION_PAYLOAD_KEY,
     GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
     INGEST_METADATA_PAYLOAD_KEY,
@@ -558,6 +560,50 @@ def test_access_event_raw_payload_includes_webhook_trace_and_debounce_timestamps
     assert payload["debounce"]["candidates"][0]["webhook_trace"]["received_at"] == "2026-05-10T08:00:00.250000+00:00"
 
 
+def test_access_event_payloads_expose_external_admission_metadata() -> None:
+    service = AccessEventService()
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    read = plate_read("UNK123", captured_at)
+    external_admission = {"mode": "arrival", "source": "gate_state_changed"}
+    window = SimpleNamespace(reads=[read], first_seen=captured_at, updated_at=captured_at)
+    payload = service._access_event_raw_payload(
+        window=window,
+        read=read,
+        schedule_evaluation=None,
+        direction_resolution={"source": "external_gate_open", "external_admission": external_admission},
+        vehicle_visual_detection=None,
+        visitor_pass=None,
+        visitor_pass_mode=None,
+        trace_id="0" * 32,
+        finalize_started_at=captured_at,
+        webhook_trace=service._webhook_trace_for_window(window),
+        external_admission=external_admission,
+    )
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        person_id=None,
+        vehicle_id=None,
+        registration_number="UNK123",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        confidence=0.9,
+        source="gate_state_changed",
+        occurred_at=captured_at,
+        timing_classification=TimingClassification.UNKNOWN,
+        raw_payload=payload,
+        snapshot_path=None,
+    )
+
+    realtime = access_event_realtime_payload(event, anomaly_count=1, visitor_pass=None, visitor_pass_mode=None)
+    facts = notification_facts(event, None, None, "Unauthorised Plate, Admitted Externally")
+
+    assert payload[EXTERNAL_ADMISSION_PAYLOAD_KEY] == external_admission
+    assert realtime["external_admission_mode"] == "arrival"
+    assert realtime["external_admission_source"] == "gate_state_changed"
+    assert facts["external_admission_mode"] == "arrival"
+    assert facts["external_admission_source"] == "gate_state_changed"
+
+
 def plate_read_with_gate_state_at(registration_number: str, captured_at: datetime, state: str) -> PlateRead:
     return PlateRead(
         registration_number=registration_number,
@@ -644,6 +690,103 @@ def plate_read_with_context(
         captured_at=captured_at,
         raw_payload=raw_payload,
     )
+
+
+@pytest.mark.asyncio
+async def test_open_gate_unknown_read_can_be_marked_as_external_admission() -> None:
+    service = AccessEventService()
+    service._runtime = SimpleNamespace(
+        lpr_similarity_threshold=0.78,
+        lpr_debounce_max_seconds=6.0,
+        lpr_vehicle_session_idle_seconds=180.0,
+        site_timezone="Europe/London",
+    )
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+    denied_session = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="UNK123",
+        normalized_registration_number="UNK123",
+    )
+    denied_event = SimpleNamespace(
+        id=uuid.uuid4(),
+        registration_number="UNK123",
+        confidence=0.88,
+    )
+    match = movement_sessions_module.ExternalVehicleSessionMatch(
+        session=denied_session,
+        access_event=denied_event,
+        evidence={
+            "source": "uiprotect_event",
+            "source_detail": "vehicle_detection",
+            "active": True,
+            "observed_at": captured_at.isoformat(),
+            "event_id": "protect-1",
+            "registration_number": "UNK123",
+        },
+        matched_by="external_presence_registration_number",
+    )
+
+    class FakeMovementSessions:
+        async def external_departure_candidate_for_read(self, *_args, **_kwargs):
+            return None
+
+        async def external_admission_candidate_for_read(self, *_args, **_kwargs):
+            return match
+
+    service._movement_sessions = FakeMovementSessions()
+    service._recent_iacs_gate_open_command = AsyncMock(return_value=None)
+
+    annotated = await service._read_with_external_admission_match(
+        plate_read_with_context("UNK123", captured_at, state="open", event_id="protect-1", camera_id="gate-camera")
+    )
+
+    external = annotated.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]
+    assert annotated.registration_number == "UNK123"
+    assert external["mode"] == "arrival"
+    assert external["source"] == "lpr_open_gate_read"
+    assert external["original_denied_access_event_id"] == str(denied_event.id)
+    assert external["presence_evidence"]["source"] == "uiprotect_event"
+
+
+@pytest.mark.asyncio
+async def test_external_admission_anomalies_alert_arrival_but_not_linked_departure() -> None:
+    service = AccessEventService()
+    occurred_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
+
+    def event_for(mode: str | None) -> AccessEvent:
+        return AccessEvent(
+            registration_number="UNK123",
+            direction=AccessDirection.EXIT if mode == "departure" else AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED if mode else AccessDecision.DENIED,
+            confidence=0.9,
+            source="test",
+            occurred_at=occurred_at,
+            timing_classification=TimingClassification.UNKNOWN,
+            raw_payload={"external_admission": {"mode": mode, "source": "gate_state_changed"}} if mode else {},
+        )
+
+    arrival = await service._build_anomalies(
+        FakePresenceSession(),
+        event_for("arrival"),
+        None,
+        None,
+        True,
+        external_admission={"mode": "arrival", "source": "gate_state_changed"},
+    )
+    departure = await service._build_anomalies(
+        FakePresenceSession(),
+        event_for("departure"),
+        None,
+        None,
+        True,
+        external_admission={"mode": "departure", "source": "external_vehicle_session"},
+    )
+    denied = await service._build_anomalies(FakePresenceSession(), event_for(None), None, None, False)
+
+    assert [item.message for item in arrival] == ["Unauthorised Plate, Admitted Externally"]
+    assert arrival[0].context["external_admission"]["mode"] == "arrival"
+    assert departure == []
+    assert [item.message for item in denied] == ["Unauthorised Plate, Access Denied"]
 
 
 def remember_session(

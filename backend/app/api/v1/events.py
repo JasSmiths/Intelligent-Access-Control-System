@@ -66,6 +66,7 @@ def _serialize_event(
     verify_snapshot_available: bool = True,
 ) -> dict:
     visitor_pass = _event_visitor_pass_payload(event)
+    external_admission = _event_external_admission_payload(event)
     payload = {
         "id": str(event.id),
         "registration_number": event.registration_number,
@@ -79,6 +80,8 @@ def _serialize_event(
         "visitor_pass_id": _optional_text(visitor_pass.get("id")),
         "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
         "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
+        "external_admission_mode": _optional_text(external_admission.get("mode")),
+        "external_admission_source": _optional_text(external_admission.get("source")),
         "movement_saga": _event_movement_saga_payload(event, movement_saga),
     }
     payload.update(access_event_snapshot_payload(event, verify_available=verify_snapshot_available))
@@ -126,6 +129,12 @@ async def event_snapshot(
 def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     payload = raw_payload.get("visitor_pass")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_external_admission_payload(event: AccessEvent) -> dict[str, Any]:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    payload = raw_payload.get("external_admission")
     return payload if isinstance(payload, dict) else {}
 
 

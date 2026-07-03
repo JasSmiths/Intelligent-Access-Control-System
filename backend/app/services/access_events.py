@@ -25,8 +25,10 @@ from app.modules.lpr.base import PlateRead
 from app.models import (
     AccessEvent,
     Anomaly,
+    GateCommandRecord,
     LprIngestEvent,
     MovementSagaRecord,
+    MovementSessionRecord,
     Person,
     Presence,
     Vehicle,
@@ -76,6 +78,7 @@ from app.services.movement.presence import commit_presence_for_event
 from app.services.movement.sessions import (
     ARRIVAL_GATE_STATES,
     DEPARTURE_GATE_STATES,
+    ExternalVehicleSessionMatch,
     VEHICLE_SESSION_PAYLOAD_KEY,
     MovementSessionService,
     candidate_registration_numbers as _candidate_registration_numbers,
@@ -88,6 +91,7 @@ from app.services.movement.sessions import (
     known_vehicle_plate_match_from_read as _known_vehicle_plate_match_from_read,
     normalize_registration_number,
     plates_are_similar,
+    presence_evidence_payload,
     read_direction_hint,
 )
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
@@ -134,6 +138,12 @@ LPR_INGEST_EVENT_PAYLOAD_KEY = "_iacs_lpr_ingest_event"
 WEBHOOK_TRACE_PAYLOAD_KEY = "webhook_trace"
 VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY = "vehicle_visual_detection"
 VISITOR_PASS_PAYLOAD_KEY = "visitor_pass"
+EXTERNAL_ADMISSION_PAYLOAD_KEY = "external_admission"
+EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED = "gate_state_changed"
+EXTERNAL_ADMISSION_SOURCE_LPR_OPEN_GATE = "lpr_open_gate_read"
+EXTERNAL_ADMISSION_SOURCE_VEHICLE_SESSION = "external_vehicle_session"
+EXTERNAL_ADMISSION_ORIGINAL_SUPERSEDED_REASON = "external_admission_confirmed"
+EXTERNAL_ADMISSION_DEPARTURE_REASON = "external_departure_recorded"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
 MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
 PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
@@ -155,6 +165,11 @@ def _is_exact_known_vehicle_plate_match(read: PlateRead) -> bool:
 
 def _visitor_pass_plate_match_from_read(read: PlateRead) -> dict[str, Any] | None:
     match = (read.raw_payload or {}).get(VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY)
+    return match if isinstance(match, dict) else None
+
+
+def _external_admission_from_read(read: PlateRead) -> dict[str, Any] | None:
+    match = (read.raw_payload or {}).get(EXTERNAL_ADMISSION_PAYLOAD_KEY)
     return match if isinstance(match, dict) else None
 
 
@@ -193,6 +208,7 @@ class DebounceWindow:
             key=lambda read: (
                 1 if _is_exact_known_vehicle_plate_match(read) else 0,
                 1 if _is_visitor_pass_plate_match(read) else 0,
+                1 if _external_admission_from_read(read) else 0,
                 read.confidence,
                 read.captured_at,
             ),
@@ -250,6 +266,7 @@ class AccessEventService:
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
         self._worker.add_done_callback(self._handle_worker_done)
         event_bus.subscribe(self._handle_realtime_event, scope="all_workers")
+        event_bus.subscribe(self._handle_local_realtime_event)
         try:
             await self._enqueue_pending_lpr_ingest_rows()
         except Exception as exc:
@@ -266,6 +283,7 @@ class AccessEventService:
             await self._worker
         await self._flush_all_pending()
         event_bus.unsubscribe(self._handle_realtime_event)
+        event_bus.unsubscribe(self._handle_local_realtime_event)
         logger.info("access_event_service_stopped")
 
     def status(self) -> dict[str, Any]:
@@ -814,20 +832,25 @@ class AccessEventService:
                 await self._publish_suppressed_read(read, reason=exact_suppression_reason)
                 return
 
-            vehicle_session_suppression = await self._movement_sessions.suppression_for_read(
-                read,
-                runtime=self._runtime,
-            )
-            if vehicle_session_suppression:
-                await self._movement_sessions.annotate_suppressed_read(
+            if not known_vehicle_match:
+                read = await self._read_with_external_admission_match(read)
+
+            if not _external_admission_from_read(read):
+                vehicle_session_suppression = await self._movement_sessions.suppression_for_read(
                     read,
-                    vehicle_session_suppression,
                     runtime=self._runtime,
                 )
-                await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
-                return
+                if vehicle_session_suppression:
+                    await self._movement_sessions.annotate_suppressed_read(
+                        read,
+                        vehicle_session_suppression,
+                        runtime=self._runtime,
+                    )
+                    await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
+                    return
 
-        if not _known_vehicle_plate_match_from_read(read):
+        external_admission = _external_admission_from_read(read)
+        if not _known_vehicle_plate_match_from_read(read) and not external_admission:
             read = await self._read_with_visitor_pass_departure_match(read)
         if self._suppress_after_visitor_pass_resolution(read):
             await self._publish_suppressed_read(read, reason="visitor_pass_plate_already_resolved_in_debounce_window")
@@ -837,6 +860,9 @@ class AccessEventService:
         if _is_exact_known_vehicle_plate_match(read):
             window = self._pop_exact_known_plate_window(window)
             await self._finalize_window_or_fail(window, reason="exact_known_vehicle_plate")
+        elif external_admission:
+            window = self._pop_related_read_window(window, read)
+            await self._finalize_window_or_fail(window, reason="external_unknown_vehicle_admission")
         elif _is_visitor_pass_plate_match(read):
             window = self._pop_related_read_window(window, read)
             if await self._finalize_window_or_fail(window, reason="visitor_pass_departure_plate"):
@@ -883,6 +909,292 @@ class AccessEventService:
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "maintenance_mode.changed" and event.payload.get("is_active") is True:
             self._clear_pending_reads()
+
+    async def _handle_local_realtime_event(self, event: RealtimeEvent) -> None:
+        if event.type != "gate.state_changed":
+            return
+        state = coerce_gate_state(event.payload.get("state"))
+        previous_state = coerce_gate_state(event.payload.get("previous_state"))
+        if state not in DEPARTURE_GATE_STATES:
+            return
+        if previous_state in DEPARTURE_GATE_STATES:
+            return
+        await self._record_external_gate_open_admission(event)
+
+    async def _record_external_gate_open_admission(self, event: RealtimeEvent) -> None:
+        if await is_maintenance_mode_active():
+            return
+        observed_at = (
+            datetime_from_payload(event.payload.get("state_changed_at"))
+            or datetime_from_payload(event.created_at)
+            or datetime.now(tz=UTC)
+        )
+        runtime = self._runtime or await get_runtime_config()
+        result: tuple[AccessEvent, list[Anomaly], dict[str, Any]] | None = None
+        async with AsyncSessionLocal() as session:
+            if await self._recent_iacs_gate_open_command(session, observed_at):
+                return
+            match = await self._movement_sessions.external_admission_candidate_for_gate_open(
+                session,
+                opened_at=observed_at,
+                runtime=runtime,
+            )
+            if not match:
+                return
+            result = await self._persist_external_gate_open_admission(
+                session,
+                match,
+                observed_at=observed_at,
+                gate_payload=event.payload,
+                runtime=runtime,
+            )
+            if result is None:
+                return
+            await session.commit()
+
+        access_event, anomalies, realtime_payload = result
+        await event_bus.publish("access_event.finalized", realtime_payload)
+        for anomaly in anomalies:
+            await get_notification_service().notify(
+                NotificationContext(
+                    event_type=anomaly.anomaly_type.value,
+                    subject=access_event.registration_number,
+                    severity=anomaly.severity.value,
+                    facts=notification_facts(
+                        access_event,
+                        None,
+                        None,
+                        anomaly.message,
+                    ),
+                )
+            )
+
+    async def _recent_iacs_gate_open_command(self, session: AsyncSession, observed_at: datetime) -> GateCommandRecord | None:
+        command_window_start = observed_at - timedelta(seconds=90)
+        command_window_end = observed_at + timedelta(seconds=15)
+        return await session.scalar(
+            select(GateCommandRecord)
+            .where(
+                GateCommandRecord.action == "open",
+                GateCommandRecord.accepted.is_(True),
+                GateCommandRecord.started_at.is_not(None),
+                GateCommandRecord.started_at <= command_window_end,
+                or_(
+                    GateCommandRecord.started_at >= command_window_start,
+                    GateCommandRecord.completed_at >= command_window_start,
+                ),
+            )
+            .order_by(GateCommandRecord.started_at.desc(), GateCommandRecord.created_at.desc())
+            .limit(1)
+        )
+
+    async def _persist_external_gate_open_admission(
+        self,
+        session: AsyncSession,
+        match: ExternalVehicleSessionMatch,
+        *,
+        observed_at: datetime,
+        gate_payload: dict[str, Any],
+        runtime: RuntimeConfig,
+    ) -> tuple[AccessEvent, list[Anomaly], dict[str, Any]] | None:
+        session_id = str(getattr(match.session, "id", "") or "")
+        movement_saga = await self._movement_ledger.create_movement_saga(
+            session,
+            idempotency_key=f"movement:external-admission:arrival:{session_id}",
+            source=EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+            occurred_at=observed_at,
+            registration_number=str(getattr(match.session, "registration_number", "") or match.access_event.registration_number),
+            direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED,
+            state=MovementSagaState.DIRECTION_RESOLVED,
+            intent_payload={
+                "source": EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+                "registration_number": str(
+                    getattr(match.session, "registration_number", "") or match.access_event.registration_number
+                ),
+                "captured_at": observed_at.isoformat(),
+                "allowed": True,
+                "person_id": None,
+                "vehicle_id": None,
+                "external_admission": {
+                    "mode": "arrival",
+                    "source": EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+                    "original_denied_access_event_id": str(match.access_event.id),
+                    "original_denied_movement_session_id": session_id,
+                },
+                "gate_observation": self._gate_observation_from_gate_event(gate_payload, observed_at),
+            },
+        )
+        if movement_saga.access_event_id:
+            return None
+
+        external_admission = self._external_admission_payload(
+            match,
+            mode="arrival",
+            source=EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+            observed_at=observed_at,
+            gate_observation=self._gate_observation_from_gate_event(gate_payload, observed_at),
+            gate_payload=gate_payload,
+        )
+        read = self._external_gate_open_read(match, observed_at=observed_at, gate_payload=gate_payload, external_admission=external_admission)
+        window = DebounceWindow(first_seen=observed_at, updated_at=observed_at, reads=[read])
+        direction, direction_resolution = self._external_admission_direction_resolution(read, external_admission)
+        schedule_evaluation = ScheduleEvaluation(
+            allowed=True,
+            source="external_admission_arrival",
+            reason="Unknown vehicle was admitted by an external gate opening while Protect still showed it present.",
+        )
+        webhook_trace = self._webhook_trace_for_window(window)
+        event = AccessEvent(
+            vehicle=None,
+            person_id=None,
+            registration_number=read.registration_number,
+            direction=direction,
+            decision=AccessDecision.GRANTED,
+            confidence=read.confidence,
+            source=EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+            occurred_at=observed_at,
+            timing_classification=TimingClassification.UNKNOWN,
+            raw_payload=self._access_event_raw_payload(
+                window=window,
+                read=read,
+                schedule_evaluation=schedule_evaluation,
+                direction_resolution=direction_resolution,
+                vehicle_visual_detection=None,
+                visitor_pass=None,
+                visitor_pass_mode=None,
+                external_admission=external_admission,
+                trace_id=uuid.uuid4().hex,
+                finalize_started_at=datetime.now(tz=UTC),
+                webhook_trace=webhook_trace,
+            ),
+        )
+        session.add(event)
+        await session.flush()
+        await self._movement_ledger.transition_movement_saga(
+            session,
+            movement_saga,
+            MovementSagaState.COMPLETED,
+            detail="external_gate_open_admission_recorded",
+            access_event_id=event.id,
+            gate_command_required=False,
+            presence_committed=False,
+            decision_payload=direction_resolution,
+        )
+        event.raw_payload = {
+            **(event.raw_payload or {}),
+            VEHICLE_SESSION_PAYLOAD_KEY: self._movement_sessions.initial_payload(
+                window.reads,
+                first_seen=window.first_seen,
+                updated_at=window.updated_at,
+                read=read,
+                event=event,
+            ),
+        }
+        await self._movement_sessions.remember_session_in_db(
+            session,
+            event,
+            window.reads,
+            first_seen=window.first_seen,
+            updated_at=window.updated_at,
+            read=read,
+            movement_saga_id=movement_saga.id,
+            runtime=runtime,
+        )
+        await self._movement_sessions.mark_external_session_superseded(
+            session,
+            match.session,
+            reason=EXTERNAL_ADMISSION_ORIGINAL_SUPERSEDED_REASON,
+            matched_by=match.matched_by,
+            evidence=match.evidence,
+            event_id=event.id,
+            observed_at=observed_at,
+        )
+        await capture_access_event_snapshot(event)
+        anomalies = await self._build_anomalies(
+            session,
+            event,
+            None,
+            None,
+            True,
+            external_admission=external_admission,
+        )
+        session.add_all(anomalies)
+        event.raw_payload = self._raw_payload_with_movement_saga(
+            event.raw_payload,
+            state="completed",
+            gate_command_required=False,
+            presence_committed=False,
+            movement_saga=movement_saga,
+            detail="External gate opening recorded; no IACS hardware command was sent.",
+        )
+        realtime_payload = access_event_realtime_payload(
+            event,
+            anomaly_count=len(anomalies),
+            visitor_pass=None,
+            visitor_pass_mode=None,
+        )
+        saga_payload = (event.raw_payload or {}).get("movement_saga")
+        if isinstance(saga_payload, dict):
+            realtime_payload["movement_saga"] = saga_payload
+        return event, anomalies, realtime_payload
+
+    def _external_gate_open_read(
+        self,
+        match: ExternalVehicleSessionMatch,
+        *,
+        observed_at: datetime,
+        gate_payload: dict[str, Any],
+        external_admission: dict[str, Any],
+    ) -> PlateRead:
+        gate_observation = self._gate_observation_from_gate_event(gate_payload, observed_at)
+        raw_payload = {
+            GATE_OBSERVATION_PAYLOAD_KEY: gate_observation,
+            EXTERNAL_ADMISSION_PAYLOAD_KEY: external_admission,
+            WEBHOOK_TRACE_PAYLOAD_KEY: {
+                "source": EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+                "registration_number": str(
+                    getattr(match.session, "registration_number", "") or match.access_event.registration_number
+                ),
+                "captured_at": observed_at.isoformat(),
+                "received_at": observed_at.isoformat(),
+                "webhook_received_at": observed_at.isoformat(),
+                "captured_to_webhook_ms": 0.0,
+            },
+            "gate_state_changed": {
+                key: gate_payload.get(key)
+                for key in (
+                    "source",
+                    "entity_id",
+                    "device_key",
+                    "name",
+                    "state",
+                    "raw_state",
+                    "previous_state",
+                    "state_changed_at",
+                )
+                if gate_payload.get(key) is not None
+            },
+        }
+        return PlateRead(
+            registration_number=str(
+                getattr(match.session, "registration_number", "") or match.access_event.registration_number
+            ),
+            confidence=float(getattr(match.access_event, "confidence", None) or 1.0),
+            source=EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
+            captured_at=observed_at,
+            raw_payload=raw_payload,
+        )
+
+    def _gate_observation_from_gate_event(self, payload: dict[str, Any], observed_at: datetime) -> dict[str, Any]:
+        state = coerce_gate_state(payload.get("state")) or GateState.UNKNOWN
+        return {
+            "state": state.value,
+            "observed_at": observed_at.isoformat(),
+            "controller": payload.get("source") or "gate_state_changed",
+            "entity_id": payload.get("entity_id") or payload.get("device_key"),
+            "detail": "Gate opened outside IACS while an unknown vehicle was still detected at the gate.",
+        }
 
     def _clear_pending_reads(self) -> None:
         self._pending = []
@@ -957,6 +1269,143 @@ class AccessEventService:
         raw_payload = dict(read.raw_payload or {})
         raw_payload[GATE_MALFUNCTION_PAYLOAD_KEY] = malfunction.as_payload()
         return _plate_read_with_payload(read, raw_payload)
+
+    async def _read_with_external_admission_match(self, read: PlateRead) -> PlateRead:
+        gate_state = coerce_gate_state(gate_observation_from_read(read).get("state"))
+        if gate_state not in DEPARTURE_GATE_STATES:
+            return read
+        runtime = self._runtime or await get_runtime_config()
+        async with AsyncSessionLocal() as session:
+            departure = await self._movement_sessions.external_departure_candidate_for_read(
+                session,
+                read,
+                runtime=runtime,
+            )
+            if departure:
+                return self._read_with_external_admission_payload(
+                    read,
+                    departure,
+                    mode="departure",
+                    source=EXTERNAL_ADMISSION_SOURCE_VEHICLE_SESSION,
+                )
+            if await self._recent_iacs_gate_open_command(session, read.captured_at):
+                return read
+            admission = await self._movement_sessions.external_admission_candidate_for_read(
+                session,
+                read,
+                runtime=runtime,
+            )
+            if admission:
+                return self._read_with_external_admission_payload(
+                    read,
+                    admission,
+                    mode="arrival",
+                    source=EXTERNAL_ADMISSION_SOURCE_LPR_OPEN_GATE,
+                )
+        return read
+
+    def _read_with_external_admission_payload(
+        self,
+        read: PlateRead,
+        match: ExternalVehicleSessionMatch,
+        *,
+        mode: str,
+        source: str,
+    ) -> PlateRead:
+        raw_payload = dict(read.raw_payload or {})
+        raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY] = self._external_admission_payload(
+            match,
+            mode=mode,
+            source=source,
+            observed_at=read.captured_at,
+            gate_observation=gate_observation_from_read(read),
+        )
+        registration_number = str(
+            getattr(match.session, "registration_number", None)
+            or read.registration_number
+        )
+        return _plate_read_with_payload(read, raw_payload, registration_number=registration_number)
+
+    def _external_admission_payload(
+        self,
+        match: ExternalVehicleSessionMatch,
+        *,
+        mode: str,
+        source: str,
+        observed_at: datetime,
+        gate_observation: dict[str, Any] | None = None,
+        gate_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        session_row = match.session
+        linked_event = match.access_event
+        payload: dict[str, Any] = {
+            "mode": mode,
+            "source": source,
+            "observed_at": observed_at.isoformat(),
+            "registration_number": str(
+                getattr(session_row, "registration_number", None)
+                or getattr(linked_event, "registration_number", "")
+                or ""
+            ),
+            "normalized_registration_number": str(
+                getattr(session_row, "normalized_registration_number", "") or ""
+            ),
+            "matched_by": match.matched_by,
+            "linked_access_event_id": str(linked_event.id),
+            "linked_movement_session_id": str(getattr(session_row, "id", "")),
+            "presence_evidence": presence_evidence_payload(match.evidence),
+            "gate_observation": gate_observation,
+        }
+        if gate_payload:
+            payload["gate_state_changed"] = {
+                key: gate_payload.get(key)
+                for key in (
+                    "source",
+                    "entity_id",
+                    "device_key",
+                    "name",
+                    "state",
+                    "raw_state",
+                    "previous_state",
+                    "state_changed_at",
+                )
+                if gate_payload.get(key) is not None
+            }
+        if mode == "arrival":
+            payload["original_denied_access_event_id"] = str(linked_event.id)
+            payload["original_denied_movement_session_id"] = str(getattr(session_row, "id", ""))
+        elif mode == "departure":
+            payload["external_admission_access_event_id"] = str(linked_event.id)
+            payload["external_admission_movement_session_id"] = str(getattr(session_row, "id", ""))
+        return payload
+
+    def _external_admission_direction_resolution(
+        self,
+        read: PlateRead,
+        external_admission: dict[str, Any],
+    ) -> tuple[AccessDirection, dict[str, Any]]:
+        mode = str(external_admission.get("mode") or "").strip().lower()
+        direction = AccessDirection.EXIT if mode == "departure" else AccessDirection.ENTRY
+        source = (
+            "external_gate_open"
+            if external_admission.get("source") == EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED
+            else EXTERNAL_ADMISSION_SOURCE_VEHICLE_SESSION
+            if mode == "departure"
+            else "external_gate_open"
+        )
+        return direction, {
+            "source": source,
+            "direction": direction.value,
+            "movement_state": "completed",
+            "gate_observation": gate_observation_from_read(read),
+            "external_admission": external_admission,
+            "hardware_actions_suppressed": True,
+            "reason": (
+                "Unknown vehicle was admitted by an external gate opening while Protect still showed it present."
+                if mode != "departure"
+                else "Linked externally admitted unknown vehicle departure was recorded from the later plate read."
+            ),
+        }
 
     async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
         gate_observation = gate_observation_from_read(read)
@@ -1327,7 +1776,8 @@ class AccessEventService:
             self._clear_pending_reads()
             return
         read = window.best_read
-        direction_read = read if _is_visitor_pass_plate_match(read) else window.first_read
+        external_admission = _external_admission_from_read(read)
+        direction_read = read if _is_visitor_pass_plate_match(read) or external_admission else window.first_read
         finalize_started_at = datetime.now(tz=UTC)
         webhook_trace = self._webhook_trace_for_window(window)
         webhook_received_at = (
@@ -1354,6 +1804,7 @@ class AccessEventService:
                 "webhook_to_finalize_ms": webhook_to_finalize_ms,
                 "exact_known_vehicle": _is_exact_known_vehicle_plate_match(read),
                 "visitor_pass_match": _is_visitor_pass_plate_match(read) is not None,
+                "external_admission_mode": external_admission.get("mode") if external_admission else None,
             },
         )
         trace = telemetry.start_trace(
@@ -1425,37 +1876,62 @@ class AccessEventService:
             person = vehicle.owner if vehicle else None
             runtime = self._runtime or await get_runtime_config()
             identity_active = bool(vehicle and (not person or person.is_active))
-            if not vehicle:
+            if external_admission:
+                visitor_pass, visitor_pass_mode = None, None
+            elif not vehicle:
                 visitor_pass, visitor_pass_mode = await self._match_visitor_pass(session, read, direction_read, trace)
             else:
                 visitor_pass, visitor_pass_mode = None, None
-            schedule_evaluation = await self._schedule_evaluation_for_detection(
-                session,
-                vehicle=vehicle,
-                identity_active=identity_active,
-                visitor_pass=visitor_pass,
-                visitor_pass_mode=visitor_pass_mode,
-                captured_at=read.captured_at,
-                runtime=runtime,
-                trace=trace,
+            if external_admission:
+                mode = str(external_admission.get("mode") or "arrival")
+                schedule_evaluation = ScheduleEvaluation(
+                    allowed=True,
+                    source=f"external_admission_{mode}",
+                    reason=(
+                        "Unknown vehicle was admitted externally and is being tracked as a vehicle session."
+                        if mode == "arrival"
+                        else "Externally admitted unknown vehicle departure was linked to the active vehicle session."
+                    ),
+                )
+            else:
+                schedule_evaluation = await self._schedule_evaluation_for_detection(
+                    session,
+                    vehicle=vehicle,
+                    identity_active=identity_active,
+                    visitor_pass=visitor_pass,
+                    visitor_pass_mode=visitor_pass_mode,
+                    captured_at=read.captured_at,
+                    runtime=runtime,
+                    trace=trace,
+                )
+            allowed = bool(
+                schedule_evaluation
+                and schedule_evaluation.allowed
+                and (identity_active or visitor_pass or external_admission)
             )
-            allowed = bool(schedule_evaluation and schedule_evaluation.allowed and (identity_active or visitor_pass))
             direction_span = trace.start_span(
                 "Direction Classification",
                 attributes={
                     "allowed": allowed,
                     "gate_observation": gate_observation_from_read(direction_read),
                     "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
+                    "external_admission_mode": external_admission.get("mode") if external_admission else None,
                 },
             )
-            direction, direction_resolution = await self._resolve_direction(
-                session,
-                direction_read,
-                person,
-                allowed,
-                vehicle=vehicle,
-                trace=trace,
-            )
+            if external_admission:
+                direction, direction_resolution = self._external_admission_direction_resolution(
+                    direction_read,
+                    external_admission,
+                )
+            else:
+                direction, direction_resolution = await self._resolve_direction(
+                    session,
+                    direction_read,
+                    person,
+                    allowed,
+                    vehicle=vehicle,
+                    trace=trace,
+                )
             direction_span.finish(
                 output_payload={
                     "direction": direction.value,
@@ -1528,6 +2004,7 @@ class AccessEventService:
                     vehicle_visual_detection=vehicle_visual_detection,
                     visitor_pass=visitor_pass,
                     visitor_pass_mode=visitor_pass_mode,
+                    external_admission=external_admission,
                     trace_id=trace.trace_id,
                     finalize_started_at=finalize_started_at,
                     webhook_trace=webhook_trace,
@@ -1578,6 +2055,13 @@ class AccessEventService:
                     )
                 elif visitor_pass_mode == "departure":
                     await visitor_service.record_departure(session, visitor_pass, event=event)
+            if external_admission:
+                await self._mark_external_admission_linked_session(
+                    session,
+                    external_admission,
+                    event_id=event.id,
+                    observed_at=read.captured_at,
+                )
 
             anomalies = await self._build_anomalies(
                 session,
@@ -1586,6 +2070,7 @@ class AccessEventService:
                 vehicle,
                 allowed,
                 visitor_pass=visitor_pass,
+                external_admission=external_admission,
             )
             session.add_all(anomalies)
 
@@ -1829,6 +2314,8 @@ class AccessEventService:
                 "anomaly_count": len(anomalies),
                 "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
                 "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
+                "external_admission_mode": external_admission.get("mode") if external_admission else None,
+                "external_admission_source": external_admission.get("source") if external_admission else None,
             },
         )
     async def _record_lpr_zone_shadow_decision(
@@ -2003,6 +2490,7 @@ class AccessEventService:
         trace_id: str,
         finalize_started_at: datetime,
         webhook_trace: dict[str, Any],
+        external_admission: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "best": read.raw_payload,
@@ -2030,6 +2518,7 @@ class AccessEventService:
             "direction_resolution": direction_resolution,
             VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY: vehicle_visual_detection,
             VISITOR_PASS_PAYLOAD_KEY: self._visitor_pass_payload(visitor_pass, visitor_pass_mode),
+            EXTERNAL_ADMISSION_PAYLOAD_KEY: external_admission,
             "telemetry": {"trace_id": trace_id},
         }
 
@@ -2055,6 +2544,7 @@ class AccessEventService:
             "explicit_direction": explicit_direction.value if explicit_direction else None,
             "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
             "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(read),
+            "external_admission": _external_admission_from_read(read),
             "gate_malfunction": _gate_malfunction_from_read(read),
         }
 
@@ -2675,6 +3165,46 @@ class AccessEventService:
             "number_plate": visitor_pass.number_plate,
         }
 
+    async def _mark_external_admission_linked_session(
+        self,
+        session: AsyncSession,
+        external_admission: dict[str, Any],
+        *,
+        event_id: uuid.UUID,
+        observed_at: datetime,
+    ) -> None:
+        mode = str(external_admission.get("mode") or "").strip().lower()
+        if mode == "departure":
+            session_id = external_admission.get("external_admission_movement_session_id") or external_admission.get(
+                "linked_movement_session_id"
+            )
+            reason = EXTERNAL_ADMISSION_DEPARTURE_REASON
+        else:
+            session_id = external_admission.get("original_denied_movement_session_id") or external_admission.get(
+                "linked_movement_session_id"
+            )
+            reason = EXTERNAL_ADMISSION_ORIGINAL_SUPERSEDED_REASON
+        if not session_id:
+            return
+        try:
+            row_id = uuid.UUID(str(session_id))
+        except (TypeError, ValueError):
+            return
+        row = await session.get(MovementSessionRecord, row_id)
+        if not row:
+            return
+        await self._movement_sessions.mark_external_session_superseded(
+            session,
+            row,
+            reason=reason,
+            matched_by=str(external_admission.get("matched_by") or external_admission.get("source") or "external_admission"),
+            evidence=external_admission.get("presence_evidence")
+            if isinstance(external_admission.get("presence_evidence"), dict)
+            else None,
+            event_id=event_id,
+            observed_at=observed_at,
+        )
+
     async def _classify_timing(
         self, session: AsyncSession, person: Person, direction: AccessDirection, occurred_at: datetime
     ) -> TimingClassification:
@@ -2721,22 +3251,31 @@ class AccessEventService:
         allowed: bool,
         *,
         visitor_pass: VisitorPass | None = None,
+        external_admission: dict[str, Any] | None = None,
     ) -> list[Anomaly]:
         anomalies: list[Anomaly] = []
 
         if not vehicle:
             if visitor_pass:
                 return anomalies
+            external_mode = str((external_admission or {}).get("mode") or "").strip().lower()
+            if external_mode == "departure":
+                return anomalies
             anomaly = Anomaly(
                 event=event,
                 anomaly_type=AnomalyType.UNAUTHORIZED_PLATE,
                 severity=AnomalySeverity.WARNING,
-                message="Unauthorised Plate, Access Denied",
+                message=(
+                    "Unauthorised Plate, Admitted Externally"
+                    if external_mode == "arrival"
+                    else "Unauthorised Plate, Access Denied"
+                ),
                 context={
                     key: value
                     for key, value in {
                         "registration_number": event.registration_number,
                         "snapshot": alert_snapshot_metadata_from_event(event),
+                        "external_admission": external_admission if external_mode == "arrival" else None,
                     }.items()
                     if value is not None
                 },

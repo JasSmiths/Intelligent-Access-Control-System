@@ -25,6 +25,7 @@ VEHICLE_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 ENTRY_EVENT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 EXIT_EVENT_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 VISITOR_PASS_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
+EXTERNAL_ADMISSION_EVENT_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
 def _dt(value: str) -> datetime:
@@ -42,6 +43,8 @@ def _access_event(
     person_id: uuid.UUID | None = PERSON_ID,
     vehicle_id: uuid.UUID | None = VEHICLE_ID,
     raw_payload: dict[str, Any] | None = None,
+    source: str = "ubiquiti",
+    timing_classification: TimingClassification = TimingClassification.NORMAL,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=event_id,
@@ -51,9 +54,9 @@ def _access_event(
         direction=direction,
         decision=decision,
         confidence=confidence,
-        source="ubiquiti",
+        source=source,
         occurred_at=occurred_at,
-        timing_classification=TimingClassification.NORMAL,
+        timing_classification=timing_classification,
         raw_payload=raw_payload or {},
         snapshot_path=None,
     )
@@ -222,6 +225,37 @@ def test_visitor_vehicle_contract_links_pass_and_mode() -> None:
     assert realtime_payload["visitor_name"] == "Taylor Visitor"
     assert realtime_payload["visitor_pass_mode"] == "arrival"
     assert realtime_payload["decision"] == "granted"
+
+
+def test_external_unknown_admission_contract_exposes_mode_and_source() -> None:
+    event = _access_event(
+        event_id=EXTERNAL_ADMISSION_EVENT_ID,
+        registration_number="UNK123",
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        confidence=0.91,
+        occurred_at=_dt("2026-05-31T08:18:12+00:00"),
+        person_id=None,
+        vehicle_id=None,
+        source="gate_state_changed",
+        timing_classification=TimingClassification.UNKNOWN,
+        raw_payload={
+            "external_admission": {
+                "mode": "arrival",
+                "source": "gate_state_changed",
+                "original_denied_access_event_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            }
+        },
+    )
+
+    realtime_payload = access_event_realtime_payload(
+        event,
+        anomaly_count=1,
+        visitor_pass=None,
+        visitor_pass_mode=None,
+    )
+
+    assert_contract_subset(realtime_payload, load_contract_fixture("realtime/external_unknown_admission.json"))
 
 
 def test_unknown_vehicle_contract_denies_and_avoids_hardware_side_effects() -> None:

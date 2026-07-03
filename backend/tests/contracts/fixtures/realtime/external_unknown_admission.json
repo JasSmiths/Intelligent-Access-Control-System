@@ -1,0 +1,20 @@
+{
+  "event_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "access_event_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "person_id": null,
+  "vehicle_id": null,
+  "registration_number": "UNK123",
+  "direction": "entry",
+  "decision": "granted",
+  "confidence": 0.91,
+  "source": "gate_state_changed",
+  "occurred_at": "2026-05-31T08:18:12+00:00",
+  "event_type": "access_event.finalized",
+  "timing_classification": "unknown",
+  "anomaly_count": 1,
+  "visitor_pass_id": null,
+  "visitor_name": null,
+  "visitor_pass_mode": null,
+  "external_admission_mode": "arrival",
+  "external_admission_source": "gate_state_changed"
+}

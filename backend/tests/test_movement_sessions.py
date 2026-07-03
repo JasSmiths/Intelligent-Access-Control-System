@@ -18,10 +18,19 @@ from app.services.movement.sessions import (
 
 
 class SessionContext:
+    def __init__(self, events=None):
+        self.events = events or {}
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *_args):
+        return None
+
+    async def get(self, _model, row_id):
+        return self.events.get(row_id)
+
+    async def flush(self):
         return None
 
 
@@ -101,13 +110,26 @@ def session_row(
     event_id: str | None = None,
     camera_id: str | None = None,
     device_id: str | None = None,
+    raw_payload: dict | None = None,
+    last_gate_state: str = "closed",
     idle_seconds: float = 180.0,
 ):
     access_event_id = uuid.uuid4()
+    access_event = SimpleNamespace(
+        id=access_event_id,
+        registration_number=registration_number,
+        direction=direction,
+        decision=decision,
+        confidence=1.0,
+        vehicle_id=None,
+        person_id=None,
+        raw_payload=raw_payload or {},
+    )
     return SimpleNamespace(
         id=uuid.uuid4(),
         access_event_id=access_event_id,
         event_id=access_event_id,
+        access_event=access_event,
         source=source,
         registration_number=registration_number,
         normalized_registration_number=movement_sessions_module.normalize_registration_number(registration_number),
@@ -121,6 +143,12 @@ def session_row(
         camera_id=camera_id,
         device_id=device_id,
         protect_event_ids=[event_id] if event_id else [],
+        last_gate_state=last_gate_state,
+        suppressed_reads=[],
+        suppressed_read_count=0,
+        last_suppressed_reason=None,
+        last_matched_by=None,
+        last_presence_evidence=None,
         is_active=True,
     )
 
@@ -330,3 +358,161 @@ def test_suppressed_read_payload_updates_session_summary() -> None:
     assert session_payload["last_seen_at"] == suppressed_read.captured_at.isoformat()
     assert session_payload["protect_event_ids"] == ["event-1", "event-2"]
     assert session_payload["suppressed_reads"][0]["matched_by"] == "movement_session_registration_number"
+
+
+@pytest.mark.asyncio
+async def test_external_admission_candidate_requires_current_protect_vehicle_evidence(monkeypatch) -> None:
+    denied_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    opened_at = denied_at + timedelta(seconds=30)
+    row = session_row("UNK123", denied_at, event_id="protect-1", camera_id="gate-camera")
+    service = service_for([row])
+
+    class Tracker:
+        def __init__(self, evidence):
+            self.evidence = evidence
+
+        async def recent_evidence(self, **_kwargs):
+            return self.evidence
+
+    monkeypatch.setattr(
+        movement_sessions_module,
+        "get_vehicle_presence_tracker",
+        lambda: Tracker({
+            "source": "uiprotect_event",
+            "source_detail": "vehicle_detection",
+            "active": True,
+            "observed_at": opened_at.isoformat(),
+            "event_id": "protect-1",
+            "registration_number": "UNK123",
+            "age_seconds": 2.0,
+        }),
+    )
+    match = await service.external_admission_candidate_for_gate_open(SessionContext(), opened_at=opened_at, runtime=runtime())
+    assert match is not None
+    assert match.session is row
+    assert match.matched_by == "external_presence_registration_number"
+
+    for evidence in (
+        {
+            "source": "uiprotect_event",
+            "source_detail": "vehicle_detection",
+            "active": False,
+            "observed_at": opened_at.isoformat(),
+            "event_id": "protect-1",
+            "registration_number": "UNK123",
+        },
+        {
+            "source": "uiprotect_event",
+            "source_detail": "vehicle_detection",
+            "active": True,
+            "observed_at": (opened_at - timedelta(minutes=10)).isoformat(),
+            "event_id": "protect-1",
+            "registration_number": "UNK123",
+        },
+        {
+            "source": "webhook",
+            "source_detail": "ubiquiti_lpr_webhook",
+            "active": True,
+            "observed_at": opened_at.isoformat(),
+            "event_id": "protect-1",
+            "registration_number": "UNK123",
+        },
+    ):
+        monkeypatch.setattr(movement_sessions_module, "get_vehicle_presence_tracker", lambda evidence=evidence: Tracker(evidence))
+        assert await service.external_admission_candidate_for_gate_open(
+            SessionContext(),
+            opened_at=opened_at,
+            runtime=runtime(lpr_vehicle_session_idle_seconds=60.0),
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_external_admission_camera_only_evidence_must_be_unambiguous(monkeypatch) -> None:
+    denied_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    opened_at = denied_at + timedelta(seconds=20)
+    first = session_row("UNK123", denied_at, camera_id="gate-camera")
+    second = session_row("UNK456", denied_at + timedelta(seconds=2), camera_id="gate-camera")
+
+    class CameraOnlyTracker:
+        async def recent_evidence(self, **_kwargs):
+            return {
+                "source": "uiprotect_camera",
+                "source_detail": "vehicle_detected",
+                "active": True,
+                "observed_at": opened_at.isoformat(),
+                "camera_id": "gate-camera",
+                "age_seconds": 1.0,
+            }
+
+    monkeypatch.setattr(movement_sessions_module, "get_vehicle_presence_tracker", lambda: CameraOnlyTracker())
+
+    ambiguous = await service_for([first, second]).external_admission_candidate_for_gate_open(
+        SessionContext(),
+        opened_at=opened_at,
+        runtime=runtime(),
+    )
+    single = await service_for([first]).external_admission_candidate_for_gate_open(
+        SessionContext(),
+        opened_at=opened_at,
+        runtime=runtime(),
+    )
+
+    assert ambiguous is None
+    assert single is not None
+    assert single.matched_by == "external_presence_camera"
+
+
+@pytest.mark.asyncio
+async def test_external_departure_links_active_external_admission_and_closes_session() -> None:
+    admitted_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    row = session_row(
+        "UNK123",
+        admitted_at,
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        raw_payload={"external_admission": {"mode": "arrival", "source": "gate_state_changed"}},
+        last_gate_state="open",
+    )
+    service = service_for([row])
+    departure_read = read("UNK123", admitted_at + timedelta(seconds=70), state="open", direction="exit")
+
+    match = await service.external_departure_candidate_for_read(SessionContext(), departure_read, runtime=runtime())
+
+    assert match is not None
+    assert match.session is row
+    assert match.matched_by == "external_admission_session"
+
+    await service.mark_external_session_superseded(
+        SessionContext(),
+        row,
+        reason="external_departure_recorded",
+        matched_by=match.matched_by,
+        evidence=match.evidence,
+        event_id=uuid.uuid4(),
+        observed_at=departure_read.captured_at,
+    )
+
+    assert row.is_active is False
+    assert row.last_suppressed_reason == "external_departure_recorded"
+
+
+@pytest.mark.asyncio
+async def test_immediate_post_external_admission_read_is_session_noise_not_departure() -> None:
+    admitted_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    row = session_row(
+        "UNK123",
+        admitted_at,
+        direction=AccessDirection.ENTRY,
+        decision=AccessDecision.GRANTED,
+        raw_payload={"external_admission": {"mode": "arrival", "source": "gate_state_changed"}},
+        last_gate_state="open",
+    )
+    service = service_for([row])
+    immediate_read = read("UNK123", admitted_at + timedelta(seconds=20), state="open", direction="exit")
+
+    departure = await service.external_departure_candidate_for_read(SessionContext(), immediate_read, runtime=runtime())
+    suppression = await service.suppression_for_read(immediate_read, runtime=runtime())
+
+    assert departure is None
+    assert suppression is not None
+    assert suppression.reason == "vehicle_session_already_active"

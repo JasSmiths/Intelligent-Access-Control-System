@@ -53,6 +53,8 @@ export type AccessEvent = {
   visitor_pass_id: string | null;
   visitor_name: string | null;
   visitor_pass_mode: string | null;
+  external_admission_mode: "arrival" | "departure" | null;
+  external_admission_source: string | null;
   snapshot_url: string | null;
   snapshot_captured_at: string | null;
   snapshot_bytes: number | null;

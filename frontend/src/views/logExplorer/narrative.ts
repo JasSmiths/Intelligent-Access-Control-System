@@ -141,6 +141,9 @@ function traceNarrativeTitle(record: LogRecord): string {
     const plate = trace.registration_number || record.subject || "unknown plate";
     const decision = String(context.decision || trace.status || "").toLowerCase();
     const direction = String(context.direction || "").toLowerCase();
+    const externalMode = String(context.external_admission_mode || "").toLowerCase();
+    if (externalMode === "arrival") return `Plate ${plate} admitted externally`;
+    if (externalMode === "departure") return `Plate ${plate} external departure recorded`;
     if (decision === "denied") return `Plate ${plate} denied`;
     if (direction === "exit") return `Plate ${plate} exit recorded`;
     if (decision === "granted") return `Plate ${plate} granted entry`;
@@ -165,7 +168,14 @@ function traceNarrativeReason(record: LogRecord): string {
   if (trace.category === "lpr_telemetry") {
     const decision = String(context.decision || "").toLowerCase();
     const direction = String(context.direction || "").toLowerCase();
+    const externalMode = String(context.external_admission_mode || "").toLowerCase();
     const anomalyCount = numberFrom(context.anomaly_count);
+    if (externalMode === "arrival") {
+      return "The gate opened outside IACS while Protect still showed the unknown vehicle present.";
+    }
+    if (externalMode === "departure") {
+      return "The plate read was linked to an active externally admitted vehicle session.";
+    }
     if (anomalyCount > 0) return `${anomalyCount} anomaly ${anomalyCount === 1 ? "was" : "were"} created for this plate decision.`;
     if (stringPayload(context.visitor_name)) return `Visitor pass matched for ${stringPayload(context.visitor_name)}.`;
     if (decision === "denied") return "Access rules did not grant this plate read.";
@@ -197,7 +207,10 @@ function ledgerWhatForRecord(record: LogRecord, title: string): string {
     const vehicle = firstText(context.display_vehicle, context.vehicle);
     const decision = String(context.decision || record.status || "").toLowerCase();
     const direction = String(context.direction || "").toLowerCase();
+    const externalMode = String(context.external_admission_mode || "").toLowerCase();
     const vehicleText = vehicle && vehicle !== plate ? `${vehicle} (${plate})` : plate;
+    if (externalMode === "arrival") return `Unknown vehicle ${plate} admitted externally`;
+    if (externalMode === "departure") return `Unknown vehicle ${plate} departed after external admission`;
     if (decision === "denied") return identity ? `${identity} denied in ${vehicleText}` : `Vehicle ${plate} denied`;
     if (direction === "exit") return identity ? `${identity} departed in ${vehicleText}` : `Vehicle ${plate} departed`;
     if (identity) return `${identity} arrived in ${vehicleText}`;

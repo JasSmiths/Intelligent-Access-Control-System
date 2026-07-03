@@ -22,6 +22,7 @@ def access_event_realtime_payload(
     visitor_pass: Any | None,
     visitor_pass_mode: str | None,
 ) -> dict[str, Any]:
+    external_admission = external_admission_from_event(event)
     payload = {
         "event_id": str(event.id),
         "access_event_id": str(event.id),
@@ -39,6 +40,8 @@ def access_event_realtime_payload(
         "visitor_pass_id": str(visitor_pass.id) if visitor_pass else None,
         "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
         "visitor_pass_mode": visitor_pass_mode if visitor_pass else None,
+        "external_admission_mode": external_admission.get("mode") if external_admission else None,
+        "external_admission_source": external_admission.get("source") if external_admission else None,
     }
     payload.update(access_event_snapshot_payload(event))
     return payload
@@ -58,6 +61,7 @@ def notification_facts(
     entity_id: str | None = None,
 ) -> dict[str, Any]:
     dvla = dvla_enrichment or {}
+    external_admission = external_admission_from_event(event)
     visual = vehicle_visual_detection_from_event(event)
     detected_vehicle_type = fact_text(
         visual.get("observed_vehicle_type")
@@ -110,6 +114,8 @@ def notification_facts(
         "direction": event.direction.value,
         "decision": event.decision.value,
         "source": event.source,
+        "external_admission_mode": fact_text(external_admission.get("mode") if external_admission else None),
+        "external_admission_source": fact_text(external_admission.get("source") if external_admission else None),
         "timing_classification": event.timing_classification.value,
         "occurred_at": event.occurred_at.isoformat(),
     }
@@ -146,6 +152,12 @@ def vehicle_display_name(vehicle: Any | None, fallback: str) -> str:
 
 def vehicle_visual_detection_from_event(event: Any) -> dict[str, Any]:
     return dict((event.raw_payload or {}).get("vehicle_visual_detection") or {})
+
+
+def external_admission_from_event(event: Any) -> dict[str, Any] | None:
+    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    payload = raw_payload.get("external_admission")
+    return payload if isinstance(payload, dict) else None
 
 
 def fact_text(value: Any) -> str:
