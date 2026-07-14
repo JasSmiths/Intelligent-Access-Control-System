@@ -82,7 +82,7 @@ function RouteLoading() {
       content = <IntegrationsView currentUser={props.currentUser} people={props.people} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
-      content = <LogsView refreshToken={props.dataRefreshToken} />;
+      content = <LogsView currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_general":
       content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;

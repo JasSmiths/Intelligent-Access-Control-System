@@ -81,18 +81,22 @@ def test_redaction_and_audit_diff_hide_secrets_and_media() -> None:
         {
             "authorization": "Bearer secret",
             "home_assistant_token": "secret",
+            "webhook_key": "hook-secret",
             "mount_options": "username=iacs,password=secret,vers=3.0,rw",
             "assistant_text": "Snapshot at /api/v1/ai/chat/files/abcDEF_123",
             "profile_photo_data_url": "data:image/png;base64,abcdef",
+            "configuration_snapshot": {"schedule": "06:00-22:30"},
             "nested": {"api_key": "123", "safe": "ok"},
         }
     )
 
     assert payload["authorization"] == "[redacted]"
     assert payload["home_assistant_token"] == "[redacted]"
+    assert payload["webhook_key"] == "[redacted]"
     assert payload["mount_options"] == "[redacted]"
     assert payload["assistant_text"] == "Snapshot at /api/v1/ai/chat/files/[redacted]"
     assert str(payload["profile_photo_data_url"]).startswith("[media redacted")
+    assert payload["configuration_snapshot"] == {"schedule": "06:00-22:30"}
     assert payload["nested"]["api_key"] == "[redacted]"
 
     diff = audit_diff({"schedule": "Mon-Fri", "name": "Steph"}, {"schedule": "24/7", "name": "Steph"})

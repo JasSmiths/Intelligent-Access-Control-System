@@ -77,6 +77,7 @@ export function UnifiProtectCameraSection({
   };
   const configured = status?.configured ?? false;
   const connected = status?.connected ?? false;
+  const realtimeDegraded = connected && (status?.realtime_connected === false || Boolean(status?.realtime_error));
   return (
     <section className="protect-section">
       <div className="protect-section-header">
@@ -85,7 +86,9 @@ export function UnifiProtectCameraSection({
           <h2>UniFi Protect Cameras</h2>
         </div>
         <div className="protect-section-actions">
-          <Badge tone={connected ? "green" : configured ? "blue" : "gray"}>{connected ? "Connected" : configured ? "Configured" : "Not Configured"}</Badge>
+          <Badge tone={realtimeDegraded ? "red" : connected ? "green" : configured ? "blue" : "gray"}>
+            {realtimeDegraded ? "Realtime Degraded" : connected ? "Connected" : configured ? "Configured" : "Not Configured"}
+          </Badge>
           <button className="secondary-button" onClick={onRefresh} disabled={loading} type="button">
             <RefreshCcw size={15} /> {loading ? "Refreshing..." : "Refresh"}
           </button>
@@ -278,6 +281,10 @@ function ProtectExposeTable({
 function buildProtectExposeRows(status: UnifiProtectStatus | null, cameras: UnifiProtectCamera[]) {
   const consoleRows: ProtectExposeRow[] = [
     { name: "Connection", value: status?.connected ? "Connected" : status?.configured ? "Configured" : "Not configured" },
+    { name: "Realtime", value: status?.realtime_connected ? "Connected" : status?.configured ? "Degraded" : "Not configured" },
+    { name: "Private websocket", value: titleCase(status?.websocket_states?.private || "unknown") },
+    { name: "Events websocket", value: titleCase(status?.websocket_states?.events || "unknown") },
+    { name: "Devices websocket", value: titleCase(status?.websocket_states?.devices || "unknown") },
     { name: "Console", value: status?.host ? `${status.host}:${status.port}` : "Not configured" },
     { name: "TLS verification", value: formatExposeValue(status?.verify_ssl) },
     { name: "Camera count", value: String(status?.camera_count ?? cameras.length) },

@@ -42,6 +42,8 @@ export type WhatsAppStatus = {
 };
 export type UnifiProtectStatus = {
   configured: boolean; connected: boolean; last_error: string | null; camera_count: number;
+  realtime_connected: boolean; realtime_error: string | null;
+  websocket_states: Record<"private" | "events" | "devices", string>;
   host: string; port: number; verify_ssl: boolean; snapshot_width: number; snapshot_height: number;
 };
 export type UnifiProtectEvent = {

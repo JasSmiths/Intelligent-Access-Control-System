@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, and_, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,6 +17,21 @@ from app.db.session import get_db_session
 from app.models import AccessEvent, AuditLog, AutomationRun, GateCommandRecord, MovementSagaRecord, TelemetrySpan, TelemetryTrace, User
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.lpr_timing import get_lpr_timing_recorder
+from app.services.investigations import (
+    ActivityFilters,
+    InvalidCursorError,
+    InvalidTimeRangeError,
+    resolve_time_range,
+)
+from app.services.investigations.contracts import OUTCOMES
+from app.services.investigations.service import (
+    get_activity_detail,
+    investigate,
+    investigation_filter_options,
+    investigation_overview,
+    list_activity,
+)
+from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORIES,
     TELEMETRY_CATEGORY_CRUD,
@@ -32,6 +47,35 @@ router = APIRouter()
 class TelemetryPurgeRequest(BaseModel):
     scope: str = Field(default="telemetry", pattern="^(telemetry|full)$")
     confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class InvestigationScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    time: str | None = Field(default=None, max_length=40)
+    from_at: datetime | None = None
+    to_at: datetime | None = None
+    device: str | None = Field(default=None, max_length=160)
+    automation: str | None = Field(default=None, max_length=160)
+    schedule: str | None = Field(default=None, max_length=160)
+    integration: str | None = Field(default=None, max_length=160)
+    category: str | None = Field(default=None, max_length=80)
+    outcome: str | None = Field(default=None, max_length=40)
+    severity: str | None = Field(default=None, max_length=40)
+    actor: str | None = Field(default=None, max_length=160)
+    trigger: str | None = Field(default=None, max_length=160)
+    trace: str | None = Field(default=None, max_length=64)
+    q: str | None = Field(default=None, max_length=200)
+    include_routine: bool | None = None
+
+
+class InvestigationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=1000)
+    scope: InvestigationScope = Field(default_factory=InvestigationScope)
+    max_evidence: int = Field(default=30, ge=5, le=50)
+    use_ai: bool = True
 
 
 @router.get("/categories")
@@ -78,6 +122,120 @@ async def telemetry_summary(
         "storage": storage,
         "updated_at": datetime.now().isoformat(),
     }
+
+
+@router.get("/investigation-overview")
+async def get_investigation_overview(
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    runtime = await get_runtime_config()
+    return await investigation_overview(session, site_timezone=runtime.site_timezone)
+
+
+@router.get("/investigation-filters")
+async def get_investigation_filters(
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    runtime = await get_runtime_config()
+    return await investigation_filter_options(session, site_timezone=runtime.site_timezone)
+
+
+@router.post("/investigate")
+async def investigate_logs(
+    request: InvestigationRequest,
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    runtime = await get_runtime_config()
+    scope = request.scope.model_dump(exclude_none=True)
+    if "time" in scope:
+        scope["time_range"] = scope.pop("time")
+    _validate_investigation_outcome(scope.get("outcome"))
+    try:
+        return await investigate(
+            session,
+            question=request.question.strip(),
+            scope=scope,
+            max_evidence=request.max_evidence,
+            use_ai=request.use_ai,
+            runtime=runtime,
+        )
+    except InvalidTimeRangeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/activity")
+async def get_activity(
+    time_range: str = Query(default="last_24_hours", alias="time", max_length=40),
+    from_at: datetime | None = Query(default=None, alias="from"),
+    to_at: datetime | None = Query(default=None, alias="to"),
+    device: str | None = Query(default=None, max_length=160),
+    automation: str | None = Query(default=None, max_length=160),
+    schedule: str | None = Query(default=None, max_length=160),
+    integration: str | None = Query(default=None, max_length=160),
+    category: str | None = Query(default=None, max_length=80),
+    outcome: str | None = Query(default=None, max_length=40),
+    severity: str | None = Query(default=None, max_length=40),
+    actor: str | None = Query(default=None, max_length=160),
+    trigger: str | None = Query(default=None, max_length=160),
+    trace: str | None = Query(default=None, max_length=64),
+    q: str | None = Query(default=None, max_length=200),
+    include_routine: bool = False,
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=1000),
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    runtime = await get_runtime_config()
+    _validate_investigation_outcome(outcome)
+    try:
+        resolved_from, resolved_to, resolved_key = resolve_time_range(
+            time_range,
+            from_at=from_at,
+            to_at=to_at,
+            timezone_name=runtime.site_timezone,
+        )
+        filters = ActivityFilters(
+            from_at=resolved_from,
+            to_at=resolved_to,
+            time_range=resolved_key,
+            device=_clean_filter(device),
+            automation=_clean_filter(automation),
+            schedule=_clean_filter(schedule),
+            integration=_clean_filter(integration),
+            category=_clean_filter(category),
+            outcome=_clean_filter(outcome),
+            severity=_clean_filter(severity),
+            actor=_clean_filter(actor),
+            trigger=_clean_filter(trigger),
+            trace=_clean_filter(trace),
+            q=_clean_filter(q),
+            include_routine=include_routine,
+        )
+        return await list_activity(
+            session,
+            filters,
+            limit=limit,
+            cursor=cursor,
+            site_timezone=runtime.site_timezone,
+        )
+    except (InvalidCursorError, InvalidTimeRangeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/activity/{episode_id}")
+async def get_activity_episode(
+    episode_id: str,
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    runtime = await get_runtime_config()
+    payload = await get_activity_detail(session, episode_id, site_timezone=runtime.site_timezone)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Investigation activity was not found.")
+    return payload
 
 
 @router.get("/traces")
@@ -1102,3 +1260,17 @@ def _trace_cursor(trace: TelemetryTrace) -> str:
 
 def _audit_cursor(row: AuditLog) -> str:
     return f"{row.timestamp.isoformat()}|{row.id}"
+
+
+def _clean_filter(value: str | None) -> str | None:
+    cleaned = value.strip() if value else ""
+    return cleaned or None
+
+
+def _validate_investigation_outcome(value: Any) -> None:
+    if value is None or str(value).strip() in OUTCOMES:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=f"Unsupported outcome. Choose one of: {', '.join(OUTCOMES)}.",
+    )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -28,6 +28,12 @@ from app.modules.gate.base import GateState
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.event_bus import event_bus
 from app.services.settings import get_runtime_config
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    current_trace_id,
+    emit_audit_log,
+    telemetry,
+)
 
 logger = get_logger(__name__)
 
@@ -393,31 +399,86 @@ class AccessDeviceService:
         bypass_schedule: bool = False,
         schedule_source: str | None = None,
     ) -> AccessDeviceOperationResult:
+        started_at = datetime.now(tz=UTC)
+        active_trace_id = current_trace_id()
+        schedule_evidence: dict[str, Any] | None = None
         async with AsyncSessionLocal() as session:
             row = await self._device_row(session, device_key)
             device = self._entity_from_row(row)
             if not device.enabled:
-                return self._operation_rejected(device, action, "Access device is disabled.")
+                result = self._operation_rejected(
+                    device,
+                    action,
+                    "Access device is disabled.",
+                    metadata={"reason_code": "device_disabled"},
+                )
+                self._record_command_evidence(
+                    result,
+                    reason=reason,
+                    started_at=started_at,
+                    trace_id=active_trace_id,
+                )
+                return result
             if action == "open" and not bypass_schedule:
-                from app.services.schedules import evaluate_schedule_id
+                from app.services.schedules import evaluate_schedule_id, schedule_evaluation_payload
 
                 config = await get_runtime_config()
+                evaluated_at = datetime.now(tz=UTC)
                 schedule = await evaluate_schedule_id(
                     session,
                     row.schedule_id,
-                    datetime.now(tz=UTC),
+                    evaluated_at,
                     timezone_name=config.site_timezone,
                     default_policy=config.schedule_default_policy,
                     source=schedule_source or device.kind,
                 )
+                schedule_evidence = schedule_evaluation_payload(schedule)
+                telemetry.record_span(
+                    "Access device schedule evaluated",
+                    trace_id=active_trace_id,
+                    category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                    started_at=evaluated_at,
+                    ended_at=datetime.now(tz=UTC),
+                    attributes={
+                        "device_key": device.key,
+                        "device_name": device.name,
+                        "action": action,
+                        "reason_code": schedule.reason_code,
+                    },
+                    output_payload=schedule_evidence,
+                    status="ok" if schedule.allowed else "blocked",
+                )
                 if not schedule.allowed:
-                    return self._operation_rejected(
+                    result = self._operation_rejected(
                         device,
                         action,
                         schedule.reason or "Outside schedule.",
-                        metadata={"schedule_denied": True},
+                        metadata={
+                            "schedule_denied": True,
+                            "reason_code": schedule.reason_code,
+                            "schedule_evaluation": schedule_evidence,
+                        },
                     )
-        return await self._command_with_failover(device, action, reason)
+                    self._record_command_evidence(
+                        result,
+                        reason=reason,
+                        started_at=started_at,
+                        trace_id=active_trace_id,
+                    )
+                    return result
+        result = await self._command_with_failover(device, action, reason)
+        if schedule_evidence:
+            result = replace(
+                result,
+                metadata={**result.metadata, "schedule_evaluation": schedule_evidence},
+            )
+        self._record_command_evidence(
+            result,
+            reason=reason,
+            started_at=started_at,
+            trace_id=active_trace_id,
+        )
+        return result
 
     async def open_access_gates(
         self,
@@ -909,6 +970,93 @@ class AccessDeviceService:
         ordered = [provider for provider in ("home_assistant", "esphome") if provider in providers]
         ordered.extend(sorted(providers - set(ordered)))
         return ordered
+
+    def _record_command_evidence(
+        self,
+        result: AccessDeviceOperationResult,
+        *,
+        reason: str,
+        started_at: datetime,
+        trace_id: str | None,
+    ) -> None:
+        dispatch_state, reason_code = self._command_evidence_outcome(result)
+        payload = result.as_payload()
+        payload["dispatch_state"] = dispatch_state
+        payload["reason_code"] = reason_code
+        payload["command_sent"] = dispatch_state in {"attempted", "accepted", "verified"}
+        ended_at = datetime.now(tz=UTC)
+        span_status = (
+            "blocked"
+            if dispatch_state == "withheld"
+            else "error"
+            if dispatch_state == "attempted" and not result.accepted
+            else "warning"
+            if dispatch_state == "accepted"
+            else "ok"
+        )
+        telemetry.record_span(
+            "Access device command outcome",
+            trace_id=trace_id,
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            started_at=started_at,
+            ended_at=ended_at,
+            attributes={
+                "device_key": result.device.key,
+                "device_name": result.device.name,
+                "device_kind": result.device.kind,
+                "action": result.action,
+                "dispatch_state": dispatch_state,
+                "reason_code": reason_code,
+            },
+            input_payload={"reason": reason},
+            output_payload=payload,
+            status=span_status,
+            error=result.detail if span_status == "error" else None,
+        )
+        audit_outcome = (
+            "success"
+            if dispatch_state == "verified"
+            else "accepted"
+            if dispatch_state == "accepted"
+            else "failed"
+            if dispatch_state == "attempted"
+            else "skipped"
+        )
+        emit_audit_log(
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action=f"access_device.command.{dispatch_state}",
+            actor="IACS",
+            target_entity="AccessDevice",
+            target_id=result.device.key,
+            target_label=result.device.name,
+            outcome=audit_outcome,
+            level="error" if audit_outcome == "failed" else "warning" if dispatch_state == "accepted" else "info",
+            trace_id=trace_id,
+            metadata=payload,
+        )
+
+    def _command_evidence_outcome(
+        self,
+        result: AccessDeviceOperationResult,
+    ) -> tuple[str, str]:
+        schedule = result.metadata.get("schedule_evaluation")
+        schedule_payload = schedule if isinstance(schedule, dict) else {}
+        if result.metadata.get("schedule_denied") or schedule_payload.get("allowed") is False:
+            return "withheld", str(
+                result.metadata.get("reason_code")
+                or schedule_payload.get("reason_code")
+                or "schedule_denied"
+            )
+        reason_code = str(result.metadata.get("reason_code") or "")
+        if reason_code == "device_disabled":
+            return "withheld", reason_code
+        if result.accepted and result.verified:
+            return "verified", "device_state_verified"
+        if result.accepted:
+            return "accepted", "device_state_unverified"
+        if result.attempts:
+            return "attempted", "integration_rejected"
+        return "withheld", reason_code or "integration_not_configured"
 
     def _operation_rejected(
         self,

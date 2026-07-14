@@ -139,33 +139,50 @@ async def load_unifi_protect_bootstrap(api: Any) -> None:
 def subscribe_unifi_protect(
     api: Any,
     message_callback: Callable[[Any], None],
-    state_callback: Callable[[Any], None],
+    state_callback: Callable[[str, Any], None],
 ) -> list[Callable[[], None]]:
     unsubscribers: list[Callable[[], None]] = []
-    for method_name in (
-        "subscribe_websocket",
-        "subscribe_events_websocket",
-        "subscribe_devices_websocket",
-    ):
-        method = getattr(api, method_name, None)
+    subscriptions = (
+        ("private", "subscribe_websocket_state", "subscribe_websocket"),
+        ("events", "subscribe_events_websocket_state", "subscribe_events_websocket"),
+        ("devices", "subscribe_devices_websocket_state", "subscribe_devices_websocket"),
+    )
+
+    # Register state listeners before message listeners start their sockets so
+    # callers cannot miss the initial CONNECTED transition.
+    for channel, state_method_name, _ in subscriptions:
+        method = getattr(api, state_method_name, None)
+        if callable(method):
+            callback = _bind_websocket_state_callback(state_callback, channel)
+            try:
+                unsubscribers.append(method(callback))
+            except Exception as exc:
+                logger.debug(
+                    "unifi_protect_state_subscription_failed",
+                    extra={"method": state_method_name, "error": str(exc)},
+                )
+
+    for _, _, message_method_name in subscriptions:
+        method = getattr(api, message_method_name, None)
         if callable(method):
             try:
                 unsubscribers.append(method(message_callback))
             except Exception as exc:
-                logger.warning("unifi_protect_subscription_failed", extra={"method": method_name, "error": str(exc)})
-
-    for method_name in (
-        "subscribe_websocket_state",
-        "subscribe_events_websocket_state",
-        "subscribe_devices_websocket_state",
-    ):
-        method = getattr(api, method_name, None)
-        if callable(method):
-            try:
-                unsubscribers.append(method(state_callback))
-            except Exception as exc:
-                logger.debug("unifi_protect_state_subscription_failed", extra={"method": method_name, "error": str(exc)})
+                logger.warning(
+                    "unifi_protect_subscription_failed",
+                    extra={"method": message_method_name, "error": str(exc)},
+                )
     return unsubscribers
+
+
+def _bind_websocket_state_callback(
+    callback: Callable[[str, Any], None],
+    channel: str,
+) -> Callable[[Any], None]:
+    def handle_state(state: Any) -> None:
+        callback(channel, state)
+
+    return handle_state
 
 
 def list_bootstrap_cameras(api: Any) -> list[Any]:
@@ -396,6 +413,17 @@ def websocket_message_payload(message: Any) -> dict[str, Any]:
     if _looks_like_event(new_obj, model_key):
         payload["event"] = serialize_unifi_event(new_obj)
     return payload
+
+
+def is_unifi_protect_stream_metadata_only(message: Any) -> bool:
+    """Return true for uiprotect's synthetic RTSPS stream-cache update."""
+    changed_data = getattr(message, "changed_data", None)
+    if not isinstance(changed_data, dict):
+        return False
+    keys = {re.sub(r"[^a-z0-9]", "", str(key).lower()) for key in changed_data}
+    stream_keys = {"rtspstreams", "rtspsstreams"}
+    metadata_keys = {"modelkey", "id", *stream_keys}
+    return bool(keys & stream_keys) and keys <= metadata_keys
 
 
 def _serialize_channel(channel: Any) -> dict[str, Any]:

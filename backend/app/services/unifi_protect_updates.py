@@ -2,12 +2,13 @@ import asyncio
 from email.parser import Parser
 from importlib import metadata as importlib_metadata
 import importlib.util
+import inspect
 import json
 import re
 import shutil
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,11 @@ from app.modules.unifi_protect.client import (
     UnifiProtectError,
     build_unifi_protect_client,
     close_unifi_protect_client,
+    get_event_by_id,
+    get_unifi_protect_event_thumbnail,
     get_unifi_protect_snapshot,
     list_bootstrap_cameras,
+    list_unifi_protect_events,
     load_unifi_protect_bootstrap,
     serialize_unifi_camera,
 )
@@ -59,6 +63,11 @@ GITHUB_RELEASE_URLS = (
     "https://api.github.com/repos/uilibs/uiprotect/releases/tags/{version}",
 )
 BACKUP_SCHEMA_VERSION = 1
+MAX_COMBINED_RELEASE_NOTES_CHARS = 24000
+RELEASE_NOTES_CONCURRENCY = 6
+VERIFY_EVENT_LOOKBACK_DAYS = 7
+VERIFY_EVENT_LIMIT = 10
+VERIFY_WEBSOCKET_TIMEOUT_SECONDS = 10.0
 
 
 class UnifiProtectUpdateError(RuntimeError):
@@ -88,7 +97,7 @@ class UnifiProtectUpdateService:
         target = target_version or latest
         if not target:
             raise UnifiProtectUpdateError("Unable to determine the latest uiprotect release.")
-        release_notes = await self._release_notes(target)
+        release_notes = await self._release_notes_between(current, target)
         analysis_text, analysis_provider = await self._analyze_release_notes(
             current_version=current,
             target_version=target,
@@ -166,11 +175,79 @@ class UnifiProtectUpdateService:
                 width=160,
                 height=90,
             )
+            checks: dict[str, Any] = {
+                "bootstrap": {"status": "passed"},
+                "camera_snapshot": {"status": "passed", "bytes": len(snapshot.content)},
+            }
+
+            events = await list_unifi_protect_events(
+                api,
+                event_type="smartDetectZone",
+                limit=VERIFY_EVENT_LIMIT,
+                since=datetime.now(tz=UTC) - timedelta(days=VERIFY_EVENT_LOOKBACK_DAYS),
+            )
+            checks["event_history"] = {"status": "passed", "event_count": len(events)}
+            event = next((candidate for candidate in events if str(getattr(candidate, "id", ""))), None)
+            if event is None:
+                reason = f"No smart-detection event was returned from the last {VERIFY_EVENT_LOOKBACK_DAYS} days."
+                checks["single_event"] = {"status": "skipped", "reason": reason}
+                checks["event_thumbnail"] = {"status": "skipped", "reason": reason}
+                checks["smart_detect_track"] = {"status": "skipped", "reason": reason}
+            else:
+                event_id = str(getattr(event, "id", ""))
+                resolved_event = await get_event_by_id(api, event_id)
+                checks["single_event"] = {
+                    "status": "passed",
+                    "event_id": str(getattr(resolved_event, "id", event_id)),
+                }
+
+                thumbnail_event = next(
+                    (
+                        candidate
+                        for candidate in events
+                        if str(getattr(candidate, "id", "")) and getattr(candidate, "thumbnail_id", None)
+                    ),
+                    None,
+                )
+                if thumbnail_event is None:
+                    checks["event_thumbnail"] = {
+                        "status": "skipped",
+                        "reason": "No recent event exposed a thumbnail identifier.",
+                    }
+                else:
+                    thumbnail = await get_unifi_protect_event_thumbnail(
+                        api,
+                        str(getattr(thumbnail_event, "id", "")),
+                        width=160,
+                        height=90,
+                    )
+                    checks["event_thumbnail"] = {"status": "passed", "bytes": len(thumbnail.content)}
+
+                track_event = next((candidate for candidate in events if _is_smart_detect_event(candidate)), None)
+                request_obj = getattr(api, "api_request_obj", None)
+                if track_event is None:
+                    checks["smart_detect_track"] = {
+                        "status": "skipped",
+                        "reason": "No recent vehicle or license-plate smart-detection event was available.",
+                    }
+                elif not callable(request_obj):
+                    raise UnifiProtectError("Installed uiprotect package does not expose private read-only API requests.")
+                else:
+                    track_event_id = str(getattr(track_event, "id", ""))
+                    track = await request_obj(f"events/{track_event_id}/smartDetectTrack")
+                    checks["smart_detect_track"] = {
+                        "status": "passed",
+                        "event_id": track_event_id,
+                        "payload_type": type(track).__name__,
+                    }
+
+            checks["websockets"] = await _verify_websocket_establishment(api)
             return {
                 "package_version": current_unifi_protect_version(),
                 "camera_count": len(cameras),
                 "snapshot_bytes": len(snapshot.content),
                 "sample_camera": serialize_unifi_camera(first_camera),
+                "checks": checks,
             }
         finally:
             await close_unifi_protect_client(api)
@@ -291,6 +368,54 @@ class UnifiProtectUpdateService:
             "html_url": f"https://pypi.org/project/uiprotect/{version}/",
         }
 
+    async def _stable_release_versions(self, current_version: str, target_version: str) -> list[str]:
+        async with httpx.AsyncClient(timeout=12, trust_env=False) as client:
+            response = await client.get(PYPI_PACKAGE_URL)
+        if response.status_code >= 400:
+            raise UnifiProtectUpdateError(f"PyPI returned HTTP {response.status_code} while listing releases.")
+        payload = response.json()
+        releases = payload.get("releases")
+        if not isinstance(releases, dict):
+            raise UnifiProtectUpdateError("PyPI did not return the uiprotect release index.")
+        return _stable_versions_between(releases, current_version, target_version)
+
+    async def _release_notes_between(self, current_version: str, target_version: str) -> dict[str, Any]:
+        versions = await self._stable_release_versions(current_version, target_version)
+        if not versions:
+            try:
+                same_version = Version(current_version) == Version(target_version)
+            except InvalidVersion:
+                same_version = False
+            if same_version:
+                versions = [target_version]
+            else:
+                raise UnifiProtectUpdateError(
+                    f"PyPI did not return any stable uiprotect releases after {current_version} through {target_version}."
+                )
+
+        semaphore = asyncio.Semaphore(RELEASE_NOTES_CONCURRENCY)
+
+        async def fetch(version: str) -> tuple[str, dict[str, Any]]:
+            async with semaphore:
+                try:
+                    return version, await self._release_notes(version)
+                except Exception as exc:
+                    logger.warning(
+                        "unifi_protect_release_notes_failed",
+                        extra={"version": version, "error": str(exc)},
+                    )
+                    project_url = f"https://pypi.org/project/uiprotect/{version}/"
+                    return version, {
+                        "source": project_url,
+                        "title": f"uiprotect {version}",
+                        "body": "Release notes could not be retrieved; review the linked PyPI release page.",
+                        "published_at": None,
+                        "html_url": project_url,
+                    }
+
+        releases = await asyncio.gather(*(fetch(version) for version in versions))
+        return _combine_release_notes(current_version, target_version, releases)
+
     async def _analyze_release_notes(
         self,
         *,
@@ -308,9 +433,11 @@ class UnifiProtectUpdateService:
             f"Target version: {target_version}\n"
             "Integration touchpoints: ProtectApiClient constructor, API key auth, bootstrap update, "
             "camera snapshots, package snapshots, get_events, event thumbnails/videos, websocket subscriptions, "
-            "ModelType imports, pydantic model attributes, and aiohttp session cleanup.\n\n"
+            "private smartDetectTrack reads, ModelType imports, pydantic model attributes, and aiohttp session "
+            "cleanup.\n\n"
             f"Package metadata: {json.dumps(latest_info, default=str)[:5000]}\n\n"
-            f"Release notes source: {release_notes.get('source')}\n"
+            f"Stable releases reviewed: {release_notes.get('version_count', 1)}\n"
+            f"Release index source: {release_notes.get('source')}\n"
             f"Release notes:\n{release_notes.get('body') or 'No release notes body available.'}\n\n"
             "Return concise markdown with: risk level, possible breaking issues, what to verify, "
             "and a go/no-go recommendation."
@@ -356,6 +483,174 @@ class UnifiProtectUpdateService:
         if target_path.exists():
             shutil.rmtree(target_path)
         staging.rename(target_path)
+
+
+def _stable_versions_between(
+    releases: dict[str, Any],
+    current_version: str,
+    target_version: str,
+) -> list[str]:
+    try:
+        current = Version(current_version)
+        target = Version(target_version)
+    except InvalidVersion:
+        return []
+
+    versions: list[Version] = []
+    for raw_version, files in releases.items():
+        try:
+            version = Version(str(raw_version))
+        except InvalidVersion:
+            continue
+        if version.is_prerelease or version.is_devrelease or not current < version <= target:
+            continue
+        artifacts = [item for item in files if isinstance(item, dict)] if isinstance(files, list) else []
+        if not artifacts or all(bool(item.get("yanked")) for item in artifacts):
+            continue
+        versions.append(version)
+    return [str(version) for version in sorted(set(versions))]
+
+
+def _combine_release_notes(
+    current_version: str,
+    target_version: str,
+    releases: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    prefix = (
+        f"Stable uiprotect releases after {current_version} through {target_version}. "
+        f"Release versions were enumerated from {PYPI_PACKAGE_URL}.\n\n"
+    )
+    headers = []
+    for version, notes in releases:
+        source = str(notes.get("html_url") or notes.get("source") or f"https://pypi.org/project/uiprotect/{version}/")
+        headers.append(f"## {version}: {notes.get('title') or f'uiprotect {version}'}\nSource: {source}\n")
+    separators_size = max(0, len(releases) - 1) * 2
+    available_for_bodies = max(
+        0,
+        MAX_COMBINED_RELEASE_NOTES_CHARS - len(prefix) - sum(map(len, headers)) - separators_size,
+    )
+    per_release_limit = available_for_bodies // max(1, len(releases))
+    sections = [
+        header + _bounded_text(str(notes.get("body") or "No release notes body available."), per_release_limit)
+        for header, (_, notes) in zip(headers, releases, strict=True)
+    ]
+    body = _bounded_text(prefix + "\n\n".join(sections), MAX_COMBINED_RELEASE_NOTES_CHARS)
+    target_notes = next((notes for version, notes in releases if version == target_version), releases[-1][1])
+    return {
+        "source": PYPI_PACKAGE_URL,
+        "title": f"uiprotect {current_version} to {target_version}",
+        "body": body,
+        "published_at": target_notes.get("published_at"),
+        "html_url": target_notes.get("html_url") or target_notes.get("source"),
+        "version_count": len(releases),
+        "versions": [version for version, _ in releases],
+        "releases": [
+            {
+                "version": version,
+                "title": notes.get("title") or f"uiprotect {version}",
+                "published_at": notes.get("published_at"),
+                "html_url": notes.get("html_url") or notes.get("source"),
+                "source": notes.get("source"),
+            }
+            for version, notes in releases
+        ],
+    }
+
+
+def _is_smart_detect_event(event: Any) -> bool:
+    values = {
+        _normalized_enum_value(value)
+        for value in (getattr(event, "smart_detect_types", None) or [])
+    }
+    return bool(values & {"licenseplate", "vehicle"})
+
+
+def _normalized_enum_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return re.sub(r"[^a-z0-9]", "", str(raw).lower())
+
+
+async def _verify_websocket_establishment(
+    api: Any,
+    *,
+    timeout_seconds: float = VERIFY_WEBSOCKET_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    channels = (
+        ("private", "subscribe_websocket", "subscribe_websocket_state"),
+        ("events", "subscribe_events_websocket", "subscribe_events_websocket_state"),
+        ("devices", "subscribe_devices_websocket", "subscribe_devices_websocket_state"),
+    )
+    loop = asyncio.get_running_loop()
+    terminal_events = {name: asyncio.Event() for name, _, _ in channels}
+    outcomes: dict[str, str] = {}
+    observed_states: dict[str, list[str]] = {name: [] for name, _, _ in channels}
+    unsubscribers: list[Any] = []
+
+    def state_callback(channel: str):
+        def callback(state: Any) -> None:
+            label = _websocket_state_label(state)
+            observed_states[channel].append(label)
+            if label == "CONNECTED":
+                outcomes[channel] = "passed"
+                loop.call_soon_threadsafe(terminal_events[channel].set)
+            elif label == "AUTH_FAILED":
+                outcomes[channel] = "auth_failed"
+                loop.call_soon_threadsafe(terminal_events[channel].set)
+
+        return callback
+
+    try:
+        for channel, subscribe_name, state_subscribe_name in channels:
+            subscribe = getattr(api, subscribe_name, None)
+            subscribe_state = getattr(api, state_subscribe_name, None)
+            if not callable(subscribe) or not callable(subscribe_state):
+                raise UnifiProtectError(f"Installed uiprotect package does not expose the {channel} websocket API.")
+            state_unsubscribe = subscribe_state(state_callback(channel))
+            message_unsubscribe = subscribe(lambda _message: None)
+            unsubscribers.extend((state_unsubscribe, message_unsubscribe))
+
+        async def wait_for_channel(channel: str) -> None:
+            try:
+                await asyncio.wait_for(terminal_events[channel].wait(), timeout=timeout_seconds)
+            except TimeoutError as exc:
+                states = ", ".join(observed_states[channel]) or "none"
+                raise UnifiProtectError(
+                    f"UniFi Protect {channel} websocket did not connect within {timeout_seconds:g}s "
+                    f"(observed states: {states})."
+                ) from exc
+            if outcomes.get(channel) != "passed":
+                raise UnifiProtectError(f"UniFi Protect {channel} websocket authentication failed.")
+
+        await asyncio.gather(*(wait_for_channel(channel) for channel, _, _ in channels))
+        return {
+            "status": "passed",
+            "channels": {
+                channel: {"status": "passed", "states": observed_states[channel]}
+                for channel, _, _ in channels
+            },
+        }
+    finally:
+        for unsubscribe in reversed(unsubscribers):
+            if not callable(unsubscribe):
+                continue
+            try:
+                result = unsubscribe()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.debug("unifi_protect_verification_unsubscribe_failed", extra={"error": str(exc)})
+
+
+def _websocket_state_label(state: Any) -> str:
+    name = getattr(state, "name", None)
+    if name:
+        return str(name).upper()
+    value = getattr(state, "value", state)
+    if value is True:
+        return "CONNECTED"
+    if value is False:
+        return "DISCONNECTED"
+    return str(value).upper()
 
 
 def _package_install_command(target_path: Path, packages: list[str], *, no_deps: bool = False) -> list[str]:
@@ -563,6 +858,17 @@ def _truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "\n\n[truncated]"
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    marker = "\n[truncated]"
+    if limit <= len(marker):
+        return value[:limit]
+    return value[: limit - len(marker)] + marker
 
 
 @lru_cache

@@ -137,6 +137,9 @@ docker compose ps
 
 - Prefer `rg`/`rg --files` for search.
 - Use structured parsers/APIs over ad hoc string manipulation.
+- Bound ad hoc repository-analysis scripts and give traversal loops an explicit no-progress exit.
+- If a command yields a process or session ID, poll it to completion or explicitly terminate it before handoff. Never abandon a yielded process.
+- After launching host-side diagnostics, verify processes started by the task have exited; do not terminate unrelated processes.
 - Keep feature-specific frontend logic inside its feature or route owner.
 - Keep vendor I/O under `backend/app/modules/*` or provider modules.
 - Do not reintroduce runtime schema bootstrap compatibility or old setting aliases.

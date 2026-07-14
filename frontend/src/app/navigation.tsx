@@ -72,7 +72,7 @@ export const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.
   { key: "alerts", label: "Alerts", icon: Bell },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "settings_zones", label: "Zones", icon: MapPinned },
-  { key: "logs", label: "Logs", icon: FileText },
+  { key: "logs", label: "Investigations", icon: FileText, adminOnly: true },
   { key: "users", label: "Users", icon: Users, adminOnly: true }
 ];
 export const settingsNavViewKeys = new Set<ViewKey>(settingsNavItems.map((item) => item.key));

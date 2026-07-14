@@ -113,6 +113,7 @@ SECRET_KEY_PATTERNS = (
     "session",
     "set-cookie",
     "token",
+    "webhook_key",
     "x-api-key",
 )
 LARGE_MEDIA_KEY_PATTERNS = (
@@ -676,6 +677,8 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _is_large_media_key(key: str) -> bool:
+    if key in {"configuration_snapshot", "config_snapshot"}:
+        return False
     return any(pattern in key for pattern in LARGE_MEDIA_KEY_PATTERNS)
 
 

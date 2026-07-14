@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import settings
 from app.db.base import Base
+from app.db.migration_policy import include_schema_object
 from app import models  # noqa: F401
 
 
@@ -25,6 +26,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=settings.database_url,
         target_metadata=target_metadata,
+        include_object=include_schema_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -33,7 +35,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_schema_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

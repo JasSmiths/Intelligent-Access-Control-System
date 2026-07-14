@@ -347,7 +347,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
           dependencyStorage={dependencyStorage}
           loading={loading}
           protectCameras={protectCameras}
-          protectError={protectError || protectStatus?.last_error || ""}
+          protectError={protectError || protectStatus?.last_error || protectStatus?.realtime_error || ""}
           protectLoading={protectLoading}
           protectStatus={protectStatus}
           protectUpdateStatus={protectUpdateStatus}
@@ -397,7 +397,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
       ) : null}
       <UnifiProtectCameraSection
         cameras={protectCameras}
-        error={protectError || protectStatus?.last_error || ""}
+        error={protectError || protectStatus?.last_error || protectStatus?.realtime_error || ""}
         loaded={protectCamerasLoaded}
         loading={protectLoading}
         onLoad={() => loadProtect(false, true)}

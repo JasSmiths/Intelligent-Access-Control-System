@@ -931,6 +931,25 @@ h2 {
   box-shadow: var(--shadow);
 }
 
+.error-banner,
+.success-banner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.error-banner {
+  border: 1px solid var(--red-soft);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.success-banner {
+  border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line));
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+
 .empty-state {
   min-height: 180px;
   display: grid;

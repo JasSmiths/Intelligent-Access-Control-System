@@ -13,6 +13,7 @@ from app.modules.unifi_protect.client import (
     get_unifi_protect_event_thumbnail,
     get_unifi_protect_event_video,
     get_unifi_protect_snapshot,
+    is_unifi_protect_stream_metadata_only,
     is_unifi_protect_configured,
     list_bootstrap_cameras,
     list_unifi_protect_events,
@@ -37,6 +38,7 @@ PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS = 5.0
 LPR_TRACK_PROBE_DELAYS_SECONDS = (0.0, 0.5, 0.5, 1.0, 2.0, 4.0, 4.0, 6.0, 7.0)
 GATE_LPR_CAMERA_NAME = "gate lpr"
 GATE_LPR_CAMERA_DEVICE = "942A6FD09D64"
+PROTECT_WEBSOCKET_CHANNELS = ("private", "events", "devices")
 
 
 class UnifiProtectIntegrationService:
@@ -49,6 +51,7 @@ class UnifiProtectIntegrationService:
         self._unsubscribers: list[Callable[[], None]] = []
         self._last_error: str | None = None
         self._connected = False
+        self._websocket_states = {channel: "unknown" for channel in PROTECT_WEBSOCKET_CHANNELS}
         self._last_update_publish_at: dict[str, float] = {}
         self._lpr_track_probe_event_ids: set[str] = set()
         self._lpr_track_probe_finished_event_ids: set[str] = set()
@@ -86,6 +89,9 @@ class UnifiProtectIntegrationService:
         status = {
             **public_unifi_protect_configured_value(config),
             "connected": self._connected,
+            "realtime_connected": self._realtime_connected(),
+            "websocket_states": dict(self._websocket_states),
+            "realtime_error": self._realtime_error(),
             "last_error": self._last_error,
             "camera_count": 0,
         }
@@ -97,7 +103,10 @@ class UnifiProtectIntegrationService:
             cameras = list_bootstrap_cameras(api)
             status.update(
                 {
-                    "connected": True,
+                    "connected": self._connected,
+                    "realtime_connected": self._realtime_connected(),
+                    "websocket_states": dict(self._websocket_states),
+                    "realtime_error": self._realtime_error(),
                     "last_error": None,
                     "camera_count": len(cameras),
                 }
@@ -237,7 +246,10 @@ class UnifiProtectIntegrationService:
                 )
             await event_bus.publish(
                 "protect.connection.changed",
-                {"configured": True, "connected": True, "camera_count": len(list_bootstrap_cameras(api))},
+                {
+                    **self._connection_payload(),
+                    "camera_count": len(list_bootstrap_cameras(api)),
+                },
             )
             return api
 
@@ -260,49 +272,53 @@ class UnifiProtectIntegrationService:
             await close_unifi_protect_client(self._api)
         self._api = None
         self._connected = False
+        self._websocket_states = {channel: "unknown" for channel in PROTECT_WEBSOCKET_CHANNELS}
 
     def _handle_websocket_message(self, message: Any) -> None:
-        try:
-            received_at = datetime.now(tz=UTC)
-            self._spawn_background(
-                get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at),
-                name="unifi-protect-lpr-timing-message",
-            )
-            self._spawn_background(
-                get_vehicle_visual_detection_recorder().record_unifi_protect_message(
-                    message,
-                    received_at=received_at,
-                ),
-                name="unifi-protect-vehicle-visual-message",
-            )
-            event_id = self._lpr_track_probe_event_id(message)
-            if (
-                event_id
-                and event_id not in self._lpr_track_probe_event_ids
-                and event_id not in self._lpr_track_probe_finished_event_ids
-            ):
-                self._lpr_track_probe_event_ids.add(event_id)
+        received_at = datetime.now(tz=UTC)
+        stream_metadata_only = is_unifi_protect_stream_metadata_only(message)
+        if not stream_metadata_only:
+            try:
                 self._spawn_background(
-                    self._probe_lpr_track(event_id, getattr(message, "new_obj", None)),
-                    name=f"unifi-protect-lpr-track-probe:{event_id}",
+                    get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at),
+                    name="unifi-protect-lpr-timing-message",
                 )
-        except RuntimeError:
-            logger.debug("unifi_protect_lpr_timing_without_loop")
-        except Exception as exc:
-            logger.debug("unifi_protect_lpr_timing_failed", extra={"error": str(exc)})
+                self._spawn_background(
+                    get_vehicle_visual_detection_recorder().record_unifi_protect_message(
+                        message,
+                        received_at=received_at,
+                    ),
+                    name="unifi-protect-vehicle-visual-message",
+                )
+                event_id = self._lpr_track_probe_event_id(message)
+                if (
+                    event_id
+                    and event_id not in self._lpr_track_probe_event_ids
+                    and event_id not in self._lpr_track_probe_finished_event_ids
+                ):
+                    self._lpr_track_probe_event_ids.add(event_id)
+                    self._spawn_background(
+                        self._probe_lpr_track(event_id, getattr(message, "new_obj", None)),
+                        name=f"unifi-protect-lpr-track-probe:{event_id}",
+                    )
+            except RuntimeError:
+                logger.debug("unifi_protect_lpr_timing_without_loop")
+            except Exception as exc:
+                logger.debug("unifi_protect_lpr_timing_failed", extra={"error": str(exc)})
 
         try:
             payload = websocket_message_payload(message)
         except Exception as exc:
             logger.debug("unifi_protect_ws_payload_failed", extra={"error": str(exc)})
             return
-        try:
-            self._spawn_background(
-                get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at),
-                name="unifi-protect-vehicle-presence-message",
-            )
-        except RuntimeError:
-            logger.debug("unifi_protect_vehicle_presence_without_loop")
+        if not stream_metadata_only:
+            try:
+                self._spawn_background(
+                    get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at),
+                    name="unifi-protect-vehicle-presence-message",
+                )
+            except RuntimeError:
+                logger.debug("unifi_protect_vehicle_presence_without_loop")
 
         event_type = "protect.updated"
         if payload.get("camera"):
@@ -316,19 +332,44 @@ class UnifiProtectIntegrationService:
         except RuntimeError:
             logger.debug("unifi_protect_ws_without_loop")
 
-    def _handle_websocket_state(self, state: Any) -> None:
-        connected = str(getattr(state, "value", state)).upper() == "CONNECTED"
-        self._connected = connected
+    def _handle_websocket_state(self, channel: str, state: Any) -> None:
+        normalized_state = _websocket_state_name(state)
+        if channel not in self._websocket_states:
+            logger.debug("unifi_protect_unknown_websocket_channel", extra={"channel": channel})
+            return
+        self._websocket_states[channel] = normalized_state
         try:
             self._spawn_background(
                 event_bus.publish(
                     "protect.connection.changed",
-                    {"configured": True, "connected": connected, "state": str(getattr(state, "value", state))},
+                    {
+                        **self._connection_payload(),
+                        "channel": channel,
+                        "state": normalized_state,
+                    },
                 ),
                 name="unifi-protect-publish:connection",
             )
         except RuntimeError:
             logger.debug("unifi_protect_state_without_loop")
+
+    def _realtime_connected(self) -> bool:
+        return all(self._websocket_states[channel] == "connected" for channel in PROTECT_WEBSOCKET_CHANNELS)
+
+    def _realtime_error(self) -> str | None:
+        failed = [channel for channel, state in self._websocket_states.items() if state == "auth_failed"]
+        if not failed:
+            return None
+        return f"UniFi Protect websocket authentication failed: {', '.join(failed)}."
+
+    def _connection_payload(self) -> dict[str, Any]:
+        return {
+            "configured": True,
+            "connected": self._connected,
+            "realtime_connected": self._realtime_connected(),
+            "websocket_states": dict(self._websocket_states),
+            "realtime_error": self._realtime_error(),
+        }
 
     def _spawn_background(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
         try:
@@ -607,6 +648,19 @@ def _camera_to_dict(camera: Any) -> dict[str, Any]:
 
 def _dict_get(value: Any, key: str) -> Any:
     return value.get(key) if isinstance(value, dict) else None
+
+
+def _websocket_state_name(state: Any) -> str:
+    name = getattr(state, "name", None)
+    if name:
+        return str(name).strip().lower().replace("-", "_")
+    value = getattr(state, "value", state)
+    if value is True:
+        return "connected"
+    if value is False:
+        return "disconnected"
+    normalized = str(value).strip().lower().replace("-", "_")
+    return normalized.rsplit(".", 1)[-1]
 
 
 def _enum_value(value: Any) -> str | None:

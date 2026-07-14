@@ -48,6 +48,8 @@ from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
     audit_diff,
+    current_trace_id,
+    emit_audit_log,
     payload_shape,
     sanitize_payload,
     telemetry,
@@ -415,9 +417,11 @@ class AutomationService:
             ).all()
 
         results: list[dict[str, Any]] = []
+        matched_rule_ids: list[str] = []
         for rule in rules:
             if not any(trigger_matches(trigger, context) for trigger in normalize_triggers(rule.triggers)):
                 continue
+            matched_rule_ids.append(str(rule.id))
             results.append(
                 await self.execute_rule(
                     str(rule.id),
@@ -427,6 +431,25 @@ class AutomationService:
                     actor=actor,
                     source=source,
                 )
+            )
+        if not matched_rule_ids:
+            emit_audit_log(
+                category=TELEMETRY_CATEGORY_AUTOMATION,
+                action="automation_trigger.unmatched",
+                actor=actor,
+                target_entity="AutomationTrigger",
+                target_id=trigger_key,
+                target_label=trigger_key.replace("_", " ").replace(".", " ").title(),
+                outcome="skipped",
+                level="info",
+                trace_id=current_trace_id(),
+                metadata={
+                    "reason_code": "no_matching_automation",
+                    "trigger_key": trigger_key,
+                    "source": source,
+                    "candidate_rule_count": len(rules),
+                    "payload_shape": payload_shape(payload or {}),
+                },
             )
         if trigger_key == "webhook.received" and not results:
             unrecognized_payload = {**(payload or {}), "reason": "no_matching_automation"}
@@ -480,24 +503,50 @@ class AutomationService:
                 run.trigger_key = trigger_key
                 run.status = "running"
                 run.trigger_payload = sanitize_payload(trigger_payload)
-                run.context = context.to_payload()
                 run.trace_id = trace.trace_id
                 run.actor = actor
                 run.source = source
             else:
+                execution_context = automation_execution_context_snapshot(
+                    context,
+                    rule,
+                    captured_at=datetime.now(tz=UTC),
+                )
                 run = AutomationRun(
                     rule_id=rule.id,
                     trigger_key=trigger_key,
                     status="running",
                     started_at=datetime.now(tz=UTC),
                     trigger_payload=sanitize_payload(trigger_payload),
-                    context=context.to_payload(),
+                    context=execution_context,
                     trace_id=trace.trace_id,
                     actor=actor,
                     source=source,
                 )
                 session.add(run)
+            if run:
+                run.context = automation_execution_context_snapshot(
+                    context,
+                    rule,
+                    captured_at=datetime.now(tz=UTC),
+                )
             await session.flush()
+
+            trigger_recorded_at = datetime.now(tz=UTC)
+            trace.record_span(
+                "Automation trigger received",
+                started_at=run.started_at,
+                ended_at=trigger_recorded_at,
+                attributes={
+                    "reason_code": "automation_trigger_received",
+                    "run_id": str(run.id),
+                    "rule_id": str(rule.id),
+                    "trigger_key": trigger_key,
+                    "source": source,
+                },
+                input_payload={"trigger_payload": trigger_payload},
+                output_payload={"selected_rule": rule.name},
+            )
 
             condition_results: list[dict[str, Any]] = []
             action_results: list[dict[str, Any]] = []
@@ -508,6 +557,22 @@ class AutomationService:
                     session,
                     normalize_conditions(rule.conditions),
                     context,
+                    trace=trace,
+                )
+                decision_recorded_at = datetime.now(tz=UTC)
+                trace.record_span(
+                    "Automation decision",
+                    started_at=decision_recorded_at,
+                    ended_at=decision_recorded_at,
+                    attributes={
+                        "reason_code": "condition_failed" if status == "skipped" else "conditions_passed",
+                        "command_sent": False if status == "skipped" else None,
+                    },
+                    output_payload={
+                        "decision": "blocked" if status == "skipped" else "continue",
+                        "condition_results": condition_results,
+                    },
+                    status="blocked" if status == "skipped" else "ok",
                 )
                 if status != "skipped":
                     status, action_results, error = await self._execute_rule_actions(
@@ -515,6 +580,7 @@ class AutomationService:
                         normalize_actions(rule.actions),
                         context,
                         rule=rule,
+                        trace=trace,
                     )
             except Exception as exc:
                 status = "failed"
@@ -553,7 +619,7 @@ class AutomationService:
                     "condition_results": condition_results,
                     "action_results": action_results,
                 },
-                outcome="failed" if status == "failed" else "success",
+                outcome="failed" if status == "failed" else "skipped" if status == "skipped" else "success",
                 level="error" if status == "failed" else "info",
                 trace_id=trace.trace_id,
             )
@@ -594,11 +660,27 @@ class AutomationService:
         session: AsyncSession,
         conditions: list[dict[str, Any]],
         context: AutomationContext,
+        *,
+        trace: Any,
     ) -> tuple[str, list[dict[str, Any]]]:
         results: list[dict[str, Any]] = []
         for condition in conditions:
+            started_at = datetime.now(tz=UTC)
             result = await self._evaluate_condition(session, condition, context)
             results.append(result)
+            trace.record_span(
+                "Automation condition evaluated",
+                started_at=started_at,
+                ended_at=datetime.now(tz=UTC),
+                attributes={
+                    "condition_id": condition.get("id"),
+                    "condition_type": condition.get("type"),
+                    "reason_code": automation_condition_reason_code(result, condition),
+                },
+                input_payload={"condition": condition},
+                output_payload=result,
+                status="ok" if result.get("passed") else "blocked",
+            )
             if not result.get("passed"):
                 return "skipped", results
         return "success", results
@@ -610,12 +692,29 @@ class AutomationService:
         context: AutomationContext,
         *,
         rule: AutomationRule,
+        trace: Any,
     ) -> tuple[str, list[dict[str, Any]], str | None]:
         results: list[dict[str, Any]] = []
         status = "success"
         for action in actions:
+            started_at = datetime.now(tz=UTC)
             result = await self._execute_action(session, action, context, rule=rule)
             results.append(result)
+            result_status = str(result.get("status") or "unknown").lower()
+            trace.record_span(
+                "Automation action evaluated",
+                started_at=started_at,
+                ended_at=datetime.now(tz=UTC),
+                attributes={
+                    "action_id": action.get("id"),
+                    "action_type": action.get("type"),
+                    "reason_code": automation_action_reason_code(result),
+                    "dispatch_state": automation_action_dispatch_state(result),
+                },
+                input_payload={"action": action},
+                output_payload=result,
+                status="error" if result_status == "failed" else "skipped" if result_status == "skipped" else "ok",
+            )
             if result.get("status") == "failed":
                 error = str(result.get("error") or result.get("detail") or "Automation action failed.")
                 return "failed", results, error
@@ -1626,6 +1725,99 @@ def automation_skip_reason(
             if reason:
                 return reason
     return "Automation run was skipped."
+
+
+def automation_execution_context_snapshot(
+    context: AutomationContext,
+    rule: AutomationRule,
+    *,
+    captured_at: datetime,
+) -> dict[str, Any]:
+    """Persist the evaluated rule shape so later investigations do not use today's config."""
+
+    return sanitize_payload(
+        {
+            **context.to_payload(),
+            "configuration_snapshot": {
+                "source": "captured_at_execution",
+                "captured_at": captured_at.isoformat(),
+                "rule": {
+                    "id": str(rule.id),
+                    "name": rule.name,
+                    "triggers": normalize_triggers(rule.triggers),
+                    "conditions": normalize_conditions(rule.conditions),
+                    "actions": normalize_actions(rule.actions),
+                },
+            },
+        }
+    )
+
+
+def automation_condition_reason_code(
+    result: dict[str, Any],
+    condition: dict[str, Any] | None = None,
+) -> str:
+    explicit = str(result.get("reason_code") or "").strip()
+    if explicit:
+        return _reason_code(explicit)
+    if result.get("passed") is True:
+        return "condition_passed"
+    condition_type = str((condition or {}).get("type") or "").strip()
+    return f"{_reason_code(condition_type)}_failed" if condition_type else "condition_failed"
+
+
+def automation_action_reason_code(result: dict[str, Any]) -> str:
+    explicit = str(result.get("reason_code") or "").strip()
+    if explicit:
+        return _reason_code(explicit)
+    for outcome in result.get("outcomes") or []:
+        if not isinstance(outcome, dict):
+            continue
+        metadata = as_dict(outcome.get("metadata"))
+        schedule = as_dict(metadata.get("schedule_evaluation"))
+        if metadata.get("schedule_denied") or schedule.get("allowed") is False:
+            return str(schedule.get("reason_code") or "schedule_denied")
+        if outcome.get("accepted") and not outcome.get("verified"):
+            return "device_state_unverified"
+        if outcome.get("accepted") is False and outcome.get("attempts"):
+            return "integration_rejected"
+    status = str(result.get("status") or "").strip().lower()
+    if status == "success":
+        return "action_succeeded"
+    if status == "skipped":
+        return "action_skipped"
+    if status == "failed":
+        return "action_failed"
+    return "action_outcome_unknown"
+
+
+def automation_action_dispatch_state(result: dict[str, Any]) -> str:
+    outcomes = [item for item in result.get("outcomes") or [] if isinstance(item, dict)]
+    if outcomes:
+        if any(
+            as_dict(item.get("metadata")).get("schedule_denied")
+            or as_dict(as_dict(item.get("metadata")).get("schedule_evaluation")).get("allowed") is False
+            for item in outcomes
+        ):
+            return "withheld"
+        if any(item.get("accepted") and item.get("verified") for item in outcomes):
+            return "verified"
+        if any(item.get("accepted") for item in outcomes):
+            return "accepted"
+        if any(item.get("attempts") for item in outcomes):
+            return "attempted"
+    if result.get("command_id"):
+        if result.get("mechanically_confirmed"):
+            return "verified"
+        return "accepted" if result.get("accepted") else "attempted"
+    if str(result.get("status") or "").lower() == "skipped":
+        return "withheld"
+    return "not_applicable"
+
+
+def _reason_code(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    return normalized[:120] or "unknown"
 
 
 def automation_result_reason(result: dict[str, Any]) -> str:

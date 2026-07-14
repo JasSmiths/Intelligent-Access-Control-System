@@ -105,7 +105,11 @@ from app.services.movement_fsm import (
 )
 from app.services.notifications import get_notification_service
 from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
-from app.services.schedules import ScheduleEvaluation, evaluate_vehicle_schedule
+from app.services.schedules import (
+    ScheduleEvaluation,
+    evaluate_vehicle_schedule,
+    schedule_evaluation_payload,
+)
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -2461,21 +2465,10 @@ class AccessEventService:
         return schedule_evaluation
 
     def _schedule_evaluation_payload(self, schedule_evaluation: ScheduleEvaluation | None) -> dict[str, Any]:
-        return {
-            "allowed": schedule_evaluation.allowed if schedule_evaluation else False,
-            "source": schedule_evaluation.source if schedule_evaluation else "none",
-            "schedule_id": str(schedule_evaluation.schedule_id)
-            if schedule_evaluation and schedule_evaluation.schedule_id
-            else None,
-            "schedule_name": schedule_evaluation.schedule_name if schedule_evaluation else None,
-            "override_id": str(schedule_evaluation.override_id)
-            if schedule_evaluation and schedule_evaluation.override_id
-            else None,
-            "override_ends_at": schedule_evaluation.override_ends_at.isoformat()
-            if schedule_evaluation and schedule_evaluation.override_ends_at
-            else None,
-            "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
-        }
+        return schedule_evaluation_payload(
+            schedule_evaluation,
+            missing_reason="No active vehicle identity matched.",
+        )
 
     def _access_event_raw_payload(
         self,

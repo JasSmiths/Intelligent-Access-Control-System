@@ -106,6 +106,64 @@ def test_automation_registries_expose_required_keys() -> None:
     }.issubset(action_keys)
 
 
+def test_automation_evidence_helpers_preserve_config_and_dispatch_truth() -> None:
+    rule = AutomationRule(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        name="Open main garage door on arrival",
+        is_active=True,
+        triggers=[{"type": "vehicle.known_plate", "config": {"webhook_key": "secret"}}],
+        trigger_keys=["vehicle.known_plate"],
+        conditions=[{"id": "schedule", "type": "schedule.allowed", "config": {}}],
+        actions=[{"id": "open", "type": "garage_door.open", "config": {}}],
+    )
+    context = AutomationContext(
+        trigger_key="vehicle.known_plate",
+        subject="Main Garage Door",
+        trigger_payload={"registration_number": "IACS1"},
+    )
+
+    snapshot = automations.automation_execution_context_snapshot(
+        context,
+        rule,
+        captured_at=datetime(2026, 7, 14, 21, 47, tzinfo=UTC),
+    )
+    stored_rule = snapshot["configuration_snapshot"]["rule"]
+
+    assert stored_rule["name"] == "Open main garage door on arrival"
+    assert stored_rule["triggers"][0]["config"]["webhook_key"] == "[redacted]"
+    blocked_result = {
+        "status": "skipped",
+        "outcomes": [
+            {
+                "accepted": False,
+                "attempts": [],
+                "metadata": {
+                    "schedule_evaluation": {
+                        "allowed": False,
+                        "reason_code": "schedule_outside_window",
+                    }
+                },
+            }
+        ],
+    }
+    rejected_result = {
+        "status": "failed",
+        "outcomes": [{"accepted": False, "attempts": [{"provider": "esphome"}]}],
+    }
+
+    assert automations.automation_action_dispatch_state(blocked_result) == "withheld"
+    assert automations.automation_action_reason_code(blocked_result) == "schedule_outside_window"
+    assert automations.automation_action_dispatch_state(rejected_result) == "attempted"
+    assert automations.automation_action_reason_code(rejected_result) == "integration_rejected"
+    assert (
+        automations.automation_condition_reason_code(
+            {"passed": False, "reason": "Current configuration did not match."},
+            {"type": "schedule.allowed"},
+        )
+        == "schedule_allowed_failed"
+    )
+
+
 @pytest.mark.asyncio
 async def test_automation_rule_create_requires_confirmation_before_write() -> None:
     with pytest.raises(HTTPException) as exc:
@@ -870,6 +928,9 @@ async def test_execute_rule_serializes_payloads_before_session_closes(monkeypatc
 
     class FakeTrace:
         trace_id = "trace-1"
+
+        def record_span(self, *_args, **_kwargs):
+            return None
 
         def finish(self, **_kwargs):
             return None

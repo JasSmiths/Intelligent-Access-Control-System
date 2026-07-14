@@ -24,8 +24,15 @@ class ScheduleEvaluation:
     schedule_id: uuid.UUID | None = None
     schedule_name: str | None = None
     reason: str = ""
+    reason_code: str = "schedule_evaluated"
     override_id: uuid.UUID | None = None
     override_ends_at: datetime | None = None
+    evaluated_at: datetime | None = None
+    evaluated_local_at: str | None = None
+    timezone: str | None = None
+    allowed_intervals: list[dict[str, str]] | None = None
+    matched_interval: dict[str, str] | None = None
+    configuration_snapshot: dict[str, Any] | None = None
 
 
 def empty_time_blocks() -> dict[str, list[dict[str, str]]]:
@@ -58,7 +65,7 @@ def normalize_time_blocks(value: Any) -> dict[str, list[dict[str, str]]]:
 
 
 def schedule_allows_at(schedule: Schedule, occurred_at: datetime, timezone_name: str) -> bool:
-    local_at = occurred_at.astimezone(ZoneInfo(timezone_name))
+    local_at = _aware_utc(occurred_at).astimezone(ZoneInfo(timezone_name))
     minute = local_at.hour * 60 + local_at.minute
     blocks = normalize_time_blocks(schedule.time_blocks)
     for interval in blocks.get(str(local_at.weekday()), []):
@@ -85,7 +92,7 @@ async def evaluate_vehicle_schedule(
             vehicle_id=vehicle.id,
         )
         if override:
-            return _evaluate_override(override)
+            return _evaluate_override(override, occurred_at, timezone_name)
 
     vehicle_schedule = await _schedule_for_id(session, vehicle.schedule_id, vehicle.schedule)
     if vehicle.schedule_id:
@@ -95,6 +102,8 @@ async def evaluate_vehicle_schedule(
                 source="vehicle",
                 schedule_id=vehicle.schedule_id,
                 reason="Vehicle schedule was not found.",
+                reason_code="schedule_not_found",
+                **_evaluation_time_fields(occurred_at, timezone_name),
             )
         return _evaluate_schedule(vehicle_schedule, occurred_at, timezone_name, source="vehicle")
 
@@ -106,10 +115,12 @@ async def evaluate_vehicle_schedule(
                 source="person",
                 schedule_id=owner.schedule_id,
                 reason="Owner schedule was not found.",
+                reason_code="schedule_not_found",
+                **_evaluation_time_fields(occurred_at, timezone_name),
             )
         return _evaluate_schedule(owner_schedule, occurred_at, timezone_name, source="person")
 
-    return _evaluate_default_policy(default_policy)
+    return _evaluate_default_policy(default_policy, occurred_at, timezone_name)
 
 
 async def evaluate_person_schedule(
@@ -126,7 +137,7 @@ async def evaluate_person_schedule(
         occurred_at=occurred_at,
     )
     if override:
-        return _evaluate_override(override)
+        return _evaluate_override(override, occurred_at, timezone_name)
 
     person_schedule = await _schedule_for_id(session, person.schedule_id, person.schedule)
     if person.schedule_id:
@@ -136,9 +147,11 @@ async def evaluate_person_schedule(
                 source="person",
                 schedule_id=person.schedule_id,
                 reason="Person schedule was not found.",
+                reason_code="schedule_not_found",
+                **_evaluation_time_fields(occurred_at, timezone_name),
             )
         return _evaluate_schedule(person_schedule, occurred_at, timezone_name, source="person")
-    return _evaluate_default_policy(default_policy)
+    return _evaluate_default_policy(default_policy, occurred_at, timezone_name)
 
 
 async def evaluate_schedule_id(
@@ -151,7 +164,7 @@ async def evaluate_schedule_id(
     source: str,
 ) -> ScheduleEvaluation:
     if not schedule_id:
-        return _evaluate_default_policy(default_policy)
+        return _evaluate_default_policy(default_policy, occurred_at, timezone_name)
     try:
         parsed_schedule_id = schedule_id if isinstance(schedule_id, uuid.UUID) else uuid.UUID(str(schedule_id))
     except ValueError:
@@ -159,6 +172,8 @@ async def evaluate_schedule_id(
             allowed=False,
             source=source,
             reason="Assigned schedule ID is invalid.",
+            reason_code="schedule_id_invalid",
+            **_evaluation_time_fields(occurred_at, timezone_name),
         )
     schedule = await session.get(Schedule, parsed_schedule_id)
     if not schedule:
@@ -167,6 +182,8 @@ async def evaluate_schedule_id(
             source=source,
             schedule_id=parsed_schedule_id,
             reason="Assigned schedule was not found.",
+            reason_code="schedule_not_found",
+            **_evaluation_time_fields(occurred_at, timezone_name),
         )
     return _evaluate_schedule(schedule, occurred_at, timezone_name, source=source)
 
@@ -261,27 +278,68 @@ def _evaluate_schedule(
     *,
     source: str,
 ) -> ScheduleEvaluation:
-    allowed = schedule_allows_at(schedule, occurred_at, timezone_name)
+    local_at = _aware_utc(occurred_at).astimezone(ZoneInfo(timezone_name))
+    blocks = normalize_time_blocks(schedule.time_blocks)
+    allowed_intervals = blocks.get(str(local_at.weekday()), [])
+    minute = local_at.hour * 60 + local_at.minute
+    matched_interval = next(
+        (
+            interval
+            for interval in allowed_intervals
+            if _parse_minute(interval["start"], allow_24=False)
+            <= minute
+            < _parse_minute(interval["end"], allow_24=True)
+        ),
+        None,
+    )
+    allowed = matched_interval is not None
     return ScheduleEvaluation(
         allowed=allowed,
         source=source,
         schedule_id=schedule.id,
         schedule_name=schedule.name,
         reason=f"{schedule.name} allowed this time." if allowed else f"{schedule.name} does not allow this time.",
+        reason_code="schedule_allowed" if allowed else "schedule_outside_window",
+        evaluated_at=_aware_utc(occurred_at),
+        evaluated_local_at=local_at.isoformat(),
+        timezone=timezone_name,
+        allowed_intervals=allowed_intervals,
+        matched_interval=matched_interval,
+        configuration_snapshot={
+            "source": "captured_at_evaluation",
+            "schedule_id": str(schedule.id),
+            "schedule_name": schedule.name,
+            "time_blocks": blocks,
+        },
     )
 
 
-def _evaluate_override(override: ScheduleOverride) -> ScheduleEvaluation:
+def _evaluate_override(
+    override: ScheduleOverride,
+    occurred_at: datetime,
+    timezone_name: str,
+) -> ScheduleEvaluation:
     return ScheduleEvaluation(
         allowed=True,
         source="schedule_override",
         reason="A temporary schedule override is active.",
+        reason_code="schedule_override_active",
         override_id=override.id,
         override_ends_at=override.ends_at,
+        **_evaluation_time_fields(occurred_at, timezone_name),
+        configuration_snapshot={
+            "source": "captured_at_evaluation",
+            "override_id": str(override.id),
+            "override_ends_at": override.ends_at.isoformat(),
+        },
     )
 
 
-def _evaluate_default_policy(default_policy: str) -> ScheduleEvaluation:
+def _evaluate_default_policy(
+    default_policy: str,
+    occurred_at: datetime,
+    timezone_name: str,
+) -> ScheduleEvaluation:
     allow = default_policy.strip().lower() != "deny"
     return ScheduleEvaluation(
         allowed=allow,
@@ -289,7 +347,61 @@ def _evaluate_default_policy(default_policy: str) -> ScheduleEvaluation:
         reason="No schedule assigned; default policy allowed access."
         if allow
         else "No schedule assigned; default policy denied access.",
+        reason_code="default_policy_allowed" if allow else "default_policy_denied",
+        **_evaluation_time_fields(occurred_at, timezone_name),
+        configuration_snapshot={
+            "source": "captured_at_evaluation",
+            "default_policy": "allow" if allow else "deny",
+        },
     )
+
+
+def schedule_evaluation_payload(
+    evaluation: ScheduleEvaluation | None,
+    *,
+    missing_reason: str = "No schedule evaluation was recorded.",
+) -> dict[str, Any]:
+    """Return durable, structured evidence about the policy checked at execution time."""
+
+    if evaluation is None:
+        return {
+            "allowed": False,
+            "source": "none",
+            "reason": missing_reason,
+            "reason_code": "schedule_evidence_missing",
+            "configuration_snapshot": None,
+        }
+    return {
+        "allowed": evaluation.allowed,
+        "source": evaluation.source,
+        "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
+        "schedule_name": evaluation.schedule_name,
+        "override_id": str(evaluation.override_id) if evaluation.override_id else None,
+        "override_ends_at": evaluation.override_ends_at.isoformat()
+        if evaluation.override_ends_at
+        else None,
+        "reason": evaluation.reason,
+        "reason_code": evaluation.reason_code,
+        "evaluated_at": evaluation.evaluated_at.isoformat() if evaluation.evaluated_at else None,
+        "evaluated_local_at": evaluation.evaluated_local_at,
+        "timezone": evaluation.timezone,
+        "allowed_intervals": evaluation.allowed_intervals or [],
+        "matched_interval": evaluation.matched_interval,
+        "configuration_snapshot": evaluation.configuration_snapshot,
+    }
+
+
+def _evaluation_time_fields(occurred_at: datetime, timezone_name: str) -> dict[str, Any]:
+    local_at = _aware_utc(occurred_at).astimezone(ZoneInfo(timezone_name))
+    return {
+        "evaluated_at": _aware_utc(occurred_at),
+        "evaluated_local_at": local_at.isoformat(),
+        "timezone": timezone_name,
+    }
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 def _iter_raw_intervals(value: Any) -> list[tuple[int, list[dict[str, Any]]]]:

@@ -1,6 +1,6 @@
 # UniFi Protect Private API Notes
 
-Last checked: 2026-06-29.
+Last checked: 2026-07-14.
 
 This document captures the `uiprotect` private API behavior that IACS depends on.
 It is intended as a recovery note if a future `uiprotect` release removes a
@@ -13,22 +13,25 @@ viewers unless IACS starts depending on them.
 
 ## Current Runtime
 
-The repository pins `uiprotect==10.4.1` in `backend/pyproject.toml`, but the
-running backend uses the managed overlay package mechanism.
+The repository pins `uiprotect==15.12.2` in `backend/pyproject.toml`. The
+running backend also uses the managed overlay mechanism, with the active
+overlay kept at the same version so a container rebuild cannot silently
+downgrade the live integration.
 
 Current running backend state:
 
 ```text
-current_unifi_protect_version=10.5.1
-active_state={'mode': 'overlay', 'version': '10.5.1', 'path': '/app/data/unifi-protect-package/versions/10.5.1', 'installed_at': '2026-05-22T23:31:01.560776+00:00'}
-uiprotect_file=/app/data/unifi-protect-package/versions/10.5.1/uiprotect/__init__.py
-client_file=/app/data/unifi-protect-package/versions/10.5.1/uiprotect/api.py
+current_unifi_protect_version=15.12.2
+active_state.mode=overlay
+active_state.version=15.12.2
+uiprotect_file=/app/data/unifi-protect-package/versions/15.12.2/uiprotect/__init__.py
+client_file=/app/data/unifi-protect-package/versions/15.12.2/uiprotect/api.py
 ```
 
 Local source mirror:
 
 ```text
-data/backend/unifi-protect-package/versions/10.5.1/uiprotect/
+data/backend/unifi-protect-package/versions/15.12.2/uiprotect/
 ```
 
 Command used to verify:
@@ -42,7 +45,9 @@ from app.modules.unifi_protect.package import activate_unifi_protect_package_ove
 
 activate_unifi_protect_package_overlay()
 print("current_unifi_protect_version=" + str(current_unifi_protect_version()))
-print("active_state=" + repr(read_active_package_state().as_dict()))
+state = read_active_package_state()
+print("active_state.mode=" + str(state.mode))
+print("active_state.version=" + str(state.version))
 import uiprotect
 from uiprotect import ProtectApiClient
 print("uiprotect_file=" + str(Path(uiprotect.__file__)))
@@ -93,7 +98,7 @@ Important behavior:
 
 ## Private API Bases
 
-In `uiprotect==10.5.1`, `BaseApiClient` defines:
+In `uiprotect==15.12.2`, `BaseApiClient` defines:
 
 ```text
 private_api_path=/proxy/protect/api/
@@ -385,7 +390,7 @@ Expected useful response shape:
 }
 ```
 
-The upstream `SmartDetectTrack` model in 10.5.1 has:
+The upstream `SmartDetectTrack` model in 15.12.2 has:
 
 ```text
 id: str
@@ -577,6 +582,19 @@ SimpleNamespace(
 )
 ```
 
+`uiprotect==15.12.2` also emits a synthetic camera update after it refreshes
+cached RTSPS stream metadata. Its changed payload only contains `modelKey`,
+`id`, and `rtsps_streams`, while `new_obj` is the full cached camera. IACS
+must not treat that message as new LPR, visual-detection, or vehicle-presence
+evidence; it may still publish the redacted camera update for observability.
+
+Websocket states are tracked independently for `private`, `events`, and
+`devices`. In current `uiprotect`, `CONNECTED.value` is `True` and
+`DISCONNECTED.value` is `False`; state handling must normalize the enum name,
+not compare its value with the string `"CONNECTED"`. Newer releases also emit
+`AUTH_FAILED`, which IACS exposes separately from successful REST/bootstrap
+health.
+
 However, camera/event object reconstruction improves IACS behavior because
 `_lpr_track_probe_event_id`, `websocket_message_payload`, and detection
 recorders inspect `new_obj.id`, `new_obj.model`, `new_obj.smart_detect_types`,
@@ -696,6 +714,8 @@ If a newer `uiprotect` release removes or breaks one of these wrappers:
    provider rejection must not trigger hardware side effects.
 6. Run targeted tests around:
    - `backend/tests/test_unifi_protect.py`
+   - `backend/tests/test_unifi_protect_client.py`
+   - `backend/tests/test_unifi_protect_updates.py`
    - `backend/tests/test_lpr_timing.py`
    - `backend/tests/test_vehicle_visual_detections.py`
    - `backend/tests/test_restart_backfill.py`

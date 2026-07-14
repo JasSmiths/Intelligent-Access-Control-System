@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,10 +13,15 @@ from app.modules.access_devices.base import (
 )
 from app.modules.access_devices import esphome as esphome_module
 from app.modules.access_devices.esphome import ESPHomeAccessDeviceProvider
+from app.modules.access_devices.home_assistant import HomeAssistantAccessDeviceProvider
 from app.modules.access_devices.registry import get_access_device_provider
 from app.modules.gate.base import GateState
 from app.services import access_devices as access_devices_module
-from app.services.access_devices import AccessDeviceService
+from app.services.access_devices import (
+    AccessDeviceOperationResult,
+    AccessDeviceProviderAttempt,
+    AccessDeviceService,
+)
 
 
 class FakeProvider:
@@ -70,6 +76,148 @@ async def _noop_remember_state(*_args, **_kwargs) -> None:
 def test_access_device_provider_registry_returns_singletons() -> None:
     assert get_access_device_provider("esphome") is get_access_device_provider("esphome")
     assert get_access_device_provider("home_assistant") is get_access_device_provider("home_assistant")
+
+
+def test_command_evidence_distinguishes_withheld_attempted_accepted_and_verified() -> None:
+    device = AccessDeviceEntity(
+        key="main_garage_door",
+        kind="garage_door",
+        name="Main Garage Door",
+    )
+    service = AccessDeviceService()
+
+    schedule_blocked = AccessDeviceOperationResult(
+        device=device,
+        action="open",
+        accepted=False,
+        state=GateState.FAULT,
+        metadata={
+            "schedule_denied": True,
+            "schedule_evaluation": {
+                "allowed": False,
+                "reason_code": "schedule_outside_window",
+            },
+        },
+    )
+    provider_rejected = AccessDeviceOperationResult(
+        device=device,
+        action="open",
+        accepted=False,
+        state=GateState.FAULT,
+        attempts=[AccessDeviceProviderAttempt(provider="esphome", accepted=False)],
+    )
+    accepted_unverified = AccessDeviceOperationResult(
+        device=device,
+        action="open",
+        accepted=True,
+        state=GateState.CLOSED,
+        attempts=[AccessDeviceProviderAttempt(provider="esphome", accepted=True)],
+    )
+    verified = AccessDeviceOperationResult(
+        device=device,
+        action="open",
+        accepted=True,
+        state=GateState.OPEN,
+        attempts=[
+            AccessDeviceProviderAttempt(
+                provider="esphome",
+                accepted=True,
+                verified=True,
+            )
+        ],
+    )
+
+    assert service._command_evidence_outcome(schedule_blocked) == (
+        "withheld",
+        "schedule_outside_window",
+    )
+    assert service._command_evidence_outcome(provider_rejected) == (
+        "attempted",
+        "integration_rejected",
+    )
+    assert service._command_evidence_outcome(accepted_unverified) == (
+        "accepted",
+        "device_state_unverified",
+    )
+    assert service._command_evidence_outcome(verified) == (
+        "verified",
+        "device_state_verified",
+    )
+
+
+def test_command_evidence_records_whether_a_command_was_sent(monkeypatch) -> None:
+    device = AccessDeviceEntity(
+        key="main_garage_door",
+        kind="garage_door",
+        name="Main Garage Door",
+    )
+    result = AccessDeviceOperationResult(
+        device=device,
+        action="open",
+        accepted=False,
+        state=GateState.FAULT,
+        metadata={
+            "schedule_denied": True,
+            "schedule_evaluation": {
+                "allowed": False,
+                "reason_code": "schedule_outside_window",
+            },
+        },
+    )
+    spans = []
+    audits = []
+    monkeypatch.setattr(
+        access_devices_module.telemetry,
+        "record_span",
+        lambda *args, **kwargs: spans.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        access_devices_module,
+        "emit_audit_log",
+        lambda **kwargs: audits.append(kwargs),
+    )
+
+    AccessDeviceService()._record_command_evidence(
+        result,
+        reason="Arrival automation",
+        started_at=datetime(2026, 7, 14, 21, 47, tzinfo=UTC),
+        trace_id="a" * 32,
+    )
+
+    assert spans[0][1]["output_payload"]["command_sent"] is False
+    assert spans[0][1]["output_payload"]["dispatch_state"] == "withheld"
+    assert audits[0]["action"] == "access_device.command.withheld"
+    assert audits[0]["metadata"]["reason_code"] == "schedule_outside_window"
+
+
+@pytest.mark.asyncio
+async def test_home_assistant_command_stays_accepted_when_immediate_state_read_fails() -> None:
+    class FakeHomeAssistantClient:
+        def __init__(self) -> None:
+            self.service_calls: list[tuple[str, dict[str, str]]] = []
+            self.state_reads = 0
+
+        async def call_service(self, service: str, data: dict[str, str]) -> None:
+            self.service_calls.append((service, data))
+
+        async def get_state(self, _entity_id: str):
+            self.state_reads += 1
+            raise RuntimeError("state unavailable after accepted service call")
+
+    client = FakeHomeAssistantClient()
+    provider = HomeAssistantAccessDeviceProvider(client=client)  # type: ignore[arg-type]
+    binding = AccessDeviceBinding("home_assistant", "cover.top_gate")
+
+    result = await provider.command_cover(binding, "open", "Resident arrival")
+
+    assert result.accepted is True
+    assert result.state is GateState.UNKNOWN
+    assert result.provider == "home_assistant"
+    assert result.external_id == "cover.top_gate"
+    assert client.service_calls == [
+        ("cover.open_cover", {"entity_id": "cover.top_gate"})
+    ]
+    assert client.state_reads == 1
 
 
 @pytest.mark.asyncio

@@ -118,11 +118,30 @@ class HomeAssistantAccessDeviceProvider:
         )
         try:
             await self._client.call_service(service_name, {"entity_id": binding.external_id})
-            state = await self._client.get_state(binding.external_id)
         except HomeAssistantError as exc:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
         except Exception as exc:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
+        try:
+            state = await self._client.get_state(binding.external_id)
+        except Exception:
+            # The service call has already returned successfully. Treating a
+            # subsequent read failure as a rejected command could trigger an
+            # unsafe duplicate/failover command. The service-level confirmer
+            # will poll and retain an accepted-but-unverified result when the
+            # state remains unavailable.
+            return AccessDeviceCommandResult(
+                accepted=True,
+                state=GateState.UNKNOWN,
+                detail=reason,
+                provider=self.provider_key,
+                external_id=binding.external_id,
+                metadata={
+                    "service": service_name,
+                    "immediate_state_read": "unavailable",
+                    "state_verification_pending": True,
+                },
+            )
         return AccessDeviceCommandResult(
             accepted=True,
             state=gate_state_from_cover_state(str(state.state)),

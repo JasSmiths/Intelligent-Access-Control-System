@@ -1185,7 +1185,7 @@ requires-dist = [
     { name = "redis", specifier = ">=7.4.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.12" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
-    { name = "uiprotect", specifier = "==15.3.0" },
+    { name = "uiprotect", specifier = "==15.12.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },
 ]
 provides-extras = ["dev"]
@@ -2507,7 +2507,7 @@ wheels = [
 
 [[package]]
 name = "uiprotect"
-version = "15.3.0"
+version = "15.12.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -2524,9 +2524,9 @@ dependencies = [
     { name = "pyjwt" },
     { name = "yarl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/8d/1fb5338414be442cb5065f63c6c8d699982e403e1ea8902f5a5a67a67ca8/uiprotect-15.3.0.tar.gz", hash = "sha256:522e6473ce9a89244acf58c77aaaca86a4d329896e0f7d2907421aa3524eb5ae", size = 198335, upload-time = "2026-06-26T21:34:40.524Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/25/7083193ee0596334219a43963185ed4aaa5a397d0a39921ea2b919636b2d/uiprotect-15.12.2.tar.gz", hash = "sha256:911ebeeae9dabc3a56ab56f2faffeddefe67640b45785beaba913ce6aff6733a", size = 212019, upload-time = "2026-07-13T07:33:31.923Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/22/2428b94fa0ed1fd2d8d37eaea3b3c36d336fcd6b9ff37eb2ed68a605cc13/uiprotect-15.3.0-py3-none-any.whl", hash = "sha256:dbfe7cc8ad9aa12d1f8d96d9d300b6d67072dd2280a467cf3c66504b893c139e", size = 218947, upload-time = "2026-06-26T21:34:38.889Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/68/e305b1a63a46d748e5d59f8613c5e1134af0a3fc15c08d1e4bc89b68a2b8/uiprotect-15.12.2-py3-none-any.whl", hash = "sha256:09f299085c117c8e68ae0dfda4b764c793ddf2582feac2fa30dc1e90959ca511", size = 232813, upload-time = "2026-07-13T07:33:30.032Z" },
 ]
 
 [[package]]

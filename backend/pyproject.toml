@@ -27,7 +27,7 @@ dependencies = [
     "python-json-logger>=4.1.0",
     "redis>=7.4.0",
     "sqlalchemy[asyncio]>=2.0.49",
-    "uiprotect==15.3.0",
+    "uiprotect==15.12.2",
     "uvicorn[standard]>=0.46.0",
 ]
 
