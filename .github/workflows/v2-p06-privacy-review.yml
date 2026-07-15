@@ -1,0 +1,120 @@
+name: IACS V2 P06 Privacy Approval
+
+run-name: >-
+  R07-M05 ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_manifest_sha256 || github.event.client_payload.candidate_manifest_sha256 }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_manifest_sha256:
+        description: Exact locally verified R07-M05 candidate-manifest digest
+        required: true
+        type: string
+      baseline_head_sha:
+        description: Frozen V1 repository baseline reviewed by the candidate
+        required: true
+        type: string
+  repository_dispatch:
+    types:
+      - iacs-v2-p06-privacy-approval
+
+permissions: {}
+
+jobs:
+  dispatch-as-bot:
+    name: Dispatch candidate as GitHub Actions bot
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Validate dispatch request
+        shell: bash
+        env:
+          BASELINE_HEAD_SHA: ${{ inputs.baseline_head_sha }}
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$BASELINE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Emit bot-authenticated review event
+        shell: bash
+        env:
+          BASELINE_HEAD_SHA: ${{ inputs.baseline_head_sha }}
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BY_ID: ${{ github.actor_id }}
+          REQUESTED_BY_LOGIN: ${{ github.actor }}
+          SEED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > /tmp/repository-dispatch.json
+          import json
+          import os
+
+          print(json.dumps({
+              "event_type": "iacs-v2-p06-privacy-approval",
+              "client_payload": {
+                  "baseline_head_sha": os.environ["BASELINE_HEAD_SHA"],
+                  "candidate_manifest_sha256": os.environ["CANDIDATE_MANIFEST_SHA256"],
+                  "requested_by_id": os.environ["REQUESTED_BY_ID"],
+                  "requested_by_login": os.environ["REQUESTED_BY_LOGIN"],
+                  "seed_run_id": os.environ["SEED_RUN_ID"],
+              },
+          }, sort_keys=True))
+          PY
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
+            --data-binary @/tmp/repository-dispatch.json
+
+  publish-reviewed-manifest:
+    name: Publish reviewed R07-M05 manifest
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: p06-privacy-review
+    permissions:
+      contents: read
+    steps:
+      - name: Validate bot-authenticated candidate
+        shell: bash
+        env:
+          ACTOR_ID: ${{ github.actor_id }}
+          ACTOR_LOGIN: ${{ github.actor }}
+          BASELINE_HEAD_SHA: ${{ github.event.client_payload.baseline_head_sha }}
+          CANDIDATE_MANIFEST_SHA256: ${{ github.event.client_payload.candidate_manifest_sha256 }}
+          REQUESTED_BY_ID: ${{ github.event.client_payload.requested_by_id }}
+          REQUESTED_BY_LOGIN: ${{ github.event.client_payload.requested_by_login }}
+          SEED_RUN_ID: ${{ github.event.client_payload.seed_run_id }}
+        run: |
+          set -euo pipefail
+          test "$ACTOR_LOGIN" = "github-actions[bot]"
+          test "$ACTOR_ID" = "41898282"
+          test "$REQUESTED_BY_LOGIN" = "JasSmiths"
+          test "$REQUESTED_BY_ID" = "34107308"
+          [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$BASELINE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEED_RUN_ID" =~ ^[0-9]+$ ]]
+
+      - name: Record approved manifest
+        shell: bash
+        env:
+          BASELINE_HEAD_SHA: ${{ github.event.client_payload.baseline_head_sha }}
+          CANDIDATE_MANIFEST_SHA256: ${{ github.event.client_payload.candidate_manifest_sha256 }}
+          SEED_RUN_ID: ${{ github.event.client_payload.seed_run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## R07-M05 approved candidate manifest'
+            echo
+            echo "- Manifest: \`$CANDIDATE_MANIFEST_SHA256\`"
+            echo "- Frozen baseline: \`$BASELINE_HEAD_SHA\`"
+            echo "- Bot seed run: \`$SEED_RUN_ID\`"
+            echo "- Protected run: \`$GITHUB_RUN_ID\`"
+            echo "- Workflow ref: \`$GITHUB_WORKFLOW_REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
