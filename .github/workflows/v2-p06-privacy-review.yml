@@ -1,13 +1,17 @@
 name: IACS V2 P06 Privacy Approval
 
 run-name: >-
-  R07-M05 ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_manifest_sha256 || github.event.client_payload.candidate_manifest_sha256 }}
+  R07-M05 ${{ github.event_name == 'workflow_dispatch' && inputs.expected_manifest_sha256 || github.event.client_payload.candidate_manifest_sha256 }}
 
 on:
   workflow_dispatch:
     inputs:
-      candidate_manifest_sha256:
-        description: Exact locally verified R07-M05 candidate-manifest digest
+      candidate_bundle_base64:
+        description: Bounded gzip tar containing the exact R07-M05 candidate files
+        required: true
+        type: string
+      expected_manifest_sha256:
+        description: Independently calculated candidate manifest digest
         required: true
         type: string
       baseline_head_sha:
@@ -22,48 +26,164 @@ permissions: {}
 
 jobs:
   dispatch-as-bot:
-    name: Dispatch candidate as GitHub Actions bot
+    name: Derive and dispatch candidate as GitHub Actions bot
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Validate dispatch request
+      - name: Independently derive the candidate manifest
         shell: bash
         env:
           BASELINE_HEAD_SHA: ${{ inputs.baseline_head_sha }}
-          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
-        run: |
-          set -euo pipefail
-          [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$BASELINE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-
-      - name: Emit bot-authenticated review event
-        shell: bash
-        env:
-          BASELINE_HEAD_SHA: ${{ inputs.baseline_head_sha }}
-          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
-          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BUNDLE_BASE64: ${{ inputs.candidate_bundle_base64 }}
+          EXPECTED_MANIFEST_SHA256: ${{ inputs.expected_manifest_sha256 }}
           REQUESTED_BY_ID: ${{ github.actor_id }}
           REQUESTED_BY_LOGIN: ${{ github.actor }}
           SEED_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          python3 - <<'PY' > /tmp/repository-dispatch.json
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import io
           import json
           import os
+          import re
+          import tarfile
 
-          print(json.dumps({
+          FILES = {
+              "attestation": "V2/docs/planning/privacy/field-data-class-matrix.attestation.json",
+              "external_tests": "V2/tools/discovery/tests/test_github_privacy_trust.py",
+              "external_verifier": "V2/tools/review/github_privacy_trust.py",
+              "matrix": "V2/docs/planning/privacy/field-data-class-matrix.json",
+              "privacy_guard": "V2/tools/discovery/privacy_guard.py",
+              "privacy_tests": "V2/tools/discovery/tests/test_privacy_matrix.py",
+              "schema": "V2/docs/planning/privacy/field-data-class-matrix.schema.json",
+              "trust_contract": "V2/docs/planning/privacy/github-review-trust.json",
+          }
+          SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+          GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+          def fail(reason):
+              raise SystemExit(reason)
+
+          def digest(raw):
+              return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+          def canonical(value):
+              return digest(
+                  json.dumps(
+                      value,
+                      ensure_ascii=True,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  ).encode("utf-8")
+              )
+
+          encoded = os.environ["CANDIDATE_BUNDLE_BASE64"]
+          if len(encoded) > 60_000:
+              fail("candidate_bundle_encoded_limit")
+          try:
+              archive = base64.b64decode(encoded, validate=True)
+          except ValueError:
+              fail("candidate_bundle_base64")
+          if len(archive) > 50_000:
+              fail("candidate_bundle_archive_limit")
+
+          observed = {}
+          try:
+              with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+                  members = bundle.getmembers()
+                  if len(members) != len(FILES):
+                      fail("candidate_bundle_member_count")
+                  for member in members:
+                      if not member.isfile() or member.name not in FILES.values():
+                          fail("candidate_bundle_member")
+                      if member.name in observed or member.size > 100_000:
+                          fail("candidate_bundle_member_limit")
+                      source = bundle.extractfile(member)
+                      if source is None:
+                          fail("candidate_bundle_member_read")
+                      observed[member.name] = source.read(100_001)
+          except (tarfile.TarError, OSError):
+              fail("candidate_bundle_archive")
+          if set(observed) != set(FILES.values()):
+              fail("candidate_bundle_paths")
+          if sum(len(value) for value in observed.values()) > 300_000:
+              fail("candidate_bundle_total_limit")
+
+          try:
+              matrix = json.loads(observed[FILES["matrix"]])
+              attestation = json.loads(observed[FILES["attestation"]])
+          except (UnicodeDecodeError, json.JSONDecodeError):
+              fail("candidate_bundle_json")
+          if not isinstance(matrix, dict) or not isinstance(matrix.get("gate"), dict):
+              fail("candidate_matrix_shape")
+          if not isinstance(attestation, dict):
+              fail("candidate_attestation_shape")
+          matrix["gate"]["status"] = "<independent-review-state>"
+          attestation["attestation_status"] = "<independent-review-state>"
+
+          baseline = os.environ["BASELINE_HEAD_SHA"]
+          expected = os.environ["EXPECTED_MANIFEST_SHA256"]
+          if GIT_SHA.fullmatch(baseline) is None:
+              fail("candidate_baseline")
+          if SHA256.fullmatch(expected) is None:
+              fail("candidate_expected_manifest")
+          if os.environ["REQUESTED_BY_LOGIN"] != "JasSmiths":
+              fail("candidate_requester_login")
+          if os.environ["REQUESTED_BY_ID"] != "34107308":
+              fail("candidate_requester_id")
+          if re.fullmatch(r"[0-9]+", os.environ["SEED_RUN_ID"]) is None:
+              fail("candidate_seed_run")
+
+          projection = {
+              "attestation_semantic_sha256": canonical(attestation),
+              "baseline_head_sha": baseline,
+              "external_tests_sha256": digest(observed[FILES["external_tests"]]),
+              "external_verifier_sha256": digest(observed[FILES["external_verifier"]]),
+              "gate_id": "R07-M05",
+              "matrix_semantic_sha256": canonical(matrix),
+              "privacy_guard_sha256": digest(observed[FILES["privacy_guard"]]),
+              "privacy_tests_sha256": digest(observed[FILES["privacy_tests"]]),
+              "repository_id": 1220842995,
+              "schema_sha256": digest(observed[FILES["schema"]]),
+              "schema_version": 2,
+              "trust_contract_sha256": digest(observed[FILES["trust_contract"]]),
+          }
+          manifest = canonical(projection)
+          if manifest != expected:
+              fail("candidate_manifest_mismatch")
+
+          dispatch = {
               "event_type": "iacs-v2-p06-privacy-approval",
               "client_payload": {
-                  "baseline_head_sha": os.environ["BASELINE_HEAD_SHA"],
-                  "candidate_manifest_sha256": os.environ["CANDIDATE_MANIFEST_SHA256"],
+                  "baseline_head_sha": baseline,
+                  "candidate_bundle_base64": encoded,
+                  "candidate_manifest_sha256": manifest,
+                  "candidate_projection": projection,
                   "requested_by_id": os.environ["REQUESTED_BY_ID"],
                   "requested_by_login": os.environ["REQUESTED_BY_LOGIN"],
                   "seed_run_id": os.environ["SEED_RUN_ID"],
               },
-          }, sort_keys=True))
+          }
+          raw_dispatch = json.dumps(dispatch, separators=(",", ":"), sort_keys=True)
+          if len(raw_dispatch.encode("utf-8")) > 65_000:
+              fail("candidate_dispatch_limit")
+          with open("/tmp/repository-dispatch.json", "w", encoding="utf-8") as output:
+              output.write(raw_dispatch)
+          with open("/tmp/candidate-projection.json", "w", encoding="utf-8") as output:
+              json.dump(projection, output, indent=2, sort_keys=True)
+              output.write("\n")
           PY
+
+      - name: Emit bot-authenticated review event
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Accept: application/vnd.github+json" \
@@ -81,13 +201,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate bot-authenticated candidate
+      - name: Recompute the protected candidate
         shell: bash
         env:
           ACTOR_ID: ${{ github.actor_id }}
           ACTOR_LOGIN: ${{ github.actor }}
           BASELINE_HEAD_SHA: ${{ github.event.client_payload.baseline_head_sha }}
+          CANDIDATE_BUNDLE_BASE64: ${{ github.event.client_payload.candidate_bundle_base64 }}
           CANDIDATE_MANIFEST_SHA256: ${{ github.event.client_payload.candidate_manifest_sha256 }}
+          CANDIDATE_PROJECTION_JSON: ${{ toJSON(github.event.client_payload.candidate_projection) }}
           REQUESTED_BY_ID: ${{ github.event.client_payload.requested_by_id }}
           REQUESTED_BY_LOGIN: ${{ github.event.client_payload.requested_by_login }}
           SEED_RUN_ID: ${{ github.event.client_payload.seed_run_id }}
@@ -100,6 +222,99 @@ jobs:
           [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$BASELINE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SEED_RUN_ID" =~ ^[0-9]+$ ]]
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          import tarfile
+
+          FILES = {
+              "attestation": "V2/docs/planning/privacy/field-data-class-matrix.attestation.json",
+              "external_tests": "V2/tools/discovery/tests/test_github_privacy_trust.py",
+              "external_verifier": "V2/tools/review/github_privacy_trust.py",
+              "matrix": "V2/docs/planning/privacy/field-data-class-matrix.json",
+              "privacy_guard": "V2/tools/discovery/privacy_guard.py",
+              "privacy_tests": "V2/tools/discovery/tests/test_privacy_matrix.py",
+              "schema": "V2/docs/planning/privacy/field-data-class-matrix.schema.json",
+              "trust_contract": "V2/docs/planning/privacy/github-review-trust.json",
+          }
+
+          def fail(reason):
+              raise SystemExit(reason)
+
+          def digest(raw):
+              return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+          def canonical(value):
+              return digest(
+                  json.dumps(
+                      value,
+                      ensure_ascii=True,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  ).encode("utf-8")
+              )
+
+          encoded = os.environ["CANDIDATE_BUNDLE_BASE64"]
+          if len(encoded) > 60_000:
+              fail("protected_bundle_encoded_limit")
+          try:
+              archive = base64.b64decode(encoded, validate=True)
+          except ValueError:
+              fail("protected_bundle_base64")
+          if len(archive) > 50_000:
+              fail("protected_bundle_archive_limit")
+          observed = {}
+          try:
+              with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+                  members = bundle.getmembers()
+                  if len(members) != len(FILES):
+                      fail("protected_bundle_member_count")
+                  for member in members:
+                      if not member.isfile() or member.name not in FILES.values():
+                          fail("protected_bundle_member")
+                      if member.name in observed or member.size > 100_000:
+                          fail("protected_bundle_member_limit")
+                      source = bundle.extractfile(member)
+                      if source is None:
+                          fail("protected_bundle_member_read")
+                      observed[member.name] = source.read(100_001)
+          except (tarfile.TarError, OSError):
+              fail("protected_bundle_archive")
+          if set(observed) != set(FILES.values()):
+              fail("protected_bundle_paths")
+          if sum(len(value) for value in observed.values()) > 300_000:
+              fail("protected_bundle_total_limit")
+
+          matrix = json.loads(observed[FILES["matrix"]])
+          attestation = json.loads(observed[FILES["attestation"]])
+          matrix["gate"]["status"] = "<independent-review-state>"
+          attestation["attestation_status"] = "<independent-review-state>"
+          projection = {
+              "attestation_semantic_sha256": canonical(attestation),
+              "baseline_head_sha": os.environ["BASELINE_HEAD_SHA"],
+              "external_tests_sha256": digest(observed[FILES["external_tests"]]),
+              "external_verifier_sha256": digest(observed[FILES["external_verifier"]]),
+              "gate_id": "R07-M05",
+              "matrix_semantic_sha256": canonical(matrix),
+              "privacy_guard_sha256": digest(observed[FILES["privacy_guard"]]),
+              "privacy_tests_sha256": digest(observed[FILES["privacy_tests"]]),
+              "repository_id": 1220842995,
+              "schema_sha256": digest(observed[FILES["schema"]]),
+              "schema_version": 2,
+              "trust_contract_sha256": digest(observed[FILES["trust_contract"]]),
+          }
+          if projection != json.loads(os.environ["CANDIDATE_PROJECTION_JSON"]):
+              fail("protected_projection_mismatch")
+          manifest = canonical(projection)
+          if manifest != os.environ["CANDIDATE_MANIFEST_SHA256"]:
+              fail("protected_manifest_mismatch")
+          with open("/tmp/candidate-projection.json", "w", encoding="utf-8") as output:
+              json.dump(projection, output, indent=2, sort_keys=True)
+              output.write("\n")
+          PY
 
       - name: Record approved manifest
         shell: bash
@@ -117,4 +332,10 @@ jobs:
             echo "- Bot seed run: \`$SEED_RUN_ID\`"
             echo "- Protected run: \`$GITHUB_RUN_ID\`"
             echo "- Workflow ref: \`$GITHUB_WORKFLOW_REF\`"
+            echo
+            echo '### Independently derived projection'
+            echo
+            echo '```json'
+            cat /tmp/candidate-projection.json
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
