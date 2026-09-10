@@ -70,6 +70,24 @@ def test_confirmation_payload_hash_ignores_tokens_and_empty_optional_values() ->
     assert left == right
 
 
+def test_confirmation_payload_hash_normalizes_equivalent_timestamps() -> None:
+    browser_payload = {"expected_time": "2026-07-31T12:00:00.000Z"}
+    api_payload = {"expected_time": "2026-07-31T12:00:00Z"}
+    typed_payload = {"expected_time": datetime(2026, 7, 31, 12, 0, tzinfo=UTC)}
+
+    assert action_confirmations.confirmation_payload_hash(browser_payload) == (
+        action_confirmations.confirmation_payload_hash(api_payload)
+    )
+    assert action_confirmations.confirmation_payload_hash(browser_payload) == (
+        action_confirmations.confirmation_payload_hash(typed_payload)
+    )
+    assert action_confirmations.confirmation_payload_hash(browser_payload) != (
+        action_confirmations.confirmation_payload_hash(
+            {"expected_time": "2026-07-31T12:00:01Z"}
+        )
+    )
+
+
 async def test_create_action_confirmation_returns_secret_token_without_storing_raw_value(monkeypatch) -> None:
     monkeypatch.setattr(action_confirmations, "get_auth_secret", lambda: "test-secret")
     monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **_kwargs: None)

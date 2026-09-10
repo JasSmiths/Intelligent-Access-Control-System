@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,9 @@ from app.services.telemetry import (
 )
 
 CONFIRMATION_TTL_SECONDS = 120
+ISO_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 class ActionConfirmationError(Exception):
@@ -213,8 +217,23 @@ def _canonical_payload(value: Any) -> Any:
     if isinstance(value, uuid.UUID):
         return str(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        return _canonical_timestamp(value)
+    if isinstance(value, str) and ISO_TIMESTAMP_PATTERN.fullmatch(value):
+        try:
+            return _canonical_timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:
+            return value
     return value
+
+
+def _canonical_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        return value.isoformat()
+    normalized = value.astimezone(UTC)
+    timestamp = normalized.strftime("%Y-%m-%dT%H:%M:%S")
+    if normalized.microsecond:
+        timestamp = f"{timestamp}.{normalized.microsecond:06d}".rstrip("0")
+    return f"{timestamp}Z"
 
 
 def _emit_confirmation_rejected(

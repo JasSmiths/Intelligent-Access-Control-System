@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -22,6 +23,17 @@ from app.services.access_devices import (
     AccessDeviceProviderAttempt,
     AccessDeviceService,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_esphome_device_logs(monkeypatch, tmp_path):
+    monkeypatch.setattr(esphome_module.settings, "log_dir", tmp_path)
+    esphome_module._device_loggers.clear()
+    yield
+    for device_logger in esphome_module._device_loggers.values():
+        for handler in device_logger.handlers:
+            handler.close()
+    esphome_module._device_loggers.clear()
 
 
 class FakeProvider:
@@ -1032,6 +1044,16 @@ class FakeESPHomeAio:
     CoverInfo = FakeCoverInfo
     CoverState = FakeCoverState
 
+    class LogLevel:
+        LOG_LEVEL_DEBUG = 5
+        LOG_LEVEL_VERY_VERBOSE = 7
+
+
+class FakeESPHomeLogEntry:
+    def __init__(self, level: int, message: bytes) -> None:
+        self.level = level
+        self.message = message
+
 
 class FakeESPHomeClient:
     def __init__(self) -> None:
@@ -1040,6 +1062,8 @@ class FakeESPHomeClient:
         self.disconnected = False
         self.list_calls = 0
         self.commands: list[tuple[int, float]] = []
+        self.log_callbacks = []
+        self.log_subscriptions: list[tuple[int | None, bool | None]] = []
 
     async def list_entities_services(self):
         self.list_calls += 1
@@ -1051,10 +1075,19 @@ class FakeESPHomeClient:
     def subscribe_states(self, callback) -> None:
         self.callbacks.append(callback)
 
+    def subscribe_logs(self, callback, log_level=None, dump_config=None) -> None:
+        self.log_callbacks.append(callback)
+        self.log_subscriptions.append((log_level, dump_config))
+
     def emit(self, state: FakeCoverState) -> None:
         assert self.callbacks
         for callback in list(self.callbacks):
             callback(state)
+
+    def emit_log(self, entry: FakeESPHomeLogEntry) -> None:
+        assert self.log_callbacks
+        for callback in list(self.log_callbacks):
+            callback(entry)
 
     async def disconnect(self) -> None:
         self.disconnected = True
@@ -1100,3 +1133,98 @@ async def test_esphome_provider_streams_cover_state_events(monkeypatch) -> None:
     assert state_event["key"] == 7
     assert state_event["state"] == "open"
     assert client.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_esphome_gate_stream_captures_native_device_logs(monkeypatch, tmp_path) -> None:
+    provider = ESPHomeAccessDeviceProvider()
+    client = FakeESPHomeClient()
+    device = {
+        "id": "top_gate",
+        "name": "Top Gate",
+        "host": "10.0.107.22",
+        "port": 6053,
+        "enabled": True,
+    }
+
+    async def fake_configured_devices():
+        return [device]
+
+    async def fake_connected_client(configured_device, on_stop=None, timeout_budget=None):
+        assert configured_device == device
+        client.on_stop = on_stop
+        return FakeESPHomeAio, client
+
+    monkeypatch.setattr(provider, "_configured_devices", fake_configured_devices)
+    monkeypatch.setattr(provider, "_connected_client", fake_connected_client)
+    stream = provider.subscribe_state_changes()
+    connected = await asyncio.wait_for(stream.__anext__(), timeout=1.0)
+    client.emit_log(FakeESPHomeLogEntry(5, b"[D][binary_sensor] gate input ON\n"))
+    client.emit(FakeCoverState(7, 1.0))
+    await asyncio.wait_for(stream.__anext__(), timeout=1.0)
+    await stream.aclose()
+
+    log_path = tmp_path / "esphome" / "top_gate.jsonl"
+    log_text = log_path.read_text()
+    log_rows = [json.loads(line) for line in log_text.splitlines()]
+    assert connected["device_log_capture"] == "active"
+    assert connected["device_log_file"] == "esphome/top_gate.jsonl"
+    assert client.log_subscriptions == [(FakeESPHomeAio.LogLevel.LOG_LEVEL_VERY_VERBOSE, False)]
+    assert "stream_connected" in log_text
+    assert any(row.get("line") == "[D][binary_sensor] gate input ON\\n" for row in log_rows)
+    assert any(
+        row.get("event") == "entity_state"
+        and row.get("object_id") == "gate"
+        and row.get("state_payload", {}).get("position") == 1.0
+        for row in log_rows
+    )
+    assert '"event": "cover_state"' in log_text
+    assert '"state": "open"' in log_text
+
+
+def test_esphome_device_log_message_is_single_line_and_bounded() -> None:
+    message = b"first\nsecond\r\x1b" + (b"x" * (esphome_module.DEVICE_LOG_MESSAGE_MAX_LENGTH + 20))
+
+    sanitized = esphome_module._sanitize_device_log_message(message)
+
+    assert "\n" not in sanitized
+    assert "\r" not in sanitized
+    assert "first\\nsecond\\r\\x1b" in sanitized
+    assert len(sanitized) == esphome_module.DEVICE_LOG_MESSAGE_MAX_LENGTH
+
+
+def test_esphome_device_named_gate_captures_logs_when_cover_reports_garage_class() -> None:
+    metadata = {7: {"kind": "garage_door", "device_class": "garage", "object_id": "garage_door"}}
+
+    assert esphome_module._should_capture_device_logs(
+        {"id": "top_gate", "name": "Top Gate"},
+        metadata,
+    ) is True
+    assert esphome_module._should_capture_device_logs(
+        {"id": "main_garage_door", "name": "Main Garage Door"},
+        metadata,
+    ) is False
+
+
+def test_esphome_entity_state_payload_captures_binary_input_and_redacts_network_identity() -> None:
+    class BinaryState:
+        __slots__ = ("state", "missing_state")
+
+        def __init__(self, state: bool, missing_state: bool) -> None:
+            self.state = state
+            self.missing_state = missing_state
+
+    binary_state = BinaryState(True, False)
+    payload, redacted = esphome_module._entity_state_payload(
+        binary_state,
+        {"object_id": "contact", "name": "Contact", "state_value_sensitive": False},
+    )
+    network_payload, network_redacted = esphome_module._entity_state_payload(
+        BinaryState("Private WiFi", False),
+        {"object_id": "connected_ssid", "name": "Connected SSID", "state_value_sensitive": True},
+    )
+
+    assert payload == {"state": True, "missing_state": False}
+    assert redacted is False
+    assert network_payload == {"state": "<redacted>", "missing_state": False}
+    assert network_redacted is True

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
+import logging
+import re
+from enum import Enum
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
+from pythonjsonlogger.json import JsonFormatter
+
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.modules.access_devices.base import (
     ACCESS_DEVICE_KIND_GARAGE_DOOR,
@@ -30,8 +39,18 @@ STATE_STREAM_MAX_RECONNECT_SECONDS = 5.0
 COMMAND_LIVE_STATE_WAIT_SECONDS = 0.25
 COLD_COMMAND_CONNECT_BUDGET_SECONDS = 0.75
 STATE_EVENT_QUEUE_MAX_SIZE = 1000
+DEVICE_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEVICE_LOG_BACKUP_COUNT = 4
+DEVICE_LOG_MESSAGE_MAX_LENGTH = 4096
+DEVICE_LOG_VALUE_MAX_LENGTH = 1024
+SENSITIVE_ENTITY_IDENTIFIERS = {
+    "connected_ssid",
+    "ip_address",
+    "mac_address",
+}
 
 logger = get_logger(__name__)
+_device_loggers: dict[str, logging.Logger] = {}
 
 
 @dataclass
@@ -71,6 +90,9 @@ class ESPHomeAccessDeviceProvider:
                     "cover_count": session.cover_count if session else None,
                     "last_error": session.last_error if session else None,
                     "last_seen_at": session.last_seen_at.isoformat() if session and session.last_seen_at else None,
+                    "device_log_capture": session.device_log_capture if session else "inactive",
+                    "device_log_file": session.device_log_file if session else None,
+                    "device_log_error": session.device_log_error if session else None,
                 }
             )
         connected = any(device.get("connected") for device in device_results)
@@ -394,18 +416,30 @@ class ESPHomeAccessDeviceProvider:
         finally:
             await _disconnect(client)
 
-    async def _cover_metadata_by_key(self, aio: Any, client: Any, device: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    async def _entity_metadata_by_key(
+        self,
+        aio: Any,
+        client: Any,
+        device: dict[str, Any],
+    ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
         entities, _services = await asyncio.wait_for(
             client.list_entities_services(),
             timeout=DISCOVERY_TIMEOUT_SECONDS,
         )
-        metadata: dict[int, dict[str, Any]] = {}
+        cover_metadata: dict[int, dict[str, Any]] = {}
+        entity_metadata: dict[int, dict[str, Any]] = {}
         for entity in entities:
+            key = getattr(entity, "key", None)
+            if key is None:
+                continue
+            record = _entity_metadata_from_entity(entity, device)
+            entity_metadata[int(key)] = record
             if not _is_cover_info(aio, entity):
                 continue
-            record = _cover_metadata_from_entity(entity, device)
-            metadata[int(record["key"])] = record
-        return metadata
+            cover_record = _cover_metadata_from_entity(entity, device)
+            cover_metadata[int(cover_record["key"])] = cover_record
+            entity_metadata[int(key)] = {**record, **cover_record}
+        return cover_metadata, entity_metadata
 
     async def _resolve_cover(self, aio: Any, client: Any, binding: AccessDeviceBinding) -> Any:
         entities, _services = await asyncio.wait_for(
@@ -487,10 +521,15 @@ class _ESPHomeDeviceSession:
         self.connected = False
         self.last_error: str | None = None
         self.cover_metadata: dict[int, dict[str, Any]] = {}
+        self.entity_metadata: dict[int, dict[str, Any]] = {}
         self.states: dict[int, _ESPHomeStateRecord] = {}
         self.state_events: dict[int, asyncio.Event] = {}
         self.metadata_loaded = asyncio.Event()
         self.last_seen_at: datetime | None = None
+        self.device_log_capture = "inactive"
+        self.device_log_file: str | None = None
+        self.device_log_error: str | None = None
+        self._device_logger: logging.Logger | None = None
 
     @property
     def device_id(self) -> str:
@@ -727,12 +766,17 @@ class _ESPHomeDeviceSession:
                 if not self.cover_metadata:
                     self.metadata_loaded.clear()
                 aio, client = await self.provider._connected_client(self.device, on_stop=on_stop)
-                self.cover_metadata = await self.provider._cover_metadata_by_key(aio, client, self.device)
+                self.cover_metadata, self.entity_metadata = await self.provider._entity_metadata_by_key(
+                    aio,
+                    client,
+                    self.device,
+                )
                 self.metadata_loaded.set()
                 self.aio = aio
                 self.client = client
                 self.connected = True
                 self.last_error = None
+                self._start_device_log_capture(aio, client)
                 self._queue_event(
                     {
                         "type": "connected",
@@ -741,7 +785,16 @@ class _ESPHomeDeviceSession:
                         "device_name": str(self.device["name"]),
                         "host": str(self.device["host"]),
                         "cover_count": len(self.cover_metadata),
+                        "device_log_capture": self.device_log_capture,
+                        "device_log_file": self.device_log_file,
+                        "device_log_error": self.device_log_error,
                     }
+                )
+                self._write_device_log(
+                    "stream_connected",
+                    host=str(self.device["host"]),
+                    port=int(self.device.get("port") or 6053),
+                    cover_count=len(self.cover_metadata),
                 )
                 client.subscribe_states(self._on_state)
                 reconnect_delay = STATE_STREAM_INITIAL_RECONNECT_SECONDS
@@ -776,9 +829,26 @@ class _ESPHomeDeviceSession:
 
     def _on_state(self, state: Any) -> None:
         aio = self.aio
-        if aio is None or not _is_cover_state(aio, state):
+        if aio is None:
             return
         key = int(getattr(state, "key", -1))
+        entity_metadata = self.entity_metadata.get(key)
+        if entity_metadata:
+            self.last_seen_at = datetime.now(tz=UTC)
+            state_payload, redacted = _entity_state_payload(state, entity_metadata)
+            self._write_device_log(
+                "entity_state",
+                key=key,
+                entity_type=str(entity_metadata.get("entity_type") or state.__class__.__name__),
+                state_type=state.__class__.__name__,
+                object_id=str(entity_metadata.get("object_id") or ""),
+                entity_name=str(entity_metadata.get("name") or ""),
+                device_class=str(entity_metadata.get("device_class") or ""),
+                redacted=redacted,
+                state_payload=state_payload,
+            )
+        if not _is_cover_state(aio, state):
+            return
         metadata = self.cover_metadata.get(key)
         if not metadata:
             return
@@ -791,6 +861,17 @@ class _ESPHomeDeviceSession:
         )
         self.states[key] = record
         self.last_seen_at = now
+        self._write_device_log(
+            "cover_state",
+            key=key,
+            object_id=str(metadata.get("object_id") or ""),
+            cover_name=str(metadata.get("name") or ""),
+            state=record.state.value,
+            raw_state=record.raw_state,
+            position=getattr(state, "position", None),
+            operation=_enum_name_or_value(getattr(state, "current_operation", None)),
+            legacy_state=_enum_name_or_value(getattr(state, "legacy_state", None)),
+        )
         event = self.state_events.get(key)
         if event:
             event.set()
@@ -821,6 +902,7 @@ class _ESPHomeDeviceSession:
             return
 
     def _queue_disconnected(self, detail: str) -> None:
+        self._write_device_log("stream_disconnected", detail=detail[:500])
         self._queue_event(
             {
                 "type": "disconnected",
@@ -843,6 +925,69 @@ class _ESPHomeDeviceSession:
                     "device_id": event.get("device_id"),
                     "type": event.get("type"),
                 },
+            )
+
+    def _start_device_log_capture(self, aio: Any, client: Any) -> None:
+        if not _should_capture_device_logs(self.device, self.cover_metadata):
+            self.device_log_capture = "not_applicable"
+            self.device_log_file = None
+            self.device_log_error = None
+            self._device_logger = None
+            return
+        try:
+            self._device_logger = _device_log_logger(self.device_id)
+            self.device_log_file = str(_device_log_relative_path(self.device_id))
+            self.device_log_error = None
+            log_levels = getattr(aio, "LogLevel", None)
+            log_level = getattr(
+                log_levels,
+                "LOG_LEVEL_VERY_VERBOSE",
+                getattr(log_levels, "LOG_LEVEL_DEBUG", None),
+            )
+            client.subscribe_logs(self._on_device_log, log_level=log_level, dump_config=False)
+            self.device_log_capture = "active"
+        except Exception as exc:
+            self.device_log_capture = "failed"
+            self.device_log_error = _connect_error_detail(exc)[:500]
+            self._device_logger = None
+            logger.warning(
+                "esphome_device_log_capture_failed",
+                extra={
+                    "device_id": self.device_id,
+                    "device_name": str(self.device.get("name") or ""),
+                    "error": self.device_log_error,
+                },
+            )
+
+    def _on_device_log(self, entry: Any) -> None:
+        message = _sanitize_device_log_message(getattr(entry, "message", b""))
+        if not message:
+            return
+        self._write_device_log(
+            "device_log",
+            native_level=_enum_name_or_value(getattr(entry, "level", None)),
+            line=message,
+        )
+
+    def _write_device_log(self, event: str, **fields: Any) -> None:
+        device_logger = self._device_logger
+        if device_logger is None:
+            return
+        try:
+            device_logger.info(
+                event,
+                extra={
+                    "event": event,
+                    "provider": self.provider.provider_key,
+                    "device_id": self.device_id,
+                    "device_name": str(self.device.get("name") or ""),
+                    **fields,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "esphome_device_log_write_failed",
+                extra={"device_id": self.device_id, "error": str(exc)[:500]},
             )
 
 
@@ -894,6 +1039,76 @@ def _cover_metadata_from_entity(entity: Any, device: dict[str, Any]) -> dict[str
     }
 
 
+def _entity_metadata_from_entity(entity: Any, device: dict[str, Any]) -> dict[str, Any]:
+    object_id = str(getattr(entity, "object_id", "") or "")
+    name = str(getattr(entity, "name", "") or object_id or getattr(entity, "key", ""))
+    entity_type = entity.__class__.__name__
+    if entity_type.endswith("Info"):
+        entity_type = entity_type[:-4]
+    return {
+        "device_id": str(device["id"]),
+        "device_name": str(device["name"]),
+        "host": str(device["host"]),
+        "key": int(getattr(entity, "key")),
+        "object_id": object_id,
+        "name": name,
+        "entity_type": entity_type,
+        "device_class": str(getattr(entity, "device_class", "") or ""),
+        "unit_of_measurement": str(getattr(entity, "unit_of_measurement", "") or ""),
+        "disabled_by_default": bool(getattr(entity, "disabled_by_default", False)),
+        "state_value_sensitive": _entity_state_value_is_sensitive(object_id, name),
+    }
+
+
+def _entity_state_payload(state: Any, metadata: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    payload: dict[str, Any] = {}
+    sensitive = bool(metadata.get("state_value_sensitive"))
+    if dataclasses.is_dataclass(state):
+        field_names = [field.name for field in dataclasses.fields(state)]
+    else:
+        field_names = list(getattr(state.__class__, "__slots__", ())) or list(getattr(state, "__dict__", {}))
+    for field_name in field_names:
+        if field_name in {"key", "device_id"} or not hasattr(state, field_name):
+            continue
+        value = getattr(state, field_name)
+        if sensitive and field_name == "state":
+            payload[field_name] = "<redacted>"
+            continue
+        payload[field_name] = _safe_device_log_value(value)
+    if not payload:
+        payload["value"] = _safe_device_log_value(str(state))
+    return payload, sensitive
+
+
+def _safe_device_log_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.name
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, bytes):
+        return {"binary_bytes": len(value)}
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _safe_device_log_value(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+            if hasattr(value, field.name)
+        }
+    if isinstance(value, dict):
+        return {
+            str(key)[:120]: _safe_device_log_value(item)
+            for key, item in list(value.items())[:50]
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_device_log_value(item) for item in list(value)[:50]]
+    return str(value)[:DEVICE_LOG_VALUE_MAX_LENGTH]
+
+
+def _entity_state_value_is_sensitive(object_id: str, name: str) -> bool:
+    normalized_object_id = re.sub(r"[^a-z0-9]+", "_", object_id.lower()).strip("_")
+    normalized_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return normalized_object_id in SENSITIVE_ENTITY_IDENTIFIERS or normalized_name in SENSITIVE_ENTITY_IDENTIFIERS
+
+
 def _cover_state_label(state: Any) -> GateState:
     operation = _enum_name_or_value(getattr(state, "current_operation", None))
     if operation in {"IS_OPENING", "OPENING", 1}:
@@ -941,6 +1156,52 @@ def _enum_name_or_value(value: Any) -> str | int | None:
         return int(value)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _device_log_relative_path(device_id: str) -> Path:
+    safe_device_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(device_id)).strip("._") or "device"
+    return Path("esphome") / f"{safe_device_id}.jsonl"
+
+
+def _should_capture_device_logs(device: dict[str, Any], cover_metadata: dict[int, dict[str, Any]]) -> bool:
+    device_label = f"{device.get('id') or ''} {device.get('name') or ''}".lower()
+    return "gate" in device_label or any(
+        metadata.get("kind") == ACCESS_DEVICE_KIND_GATE for metadata in cover_metadata.values()
+    )
+
+
+def _device_log_logger(device_id: str) -> logging.Logger:
+    relative_path = _device_log_relative_path(device_id)
+    path = settings.log_dir / relative_path
+    cache_key = str(path)
+    existing = _device_loggers.get(cache_key)
+    if existing is not None:
+        return existing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    device_logger = logging.getLogger(f"{__name__}.device.{relative_path.stem}")
+    device_logger.setLevel(logging.INFO)
+    device_logger.propagate = False
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=DEVICE_LOG_MAX_BYTES,
+        backupCount=DEVICE_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(JsonFormatter("%(asctime)s %(levelname)s %(message)s"))
+    device_logger.handlers.clear()
+    device_logger.addHandler(handler)
+    _device_loggers[cache_key] = device_logger
+    return device_logger
+
+
+def _sanitize_device_log_message(value: Any) -> str:
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value or "")
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(character if character >= " " else f"\\x{ord(character):02x}" for character in text)
+    return text.strip()[:DEVICE_LOG_MESSAGE_MAX_LENGTH]
 
 
 def _elapsed_ms(start: float, end: float) -> float:
