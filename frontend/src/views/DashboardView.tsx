@@ -737,11 +737,8 @@ export function expectedPresenceTimingLabel(person: ExpectedPresenceTooltipPerso
   if (person.evidence_days === 0) {
     return person.typical_arrival ? `Seen today at ${person.typical_arrival}` : "Seen today";
   }
-  if (person.typical_arrival && person.typical_departure) {
-    return `Usually ${person.typical_arrival}-${person.typical_departure}`;
-  }
   if (person.typical_arrival) {
-    return `Usually arrives ${person.typical_arrival}`;
+    return `Usually ${person.typical_arrival}`;
   }
   return `${person.evidence_days} routine ${person.evidence_days === 1 ? "day" : "days"}`;
 }
