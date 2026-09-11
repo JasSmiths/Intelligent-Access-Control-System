@@ -16,6 +16,52 @@ from app.services.movement_ledger import MovementLedgerRepository
 
 
 @pytest.mark.asyncio
+async def test_visitor_source_reference_uniqueness_allows_multiple_unsourced_passes():
+    from sqlalchemy.exc import IntegrityError
+    from app.models import VisitorPass
+
+    reference = 'phase1-' + uuid.uuid4().hex
+
+    def visitor(source_reference):
+        return VisitorPass(
+            visitor_name='Synthetic index regression',
+            expected_time=datetime(2026, 1, 1, tzinfo=UTC),
+            source_reference=source_reference,
+        )
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add_all([visitor(None), visitor(None), visitor(reference)])
+            await session.flush()
+            with pytest.raises(IntegrityError, match='ux_visitor_passes_source_reference'):
+                async with session.begin_nested():
+                    session.add(visitor(reference))
+                    await session.flush()
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('table', [
+    'alfred_memories', 'alfred_lessons', 'alfred_feedback', 'alfred_eval_examples',
+])
+async def test_semantic_search_can_use_migrated_hnsw_index(table):
+    from sqlalchemy import text
+
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text('SET LOCAL enable_seqscan = off'))
+            plan = await connection.execute(text(
+                f"EXPLAIN SELECT id FROM {table} WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> array_fill(0.1::real, ARRAY[1536])::vector LIMIT 5"
+            ))
+            assert f'ix_{table}_embedding_hnsw' in '\n'.join(plan.scalars())
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('reason', ['duplicate', 'ocr_noise', 'vehicle_session_already_active'])
 async def test_suppressed_movement_survives_commit_and_new_session(reason):
     repository = MovementLedgerRepository()

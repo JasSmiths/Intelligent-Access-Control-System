@@ -185,6 +185,7 @@ class VehiclePersonAssignment(Base, TimestampMixin):
     person_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("people.id", ondelete="CASCADE"),
         primary_key=True,
+        index=True,
     )
 
     vehicle: Mapped[Vehicle] = relationship(back_populates="person_assignments")
@@ -805,7 +806,7 @@ class AutomationWebhookNonce(Base, TimestampMixin):
     source_ip: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
@@ -1257,7 +1258,7 @@ class VisitorPass(Base, TimestampMixin):
         index=True,
     )
     telemetry_trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
-    source_reference: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    source_reference: Mapped[str | None] = mapped_column(String(255), index=True)
     source_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     created_by: Mapped[User | None] = relationship()
@@ -1265,6 +1266,12 @@ class VisitorPass(Base, TimestampMixin):
     departure_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[departure_event_id])
 
 
+Index(
+    "ux_visitor_passes_source_reference",
+    VisitorPass.source_reference,
+    unique=True,
+    postgresql_where=VisitorPass.source_reference.is_not(None),
+)
 Index("ix_visitor_passes_status_expected_time", VisitorPass.status, VisitorPass.expected_time)
 Index("ix_visitor_passes_number_plate_status", VisitorPass.number_plate, VisitorPass.status)
 Index("ix_visitor_passes_visitor_phone_status", VisitorPass.visitor_phone, VisitorPass.status)
@@ -1445,6 +1452,14 @@ class AlfredMemory(Base, TimestampMixin):
 
 Index("ix_alfred_memories_scope_owner_deleted", AlfredMemory.scope, AlfredMemory.owner_user_id, AlfredMemory.deleted_at)
 
+Index(
+    "ix_alfred_memories_embedding_hnsw",
+    AlfredMemory.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+    postgresql_where=AlfredMemory.embedding.is_not(None),
+)
+
 
 class AlfredLesson(Base, TimestampMixin):
     __tablename__ = "alfred_lessons"
@@ -1472,6 +1487,14 @@ class AlfredLesson(Base, TimestampMixin):
 
 
 Index("ix_alfred_lessons_scope_status_deleted", AlfredLesson.scope, AlfredLesson.status, AlfredLesson.deleted_at)
+
+Index(
+    "ix_alfred_lessons_embedding_hnsw",
+    AlfredLesson.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+    postgresql_where=AlfredLesson.embedding.is_not(None),
+)
 
 
 class AlfredFeedback(Base, TimestampMixin):
@@ -1504,6 +1527,14 @@ class AlfredFeedback(Base, TimestampMixin):
 
 Index("ix_alfred_feedback_assistant_actor", AlfredFeedback.assistant_message_id, AlfredFeedback.actor_user_id)
 
+Index(
+    "ix_alfred_feedback_embedding_hnsw",
+    AlfredFeedback.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+    postgresql_where=AlfredFeedback.embedding.is_not(None),
+)
+
 
 class AlfredEvalExample(Base, TimestampMixin):
     __tablename__ = "alfred_eval_examples"
@@ -1520,3 +1551,12 @@ class AlfredEvalExample(Base, TimestampMixin):
     embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
 
     feedback: Mapped[AlfredFeedback | None] = relationship()
+
+
+Index(
+    "ix_alfred_eval_examples_embedding_hnsw",
+    AlfredEvalExample.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+    postgresql_where=AlfredEvalExample.embedding.is_not(None),
+)
