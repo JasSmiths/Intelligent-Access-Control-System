@@ -37,12 +37,15 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 FROM base AS development
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && uv sync --locked --extra dev --no-editable --compile-bytecode \
-    && python -m playwright install --with-deps chromium
+    && python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/playwright
 
 USER iacs
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -28,13 +28,13 @@ dependencies = [
     "python-json-logger>=4.1.0",
     "redis>=7.4.0",
     "sqlalchemy[asyncio]>=2.0.49",
-    "uiprotect==15.12.2",
+    "uiprotect==16.10.0",
     "uvicorn[standard]>=0.46.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy==2.1.0",
+    "mypy==2.3.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff==0.15.12",
