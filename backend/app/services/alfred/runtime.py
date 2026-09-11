@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 DEFAULT_MODE = "v3"
 NON_AGENT_PROVIDERS = {"local"}
 

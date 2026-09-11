@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from hashlib import sha256
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
 import redis.asyncio as redis_asyncio
@@ -66,7 +66,7 @@ class AlfredMemoryService:
                 if rows:
                     await _semantic_cache_set(cache_key, rows)
                     return rows
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Vector-search failures must preserve the lexical fallback.
                 logger.info("alfred_semantic_search_failed", extra={"error": str(exc)[:180]})
         rows = await self._lexical_semantic_search(query_text, limit=bounded_limit, actor_uuid=actor_uuid)
         await _semantic_cache_set(cache_key, rows)
@@ -146,7 +146,7 @@ class AlfredMemoryService:
                 ],
                 model_name=model_name,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional memory extraction must not fail the chat turn.
             logger.info("alfred_memory_extract_failed", extra={"error": str(exc)[:180]})
             return 0
         payload = _first_json_object(result.text)
@@ -467,7 +467,7 @@ def _semantic_cache() -> redis_asyncio.Redis:
 async def _semantic_cache_get(key: str) -> list[dict[str, Any]] | None:
     try:
         raw = await _semantic_cache().get(key)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - An optional cache failure must remain a cache miss.
         logger.debug("alfred_semantic_cache_get_failed", extra={"error": str(exc)[:120]})
         return None
     if not raw:
@@ -488,7 +488,7 @@ async def _semantic_cache_set(key: str, rows: list[dict[str, Any]]) -> None:
             SEMANTIC_SEARCH_CACHE_TTL_SECONDS,
             json.dumps(rows, default=str, separators=(",", ":")),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Optional cache writes must not fail a completed search.
         logger.debug("alfred_semantic_cache_set_failed", extra={"error": str(exc)[:120]})
 
 

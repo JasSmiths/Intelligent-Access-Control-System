@@ -4,13 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai.tools import (
-    ADMIN_PERMISSION,
-    SAFETY_ADMIN_ONLY,
-    SAFETY_CONFIRMATION_REQUIRED,
-    SAFETY_LEVELS,
-    AgentTool,
-)
 from app.ai.tool_groups import (
     access_diagnostics,
     automations,
@@ -21,6 +14,13 @@ from app.ai.tool_groups import (
     schedules,
     system_operations,
     visitor_passes,
+)
+from app.ai.tools import (
+    ADMIN_PERMISSION,
+    SAFETY_ADMIN_ONLY,
+    SAFETY_CONFIRMATION_REQUIRED,
+    SAFETY_LEVELS,
+    AgentTool,
 )
 
 

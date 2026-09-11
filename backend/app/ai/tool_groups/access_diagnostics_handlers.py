@@ -5,8 +5,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.ai.tool_groups._shared import *
-from app.services.movement.sessions import GATE_OBSERVATION_PAYLOAD_KEY, datetime_from_payload as _datetime_from_agent_value
+from app.services.movement.sessions import GATE_OBSERVATION_PAYLOAD_KEY
+from app.services.movement.sessions import datetime_from_payload as _datetime_from_agent_value
+
 
 def _answer_fact(fact_id: str, label: str, value: Any, display_value: Any, kind: str, source: str, *, must_appear: bool = False, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {"id": fact_id, "label": label, "value": value, "display_value": str(display_value), "kind": kind, "source": source, "must_appear": must_appear}
@@ -261,7 +265,7 @@ def _alert_snapshot_for_agent(anomaly: Anomaly) -> dict[str, Any] | None:
     snapshot = None
     try:
         snapshot = alert_snapshot_metadata(anomaly)
-    except Exception:
+    except (AttributeError, OSError, TypeError, ValueError, SQLAlchemyError):
         snapshot = None
     if not snapshot and isinstance(getattr(anomaly, "context", None), dict):
         raw_snapshot = anomaly.context.get("snapshot")
@@ -286,7 +290,7 @@ def _alert_snapshot_file(anomaly: Anomaly) -> tuple[Any, str, dict[str, Any]] | 
     snapshot = None
     try:
         snapshot = alert_snapshot_metadata(anomaly)
-    except Exception:
+    except (AttributeError, OSError, TypeError, ValueError, SQLAlchemyError):
         snapshot = None
     if not isinstance(snapshot, dict):
         return None
@@ -297,7 +301,7 @@ def _alert_snapshot_file(anomaly: Anomaly) -> tuple[Any, str, dict[str, Any]] | 
     elif getattr(anomaly, "event", None) and getattr(anomaly.event, "snapshot_path", None):
         try:
             path = get_snapshot_manager().resolve_path(anomaly.event.snapshot_path)
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             path = None
     if not path or not path.exists():
         return None
@@ -875,7 +879,7 @@ async def _notification_diagnostics_for_event(
             if rule.is_active:
                 try:
                     conditions_matched = await notification_service.conditions_match(rule, context)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Rule evaluation must report failure without aborting diagnostics.
                     conditions_matched = False
                     condition_error = str(exc)
             rule_rows.append(
@@ -1266,7 +1270,7 @@ def _human_duration(duration: timedelta) -> str:
         return f"{hours}h"
     return f"{minutes}m"
 
-def _human_duration_natural(duration: timedelta | int | float) -> str:
+def _human_duration_natural(duration: timedelta | float) -> str:
     seconds = int(duration.total_seconds()) if isinstance(duration, timedelta) else int(duration)
     minutes_total = max(0, (seconds + 30) // 60)
     hours, minutes = divmod(minutes_total, 60)
@@ -1760,7 +1764,7 @@ async def analyze_alert_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
             image_bytes=await asyncio.to_thread(path.read_bytes),
             mime_type=content_type,
         )
-    except (ImageAnalysisUnsupportedError, Exception) as exc:
+    except Exception as exc:  # noqa: BLE001 - Provider failures must become failed tool results.
         return {"alert_id": str(alert_id), "provider": provider, "error": str(exc)}
 
     return {

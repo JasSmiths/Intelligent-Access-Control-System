@@ -49,7 +49,7 @@ async def generate_embedding(text: str, *, purpose: str = "alfred_semantic_memor
             return await _ollama_embedding(runtime, normalized, purpose=purpose)
         if provider == "local":
             return _local_embedding(normalized, dimension=ALFRED_EMBEDDING_DIMENSION)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Optional embedding providers must fall back to no embedding.
         logger.info(
             "alfred_embedding_generation_failed",
             extra={"provider": provider, "purpose": purpose, "error": str(exc)[:180]},

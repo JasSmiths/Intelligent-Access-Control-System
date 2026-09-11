@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AgentTool,
-    NOTIFICATION_ACTION_SCHEMA,
-    NOTIFICATION_CONDITION_SCHEMA,
-    NOTIFICATION_RULE_LOOKUP_PROPERTIES,
-    NOTIFICATION_RULE_PAYLOAD_SCHEMA,
-)
+from app.ai.tool_groups.metadata import apply_group_metadata
 from app.ai.tool_groups.notifications_handlers import (
     create_notification_workflow,
     delete_notification_workflow,
@@ -19,8 +13,13 @@ from app.ai.tool_groups.notifications_handlers import (
     test_notification_workflow,
     update_notification_workflow,
 )
-from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import (
+    NOTIFICATION_ACTION_SCHEMA,
+    NOTIFICATION_CONDITION_SCHEMA,
+    NOTIFICATION_RULE_LOOKUP_PROPERTIES,
+    NOTIFICATION_RULE_PAYLOAD_SCHEMA,
+    AgentTool,
+)
 
 TOOL_CATEGORIES = {
     "query_notification_catalog": ("Notifications",),

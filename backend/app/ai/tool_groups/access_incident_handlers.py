@@ -2,7 +2,18 @@
 # ruff: noqa: F403, F405
 
 from app.ai.tool_groups._shared import *
-from app.ai.tool_groups.access_diagnostics_handlers import _access_event_core_fields, _access_event_load_options, _agent_time_fields, _datetime_from_agent_value, _gate_observation_from_event, _period_bounds, _serialize_lpr_timing_observation, _trace_id_from_access_event, _vehicle_agent_payload, diagnose_access_event
+from app.ai.tool_groups.access_diagnostics_handlers import (
+    _access_event_core_fields,
+    _access_event_load_options,
+    _agent_time_fields,
+    _datetime_from_agent_value,
+    _gate_observation_from_event,
+    _period_bounds,
+    _serialize_lpr_timing_observation,
+    _trace_id_from_access_event,
+    _vehicle_agent_payload,
+    diagnose_access_event,
+)
 from app.services.movement.sessions import VEHICLE_SESSION_PAYLOAD_KEY
 
 SUPPRESSED_READ_ROOT_CAUSES = {
@@ -1126,9 +1137,12 @@ async def _backfill_candidate(session, arguments: dict[str, Any], config: Any) -
     decision = _normalize(arguments.get("decision"))
     if decision not in {"granted", "denied"}:
         decision = "denied" if direction == "denied" or not (person_id or vehicle_id) else "granted"
-    if decision == "granted" and not (summary.get("person_id") or summary.get("vehicle_id")):
-        if not (person_id or vehicle_id):
-            return {"error": "A granted backfill requires a resolved active person or vehicle."}
+    if (
+        decision == "granted"
+        and not (summary.get("person_id") or summary.get("vehicle_id"))
+        and not (person_id or vehicle_id)
+    ):
+        return {"error": "A granted backfill requires a resolved active person or vehicle."}
     schedule_evaluation = None
     downgraded_reason = None
     if decision == "granted":

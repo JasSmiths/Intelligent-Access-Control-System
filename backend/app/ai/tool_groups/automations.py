@@ -2,13 +2,6 @@
 
 from __future__ import annotations
 
-from app.ai.tools import (
-    AUTOMATION_ACTION_SCHEMA,
-    AUTOMATION_CONDITION_SCHEMA,
-    AUTOMATION_RULE_LOOKUP_PROPERTIES,
-    AUTOMATION_TRIGGER_SCHEMA,
-    AgentTool,
-)
 from app.ai.tool_groups.automations_handlers import (
     create_automation,
     delete_automation,
@@ -20,7 +13,13 @@ from app.ai.tool_groups.automations_handlers import (
     query_automations,
 )
 from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import (
+    AUTOMATION_ACTION_SCHEMA,
+    AUTOMATION_CONDITION_SCHEMA,
+    AUTOMATION_RULE_LOOKUP_PROPERTIES,
+    AUTOMATION_TRIGGER_SCHEMA,
+    AgentTool,
+)
 
 TOOL_CATEGORIES = {
     "query_automation_catalog": ("Automations", "Notifications", "Gate_Hardware", "Maintenance"),

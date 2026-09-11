@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 from typing import Any
-from app.ai.tool_groups.access_diagnostics_handlers import calculate_visit_duration, query_access_events
-from app.ai.tool_groups.general_handlers import query_presence
 
 from app.ai.tool_groups._shared import *
+from app.ai.tool_groups.access_diagnostics_handlers import (
+    calculate_visit_duration,
+    query_access_events,
+)
+from app.ai.tool_groups.general_handlers import query_presence
 
 
 def _filename_slug(value: str) -> str:
@@ -102,7 +105,7 @@ async def analyze_camera_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
             image_bytes=media.content,
             mime_type=media.content_type,
         )
-    except (UnifiProtectError, ImageAnalysisUnsupportedError, Exception) as exc:
+    except Exception as exc:  # noqa: BLE001 - Camera and model provider failures must become failed tool results.
         return {"camera": camera_identifier, "provider": provider, "error": str(exc)}
 
     return {
@@ -146,7 +149,7 @@ async def read_chat_attachment(arguments: dict[str, Any]) -> dict[str, Any]:
                 image_bytes=image_bytes,
                 mime_type=attachment.content_type,
             )
-        except (ChatAttachmentError, ImageAnalysisUnsupportedError, Exception) as exc:
+        except Exception as exc:  # noqa: BLE001 - Attachment analysis failures must become per-file errors.
             return {
                 "file_id": file_id,
                 "filename": attachment.filename,
@@ -331,7 +334,7 @@ async def get_camera_snapshot(arguments: dict[str, Any]) -> dict[str, Any]:
             source="system_media",
             session_id=session_id or None,
         )
-    except (UnifiProtectError, ChatAttachmentError, Exception) as exc:
+    except Exception as exc:  # noqa: BLE001 - Camera fetch failures must return fetched=False.
         return {"fetched": False, "camera": camera_identifier, "error": str(exc)}
 
     return {

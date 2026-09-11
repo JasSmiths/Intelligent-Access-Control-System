@@ -396,7 +396,7 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     if pass_type == VisitorPassType.DURATION and payload.get("visitor_phone"):
         try:
             await get_whatsapp_messaging_service().send_visitor_pass_outreach(visitor_pass)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional outreach must not undo an already-created visitor pass.
             logger.warning(
                 "alfred_visitor_pass_whatsapp_outreach_failed",
                 extra={"visitor_pass_id": payload["id"], "error": str(exc)[:240]},

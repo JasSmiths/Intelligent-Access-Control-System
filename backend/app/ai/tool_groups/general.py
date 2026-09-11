@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
 from app.ai.tool_groups.general_handlers import (
     get_system_users,
     query_presence,
     resolve_human_entity,
 )
 from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "resolve_human_entity": ("General",),

@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.services.type_helpers import as_dict
 
-
 AnswerDomain = Literal["access_logs", "alerts", "visitor_passes", "schedules", "general"]
 
 
@@ -141,7 +140,7 @@ def select_answer_artifacts(artifacts: list[AnswerArtifact]) -> list[AnswerArtif
     answer_types = {artifact.answer_type for _index, artifact in selected}
     if len(domains) == 1 and len(answer_types) <= 2:
         return [artifact for _index, artifact in sorted(selected, key=lambda item: item[0])]
-    first_index, first_artifact = min(selected, key=lambda item: item[0])
+    _first_index, first_artifact = min(selected, key=lambda item: item[0])
     return [first_artifact]
 
 

@@ -3,7 +3,6 @@
 Concrete tool handlers live beside their group catalogs; this module keeps the
 cross-domain utilities they still share during the V2 reduction pass.
 """
-# ruff: noqa: F401
 
 from __future__ import annotations
 
@@ -11,24 +10,26 @@ import asyncio
 import csv
 import io
 import re
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
-from typing import Any, Awaitable, Callable
+from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
-    AutomationRule,
-    AuditLog,
     Anomaly,
+    AuditLog,
+    AutomationRule,
     GateStateObservation,
     NotificationRule,
     Person,
@@ -41,27 +42,49 @@ from app.models import (
     Vehicle,
     VisitorPass,
 )
-from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification, VisitorPassStatus, VisitorPassType
-from app.ai.providers import ImageAnalysisUnsupportedError, analyze_image_with_provider
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+    PresenceState,
+    TimingClassification,
+    VisitorPassStatus,
+    VisitorPassType,
+)
+from app.modules.dvla.vehicle_enquiry import (
+    DvlaVehicleEnquiryError,
+    display_vehicle_record,
+    normalize_registration_number,
+)
 from app.modules.home_assistant.covers import cover_entity_state_payload
-from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
-from app.modules.unifi_protect.client import UnifiProtectError
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
-from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
-from app.services.auth_secret_management import AuthSecretRotationError, auth_secret_security_status, rotate_auth_secret
+from app.modules.unifi_protect.client import UnifiProtectError
 from app.services.access_events import get_access_event_service
-from app.services.snapshots import alert_snapshot_metadata, alert_snapshot_path
+from app.services.alfred.answer_contracts import artifact_payload
+from app.services.auth_secret_management import (
+    AuthSecretRotationError,
+    auth_secret_security_status,
+    rotate_auth_secret,
+)
 from app.services.automations import (
     AutomationError,
     get_automation_service,
+)
+from app.services.automations import (
     normalize_actions as normalize_automation_actions,
+)
+from app.services.automations import (
     normalize_conditions as normalize_automation_conditions,
+)
+from app.services.automations import (
     normalize_triggers as normalize_automation_triggers,
+)
+from app.services.automations import (
     serialize_rule as serialize_automation_rule,
 )
-from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
+from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.dependency_updates import DependencyUpdateError, get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
+from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.home_assistant import get_home_assistant_service
@@ -70,7 +93,11 @@ from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.maintenance import (
     get_status as get_maintenance_mode_status,
+)
+from app.services.maintenance import (
     is_maintenance_mode_active,
+)
+from app.services.maintenance import (
     set_mode as set_maintenance_mode,
 )
 from app.services.notifications import (
@@ -82,19 +109,33 @@ from app.services.notifications import (
     sample_notification_context,
 )
 from app.services.schedules import (
-    evaluate_schedule_id,
     evaluate_person_schedule,
+    evaluate_schedule_id,
     evaluate_vehicle_schedule,
     normalize_time_blocks,
-    schedule_dependencies,
     schedule_allows_at,
+    schedule_dependencies,
 )
-from app.services.settings import UnknownDynamicSettingsError, get_runtime_config, list_settings, update_settings
-from app.services.snapshots import get_snapshot_manager
-from app.services.unifi_protect import get_unifi_protect_service
-from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_ACCESS, TELEMETRY_CATEGORY_WEBHOOKS_API, telemetry, write_audit_log
+from app.services.settings import (
+    UnknownDynamicSettingsError,
+    get_runtime_config,
+    list_settings,
+    update_settings,
+)
+from app.services.snapshots import (
+    alert_snapshot_metadata,
+    alert_snapshot_path,
+    get_snapshot_manager,
+)
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_ACCESS,
+    TELEMETRY_CATEGORY_ALFRED,
+    TELEMETRY_CATEGORY_WEBHOOKS_API,
+    telemetry,
+    write_audit_log,
+)
 from app.services.type_helpers import as_dict, as_dict_list, as_list
-from app.services.alfred.answer_contracts import artifact_payload
+from app.services.unifi_protect import get_unifi_protect_service
 from app.services.visitor_passes import (
     DEFAULT_WINDOW_MINUTES,
     VisitorPassError,
@@ -104,7 +145,7 @@ from app.services.visitor_passes import (
 from app.services.whatsapp_messaging import get_whatsapp_messaging_service
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context", default={})
+CHAT_TOOL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("chat_tool_context")
 logger = get_logger(__name__)
 DEFAULT_AGENT_TIMEZONE = "Europe/London"
 SAFETY_READ_ONLY = "read_only"
@@ -587,7 +628,7 @@ def _parse_agent_datetime(value: Any, timezone_name: str) -> datetime:
     if not value:
         return _agent_now(timezone_name)
     text = str(value).strip()
-    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_agent_timezone(timezone_name))
     return parsed.astimezone(_agent_timezone(timezone_name))
@@ -612,7 +653,7 @@ def _optional_text(value: Any) -> str | None:
 def _agent_timezone(timezone_name: str | None = None) -> ZoneInfo:
     try:
         return ZoneInfo(str(timezone_name or DEFAULT_AGENT_TIMEZONE))
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo(DEFAULT_AGENT_TIMEZONE)
 
 
@@ -656,169 +697,169 @@ def _compact_time_label(display_value: Any) -> str:
 
 
 __all__ = (
-    "asyncio",
-    "csv",
-    "io",
-    "re",
-    "ContextVar",
-    "Token",
+    "ADMIN_PERMISSION",
+    "AUTOMATION_ACTION_SCHEMA",
+    "AUTOMATION_CONDITION_SCHEMA",
+    "AUTOMATION_RULE_LOOKUP_PROPERTIES",
+    "AUTOMATION_RULE_PAYLOAD_SCHEMA",
+    "AUTOMATION_TRIGGER_SCHEMA",
+    "CHAT_TOOL_CONTEXT",
+    "DEFAULT_AGENT_TIMEZONE",
+    "DEFAULT_WINDOW_MINUTES",
+    "LARGE_PAYLOAD_KEY_MARKERS",
+    "NOTIFICATION_ACTION_SCHEMA",
+    "NOTIFICATION_CONDITION_SCHEMA",
+    "NOTIFICATION_RULE_LOOKUP_PROPERTIES",
+    "NOTIFICATION_RULE_PAYLOAD_SCHEMA",
+    "SAFETY_ADMIN_ONLY",
+    "SAFETY_CONFIRMATION_REQUIRED",
+    "SAFETY_LEVELS",
+    "SAFETY_READ_ONLY",
+    "SCHEDULE_LOOKUP_PROPERTIES",
+    "SCHEDULE_TIME_BLOCKS_SCHEMA",
+    "SECRET_OR_INTERNAL_KEY_MARKERS",
+    "TELEMETRY_CATEGORY_ACCESS",
+    "TELEMETRY_CATEGORY_ALFRED",
+    "TELEMETRY_CATEGORY_WEBHOOKS_API",
     "UTC",
-    "datetime",
-    "timedelta",
-    "SequenceMatcher",
+    "UUID",
+    "AccessDecision",
+    "AccessDirection",
+    "AccessEvent",
+    "Anomaly",
     "Any",
+    "AsyncSessionLocal",
+    "AuditLog",
+    "AuthSecretRotationError",
+    "AutomationError",
+    "AutomationRule",
     "Awaitable",
     "Callable",
-    "UUID",
-    "ZoneInfo",
-    "func",
-    "or_",
-    "select",
-    "IntegrityError",
-    "selectinload",
-    "get_logger",
-    "AsyncSessionLocal",
-    "AccessEvent",
-    "AutomationRule",
-    "AuditLog",
-    "Anomaly",
+    "ChatAttachmentError",
+    "ContextVar",
+    "DependencyUpdateError",
+    "DvlaVehicleEnquiryError",
     "GateStateObservation",
+    "ICloudCalendarError",
+    "ImageAnalysisUnsupportedError",
+    "IntegrityError",
+    "NotificationContext",
+    "NotificationDeliveryError",
     "NotificationRule",
     "Person",
     "Presence",
+    "PresenceState",
     "Schedule",
     "ScheduleOverride",
+    "SequenceMatcher",
     "TelemetrySpan",
     "TelemetryTrace",
+    "TimingClassification",
+    "Token",
+    "ToolHandler",
+    "UnifiProtectError",
+    "UnknownDynamicSettingsError",
     "User",
     "Vehicle",
     "VisitorPass",
-    "AccessDecision",
-    "AccessDirection",
-    "PresenceState",
-    "TimingClassification",
+    "VisitorPassError",
     "VisitorPassStatus",
     "VisitorPassType",
-    "ImageAnalysisUnsupportedError",
-    "analyze_image_with_provider",
-    "cover_entity_state_payload",
-    "DvlaVehicleEnquiryError",
-    "display_vehicle_record",
-    "normalize_registration_number",
-    "UnifiProtectError",
-    "NotificationContext",
-    "NotificationDeliveryError",
-    "ChatAttachmentError",
-    "chat_attachment_store",
-    "AuthSecretRotationError",
-    "auth_secret_security_status",
-    "rotate_auth_secret",
-    "get_access_event_service",
-    "alert_snapshot_metadata",
-    "alert_snapshot_path",
-    "AutomationError",
-    "get_automation_service",
-    "normalize_automation_actions",
-    "normalize_automation_conditions",
-    "normalize_automation_triggers",
-    "serialize_automation_rule",
-    "lookup_vehicle_registration",
-    "normalize_vehicle_enquiry_response",
-    "DependencyUpdateError",
-    "get_dependency_update_service",
-    "get_discord_messaging_service",
-    "event_bus",
-    "get_gate_malfunction_service",
-    "get_home_assistant_service",
-    "ICloudCalendarError",
-    "get_icloud_calendar_service",
-    "get_leaderboard_service",
-    "get_lpr_timing_recorder",
-    "get_maintenance_mode_status",
-    "is_maintenance_mode_active",
-    "set_maintenance_mode",
-    "get_notification_service",
-    "normalize_actions",
-    "normalize_conditions",
-    "normalize_rule_payload",
-    "notification_context_from_payload",
-    "sample_notification_context",
-    "evaluate_schedule_id",
-    "evaluate_person_schedule",
-    "evaluate_vehicle_schedule",
-    "normalize_time_blocks",
-    "schedule_dependencies",
-    "schedule_allows_at",
-    "UnknownDynamicSettingsError",
-    "get_runtime_config",
-    "list_settings",
-    "update_settings",
-    "get_snapshot_manager",
-    "get_unifi_protect_service",
-    "TELEMETRY_CATEGORY_ALFRED",
-    "TELEMETRY_CATEGORY_ACCESS",
-    "TELEMETRY_CATEGORY_WEBHOOKS_API",
-    "telemetry",
-    "write_audit_log",
-    "as_dict",
-    "as_dict_list",
-    "as_list",
-    "artifact_payload",
-    "DEFAULT_WINDOW_MINUTES",
-    "VisitorPassError",
-    "get_visitor_pass_service",
-    "serialize_visitor_pass",
-    "get_whatsapp_messaging_service",
-    "ToolHandler",
-    "CHAT_TOOL_CONTEXT",
-    "logger",
-    "DEFAULT_AGENT_TIMEZONE",
-    "SAFETY_READ_ONLY",
-    "SAFETY_CONFIRMATION_REQUIRED",
-    "SAFETY_ADMIN_ONLY",
-    "SAFETY_LEVELS",
-    "ADMIN_PERMISSION",
-    "SCHEDULE_TIME_BLOCKS_SCHEMA",
-    "SCHEDULE_LOOKUP_PROPERTIES",
-    "NOTIFICATION_RULE_LOOKUP_PROPERTIES",
-    "NOTIFICATION_CONDITION_SCHEMA",
-    "NOTIFICATION_ACTION_SCHEMA",
-    "NOTIFICATION_RULE_PAYLOAD_SCHEMA",
-    "AUTOMATION_RULE_LOOKUP_PROPERTIES",
-    "AUTOMATION_TRIGGER_SCHEMA",
-    "AUTOMATION_CONDITION_SCHEMA",
-    "AUTOMATION_ACTION_SCHEMA",
-    "AUTOMATION_RULE_PAYLOAD_SCHEMA",
-    "set_chat_tool_context",
-    "get_chat_tool_context",
-    "_chat_context_user",
-    "_require_admin_user",
-    "_schedule_answer_artifacts",
+    "ZoneInfo",
+    "_agent_datetime",
+    "_agent_datetime_display",
+    "_agent_datetime_iso",
+    "_agent_now",
+    "_agent_timezone",
     "_bounded_int",
+    "_chat_context_user",
+    "_compact_observation",
+    "_compact_time_label",
+    "_compact_value",
+    "_cover_entities_by_kind",
+    "_cover_match_key",
+    "_cover_target_match_score",
+    "_entity_match_key",
+    "_entity_match_score",
+    "_normalize",
+    "_optional_text",
+    "_parse_agent_datetime",
+    "_payload_summary",
     "_person_map",
     "_person_match_key",
     "_person_record_matches",
-    "_entity_match_key",
-    "_entity_match_score",
-    "SECRET_OR_INTERNAL_KEY_MARKERS",
-    "LARGE_PAYLOAD_KEY_MARKERS",
-    "_compact_observation",
-    "_compact_value",
-    "_strip_empty",
-    "_payload_summary",
-    "_resolve_cover_target",
-    "_cover_target_match_score",
-    "_cover_match_key",
-    "_cover_entities_by_kind",
-    "_parse_agent_datetime",
-    "_uuid_from_value",
-    "_optional_text",
-    "_agent_timezone",
-    "_agent_now",
-    "_agent_datetime",
-    "_agent_datetime_iso",
-    "_agent_datetime_display",
-    "_normalize",
     "_preferred_subject_label",
-    "_compact_time_label",
+    "_require_admin_user",
+    "_resolve_cover_target",
+    "_schedule_answer_artifacts",
+    "_strip_empty",
+    "_uuid_from_value",
+    "alert_snapshot_metadata",
+    "alert_snapshot_path",
+    "analyze_image_with_provider",
+    "artifact_payload",
+    "as_dict",
+    "as_dict_list",
+    "as_list",
+    "asyncio",
+    "auth_secret_security_status",
+    "chat_attachment_store",
+    "cover_entity_state_payload",
+    "csv",
+    "datetime",
+    "display_vehicle_record",
+    "evaluate_person_schedule",
+    "evaluate_schedule_id",
+    "evaluate_vehicle_schedule",
+    "event_bus",
+    "func",
+    "get_access_event_service",
+    "get_automation_service",
+    "get_chat_tool_context",
+    "get_dependency_update_service",
+    "get_discord_messaging_service",
+    "get_gate_malfunction_service",
+    "get_home_assistant_service",
+    "get_icloud_calendar_service",
+    "get_leaderboard_service",
+    "get_logger",
+    "get_lpr_timing_recorder",
+    "get_maintenance_mode_status",
+    "get_notification_service",
+    "get_runtime_config",
+    "get_snapshot_manager",
+    "get_unifi_protect_service",
+    "get_visitor_pass_service",
+    "get_whatsapp_messaging_service",
+    "io",
+    "is_maintenance_mode_active",
+    "list_settings",
+    "logger",
+    "lookup_vehicle_registration",
+    "normalize_actions",
+    "normalize_automation_actions",
+    "normalize_automation_conditions",
+    "normalize_automation_triggers",
+    "normalize_conditions",
+    "normalize_registration_number",
+    "normalize_rule_payload",
+    "normalize_time_blocks",
+    "normalize_vehicle_enquiry_response",
+    "notification_context_from_payload",
+    "or_",
+    "re",
+    "rotate_auth_secret",
+    "sample_notification_context",
+    "schedule_allows_at",
+    "schedule_dependencies",
+    "select",
+    "selectinload",
+    "serialize_automation_rule",
+    "serialize_visitor_pass",
+    "set_chat_tool_context",
+    "set_maintenance_mode",
+    "telemetry",
+    "timedelta",
+    "update_settings",
+    "write_audit_log",
 )

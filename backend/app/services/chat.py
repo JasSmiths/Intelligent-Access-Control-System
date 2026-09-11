@@ -22,13 +22,6 @@ from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import ChatMessage, ChatSession, Person, User, Vehicle
-from app.services.alfred.executor import can_execute_parallel
-from app.services.alfred.feedback import alfred_feedback_service
-from app.services.alfred.memory import alfred_memory_service
-from app.services.alfred.permissions import filter_tools_for_actor, validate_tool_call
-from app.services.alfred.planner import PlannerSelection, ToolCallPlan, plan_with_llm, tools_for_selection
-from app.services.alfred.runtime import agent_status_payload, provider_agent_capability
-from app.services.alfred.streaming import emit_agent_state
 from app.services.alfred.answer_contracts import (
     ANSWER_DRAFT_RESPONSE_SCHEMA,
     AnswerDraft,
@@ -40,6 +33,18 @@ from app.services.alfred.answer_contracts import (
     select_answer_artifacts,
     verify_answer_draft,
 )
+from app.services.alfred.executor import can_execute_parallel
+from app.services.alfred.feedback import alfred_feedback_service
+from app.services.alfred.memory import alfred_memory_service
+from app.services.alfred.permissions import filter_tools_for_actor, validate_tool_call
+from app.services.alfred.planner import (
+    PlannerSelection,
+    ToolCallPlan,
+    plan_with_llm,
+    tools_for_selection,
+)
+from app.services.alfred.runtime import agent_status_payload, provider_agent_capability
+from app.services.alfred.streaming import emit_agent_state
 from app.services.chat_attachments import ChatAttachmentError, chat_attachment_store
 from app.services.chat_contracts import (
     CHAT_FILE_LINK_PATTERN,
@@ -60,7 +65,12 @@ from app.services.chat_contracts import (
 )
 from app.services.event_bus import event_bus
 from app.services.settings import SECRET_KEYS, get_runtime_config
-from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log, sanitize_payload
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_ALFRED,
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    emit_audit_log,
+    sanitize_payload,
+)
 from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
@@ -249,7 +259,7 @@ class ChatService:
                     call,
                     status_callback=status_callback,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Confirmed tool failures must produce a failed result, never success.
                 logger.warning(
                     "agent_confirmation_execution_failed",
                     extra={"tool": tool_name, "error": str(exc)[:240]},
@@ -295,8 +305,8 @@ class ChatService:
                         actor_context=actor_context,
                         status_callback=status_callback,
                     )
-                    result_text = resumed.text if isinstance(resumed, LlmResult) else resumed.text
-                except Exception as exc:
+                    result_text = resumed.text
+                except Exception as exc:  # noqa: BLE001 - Resume failures must retain the audited tool result.
                     logger.info("agent_confirmation_resume_failed", extra={"tool": tool_name, "error": str(exc)[:240]})
                     result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
         finally:
@@ -543,7 +553,7 @@ class ChatService:
                     limit=5,
                     actor_id=str(user.get("id") or "") or None,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Optional semantic context must not block the planner.
                 logger.info("alfred_semantic_context_failed", extra={"error": str(exc)[:180]})
                 relevant_past_lessons = []
         visible_tools = filter_tools_for_actor(self._tools.values(), actor_context)
@@ -574,7 +584,7 @@ class ChatService:
             )
             if selection.llm_usage_summary:
                 llm_usage_summaries.append(selection.llm_usage_summary)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Every planner failure must stop execution and fail closed.
             logger.warning(
                 "alfred_v3_planner_failed_closed",
                 extra={"provider": provider.name, "error": str(exc)[:240]},
@@ -743,7 +753,7 @@ class ChatService:
                     active_tool_calls=0,
                 )
                 return await self._provider_error_response(session_uuid, provider.name, exc, user_message_id=user_message_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Provider failures must produce an explicit error response.
                 logger.warning(
                     "llm_provider_failed",
                     extra={"provider": provider.name, "error": str(exc)},
@@ -770,7 +780,7 @@ class ChatService:
                     artifacts=answer_artifacts,
                     status_callback=status_callback,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Every answer-composer failure must fail closed.
                 logger.warning(
                     "alfred_answer_composer_failed_closed",
                     extra={"provider": provider.name, "error": str(exc)[:240]},
@@ -1238,9 +1248,10 @@ class ChatService:
         actor_context: dict[str, Any] | None,
     ) -> ToolCall | None:
         tool = selected_by_name.get(plan.name)
-        if not tool or not tool.read_only or tool.requires_confirmation:
-            if not tool or not tool.requires_confirmation:
-                return None
+        if (not tool or not tool.read_only or tool.requires_confirmation) and (
+            not tool or not tool.requires_confirmation
+        ):
+            return None
         denial = validate_tool_call(
             plan.name,
             selected_tool_names=selected_names,
@@ -1439,7 +1450,7 @@ class ChatService:
                 "call_id": result.get("call_id"),
                 "name": result.get("name"),
                 "arguments": self._compact_prompt_value(result.get("arguments") if isinstance(result.get("arguments"), dict) else {}),
-                "output": self._compact_prompt_value(result.get("output") if isinstance(result.get("output"), dict) else result.get("output")),
+                "output": self._compact_prompt_value(result.get("output")),
             }
             for result in tool_results
         ]
@@ -1712,7 +1723,7 @@ class ChatService:
                 max_output_tokens=350,
                 request_purpose="alfred.answer_draft",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional drafting failures must preserve the artifact fallback.
             logger.info(
                 "alfred_answer_composer_failed",
                 extra={"provider": getattr(provider, "name", ""), "error": str(exc)[:180]},
@@ -2278,7 +2289,7 @@ class ChatService:
                 done.result()
             except asyncio.CancelledError:
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Consume and log optional background-memory failures.
                 logger.info("alfred_memory_remember_task_failed", extra={"error": str(exc)[:180]})
 
         task.add_done_callback(_log_failure)
@@ -2369,7 +2380,7 @@ class ChatService:
                     ),
                     timeout=tool_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 message = f"Timed out after {tool_timeout:g} seconds."
                 logger.warning("agent_tool_timed_out", extra={"tool": call.name, "timeout_seconds": tool_timeout})
                 if status_callback:
@@ -2391,7 +2402,7 @@ class ChatService:
                     "arguments": call.arguments,
                     "output": {"error": message},
                 }
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - All tool failures must become explicit failed batch results.
                 logger.warning("agent_tool_failed", extra={"tool": call.name, "error": str(exc)[:240]})
                 if status_callback:
                     await status_callback(
@@ -2570,7 +2581,7 @@ class ChatService:
 
     def _pending_action_expired(self, pending: dict[str, Any]) -> bool:
         try:
-            expires_at = datetime.fromisoformat(str(pending.get("expires_at")).replace("Z", "+00:00"))
+            expires_at = datetime.fromisoformat(str(pending.get("expires_at")))
         except (TypeError, ValueError):
             return True
         if expires_at.tzinfo is None:

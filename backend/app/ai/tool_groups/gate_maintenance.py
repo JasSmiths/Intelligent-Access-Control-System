@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
 from app.ai.tool_groups.gate_maintenance_handlers import (
     disable_maintenance_mode,
     enable_maintenance_mode,
@@ -16,7 +15,7 @@ from app.ai.tool_groups.gate_maintenance_handlers import (
     trigger_manual_malfunction_override,
 )
 from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "query_device_states": ("Gate_Hardware", "General"),

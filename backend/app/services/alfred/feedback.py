@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-import asyncio
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -256,7 +256,7 @@ class AlfredFeedbackService:
             task.result()
         except asyncio.CancelledError:
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Consume and log background-task failures.
             logger.info("alfred_reflection_failed", extra={"error": str(exc)[:240]})
 
     async def reflect_on_turn(
@@ -307,7 +307,7 @@ class AlfredFeedbackService:
                 ],
                 model_name=model_name,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional reflection must not fail the completed chat turn.
             logger.info("alfred_reflection_provider_failed", extra={"error": str(exc)[:180]})
             return None
         payload = _first_json_object(result.text)
@@ -513,7 +513,7 @@ class AlfredFeedbackService:
     def _log_processing_failure(self, task: asyncio.Task) -> None:
         try:
             task.result()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Consume and log background feedback-task failures.
             logger.warning("alfred_feedback_processing_failed", extra={"error": str(exc)[:240]})
 
     async def process_feedback(self, feedback_id: uuid.UUID | str) -> dict[str, Any] | None:
@@ -856,7 +856,7 @@ class AlfredFeedbackService:
                 ],
                 model_name=model_name,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Keep saved feedback when optional model analysis fails.
             logger.info("alfred_feedback_analysis_failed", extra={"error": str(exc)[:180]})
             return {
                 "summary": "Feedback stored, but LLM analysis failed.",
@@ -1545,7 +1545,7 @@ def _coerce_uuid(value: Any) -> uuid.UUID | None:
 def _first_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
-    candidates = [match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.I | re.S)]
+    candidates = [match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)]
     candidates.append(text.strip())
     for candidate in candidates:
         start = candidate.find("{")

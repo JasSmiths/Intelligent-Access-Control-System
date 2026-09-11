@@ -68,7 +68,7 @@ async def test_integration_connection(arguments: dict[str, Any]) -> dict[str, An
             result = {"configured": bool(runtime.dvla_api_key), "endpoint": runtime.dvla_vehicle_enquiry_url}
         else:
             return {"tested": False, "integration": integration, "error": "Unknown integration."}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Integration provider failures must return ok=False.
         return {"tested": True, "integration": integration, "ok": False, "error": str(exc)[:500]}
     return {"tested": True, "integration": integration, "ok": not bool(result.get("error")), "result": result}
 
@@ -96,7 +96,7 @@ async def update_system_settings(arguments: dict[str, Any]) -> dict[str, Any]:
             "confirmation_field": "confirm",
             "target": "System Settings",
             "detail": f"Update {len(values)} setting(s)? Secrets stay redacted, but this can change live IACS behavior.",
-            "setting_keys": sorted(str(key) for key in values.keys()),
+            "setting_keys": sorted(str(key) for key in values),
         }
     try:
         rows = await update_settings(values)
@@ -107,7 +107,7 @@ async def update_system_settings(arguments: dict[str, Any]) -> dict[str, Any]:
             "unknown_keys": exc.unknown_keys,
             "allowed_keys": exc.allowed_keys,
         }
-    changed_keys = sorted(str(key) for key in values.keys())
+    changed_keys = sorted(str(key) for key in values)
     return {
         "updated": True,
         "changed_keys": changed_keys,

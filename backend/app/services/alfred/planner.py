@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable
+from typing import Any
 
 from app.ai.providers import ChatMessageInput
-from app.ai.tools import AgentTool
 from app.ai.tool_groups.metadata import domain_summary
+from app.ai.tools import AgentTool
 from app.services.chat_contracts import SUPPORTED_INTENTS
 from app.services.type_helpers import as_dict, as_list
-
 
 PLANNED_PREVIEW_TOOL_NAMES = {
     "calculate_absence_duration",
@@ -228,7 +228,7 @@ async def plan_with_llm(
     )
     payload = _first_json_object(result.text)
     if not isinstance(payload, dict):
-        raise ValueError("Alfred v3 planner returned invalid JSON.")
+        raise ValueError("Alfred v3 planner returned invalid JSON.")  # noqa: TRY004 - Malformed provider output is an invalid value, not a caller type error.
     selection = parse_planner_selection(payload, tools)
     if result.usage_summary:
         return replace(selection, llm_usage_summary=result.usage_summary)
@@ -404,7 +404,7 @@ def _compact_example_value(value: Any) -> Any:
 def _first_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
-    candidates = [match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.I | re.S)]
+    candidates = [match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)]
     candidates.append(text.strip())
     for candidate in candidates:
         start = candidate.find("{")

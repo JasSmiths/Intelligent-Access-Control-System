@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
+from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
 from app.ai.tool_groups.system_operations_handlers import (
     analyze_dependency_update,
     apply_dependency_update,
     check_dependency_updates,
     configure_dependency_backup_storage,
-    query_auth_secret_status,
     query_alfred_runtime_events,
+    query_auth_secret_status,
     query_dependency_backups,
     query_dependency_update_job,
     query_dependency_updates,
@@ -21,8 +21,7 @@ from app.ai.tool_groups.system_operations_handlers import (
     update_system_settings,
     validate_dependency_backup_storage,
 )
-from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "query_integration_health": ("System_Operations", "Users_Settings", "General"),

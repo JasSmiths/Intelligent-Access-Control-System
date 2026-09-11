@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
 from app.ai.tool_groups.access_diagnostics_handlers import (
     analyze_alert_snapshot,
     calculate_absence_duration,
@@ -18,9 +17,14 @@ from app.ai.tool_groups.access_diagnostics_handlers import (
     summarize_access_rhythm,
     trigger_anomaly_alert,
 )
-from app.ai.tool_groups.access_incident_handlers import backfill_access_event_from_protect, investigate_access_incident, query_unifi_protect_events, test_unifi_alarm_webhook
+from app.ai.tool_groups.access_incident_handlers import (
+    backfill_access_event_from_protect,
+    investigate_access_incident,
+    query_unifi_protect_events,
+    test_unifi_alarm_webhook,
+)
 from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "query_access_events": ("Access_Logs", "Access_Diagnostics", "General"),

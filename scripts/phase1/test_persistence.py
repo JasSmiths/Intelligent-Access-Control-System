@@ -16,6 +16,44 @@ from app.services.movement_ledger import MovementLedgerRepository
 
 
 @pytest.mark.asyncio
+async def test_dependency_analysis_foreign_keys_preserve_delete_behavior():
+    from sqlalchemy import delete, func, select
+    from app.models import DependencyUpdateAnalysis, ExternalDependency
+
+    try:
+        async with AsyncSessionLocal() as session:
+            dependency = ExternalDependency(
+                ecosystem='synthetic', package_name='phase1',
+                normalized_name='phase1-' + uuid.uuid4().hex,
+            )
+            session.add(dependency)
+            await session.flush()
+            for remove_dependency in (False, True):
+                analysis = DependencyUpdateAnalysis(
+                    dependency_id=dependency.id, target_version='1.0',
+                    provider='synthetic', verdict='safe',
+                )
+                session.add(analysis)
+                await session.flush()
+                dependency.latest_analysis_id = analysis.id
+                await session.flush()
+                if remove_dependency:
+                    await session.execute(delete(ExternalDependency).where(
+                        ExternalDependency.id == dependency.id))
+                    assert await session.scalar(select(func.count()).select_from(
+                        DependencyUpdateAnalysis).where(
+                            DependencyUpdateAnalysis.dependency_id == dependency.id)) == 0
+                else:
+                    await session.execute(delete(DependencyUpdateAnalysis).where(
+                        DependencyUpdateAnalysis.id == analysis.id))
+                    assert await session.scalar(select(ExternalDependency.latest_analysis_id).where(
+                        ExternalDependency.id == dependency.id)) is None
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_visitor_source_reference_uniqueness_allows_multiple_unsourced_passes():
     from sqlalchemy.exc import IntegrityError
     from app.models import VisitorPass

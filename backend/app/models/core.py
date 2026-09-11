@@ -272,7 +272,12 @@ class ExternalDependency(Base, TimestampMixin):
     risk_status: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False, index=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     latest_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("dependency_update_analyses.id", ondelete="SET NULL"),
+        ForeignKey(
+            "dependency_update_analyses.id",
+            name="external_dependencies_latest_analysis_id_fkey",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
         index=True,
     )
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)

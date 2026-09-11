@@ -52,8 +52,8 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-# Preserve the pre-0.16 rule set; adopt additional rules as a separate change.
-select = ["E4", "E7", "E9", "F"]
+# Keep the previous rules alongside Ruff 0.16 defaults.
+extend-select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.12"

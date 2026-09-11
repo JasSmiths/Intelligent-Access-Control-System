@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
+from app.ai.tool_groups.metadata import apply_group_metadata
 from app.ai.tool_groups.visitor_passes_handlers import (
     cancel_visitor_pass,
     create_visitor_pass,
@@ -11,8 +11,7 @@ from app.ai.tool_groups.visitor_passes_handlers import (
     trigger_icloud_sync,
     update_visitor_pass,
 )
-from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "query_visitor_passes": ("Visitor_Passes", "Access_Logs", "General"),

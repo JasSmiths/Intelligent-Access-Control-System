@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from app.ai.tools import AgentTool
 from app.ai.tool_groups.compliance_cameras_files_handlers import (
     analyze_camera_snapshot,
     export_presence_report_csv,
@@ -12,7 +11,7 @@ from app.ai.tool_groups.compliance_cameras_files_handlers import (
     read_chat_attachment,
 )
 from app.ai.tool_groups.metadata import apply_group_metadata
-
+from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
     "lookup_dvla_vehicle": ("Compliance_DVLA",),

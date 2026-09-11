@@ -7,7 +7,6 @@ from typing import Any
 
 from app.ai.tool_groups._shared import *
 
-
 NATURAL_SCHEDULE_DAY_ALIASES = {
     "mon": 0,
     "monday": 0,
@@ -309,7 +308,7 @@ def _natural_schedule_days(lower: str) -> list[int]:
         if start is not None and end is not None:
             if start <= end:
                 return list(range(start, end + 1))
-            return list(range(start, 7)) + list(range(0, end + 1))
+            return list(range(start, 7)) + list(range(end + 1))
 
     days: list[int] = []
     for token in re.findall(rf"\b({NATURAL_SCHEDULE_DAY_PATTERN})\b", lower):
