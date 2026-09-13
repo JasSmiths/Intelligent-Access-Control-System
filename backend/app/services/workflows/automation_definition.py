@@ -561,4 +561,3 @@ def access_event_vehicle_triggers(payload: dict[str, Any], *, occurred_at: str) 
     else:
         return []
     return [(trigger_key, {**payload, "occurred_at": payload.get("occurred_at") or occurred_at})]
-

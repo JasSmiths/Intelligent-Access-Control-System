@@ -235,4 +235,3 @@ def coerce_uuid(value: Any) -> uuid.UUID | None:
         return uuid.UUID(str(value))
     except (TypeError, ValueError):
         return None
-

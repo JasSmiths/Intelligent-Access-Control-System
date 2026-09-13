@@ -200,4 +200,3 @@ def _duration_label_from_seconds(value: Any) -> str:
     if hours:
         return f"{hours}h"
     return f"{minutes}m"
-

@@ -205,4 +205,3 @@ class AccessDeviceConfiguration:
                 for binding in row.provider_bindings
             },
         )
-

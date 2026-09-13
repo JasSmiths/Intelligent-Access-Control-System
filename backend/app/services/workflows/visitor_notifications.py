@@ -268,4 +268,3 @@ def safe_zoneinfo(timezone_name: str | None) -> ZoneInfo:
         return ZoneInfo(str(timezone_name or "Europe/London"))
     except Exception:
         return ZoneInfo("Europe/London")
-
