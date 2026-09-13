@@ -18,6 +18,19 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RecoveryProfileTests(unittest.TestCase):
+    def test_container_user_matches_bind_owner_without_restoring_capabilities(self):
+        harness = object.__new__(Harness)
+        harness.prefix = 'identity-probe'
+        harness.owned = []
+        harness.write = lambda *args: None
+        with patch('validate.os.getuid', return_value=1001), patch('validate.os.getgid', return_value=1002):
+            command = harness.container('python-deps', 'inert-image', ['true'])
+            self.assertEqual(command[command.index('--user') + 1], '1001:1002')
+            self.assertEqual(command[command.index('--cap-drop') + 1], 'ALL')
+            self.assertNotIn('--cap-add', command)
+            postgres = harness.container('postgres', 'inert-image', ['true'])
+            self.assertEqual(postgres[postgres.index('--user') + 1], '0')
+
     def test_every_phase1_test_has_one_explicit_execution_class(self):
         self.assertEqual(recovery_checks.inventory_errors(ROOT), [])
 

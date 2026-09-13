@@ -215,7 +215,7 @@ class Harness:
         command_line = ['docker', 'run', '--name', cname, '--label', 'iacs.phase1=' + self.prefix,
                         '--network', network, '--cpus', '1', '--memory', '1536m', '--pids-limit', '256',
                         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--no-healthcheck',
-                        '--user', '0', '--workdir', work]
+                        '--user', '0' if name == 'postgres' else f'{os.getuid()}:{os.getgid()}', '--workdir', work]
         if name == 'postgres':
             command_line += ['--cap-add', 'CHOWN', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'SETUID', '--cap-add', 'SETGID']
         for source, dest, mode in mounts:
@@ -271,11 +271,11 @@ class Harness:
                     shutil.copy2(self.snapshot / source / name, directory / name)
             self.check('python-dependencies', self.container('python-deps', images['backend'],
                 ['uv', 'sync', '--locked', '--extra', 'dev', '--no-install-project', '--python', '/usr/local/bin/python'],
-                mounts=[(python_deps, '/deps', 'rw')], env={'UV_PROJECT_ENVIRONMENT': '/deps/.venv'},
+                mounts=[(python_deps, '/deps', 'rw')], env={'UV_PROJECT_ENVIRONMENT': '/deps/.venv', 'UV_CACHE_DIR': '/tmp/uv-cache'},
                 network='bridge', work='/deps'), True, classification='dependency-setup')
             self.check('frontend-dependencies', self.container('js-deps', images['node'],
                 ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'],
-                mounts=[(js_deps, '/deps', 'rw')], network='bridge', work='/deps'),
+                mounts=[(js_deps, '/deps', 'rw')], env={'npm_config_cache': '/tmp/npm-cache'}, network='bridge', work='/deps'),
                 True, classification='dependency-setup')
         self.check('python-lock-check', self.container('python-lock-check', images['backend'],
             ['uv', 'sync', '--locked', '--offline', '--check', '--extra', 'dev', '--no-install-project', '--python', '/usr/local/bin/python'],
