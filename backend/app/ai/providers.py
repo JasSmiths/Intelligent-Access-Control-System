@@ -1,7 +1,7 @@
 import base64
 import json
-from time import monotonic
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Protocol
 
 import httpx
@@ -573,18 +573,6 @@ class LocalDiagnosticProvider:
         raise ImageAnalysisUnsupportedError("The local diagnostics provider cannot analyze camera images.")
 
 
-def _format_engine_capacity(value: Any) -> str | None:
-    if value in {None, ""}:
-        return None
-    return f"{value} cc"
-
-
-def _format_co2(value: Any) -> str | None:
-    if value in {None, ""}:
-        return None
-    return f"{value} g/km"
-
-
 async def analyze_image_with_provider(
     provider_name: str,
     *,
@@ -608,29 +596,14 @@ def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
 
 
 async def complete_with_provider_options(
-    provider: Any,
+    provider: LlmProvider,
     messages: list[ChatMessageInput],
     **options: Any,
 ) -> LlmResult:
-    """Call a provider with optional efficiency controls and tolerate older test doubles."""
+    """Normalise absent options and call the current provider contract exactly once."""
 
     clean_options = {key: value for key, value in options.items() if value is not None and value != ""}
-    try:
-        return await provider.complete(messages, **clean_options)
-    except TypeError as exc:
-        if "unexpected keyword" not in str(exc):
-            raise
-        compatible_options = {
-            key: value
-            for key, value in clean_options.items()
-            if key in {"tools", "tool_results", "response_schema", "reasoning_effort", "model"}
-        }
-        try:
-            return await provider.complete(messages, **compatible_options)
-        except TypeError as compatible_exc:
-            if "unexpected keyword" not in str(compatible_exc):
-                raise
-            return await provider.complete(messages)
+    return await provider.complete(messages, **clean_options)
 
 
 def _compact_cache_key(value: str) -> str:

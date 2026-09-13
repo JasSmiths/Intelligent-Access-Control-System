@@ -76,42 +76,18 @@ async def create_person_movement_report_export(
         "include_snapshots": include_snapshots,
         "include_confidence": include_confidence,
     }
-    subject_type = "person"
-    subject_id: uuid.UUID | None = person_id
-    if visitor_pass_id:
-        visitor_pass = await _get_report_visitor_pass(session, visitor_pass_id)
-        if not visitor_pass:
-            raise ReportExportError("Visitor Pass was not found.")
-        subject_type = "visitor_pass"
-        subject_id = visitor_pass.id
-        snapshot = await build_visitor_pass_movement_report_snapshot(
-            session,
-            visitor_pass=visitor_pass,
-            report_number=report_number,
-            period_start=start,
-            period_end=end,
-            options=options,
-            timezone=timezone,
-        )
-        row_person_id = None
-        target_label = f"Visitor pass movement report {report_number}"
-    else:
-        if not person_id:
-            raise ReportExportError("Person or Visitor Pass must be selected.")
-        person = await _get_report_person(session, person_id)
-        if not person:
-            raise ReportExportError("Person was not found.")
-        snapshot = await build_person_movement_report_snapshot(
-            session,
-            person=person,
-            report_number=report_number,
-            period_start=start,
-            period_end=end,
-            options=options,
-            timezone=timezone,
-        )
-        row_person_id = person.id
-        target_label = f"Person movement report {report_number}"
+    snapshot = await build_movement_report_snapshot(
+        session, person_id=person_id, visitor_pass_id=visitor_pass_id,
+        report_number=report_number, period_start=start, period_end=end,
+        options=options, timezone=timezone,
+    )
+    subject_type = snapshot["subject_type"]
+    subject_id = snapshot["subject"]["id"]
+    row_person_id = uuid.UUID(subject_id) if subject_type == "person" else None
+    target_label = (
+        f"Visitor pass movement report {report_number}" if subject_type == "visitor_pass"
+        else f"Person movement report {report_number}"
+    )
 
     relative_pdf_path = _report_pdf_relative_path(report_number)
     pdf_path = _resolve_report_path(relative_pdf_path, must_exist=False)
@@ -155,6 +131,108 @@ async def create_person_movement_report_export(
     await session.commit()
     await session.refresh(row)
     return row
+
+
+async def report_preview_context() -> dict[str, str]:
+    config = await get_runtime_config()
+    return {
+        "site_timezone": _timezone(config.site_timezone).key,
+        "now": datetime.now(tz=UTC).isoformat(),
+    }
+
+
+def resolve_report_boundary(
+    value: datetime, *, timezone: ZoneInfo, field: str, fold: int | None = None,
+) -> tuple[datetime | None, dict[str, Any] | None]:
+    """Resolve report civil input without guessing a repeated or missing hour."""
+    if value.tzinfo is not None:
+        return value.astimezone(UTC), None
+    candidates: dict[int, tuple[datetime, int]] = {}
+    for candidate_fold in (0, 1):
+        local = value.replace(tzinfo=timezone, fold=candidate_fold)
+        instant = local.astimezone(UTC)
+        if instant.astimezone(timezone).replace(tzinfo=None) == value:
+            offset = local.utcoffset()
+            candidates[candidate_fold] = (instant, int(offset.total_seconds() / 60) if offset else 0)
+    if not candidates:
+        boundary = "Start" if field == "period_start" else "End"
+        raise ReportExportError(
+            f"{boundary} time does not exist in {timezone.key} because the clocks change. Choose a valid local time."
+        )
+    instants = {instant for instant, _offset in candidates.values()}
+    if len(instants) == 1:
+        return next(iter(instants)), None
+    if fold in candidates:
+        return candidates[fold][0], None
+    choices = []
+    for candidate_fold, (_instant, offset) in candidates.items():
+        sign = "+" if offset >= 0 else "-"
+        hours, minutes = divmod(abs(offset), 60)
+        occurrence = "First" if candidate_fold == 0 else "Second"
+        choices.append({
+            "fold": candidate_fold,
+            "utc_offset_minutes": offset,
+            "label": f"{occurrence} occurrence (UTC{sign}{hours:02}:{minutes:02})",
+        })
+    return None, {"field": field, "local_time": value.isoformat(), "choices": choices}
+
+
+async def preview_person_movement_report(
+    session: AsyncSession, *, person_id: uuid.UUID | None = None,
+    visitor_pass_id: uuid.UUID | None = None, period_start: datetime,
+    period_end: datetime, include_denied: bool, include_snapshots: bool,
+    include_confidence: bool, period_start_fold: int | None = None,
+    period_end_fold: int | None = None,
+) -> dict[str, Any]:
+    config = await get_runtime_config()
+    timezone = _timezone(config.site_timezone)
+    start, start_choice = resolve_report_boundary(
+        period_start, timezone=timezone, field="period_start", fold=period_start_fold,
+    )
+    end, end_choice = resolve_report_boundary(
+        period_end, timezone=timezone, field="period_end", fold=period_end_fold,
+    )
+    choices = [choice for choice in (start_choice, end_choice) if choice is not None]
+    if choices:
+        return {"status": "time_choice_required", "site_timezone": timezone.key, "time_choices": choices}
+    if start is None or end is None or end <= start:
+        raise ReportExportError("Report end time must be after the start time.")
+    snapshot = await build_movement_report_snapshot(
+        session, person_id=person_id, visitor_pass_id=visitor_pass_id,
+        report_number=None, period_start=start, period_end=end,
+        options={"include_denied": include_denied, "include_snapshots": include_snapshots,
+                 "include_confidence": include_confidence},
+        timezone=timezone, verify_snapshot_availability=False,
+    )
+    return {"status": "ready", "complete": True, "report": public_report_snapshot(snapshot)}
+
+
+async def build_movement_report_snapshot(
+    session: AsyncSession, *, person_id: uuid.UUID | None,
+    visitor_pass_id: uuid.UUID | None, report_number: str | None,
+    period_start: datetime, period_end: datetime, options: dict[str, bool],
+    timezone: ZoneInfo, verify_snapshot_availability: bool = True,
+) -> dict[str, Any]:
+    """One subject/history policy for previews and persisted exports."""
+    if visitor_pass_id:
+        visitor_pass = await _get_report_visitor_pass(session, visitor_pass_id)
+        if not visitor_pass:
+            raise ReportExportError("Visitor Pass was not found.")
+        return await build_visitor_pass_movement_report_snapshot(
+            session, visitor_pass=visitor_pass, report_number=report_number,
+            period_start=period_start, period_end=period_end, options=options,
+            timezone=timezone, verify_snapshot_availability=verify_snapshot_availability,
+        )
+    if not person_id:
+        raise ReportExportError("Person or Visitor Pass must be selected.")
+    person = await _get_report_person(session, person_id)
+    if not person:
+        raise ReportExportError("Person was not found.")
+    return await build_person_movement_report_snapshot(
+        session, person=person, report_number=report_number,
+        period_start=period_start, period_end=period_end, options=options,
+        timezone=timezone, verify_snapshot_availability=verify_snapshot_availability,
+    )
 
 
 async def load_report_export(session: AsyncSession, report_number: str, *, actor: User) -> ReportExport | None:
@@ -216,11 +294,12 @@ async def build_person_movement_report_snapshot(
     session: AsyncSession,
     *,
     person: Person,
-    report_number: str,
+    report_number: str | None,
     period_start: datetime,
     period_end: datetime,
     options: dict[str, bool],
     timezone: ZoneInfo,
+    verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
     vehicle_ids = [vehicle.id for vehicle in person.vehicles]
     selected_plates = {_normalize_plate(vehicle.registration_number) for vehicle in person.vehicles}
@@ -232,6 +311,7 @@ async def build_person_movement_report_snapshot(
         period_end=period_end,
         options=options,
         timezone=timezone,
+        verify_snapshot_availability=verify_snapshot_availability,
     )
     presence = person.presence or await session.get(Presence, person.id)
     generated_at = datetime.now(tz=UTC)
@@ -280,11 +360,12 @@ async def build_visitor_pass_movement_report_snapshot(
     session: AsyncSession,
     *,
     visitor_pass: VisitorPass,
-    report_number: str,
+    report_number: str | None,
     period_start: datetime,
     period_end: datetime,
     options: dict[str, bool],
     timezone: ZoneInfo,
+    verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
     selected_filter = _visitor_pass_event_filter(visitor_pass)
     report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
@@ -294,6 +375,7 @@ async def build_visitor_pass_movement_report_snapshot(
         period_end=period_end,
         options=options,
         timezone=timezone,
+        verify_snapshot_availability=verify_snapshot_availability,
     )
     generated_at = datetime.now(tz=UTC)
 
@@ -342,6 +424,7 @@ async def _collect_movement_report_events(
     period_end: datetime,
     options: dict[str, bool],
     timezone: ZoneInfo,
+    verify_snapshot_availability: bool = True,
 ) -> tuple[list[AccessEvent], list[dict[str, Any]], list[AccessEvent], dict[str, Any]]:
     movement_filters = (
         AccessEvent.decision == AccessDecision.GRANTED,
@@ -376,6 +459,7 @@ async def _collect_movement_report_events(
             include_snapshots=options["include_snapshots"],
             duration=duration_lookup.get(str(event.id)),
             timezone=timezone,
+            verify_snapshot_availability=verify_snapshot_availability,
         )
         for event in sorted(report_events, key=lambda item: item.occurred_at, reverse=True)
     ]
@@ -558,8 +642,9 @@ def serialize_report_event(
     include_snapshots: bool,
     duration: dict[str, Any] | None,
     timezone: ZoneInfo,
+    verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
-    snapshot = access_event_snapshot_payload(event) if include_snapshots else {}
+    snapshot = access_event_snapshot_payload(event, verify_available=verify_snapshot_availability) if include_snapshots else {}
     visitor_pass = _event_visitor_pass_payload(event)
     return {
         "id": str(event.id),

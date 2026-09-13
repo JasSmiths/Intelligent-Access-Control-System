@@ -36,6 +36,17 @@ def _ha_runtime(**overrides):
 
 
 async def test_home_assistant_status_reports_degraded_refresh_without_leaking_token(monkeypatch) -> None:
+    from app.services import notifications as notification_owner
+
+    queued = []
+
+    async def enqueue(context):
+        queued.append(context)
+
+    monkeypatch.setattr(
+        notification_owner, "get_notification_service",
+        lambda: SimpleNamespace(enqueue_notification=enqueue),
+    )
     async def fake_runtime():
         return _ha_runtime()
 
@@ -53,6 +64,7 @@ async def test_home_assistant_status_reports_degraded_refresh_without_leaking_to
     assert status["degraded"] is True
     assert "Unauthorized" in status["last_error"]
     assert "secret-token" not in json.dumps(status)
+    assert len(queued) == 1
 
 
 async def test_home_assistant_degraded_transition_publishes_notification_trigger(monkeypatch) -> None:
@@ -68,6 +80,12 @@ async def test_home_assistant_degraded_transition_publishes_notification_trigger
     async def fake_publish(event_type: str, payload: dict):
         published.append((event_type, payload))
 
+    from app.services import notifications as notification_owner
+
+    async def enqueue(context):
+        published.append(("notification.trigger", notification_owner.notification_context_payload(context)))
+
+    monkeypatch.setattr(notification_owner, "get_notification_service", lambda: SimpleNamespace(enqueue_notification=enqueue))
     monkeypatch.setattr(home_assistant_module, "get_runtime_config", fake_runtime)
     monkeypatch.setattr(home_assistant_module, "event_bus", SimpleNamespace(publish=fake_publish))
     service = HomeAssistantIntegrationService(cast(Any, FailingClient()))
@@ -193,7 +211,7 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
     monkeypatch.setattr(health_api, "get_maintenance_status", fake_maintenance_status)
     monkeypatch.setattr(health_api, "get_home_assistant_service", lambda: FakeHomeAssistant())
     monkeypatch.setattr(health_api, "get_discord_messaging_service", lambda: FakeDiscord())
-    monkeypatch.setattr(health_api, "get_whatsapp_messaging_service", lambda: FakeWhatsApp())
+    monkeypatch.setattr(health_api, "get_whatsapp_delivery_service", lambda: FakeWhatsApp())
 
     result = await health_api.health()
 

@@ -26,9 +26,10 @@ class HomeAssistantMobileAppNotifier:
         image_url: str | None = None,
         image_content_type: str | None = None,
         actions: list[dict[str, Any]] | None = None,
+        runtime_config=None,
     ) -> None:
         if not target.service_name.startswith("notify.mobile_app_"):
-            raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.")
+            raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.", delivery="not_sent")
 
         data: dict[str, Any] = {
             "tag": f"iacs-{context.event_type}",
@@ -44,6 +45,7 @@ class HomeAssistantMobileAppNotifier:
             data["actions"] = actions
 
         try:
+            options = {"runtime_config": runtime_config} if runtime_config is not None else {}
             await self._client.call_service(
                 target.service_name,
                 {
@@ -51,9 +53,10 @@ class HomeAssistantMobileAppNotifier:
                     "message": body or context.subject,
                     "data": data,
                 },
+                **options,
             )
         except HomeAssistantError as exc:
-            raise NotificationDeliveryError(str(exc)) from exc
+            raise NotificationDeliveryError(str(exc), delivery=exc.delivery) from exc
 
 
 def _attachment_content_type(content_type: str | None) -> str:

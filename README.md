@@ -45,31 +45,24 @@ debugging.
 
 ## Tests
 
-The backend image and backend virtualenv install the project dev extras,
-including `pytest` and `pytest-asyncio`. Use the repo test wrapper so pytest is
-resolved consistently from the live Compose container when available, or from
-`backend/.venv` otherwise:
+Use the isolated regression harness for development and architectural changes.
+It snapshots the current source and runs against disposable resources without
+production credentials, data or provider access:
 
 ```bash
-./scripts/backend-pytest
+python3 scripts/phase1/validate.py
 ```
 
-For a focused test file:
-
-```bash
-./scripts/backend-pytest tests/test_dependency_updates.py
-```
-
-Frontend guardrail tests run with Vitest:
-
-```bash
-cd frontend && npm run test
-```
+See [isolated validation](docs/validation/phase1.md) for source inclusion,
+focused checks, dependency reuse and retained evidence. The full harness includes
+backend/persistence tests and the locked frontend tests/build. The older
+`scripts/backend-pytest` wrapper may select the running Compose backend and must
+not be used for an isolated regression run.
 
 Schema changes are managed through Alembic. Normal Compose startup runs
-`alembic upgrade head` when `IACS_AUTO_CREATE_SCHEMA=true`; the previous
-transitional bootstrap DDL is available only for older local databases by
-setting `IACS_LEGACY_SCHEMA_BOOTSTRAP=true`.
+`alembic upgrade head` when `IACS_AUTO_CREATE_SCHEMA=true`. The old runtime
+bootstrap compatibility path has been removed. Test migrations only in disposable
+databases; production migration and deployment require a separate instruction.
 
 ## Architecture Shape
 
@@ -79,7 +72,9 @@ setting `IACS_LEGACY_SCHEMA_BOOTSTRAP=true`.
 - `backend/app/services`: core orchestration services that depend on module interfaces.
 - `backend/app/db`: SQLAlchemy session and migration-ready database wiring.
 - `backend/app/workers`: reserved package; current background services start from the FastAPI lifespan.
-- `backend/app/simulation`: mock event endpoints for hardware-free testing.
+- `backend/app/simulation`: scenario tests and synthetic event injection. Arrival
+  and misread endpoints enter the access pipeline and can actuate hardware;
+  synthetic input alone does not make a call hardware-free. Use isolated fixtures.
 - `backend/app/ai`: Alfred tool registry, domain tool groups, and provider boundaries.
 
 Docker storage uses host bind mounts only. No Docker named volumes are declared.
@@ -91,7 +86,7 @@ service also mounts Docker's socket for dependency update jobs.
 - `POST /api/v1/webhooks/ubiquiti/lpr`
 - `POST /api/v1/simulation/arrival/{registration_number}`
 - `POST /api/v1/simulation/misread-sequence/{registration_number}`
-- `POST /api/v1/simulation/e2e/full-access-flow` (Admin)
+- `POST /api/v1/simulation/e2e/full-access-flow` (retired; returns HTTP 410, full-flow scenarios run only through isolated tests)
 - `GET /api/v1/events`
 - `GET /api/v1/alerts`
 - `PATCH /api/v1/alerts/action`
@@ -111,18 +106,21 @@ for the current data model and movement-session behavior.
 - `POST /api/v1/integrations/announcements/say`
 - `POST /api/v1/integrations/notifications/test`
 
-See [docs/phase-3.md](docs/phase-3.md)
-for Home Assistant, TTS, presence sync, and Apprise configuration.
+See the [backend integration owners](docs/agent/backend.md)
+for Home Assistant, TTS, presence sync, and notification implementation guidance.
 
-## Phase 4 AI Agent
+## Alfred V3
 
 - `GET /api/v1/ai/providers`
 - `GET /api/v1/ai/tools`
 - `POST /api/v1/ai/chat`
 - `WS /api/v1/ai/chat/ws`
 
-See [docs/phase-4.md](docs/phase-4.md)
-for provider configuration, agent tools, and conversational memory behavior.
+See [Alfred V3 ownership](docs/agent/backend.md#alfred-v3)
+for provider contracts, agent tools, and conversational memory guidance.
+The [architecture recovery guide](docs/architecture.md) defines extension and
+retirement rules; [isolated validation](docs/validation/phase1.md) verifies changes
+without using the production stack.
 
 ## Smoke Checks
 
@@ -151,3 +149,11 @@ Future implementation work should start with
 [AGENTS.md](AGENTS.md), which
 documents the architecture, modular I/O rules, API surface, UI design language,
 reverse-proxy expectations, and safe extension points for future AI agents.
+
+Architecture recovery milestone 3 ownership and validation: [feature operations and Alfred contracts](docs/validation/milestone3-operations.md).
+
+Architecture recovery milestone 4: [durable notification dispatch and recovery](docs/validation/milestone4-recovery.md).
+
+Architecture recovery milestone 5: [access evidence, decisions, execution and enrichment](docs/validation/milestone5-access.md).
+
+Architecture recovery milestone 6: [frontend owners, refresh coordination and retirement](docs/validation/milestone6-frontend.md).

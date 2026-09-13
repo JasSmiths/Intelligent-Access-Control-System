@@ -3,16 +3,15 @@ import hashlib
 import hmac
 import json
 import re
-import secrets
 import uuid
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address, ip_network
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,28 +19,51 @@ from app.ai.providers import ChatMessageInput, complete_with_provider_options, g
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
+    AccessEvent,
+    AuditLog,
     AutomationRule,
     AutomationRun,
     AutomationWebhookNonce,
     AutomationWebhookSender,
+    GateCommandRecord,
+    MovementSagaRecord,
     NotificationRule,
-    Presence,
     User,
-    Vehicle,
     VisitorPass,
 )
-from app.models.enums import PresenceState
+from app.models.enums import AccessDecision, AccessDirection, GateCommandState
+from app.services.mutation_context import MutationError, require_active_admin
 from app.services.access_devices import get_access_device_service
+from app.services.access.authorization import assert_current_recognition_authorization, recognition_deadline_for_event
+from app.services.access_device_commands import AccessDeviceCommandJournal
+from app.services.automation_authorization import automation_rule_fingerprint, current_rule_denial, evaluate_current_condition
+from app.services.automation_dispatch import AutomationDispatcher
+from app.services.automation_intake import public_automation_context, reserve_occurrence, reserve_trigger
+from app.services.workflows.automation_definition import (
+    ACTION_CATALOG, CONDITION_CATALOG, TIME_TRIGGER_KEYS, TRIGGER_CATALOG, TRIGGER_SCOPES,
+    VARIABLES, WEBHOOK_HMAC_WINDOW_SECONDS, WEBHOOK_RATE_LIMIT_PER_MINUTE,
+    AutomationContext, automation_triggers_for_origin, bool_config, build_context_variables, captured_automation_context, context_missing_references,
+    ensure_aware, generate_automation_webhook_key, is_high_entropy_webhook_key,
+    normalize_actions, normalize_conditions, normalize_rule_payload, normalize_triggers,
+    optional_text, parse_datetime, restored_automation_context, safe_int, trigger_keys_for_triggers,
+)
+from app.services.automation_execution import AutomationActionWait, AutomationRunStore
 from app.services.automation_integration_actions import (
     execute_integration_action,
     integration_action_catalog,
-    integration_action_config,
     integration_action_for_type,
-    registered_integration_action_types,
+)
+from app.services.automation_policy import (
+    HARDWARE_ACTION_TYPES,
+    HARDWARE_DENIAL_DETAILS,
+    REQUESTER_CONFIRMATION_REQUIRED,
+    hardware_action_denial,
+    hardware_configuration_error,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active, set_mode as set_maintenance_mode
+from app.services.notification_rules import set_automation_activation
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_AUTOMATION,
@@ -57,16 +79,9 @@ from app.services.telemetry import (
 )
 from app.services.type_helpers import as_dict
 from app.services.visitor_passes import serialize_visitor_pass
-from app.services.workflows.catalog import (
-    automation_action_catalog,
-    automation_condition_catalog,
-    automation_trigger_catalog,
-    automation_variables,
-)
+
 from app.services.workflows.context import (
-    canonical_key,
     normalize_string_list,
-    referenced_variable_names,
     render_template,
     workflow_action_result,
 )
@@ -76,91 +91,28 @@ logger = get_logger(__name__)
 SCHEDULER_INTERVAL_SECONDS = 15
 MAX_DUE_RULES_PER_TICK = 25
 AI_SCHEDULE_CONFIDENCE_THRESHOLD = 0.65
-AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {
-    "notification.trigger",
-    "notification.sent",
-    "notification.failed",
-    "notification.skipped",
-}
-AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES = ("automation.run.",)
-WEBHOOK_KEY_PREFIX = "whk_"
-WEBHOOK_KEY_RANDOM_BYTES = 32
-WEBHOOK_HMAC_WINDOW_SECONDS = 300
 WEBHOOK_RATE_WINDOW_SECONDS = 60
-WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
 WEBHOOK_SIGNATURE_HEADER = "X-IACS-Webhook-Signature"
 WEBHOOK_TIMESTAMP_HEADER = "X-IACS-Webhook-Timestamp"
 WEBHOOK_NONCE_HEADER = "X-IACS-Webhook-Nonce"
-
-
-@dataclass
-class AutomationContext:
-    trigger_key: str
-    subject: str
-    trigger_payload: dict[str, Any]
-    facts: dict[str, Any] = field(default_factory=dict)
-    entities: dict[str, str] = field(default_factory=dict)
-    scopes: set[str] = field(default_factory=set)
-    variables: dict[str, str] = field(default_factory=dict)
-    missing_required_variables: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "trigger": {
-                "key": self.trigger_key,
-                "subject": self.subject,
-            },
-            "trigger_key": self.trigger_key,
-            "subject": self.subject,
-            "trigger_payload": sanitize_payload(self.trigger_payload),
-            "facts": sanitize_payload(self.facts),
-            "entities": self.entities,
-            "scopes": sorted(self.scopes),
-            "variables": self.variables,
-            "missing_required_variables": sorted(set(self.missing_required_variables)),
-            "warnings": self.warnings,
-        }
-
-
-TRIGGER_CATALOG = automation_trigger_catalog()
-
-CONDITION_CATALOG = automation_condition_catalog()
-
-ACTION_CATALOG = automation_action_catalog()
-
-VARIABLES = automation_variables()
-
-VARIABLE_BY_NAME = {variable.name.lower(): variable for variable in VARIABLES}
-TRIGGER_SCOPES = {
-    trigger["type"]: set(trigger.get("scopes") or [])
-    for group in TRIGGER_CATALOG
-    for trigger in group["triggers"]
-}
-TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron", "time.ai_text"}
 
 
 class AutomationError(RuntimeError):
     """Raised when an automation rule or action cannot be evaluated safely."""
 
 
-@dataclass(frozen=True)
-class ScheduledAutomationClaim:
-    rule_id: str
-    run_id: str
-    trigger_key: str
-    trigger_payload: dict[str, Any]
-
-
 class AutomationService:
     def __init__(self) -> None:
         self._started = False
         self._scheduler_task: asyncio.Task | None = None
+        self.run_store = AutomationRunStore()
+        self.dispatcher = AutomationDispatcher(self, self.run_store)
 
     async def start(self) -> None:
         if self._started:
             return
         event_bus.subscribe(self._handle_realtime_event)
+        self.dispatcher.start()
         self._scheduler_task = asyncio.create_task(self._run_scheduler(), name="automation-scheduler")
         self._started = True
         logger.info("automation_engine_started")
@@ -176,6 +128,7 @@ class AutomationService:
             except asyncio.CancelledError:
                 pass
         self._scheduler_task = None
+        await self.dispatcher.stop()
         self._started = False
         logger.info("automation_engine_stopped")
 
@@ -237,8 +190,15 @@ class AutomationService:
         is_active: bool = True,
         created_by: User | None = None,
     ) -> AutomationRule:
+        created_by = require_active_admin(created_by)
+        name = validated_rule_name(name)
         normalized_triggers = normalize_triggers(triggers, generate_webhook_keys=True)
         normalized_actions = normalize_actions(actions)
+        if error := hardware_configuration_error(
+            (trigger["type"] for trigger in normalized_triggers),
+            (action["type"] for action in normalized_actions),
+        ):
+            raise AutomationError(error)
         harden_webhook_triggers_for_actions(normalized_triggers, normalized_actions)
         if not normalized_triggers:
             raise AutomationError("At least one automation trigger is required.")
@@ -246,7 +206,7 @@ class AutomationService:
             raise AutomationError("At least one automation action is required.")
         now = datetime.now(tz=UTC)
         rule = AutomationRule(
-            name=name.strip()[:160] or "Automation Rule",
+            name=name,
             description=(description or "").strip() or None,
             is_active=is_active,
             triggers=normalized_triggers,
@@ -284,20 +244,32 @@ class AutomationService:
         actions: Any = None,
         is_active: bool | None = None,
     ) -> AutomationRule:
+        actor = require_active_admin(actor)
+        await session.refresh(rule, with_for_update=True)
         before = serialize_rule(rule)
-        if name is not None:
-            rule.name = name.strip()[:160] or rule.name
-        if description is not None:
-            rule.description = description.strip() or None
         normalized_triggers = (
             normalize_triggers(triggers, generate_webhook_keys=True)
             if triggers is not None
             else normalize_triggers(rule.triggers)
         )
         normalized_actions = normalize_actions(actions) if actions is not None else normalize_actions(rule.actions)
+        error = hardware_configuration_error(
+            (trigger["type"] for trigger in normalized_triggers),
+            (action["type"] for action in normalized_actions),
+        )
+        # Keep an existing unsafe row readable and allow disabling it without
+        # rewriting history. New or edited trigger/action combinations still
+        # require valid policy; re-enabling also checks the merged configuration.
+        disabling_existing = is_active is False and triggers is None and actions is None
+        if error and not disabling_existing:
+            raise AutomationError(error)
+        if name is not None:
+            rule.name = validated_rule_name(name)
+        if description is not None:
+            rule.description = description.strip() or None
         harden_webhook_triggers_for_actions(normalized_triggers, normalized_actions)
+        rule.triggers = normalized_triggers
         if triggers is not None:
-            rule.triggers = normalized_triggers
             if not rule.triggers:
                 raise AutomationError("At least one automation trigger is required.")
             rule.trigger_keys = trigger_keys_for_triggers(rule.triggers)
@@ -330,6 +302,8 @@ class AutomationService:
         return rule
 
     async def delete_rule(self, session: AsyncSession, rule: AutomationRule, *, actor: User | None = None) -> None:
+        actor = require_active_admin(actor)
+        await session.refresh(rule, with_for_update=True)
         before = serialize_rule(rule)
         await write_audit_log(
             session,
@@ -374,21 +348,26 @@ class AutomationService:
         action_previews = []
         for action in payload["actions"]:
             missing = context_missing_references(context, action)
+            denial = hardware_action_denial(str(action["type"]), context.provenance)
             action_previews.append(
                 {
                     "id": action["id"],
                     "type": action["type"],
                     "dry_run": True,
                     "executed": False,
-                    "would_execute": conditions_passed and not missing,
-                    "skipped": bool(missing),
+                    "would_execute": conditions_passed and not missing and denial is None,
+                    "skipped": bool(missing or denial),
                     "missing_variables": missing,
                     "rendered_reason": render_with_context(action.get("reason_template") or "", context),
+                    **({"reason": denial, "reason_code": denial,
+                        "detail": HARDWARE_DENIAL_DETAILS[denial],
+                        "requires_confirmation": denial == REQUESTER_CONFIRMATION_REQUIRED}
+                       if denial else {}),
                 }
             )
         return {
             "rule": payload,
-            "context": context.to_payload(),
+            "context": public_automation_context(context),
             "condition_results": conditions,
             "action_previews": action_previews,
             "dry_run": True,
@@ -404,52 +383,27 @@ class AutomationService:
         *,
         actor: str = "Automation Engine",
         source: str = "event_bus",
+        origin_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        context = await self.context_for_trigger(trigger_key, payload or {})
+        origin_id = origin_id or str(uuid.uuid4())
         async with AsyncSessionLocal() as session:
-            rules = (
-                await session.scalars(
-                    select(AutomationRule)
-                    .where(AutomationRule.is_active.is_(True))
-                    .where(AutomationRule.trigger_keys.contains([trigger_key]))
-                    .order_by(AutomationRule.created_at)
-                )
-            ).all()
-
-        results: list[dict[str, Any]] = []
-        matched_rule_ids: list[str] = []
-        for rule in rules:
-            if not any(trigger_matches(trigger, context) for trigger in normalize_triggers(rule.triggers)):
-                continue
-            matched_rule_ids.append(str(rule.id))
-            results.append(
-                await self.execute_rule(
-                    str(rule.id),
-                    trigger_key=trigger_key,
-                    trigger_payload=payload or {},
-                    context=context,
-                    actor=actor,
-                    source=source,
-                )
-            )
-        if not matched_rule_ids:
+            identities = await reserve_trigger(session, trigger_key, payload or {},
+                origin_kind=source, origin_id=origin_id, actor=actor, source=source, trace_id=current_trace_id())
+            await session.commit()
+        results = []
+        self.dispatcher.wake()
+        for identity in identities:
+            await self.dispatcher.run_once(identity)
+            results.append(await self.run_response(identity))
+        if not identities:
             emit_audit_log(
                 category=TELEMETRY_CATEGORY_AUTOMATION,
-                action="automation_trigger.unmatched",
-                actor=actor,
-                target_entity="AutomationTrigger",
-                target_id=trigger_key,
+                action="automation_trigger.unmatched", actor=actor,
+                target_entity="AutomationTrigger", target_id=trigger_key,
                 target_label=trigger_key.replace("_", " ").replace(".", " ").title(),
-                outcome="skipped",
-                level="info",
-                trace_id=current_trace_id(),
-                metadata={
-                    "reason_code": "no_matching_automation",
-                    "trigger_key": trigger_key,
-                    "source": source,
-                    "candidate_rule_count": len(rules),
-                    "payload_shape": payload_shape(payload or {}),
-                },
+                outcome="skipped", level="info", trace_id=current_trace_id(),
+                metadata={"reason_code": "no_matching_automation", "trigger_key": trigger_key,
+                          "source": source, "payload_shape": payload_shape(payload or {})},
             )
         if trigger_key == "webhook.received" and not results:
             unrecognized_payload = {**(payload or {}), "reason": "no_matching_automation"}
@@ -459,201 +413,281 @@ class AutomationService:
                     unrecognized_payload,
                     actor=actor,
                     source=source,
+                    origin_id=origin_id,
                 )
             )
         return results
 
+
     async def execute_rule(
-        self,
-        rule_id: str,
-        *,
-        trigger_key: str,
-        trigger_payload: dict[str, Any],
-        context: AutomationContext | None = None,
-        actor: str = "Automation Engine",
-        source: str = "automation",
-        claimed_run_id: str | None = None,
+        self, rule_id: str, *, trigger_key: str, trigger_payload: dict[str, Any],
+        context: AutomationContext | None = None, actor: str = "Automation Engine", source: str = "automation",
+        origin_id: str | None = None,
     ) -> dict[str, Any]:
-        rule_uuid = uuid.UUID(str(rule_id))
+        context = context or await self.context_for_trigger(trigger_key, trigger_payload)
         async with AsyncSessionLocal() as session:
-            rule = await session.get(AutomationRule, rule_uuid)
-            if not rule or not rule.is_active:
-                if claimed_run_id:
-                    run = await session.get(AutomationRun, uuid.UUID(str(claimed_run_id)))
-                    if run and run.status == "claimed":
-                        run.status = "skipped"
-                        run.finished_at = datetime.now(tz=UTC)
-                        run.error = "rule_not_active"
-                        await session.commit()
+            rule = await session.scalar(select(AutomationRule).where(AutomationRule.id == uuid.UUID(str(rule_id)))
+                                        .with_for_update().execution_options(populate_existing=True))
+            if rule is None or not rule.is_active:
                 return {"executed": False, "status": "skipped", "reason": "rule_not_active"}
-            context = context or await self.context_for_trigger(trigger_key, trigger_payload)
-            trace = telemetry.start_trace(
-                f"Automation Rule: {rule.name}",
-                category=TELEMETRY_CATEGORY_AUTOMATION,
-                actor=actor,
-                source=source,
-                context={"rule_id": str(rule.id), "trigger_key": trigger_key},
-            )
-            run = None
-            if claimed_run_id:
-                run = await session.get(AutomationRun, uuid.UUID(str(claimed_run_id)))
-                if run and run.rule_id != rule.id:
-                    run = None
-            if run:
-                run.trigger_key = trigger_key
-                run.status = "running"
-                run.trigger_payload = sanitize_payload(trigger_payload)
-                run.trace_id = trace.trace_id
-                run.actor = actor
-                run.source = source
-            else:
-                execution_context = automation_execution_context_snapshot(
-                    context,
-                    rule,
-                    captured_at=datetime.now(tz=UTC),
-                )
-                run = AutomationRun(
-                    rule_id=rule.id,
-                    trigger_key=trigger_key,
-                    status="running",
-                    started_at=datetime.now(tz=UTC),
-                    trigger_payload=sanitize_payload(trigger_payload),
-                    context=execution_context,
-                    trace_id=trace.trace_id,
-                    actor=actor,
-                    source=source,
-                )
-                session.add(run)
-            if run:
-                run.context = automation_execution_context_snapshot(
-                    context,
-                    rule,
-                    captured_at=datetime.now(tz=UTC),
-                )
-            await session.flush()
-
-            trigger_recorded_at = datetime.now(tz=UTC)
-            trace.record_span(
-                "Automation trigger received",
-                started_at=run.started_at,
-                ended_at=trigger_recorded_at,
-                attributes={
-                    "reason_code": "automation_trigger_received",
-                    "run_id": str(run.id),
-                    "rule_id": str(rule.id),
-                    "trigger_key": trigger_key,
-                    "source": source,
-                },
-                input_payload={"trigger_payload": trigger_payload},
-                output_payload={"selected_rule": rule.name},
-            )
-
-            condition_results: list[dict[str, Any]] = []
-            action_results: list[dict[str, Any]] = []
-            status = "success"
-            error: str | None = None
-            try:
-                status, condition_results = await self._evaluate_rule_conditions(
-                    session,
-                    normalize_conditions(rule.conditions),
-                    context,
-                    trace=trace,
-                )
-                decision_recorded_at = datetime.now(tz=UTC)
-                trace.record_span(
-                    "Automation decision",
-                    started_at=decision_recorded_at,
-                    ended_at=decision_recorded_at,
-                    attributes={
-                        "reason_code": "condition_failed" if status == "skipped" else "conditions_passed",
-                        "command_sent": False if status == "skipped" else None,
-                    },
-                    output_payload={
-                        "decision": "blocked" if status == "skipped" else "continue",
-                        "condition_results": condition_results,
-                    },
-                    status="blocked" if status == "skipped" else "ok",
-                )
-                if status != "skipped":
-                    status, action_results, error = await self._execute_rule_actions(
-                        session,
-                        normalize_actions(rule.actions),
-                        context,
-                        rule=rule,
-                        trace=trace,
-                    )
-            except Exception as exc:
-                status = "failed"
-                error = str(exc)
-                logger.exception("automation_rule_execution_failed", extra={"rule_id": str(rule.id)})
-
-            finished_at = datetime.now(tz=UTC)
-            run.status = status
-            run.finished_at = finished_at
-            run.condition_results = condition_results
-            run.action_results = action_results
-            run.error = error
-            rule.last_fired_at = finished_at
-            rule.run_count = int(rule.run_count or 0) + 1
-            rule.last_run_status = status
-            rule.last_error = error
-            rule.next_run_at = next_run_for_triggers(
-                normalize_triggers(rule.triggers),
-                now=finished_at,
-                last_fired_at=finished_at,
-            )
-            if not rule.next_run_at and all(trigger["type"] in TIME_TRIGGER_KEYS for trigger in normalize_triggers(rule.triggers)):
-                rule.is_active = False
-
-            await write_audit_log(
-                session,
-                category=TELEMETRY_CATEGORY_AUTOMATION,
-                action=f"automation_rule.{status}",
-                actor=actor,
-                target_entity="AutomationRule",
-                target_id=rule.id,
-                target_label=rule.name,
-                metadata={
-                    "run_id": str(run.id),
-                    "trigger_key": trigger_key,
-                    "condition_results": condition_results,
-                    "action_results": action_results,
-                },
-                outcome="failed" if status == "failed" else "skipped" if status == "skipped" else "success",
-                level="error" if status == "failed" else "info",
-                trace_id=trace.trace_id,
-            )
+            identity = await reserve_occurrence(session, rule, context, origin_kind=source,
+                origin_id=origin_id or str(uuid.uuid4()), actor=actor, source=source, trace_id=current_trace_id())
             await session.commit()
-            await session.refresh(run)
-            await session.refresh(rule)
-            run_payload = serialize_run(run)
-            rule_payload = serialize_rule(rule)
-            rule_name = str(rule_payload["name"])
+        self.dispatcher.wake()
+        await self.dispatcher.run_once(identity)
+        return await self.run_response(identity)
 
-        event_payload = {
-            "run": run_payload,
-            "rule": rule_payload,
-        }
-        await event_bus.publish(f"automation.run.{status}", event_payload)
-        trace_context: dict[str, Any] = {
-            "run_id": str(run_payload["id"]),
-            "status": status,
-            "condition_count": len(condition_results),
-            "action_count": len(action_results),
-            "condition_results": condition_results,
-            "action_results": action_results,
-        }
-        skip_reason = automation_skip_reason(status, condition_results, action_results, error)
-        if skip_reason:
-            trace_context["skip_reason"] = skip_reason
-        trace.finish(
-            status="error" if status == "failed" else "ok",
-            level="error" if status == "failed" else "info",
-            summary=f"{rule_name} {status} for {trigger_key}",
-            context=trace_context,
-            error=error,
-        )
-        return {"executed": status == "success", "status": status, "run": run_payload}
+    async def run_response(self, identity: uuid.UUID) -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            run = await session.get(AutomationRun, identity)
+            if run is None:
+                raise LookupError("Automation run not found.")
+            payload = serialize_run(run)
+        return {"executed": payload["status"] == "success", "status": payload["status"], "run": payload}
+
+    async def _preflight(self, session: AsyncSession, run: AutomationRun, item: dict[str, Any], *,
+                         now: datetime, rule: AutomationRule | None, deadlines: dict[str, Any] | None = None) -> dict[str, Any] | AutomationActionWait | None:
+        action = item["action"]
+        def skip(reason: str, *, review: bool = False, **extra):
+            return workflow_action_result(action, "skipped", reason=reason, reason_code=reason,
+                                          command_sent=False, requires_review=review, **extra)
+        rule_denial = current_rule_denial(rule, run.context.get("rule_fingerprint"))
+        if rule_denial:
+            return skip("rule_not_active" if rule_denial == "rule_inactive" else "rule_changed_since_occurrence",
+                        review=rule_denial == "rule_changed")
+        context = restored_automation_context(run.context)
+        denial = hardware_action_denial(action["type"], context.provenance)
+        if denial:
+            return skip(denial, detail=HARDWARE_DENIAL_DETAILS[denial],
+                        requires_confirmation=denial == REQUESTER_CONFIRMATION_REQUIRED)
+        missing = context_missing_references(context, action)
+        if missing:
+            return skip("context_missing", missing_variables=missing)
+        if (await is_maintenance_mode_active() and action["type"] != "maintenance_mode.disable"
+                and action_paused_by_maintenance_mode(action["type"])):
+            return skip("maintenance_mode")
+        conditions = [await self._evaluate_condition(session, condition, context)
+                      for condition in normalize_conditions(rule.conditions)]
+        run.condition_results = conditions
+        if any(not result.get("passed") for result in conditions):
+            return skip("condition_failed")
+        if action["type"] in HARDWARE_ACTION_TYPES:
+            if run.trigger_key == "visitor_pass.used":
+                return skip("visitor_already_admitted")
+            if item.get("preparation_error"):
+                return skip("target_plan_unavailable", review=True, detail=item["preparation_error"])
+            if run.trigger_key.startswith("time."):
+                deadline = automation_hardware_deadline(run)
+                if deadlines is not None:
+                    deadlines["expires_at"] = deadline
+                if now > deadline:
+                    return skip("scheduled_hardware_expired")
+            if run.trigger_key.startswith("vehicle.") or run.trigger_key in {"visitor_pass.used", "visitor_pass.detected"}:
+                try:
+                    event = await session.get(AccessEvent, uuid.UUID(str(context.provenance.event_id)), populate_existing=True)
+                    if event is None:
+                        return skip("recognition_authorization_changed", detail="Recognition event is no longer available.")
+                    deadline = await recognition_deadline_for_event(session, event)
+                    if now > deadline:
+                        return skip("recognition_hardware_expired", review=True)
+                    checkpoint = await assert_current_recognition_authorization(session, event_id=context.provenance.event_id,
+                        allow_vehicle_schedule_override=run.trigger_key == "vehicle.outside_schedule", now=now)
+                    if deadlines is not None:
+                        deadlines["expires_at"] = checkpoint.expires_at
+                    if action["type"] == "gate.open" and item.get("automatic_entry_policy") is not True:
+                        return skip("recognition_entry_policy_not_captured", review=True)
+                    reason = await self._primary_admission_wait_reason(session, event)
+                    if reason:
+                        return AutomationActionWait(reason, min(now + timedelta(seconds=5),
+                            deadline + timedelta(microseconds=1)), deadline)
+                except ValueError as exc:
+                    return skip("recognition_authorization_changed", detail=str(exc))
+        return None
+
+    async def _primary_admission_wait_reason(self, session: AsyncSession, event: AccessEvent) -> str | None:
+        """Read the primary admission owner's truth; never claim or alter it.
+
+        A rule's operation remains independent. In particular its denial or
+        configuration cannot poison the primary admission's idempotency key.
+        No core lock is taken while this caller holds rule/run locks.
+        """
+        if event.decision != AccessDecision.GRANTED or event.direction != AccessDirection.ENTRY:
+            return None
+        sagas = list((await session.scalars(select(MovementSagaRecord).where(
+            MovementSagaRecord.access_event_id == event.id).execution_options(populate_existing=True))).all())
+        if len(sagas) != 1:
+            return "primary_admission_not_settled"
+        saga = sagas[0]
+        if saga.admission_status not in {"verified", "denied"} or saga.reconciliation_required:
+            return "primary_admission_not_settled"
+        parent = await session.scalar(select(GateCommandRecord).where(
+            GateCommandRecord.movement_saga_id == saga.id, GateCommandRecord.access_event_id == event.id,
+            GateCommandRecord.idempotency_key == f"gate-command:open:default:event:{event.id}",
+        ).execution_options(populate_existing=True))
+        if (parent is None or parent.state not in {GateCommandState.ACCEPTED, GateCommandState.REJECTED,
+                GateCommandState.FAILED, GateCommandState.RECONCILED} or parent.requires_reconciliation
+                or parent.completed_at is None
+                or (parent.command_metadata or {}).get("intent_id") != str(uuid.uuid5(event.id, "automatic-gate-open"))):
+            return "primary_gate_command_not_settled"
+        try:
+            projection = await AccessDeviceCommandJournal().gate_command_projection(session, parent)
+        except (KeyError, TypeError, ValueError):
+            # Missing historical/corrupt receipt structure is not proof that
+            # the primary operation settled. Expiry will leave an explicit skip.
+            return "primary_gate_targets_not_settled"
+        if projection is None or projection["requires_reconciliation"]:
+            return "primary_gate_targets_not_settled"
+        return None
+
+    async def prepare_action_dispatch(self, run: AutomationRun, token: uuid.UUID, index: int):
+        async with AsyncSessionLocal() as session:
+            rule = await session.scalar(select(AutomationRule).where(AutomationRule.id == run.rule_id)
+                                        .with_for_update().execution_options(populate_existing=True)) if run.rule_id else None
+            current, now = await self.run_store.owned(session, run.id, token)
+            item = current.action_plan[index]
+            deadlines = {}
+            denial = await self._preflight(session, current, item, now=now, rule=rule, deadlines=deadlines)
+            if isinstance(denial, AutomationActionWait):
+                if await self.run_store.defer_action(session, run.id, token, index, denial):
+                    await session.commit()
+                    return denial
+                # The observation can expire while the current authority was
+                # checked. Finish the pending action without ever attempting it.
+                denial = workflow_action_result(item["action"], "skipped", reason="recognition_hardware_expired",
+                    reason_code="recognition_hardware_expired", command_sent=False, requires_review=True)
+            action, context = item["action"], restored_automation_context(current.context)
+            if denial is not None or action["type"] in {"notification.enable", "notification.disable", "integration.whatsapp.send_message"}:
+                outcome = denial if denial is not None else await self._execute_action(session, action, context, rule=rule, execution={**item, "run_id": str(current.id), "rule_fingerprint": current.context["rule_fingerprint"]})
+                if outcome.get("requires_review"):
+                    current.review_reason = outcome.get("reason") or "preflight_requires_review"
+                await session.flush()
+                await self.run_store.complete_local_action(session, run.id, token, index, outcome,
+                    state="failed" if outcome["status"] == "failed" else "skipped" if outcome["status"] == "skipped" else "succeeded")
+                current, _ = await self.run_store.owned(session, run.id, token)
+                if not any(part["state"] in {"pending", "attempting"} for part in current.action_plan):
+                    await self.run_store.finish_in_session(session, run.id, token)
+                    await self._account_completion(session, current, rule)
+                elif denial is None:
+                    audit = await write_audit_log(session, category=TELEMETRY_CATEGORY_AUTOMATION,
+                        action="automation_rule.action_success", actor=current.actor, target_entity="AutomationRule",
+                        target_id=current.rule_id, target_label=rule.name, metadata={"run_id": str(run.id), "action_results": [outcome]})
+                    audit.id = uuid.uuid5(run.id, f"action-audit:{index}")
+                await session.commit()
+                return None
+            await session.flush()
+            attempted = await self.run_store.begin_action(session, run.id, token, index)
+            await session.commit()
+        execution = {**attempted, **deadlines, "run_id": str(run.id), "claim_token": str(token)}
+        return action, context, rule, execution
+
+    async def dispatch_prepared_action(self, action, context, rule, execution):
+        # Some integration/domain adapters need an explicit transaction participant;
+        # it is not opened until after the durable attempted checkpoint committed.
+        async with AsyncSessionLocal() as session:
+            return await self._execute_action(session, action, context, rule=rule, execution=execution)
+
+    async def authorize_hardware_dispatch(self, session: AsyncSession, execution: dict[str, Any]) -> None:
+        identity, token = uuid.UUID(execution["run_id"]), uuid.UUID(execution["claim_token"])
+        # P04 invokes this after target/parent locks. No other path holds a rule
+        # lock while taking a target lock, so this does not invert dispatch order.
+        snapshot = await session.get(AutomationRun, identity)
+        rule = await session.scalar(select(AutomationRule).where(AutomationRule.id == snapshot.rule_id)
+            .with_for_update().execution_options(populate_existing=True)) if snapshot and snapshot.rule_id else None
+        current, now = await self.run_store.owned(session, identity, token)
+        item = current.action_plan[execution["index"]]
+        if item["state"] != "attempting" or item["operation_id"] != execution["operation_id"]:
+            raise ValueError("Automation action no longer owns this hardware attempt.")
+        denial = await self._preflight(session, current, item, now=now, rule=rule)
+        if isinstance(denial, AutomationActionWait):
+            raise ValueError(denial.reason)
+        if denial:
+            raise ValueError(denial.get("detail") or denial["reason"])
+
+    async def account_completed_run(self, identity: uuid.UUID) -> None:
+        async with AsyncSessionLocal() as session:
+            snapshot = await session.get(AutomationRun, identity)
+            if snapshot is None or snapshot.status in {"queued", "processing"}:
+                return
+            rule = await session.scalar(select(AutomationRule).where(AutomationRule.id == snapshot.rule_id)
+                .with_for_update().execution_options(populate_existing=True)) if snapshot.rule_id else None
+            current = await session.scalar(select(AutomationRun).where(AutomationRun.id == identity).with_for_update()
+                                           .execution_options(populate_existing=True))
+            changed = await self._account_completion(session, current, rule)
+            if rule is not None:
+                # UPDATE expires the server-generated updated_at even when
+                # expire_on_commit=False. Load it explicitly before synchronous
+                # serialization; no ORM access may initiate implicit async I/O.
+                await session.refresh(rule)
+            run_payload = serialize_run(current)
+            rule_payload = serialize_rule(rule) if rule else None
+            await session.commit()
+        if changed or current.recovery_version == 1:
+            try:
+                await event_bus.publish(f"automation.run.{run_payload['status']}", {"run": run_payload, "rule": rule_payload})
+            except Exception:
+                logger.exception("automation_completion_publish_failed")
+
+    async def _account_completion(self, session: AsyncSession, run: AutomationRun, rule: AutomationRule | None) -> bool:
+        if run.recovery_version != 1 or run.status in {"queued", "processing"}:
+            return False
+        audit_id = uuid.uuid5(run.id, "completion-audit")
+        if await session.get(AuditLog, audit_id) is not None:
+            return False
+        error = next((str(item.get("error") or item.get("detail") or item.get("reason"))
+                      for item in run.action_results if item.get("status") in {"failed", "unknown"}), None)
+        run.error = run.error or error
+        if rule:
+            rule.last_fired_at = run.finished_at
+            rule.run_count = int(rule.run_count or 0) + 1
+            rule.last_run_status, rule.last_error = run.status, run.error
+            # Exhaustion belongs to next_run_at=None. Only explicit disable
+            # revokes pending effects; completion must not cancel its own handoff.
+        audit = await write_audit_log(session, category=TELEMETRY_CATEGORY_AUTOMATION,
+            action=f"automation_rule.{run.status}", actor=run.actor, target_entity="AutomationRule", target_id=run.rule_id,
+            target_label=rule.name if rule else "Deleted automation rule", trace_id=run.trace_id,
+            metadata={"run_id": str(run.id), "trigger_key": run.trigger_key, "condition_results": run.condition_results,
+                      "action_results": run.action_results, "review_reason": run.review_reason},
+            outcome="failed" if run.status in {"failed", "review_required"} else "skipped" if run.status == "skipped" else "success",
+            level="error" if run.status in {"failed", "review_required"} else "info")
+        audit.id = audit_id
+        await session.flush()
+        return True
+
+    async def recover_completion_audits(self) -> None:
+        async with AsyncSessionLocal() as session:
+            accounted = select(AuditLog.id).where(AuditLog.category == TELEMETRY_CATEGORY_AUTOMATION,
+                AuditLog.action.in_(["automation_rule.success", "automation_rule.skipped", "automation_rule.failed", "automation_rule.review_required"]),
+                AuditLog.metadata_["run_id"].astext == cast(AutomationRun.id, String)).exists()
+            identities = (await session.scalars(select(AutomationRun.id).where(AutomationRun.recovery_version == 1,
+                AutomationRun.status.not_in(["queued", "processing"]), ~accounted)
+                .order_by(AutomationRun.finished_at, AutomationRun.id).limit(20))).all()
+        for identity in identities:
+            await self.account_completed_run(identity)
+
+    async def _process_due_rules(self) -> None:
+        await self._reserve_due_rules()
+        self.dispatcher.wake()
+
+    async def _reserve_due_rules(self) -> int:
+        async with AsyncSessionLocal() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            rules = (await session.scalars(select(AutomationRule).where(AutomationRule.is_active.is_(True),
+                AutomationRule.next_run_at.is_not(None), AutomationRule.next_run_at <= now)
+                .order_by(AutomationRule.next_run_at).limit(MAX_DUE_RULES_PER_TICK).with_for_update(skip_locked=True))).all()
+            count = 0
+            for rule in rules:
+                triggers = normalize_triggers(rule.triggers)
+                scheduled_for = rule.next_run_at
+                trigger = due_time_trigger(triggers, now=now, last_fired_at=rule.last_fired_at, scheduled_for=scheduled_for)
+                if trigger:
+                    payload = {"trigger": trigger, "occurred_at": now.isoformat(), "scheduled_for": scheduled_for.isoformat()}
+                    context = captured_automation_context(str(trigger["type"]), payload)
+                    await reserve_occurrence(session, rule, context, origin_kind="scheduler",
+                        origin_id=f"{rule.id}:{trigger['id']}:{scheduled_for.isoformat()}", actor="Automation Scheduler", source="scheduler")
+                    count += 1
+                rule.next_run_at = next_run_for_triggers(triggers, now=now, last_fired_at=now)
+            await session.commit()
+        return count
 
     async def _evaluate_rule_conditions(
         self,
@@ -685,59 +719,11 @@ class AutomationService:
                 return "skipped", results
         return "success", results
 
-    async def _execute_rule_actions(
-        self,
-        session: AsyncSession,
-        actions: list[dict[str, Any]],
-        context: AutomationContext,
-        *,
-        rule: AutomationRule,
-        trace: Any,
-    ) -> tuple[str, list[dict[str, Any]], str | None]:
-        results: list[dict[str, Any]] = []
-        status = "success"
-        for action in actions:
-            started_at = datetime.now(tz=UTC)
-            result = await self._execute_action(session, action, context, rule=rule)
-            results.append(result)
-            result_status = str(result.get("status") or "unknown").lower()
-            trace.record_span(
-                "Automation action evaluated",
-                started_at=started_at,
-                ended_at=datetime.now(tz=UTC),
-                attributes={
-                    "action_id": action.get("id"),
-                    "action_type": action.get("type"),
-                    "reason_code": automation_action_reason_code(result),
-                    "dispatch_state": automation_action_dispatch_state(result),
-                },
-                input_payload={"action": action},
-                output_payload=result,
-                status="error" if result_status == "failed" else "skipped" if result_status == "skipped" else "ok",
-            )
-            if result.get("status") == "failed":
-                error = str(result.get("error") or result.get("detail") or "Automation action failed.")
-                return "failed", results, error
-            if result.get("status") == "skipped":
-                status = "skipped"
-        return status, results, None
 
     async def context_for_trigger(self, trigger_key: str, payload: dict[str, Any]) -> AutomationContext:
         if trigger_key.startswith("visitor_pass."):
             payload = await self._fresh_visitor_pass_payload(payload)
-        scopes = set(TRIGGER_SCOPES.get(trigger_key, {"event"}))
-        if trigger_key.startswith("time."):
-            scopes.update({"time", "event"})
-        context = AutomationContext(
-            trigger_key=trigger_key,
-            subject=subject_for_trigger(trigger_key, payload),
-            trigger_payload=payload,
-            facts=facts_from_payload(trigger_key, payload),
-            entities=entities_from_payload(payload),
-            scopes=scopes,
-        )
-        context.variables = build_context_variables(context)
-        return context
+        return captured_automation_context(trigger_key, payload)
 
     async def parse_ai_schedule(self, text: str) -> dict[str, Any]:
         runtime = await get_runtime_config()
@@ -803,6 +789,7 @@ class AutomationService:
         hmac_verified = False
         async with AsyncSessionLocal() as session:
             policies = await webhook_policies_for_key(session, webhook_key)
+            now = await session.scalar(select(func.clock_timestamp()))
             replay_window_seconds = WEBHOOK_HMAC_WINDOW_SECONDS
             if policies:
                 allowed_by_source = [
@@ -843,28 +830,19 @@ class AutomationService:
                         raise
                     hmac_verified = True
 
-            sender = (
-                await session.scalars(
-                    select(AutomationWebhookSender)
-                    .where(AutomationWebhookSender.webhook_key == webhook_key)
-                    .where(AutomationWebhookSender.source_ip == source_ip)
-                )
-            ).first()
-            new_sender = sender is None
+            inserted = await session.scalar(pg_insert(AutomationWebhookSender).values(
+                id=uuid.uuid4(), webhook_key=webhook_key, source_ip=source_ip,
+                first_seen_at=now, last_seen_at=now, event_count=0, last_payload_shape=payload_shape_value,
+            ).on_conflict_do_nothing(index_elements=["webhook_key", "source_ip"]).returning(AutomationWebhookSender.id))
+            sender = await session.scalar(select(AutomationWebhookSender)
+                .where(AutomationWebhookSender.webhook_key == webhook_key, AutomationWebhookSender.source_ip == source_ip)
+                .with_for_update().execution_options(populate_existing=True))
             if sender is None:
-                sender = AutomationWebhookSender(
-                    webhook_key=webhook_key,
-                    source_ip=source_ip,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    event_count=1,
-                    last_payload_shape=payload_shape_value,
-                )
-                session.add(sender)
-            else:
-                sender.last_seen_at = now
-                sender.event_count = int(sender.event_count or 0) + 1
-                sender.last_payload_shape = payload_shape_value
+                raise AutomationError("Webhook sender could not be reserved.")
+            new_sender = inserted is not None
+            sender.last_seen_at = now
+            sender.event_count = int(sender.event_count or 0) + 1
+            sender.last_payload_shape = payload_shape_value
             if policies:
                 strictest_rate_limit = min(
                     int(policy.get("rate_limit_per_minute") or WEBHOOK_RATE_LIMIT_PER_MINUTE)
@@ -886,23 +864,29 @@ class AutomationService:
                 if hmac_verified:
                     sender.last_nonce = nonce
                     sender.last_signature_at = now
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                new_sender = False
-
-        base_payload = {
-            "webhook_key": webhook_key,
-            "source_ip": source_ip,
-            "payload": payload,
-            "payload_shape": payload_shape_value,
-            "occurred_at": now.isoformat(),
-            "hmac_verified": hmac_verified,
-        }
-        runs = await self.fire_trigger("webhook.received", base_payload, source="webhook", actor="Webhook")
-        if new_sender:
-            runs.extend(await self.fire_trigger("webhook.new_sender", base_payload, source="webhook", actor="Webhook"))
+            base_payload = {
+                "webhook_key": webhook_key, "source_ip": source_ip, "payload": payload,
+                "payload_shape": payload_shape_value, "occurred_at": now.isoformat(), "hmac_verified": hmac_verified,
+            }
+            # The committed sender sequence identifies this accepted request.
+            # Nonce, sequence and occurrences roll back as one unit on failure.
+            origin_id = f"{sender.id}:{sender.event_count}"
+            identities = await reserve_trigger(session, "webhook.received", base_payload,
+                origin_kind="webhook", origin_id=origin_id, actor="Webhook", source="webhook", trace_id=current_trace_id(),
+                eligible_rule_ids={uuid.UUID(policy["rule_id"]) for policy in policies})
+            if not identities:
+                identities.extend(await reserve_trigger(session, "webhook.unrecognized",
+                    {**base_payload, "reason": "no_matching_automation"}, origin_kind="webhook", origin_id=origin_id,
+                    actor="Webhook", source="webhook", trace_id=current_trace_id()))
+            if new_sender:
+                identities.extend(await reserve_trigger(session, "webhook.new_sender", base_payload,
+                    origin_kind="webhook", origin_id=origin_id, actor="Webhook", source="webhook", trace_id=current_trace_id()))
+            await session.commit()
+        self.dispatcher.wake()
+        runs = []
+        for identity in identities:
+            await self.dispatcher.run_once(identity)
+            runs.append(await self.run_response(identity))
         return {
             "accepted": True,
             "webhook_key": webhook_key,
@@ -919,136 +903,17 @@ class AutomationService:
                 logger.exception("automation_scheduler_tick_failed")
             await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
-    async def _process_due_rules(self) -> None:
-        now = datetime.now(tz=UTC)
-        claims = await self._claim_due_rules(now)
-        for claim in claims:
-            await self.execute_rule(
-                claim.rule_id,
-                trigger_key=claim.trigger_key,
-                trigger_payload=claim.trigger_payload,
-                actor="Automation Scheduler",
-                source="scheduler",
-                claimed_run_id=claim.run_id,
-            )
-
-    async def _claim_due_rules(self, now: datetime) -> list[ScheduledAutomationClaim]:
-        claims: list[ScheduledAutomationClaim] = []
-        async with AsyncSessionLocal() as session:
-            rules = (
-                await session.scalars(
-                    select(AutomationRule)
-                    .where(AutomationRule.is_active.is_(True))
-                    .where(AutomationRule.next_run_at.is_not(None))
-                    .where(AutomationRule.next_run_at <= now)
-                    .order_by(AutomationRule.next_run_at)
-                    .limit(MAX_DUE_RULES_PER_TICK)
-                    .with_for_update(skip_locked=True)
-                )
-            ).all()
-            for rule in rules:
-                triggers = normalize_triggers(rule.triggers)
-                scheduled_for = rule.next_run_at
-                trigger = due_time_trigger(
-                    triggers,
-                    now=now,
-                    last_fired_at=rule.last_fired_at,
-                    scheduled_for=scheduled_for,
-                )
-                if not trigger:
-                    rule.next_run_at = next_run_for_triggers(
-                        triggers,
-                        now=now,
-                        last_fired_at=rule.last_fired_at,
-                    )
-                    continue
-                trigger_payload = {
-                    "trigger": trigger,
-                    "occurred_at": now.isoformat(),
-                    "scheduled_for": scheduled_for.isoformat() if scheduled_for else now.isoformat(),
-                }
-                run = AutomationRun(
-                    rule_id=rule.id,
-                    trigger_key=str(trigger["type"]),
-                    status="claimed",
-                    started_at=now,
-                    trigger_payload=sanitize_payload(trigger_payload),
-                    context={},
-                    actor="Automation Scheduler",
-                    source="scheduler",
-                )
-                session.add(run)
-                rule.next_run_at = next_run_for_triggers(
-                    triggers,
-                    now=now,
-                    last_fired_at=now,
-                )
-                await session.flush()
-                claims.append(
-                    ScheduledAutomationClaim(
-                        rule_id=str(rule.id),
-                        run_id=str(run.id),
-                        trigger_key=str(trigger["type"]),
-                        trigger_payload=trigger_payload,
-                    )
-                )
-            await session.commit()
-        return claims
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
-        for trigger_key, payload in self._event_to_triggers(event):
-            await self.fire_trigger(trigger_key, payload, actor="Automation Engine", source="event_bus")
+        # Their canonical mutation owners already committed matching occurrences.
+        # Realtime delivery may repeat or disappear and never creates a second run.
+        if event.type in {"access_event.finalized", "maintenance_mode.changed", "visitor_pass.created", "visitor_pass.used", "visitor_pass.status_changed"}:
+            return
+        for trigger_key, payload in automation_triggers_for_origin(event.type, event.payload if isinstance(event.payload, dict) else {}, occurred_at=event.created_at):
+            await self.fire_trigger(trigger_key, payload, actor="Automation Engine", source="event_bus",
+                origin_id=str(payload.get("access_event_id") or payload.get("event_id") or f"{event.type}:{event.created_at}"))
 
-    def _event_to_triggers(self, event: RealtimeEvent) -> list[tuple[str, dict[str, Any]]]:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type in AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES or event.type.startswith(
-            AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES
-        ):
-            return []
-        if event.type == "maintenance_mode.changed":
-            return [
-                (
-                    "maintenance_mode.enabled" if payload.get("is_active") else "maintenance_mode.disabled",
-                    {**payload, "occurred_at": event.created_at},
-                )
-            ]
-        if event.type == "access_event.finalized":
-            if payload.get("backfilled") or payload.get("skip_automation_actions"):
-                return []
-            return self._access_event_to_vehicle_trigger(event, payload)
-        if event.type == "visitor_pass.created":
-            return [("visitor_pass.created", {**payload, "occurred_at": event.created_at})]
-        if event.type == "visitor_pass.used":
-            return [
-                ("visitor_pass.used", {**payload, "occurred_at": event.created_at}),
-                ("visitor_pass.detected", {**payload, "occurred_at": event.created_at}),
-            ]
-        if event.type == "visitor_pass.status_changed":
-            visitor_pass = as_dict(payload.get("visitor_pass"))
-            if str(visitor_pass.get("status") or "").lower() == "expired":
-                return [("visitor_pass.expired", {**payload, "occurred_at": event.created_at})]
-        if event.type == "ai.phrase_received":
-            return [("ai.phrase_received", {**payload, "occurred_at": event.created_at})]
-        if event.type == "ai.issue_detected":
-            return [("ai.issue_detected", {**payload, "occurred_at": event.created_at})]
-        return []
 
-    def _access_event_to_vehicle_trigger(
-        self,
-        event: RealtimeEvent,
-        payload: dict[str, Any],
-    ) -> list[tuple[str, dict[str, Any]]]:
-        decision = str(payload.get("decision") or "").lower()
-        vehicle_id = optional_text(payload.get("vehicle_id"))
-        if decision == "granted" and vehicle_id:
-            trigger_key = "vehicle.known_plate"
-        elif decision == "denied" and vehicle_id:
-            trigger_key = "vehicle.outside_schedule"
-        elif decision == "denied" and not vehicle_id:
-            trigger_key = "vehicle.unknown_plate"
-        else:
-            return []
-        return [(trigger_key, {**payload, "occurred_at": payload.get("occurred_at") or event.created_at})]
 
     async def _evaluate_condition(
         self,
@@ -1065,28 +930,7 @@ class AutomationService:
                 "reason": "context_missing",
                 "missing_variables": missing,
             }
-        condition_type = str(condition.get("type") or "")
-        config = as_dict(condition.get("config"))
-        if condition_type in {"person.on_site", "person.off_site"}:
-            person_id = str(config.get("person_id") or context.entities.get("person_id") or "")
-            present = await person_is_present(session, person_id)
-            expected = condition_type == "person.on_site"
-            return condition_result(condition, present is expected, {"person_id": person_id, "present": present})
-        if condition_type in {"vehicle.on_site", "vehicle.off_site"}:
-            vehicle_id = str(config.get("vehicle_id") or context.entities.get("vehicle_id") or "")
-            present = await vehicle_is_present(session, vehicle_id)
-            expected = condition_type == "vehicle.on_site"
-            return condition_result(condition, present is expected, {"vehicle_id": vehicle_id, "present": present})
-        if condition_type in {"maintenance_mode.enabled", "maintenance_mode.disabled"}:
-            active = await is_maintenance_mode_active()
-            expected = condition_type == "maintenance_mode.enabled"
-            return condition_result(condition, active is expected, {"maintenance_mode_active": active})
-        return {
-            "id": condition["id"],
-            "type": condition_type,
-            "passed": False,
-            "reason": "unknown_condition",
-        }
+        return await evaluate_current_condition(session, condition, context.entities)
 
     async def _execute_action(
         self,
@@ -1095,11 +939,19 @@ class AutomationService:
         context: AutomationContext,
         *,
         rule: AutomationRule,
+        execution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        action_type = str(action["type"])
+        denial = hardware_action_denial(action_type, context.provenance)
+        if denial:
+            return workflow_action_result(
+                action, "skipped", reason=denial, reason_code=denial,
+                detail=HARDWARE_DENIAL_DETAILS[denial], command_sent=False,
+                requires_confirmation=denial == REQUESTER_CONFIRMATION_REQUIRED,
+            )
         missing = context_missing_references(context, action)
         if missing:
             return workflow_action_result(action, "skipped", reason="context_missing", missing_variables=missing)
-        action_type = str(action["type"])
         if (
             await is_maintenance_mode_active()
             and action_type != "maintenance_mode.disable"
@@ -1107,36 +959,36 @@ class AutomationService:
         ):
             return workflow_action_result(action, "skipped", reason="maintenance_mode")
         if action_type in {"notification.enable", "notification.disable"}:
-            return await self._toggle_notification_rule(session, action, active=action_type.endswith("enable"))
-        if action_type == "gate.open":
-            reason = render_action_reason(action, context, rule)
-            outcome = await get_gate_command_coordinator().execute_open(
-                GateCommandIntent(
-                    reason=reason,
-                    source="automation",
-                    actor="Automation Engine",
-                    metadata={
-                        "rule_id": str(getattr(rule, "id", "")) if getattr(rule, "id", None) else None,
-                        "rule_name": getattr(rule, "name", None),
-                        "trigger_key": context.trigger_key,
-                    },
+            try:
+                receipt = await set_automation_activation(
+                    session, reference=as_dict(action.get("config")), active=action_type.endswith("enable"),
                 )
-            )
-            return workflow_action_result(
-                action,
-                "success" if outcome.accepted else "failed",
-                accepted=outcome.accepted,
-                state=outcome.state.value,
-                detail=outcome.detail,
-                intent_id=outcome.intent.intent_id,
-                command_id=outcome.command_id,
-                mechanically_confirmed=outcome.mechanically_confirmed,
-                requires_reconciliation=outcome.requires_reconciliation,
-            )
+            except MutationError as exc:
+                if exc.code != "not_found":
+                    raise
+                return workflow_action_result(action, "failed", error="notification_rule_not_found")
+            return workflow_action_result(action, "success", **receipt)
+        if action_type in HARDWARE_ACTION_TYPES and execution is None:
+            raise ValueError("Hardware actions require a claimed durable automation action.")
+        if action_type == "gate.open":
+            async def authorize(session):
+                await self.authorize_hardware_dispatch(session, execution)
+            outcome = await get_gate_command_coordinator().execute_open(GateCommandIntent(
+                reason=render_action_reason(action, context, rule), source="automation", actor="Automation Engine",
+                intent_id=execution["operation_id"], idempotency_key=execution["idempotency_key"],
+                target_plan=execution["target_plan"], expires_at=execution.get("expires_at"), require_admission=True,
+                automatic_entry_policy=execution.get("automatic_entry_policy") is True,
+                event_id=context.provenance.event_id, authorize_dispatch=authorize,
+                metadata={"rule_id": str(rule.id), "rule_name": rule.name, "trigger_key": context.trigger_key,
+                          "automation_run_id": execution["run_id"]},
+            ))
+            return {**workflow_action_result(action, "success" if outcome.accepted else "failed"), **outcome.as_payload()}
         if action_type in {"garage_door.open", "garage_door.close"}:
-            return await self._command_garage_doors(session, action, context, rule=rule)
+            return await self._command_garage_doors(action, context, rule=rule, execution=execution)
         if integration_action_for_type(action_type):
-            return await execute_integration_action(session, action, context, rule=rule)
+            return await execute_integration_action(session, action, context, rule=rule,
+                operation_id=execution["operation_id"] if execution else None,
+                origin={key: execution[key] for key in ("run_id", "rule_fingerprint")} if execution and action_type == "integration.whatsapp.send_message" else None)
         if action_type in {"maintenance_mode.enable", "maintenance_mode.disable"}:
             reason = render_action_reason(action, context, rule)
             status = await set_maintenance_mode(
@@ -1148,65 +1000,35 @@ class AutomationService:
             return workflow_action_result(action, "success", maintenance_mode=status)
         return workflow_action_result(action, "failed", error="unknown_action")
 
-    async def _toggle_notification_rule(
-        self,
-        session: AsyncSession,
-        action: dict[str, Any],
-        *,
-        active: bool,
-    ) -> dict[str, Any]:
-        config = as_dict(action.get("config"))
-        rule = await resolve_notification_rule(session, config)
-        if not rule:
-            return workflow_action_result(action, "failed", error="notification_rule_not_found")
-        rule.is_active = active
-        return workflow_action_result(action, "success", notification_rule_id=str(rule.id), is_active=active)
-
-    async def _command_garage_doors(
-        self,
-        session: AsyncSession,
-        action: dict[str, Any],
-        context: AutomationContext,
-        *,
-        rule: AutomationRule,
-    ) -> dict[str, Any]:
-        devices = await automation_garage_targets(action)
-        if not devices:
+    async def _command_garage_doors(self, action: dict[str, Any], context: AutomationContext, *,
+                                    rule: AutomationRule, execution: dict[str, Any]) -> dict[str, Any]:
+        plans = execution.get("target_plans") or []
+        if not plans:
             return workflow_action_result(action, "failed", error="garage_door_not_configured")
         command = "open" if action["type"] == "garage_door.open" else "close"
         reason = render_action_reason(action, context, rule)
         outcomes = []
-        for device in devices:
-            outcomes.append(
-                await self._garage_command_outcome(
-                    session,
-                    device.key,
-                    command,
-                    reason,
-                )
-            )
-        failed = [outcome for outcome in outcomes if not outcome["accepted"]]
-        return workflow_action_result(
-            action,
-            "failed" if failed else "success",
-            outcomes=outcomes,
-            error="; ".join(str(item.get("detail") or item["entity_id"]) for item in failed) if failed else None,
-        )
-
-    async def _garage_command_outcome(
-        self,
-        session: AsyncSession,
-        device_key: str,
-        command: str,
-        reason: str,
-    ) -> dict[str, Any]:
-        outcome = await get_access_device_service().command_device(
-            device_key,
-            command,
-            reason,
-            schedule_source="garage_door",
-        )
-        return outcome.as_payload()
+        async def authorize(session):
+            await self.authorize_hardware_dispatch(session, execution)
+        for plan in plans:
+            # One configured action may address several devices. Each existing
+            # device key has one stable child operation beneath this action.
+            device_key = plan["target_device_key"]
+            identity = str(uuid.uuid5(uuid.UUID(execution["operation_id"]), device_key))
+            result = await get_access_device_service().command_device(device_key, command, reason,
+                schedule_source="garage_door", intent_id=identity, idempotency_key=identity,
+                target_plan=plan, expires_at=execution.get("expires_at"), authorize_dispatch=authorize)
+            outcomes.append(result.as_payload())
+            if result.requires_reconciliation or not result.accepted:
+                # An ambiguous earlier target cannot be followed by another
+                # hardware transmission within the same configured action.
+                break
+        unresolved = any(item.get("requires_reconciliation") or item.get("delivery") == "unknown" for item in outcomes)
+        failed = any(not item["accepted"] for item in outcomes)
+        return workflow_action_result(action, "unknown" if unresolved else "failed" if failed else "success",
+            outcomes=outcomes, requires_reconciliation=unresolved,
+            skipped_target_count=len(plans) - len(outcomes),
+            error="garage_target_outcome_unknown" if unresolved else "garage_target_failed" if failed else None)
 
     async def _fresh_visitor_pass_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         visitor_pass = as_dict(payload.get("visitor_pass")) or payload
@@ -1229,206 +1051,6 @@ class AutomationService:
         return [{"id": str(rule.id), "name": rule.name, "trigger_event": rule.trigger_event} for rule in rules]
 
 
-def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
-    triggers = normalize_triggers(value.get("triggers"))
-    return {
-        "id": str(value.get("id") or uuid.uuid4()),
-        "name": str(value.get("name") or "Automation Rule").strip()[:160],
-        "description": str(value.get("description") or "").strip(),
-        "is_active": value.get("is_active", True) is not False,
-        "triggers": triggers,
-        "trigger_keys": trigger_keys_for_triggers(triggers),
-        "conditions": normalize_conditions(value.get("conditions")),
-        "actions": normalize_actions(value.get("actions")),
-        "next_run_at": value.get("next_run_at"),
-        "last_fired_at": value.get("last_fired_at"),
-        "last_run_status": value.get("last_run_status"),
-        "last_error": value.get("last_error"),
-        "run_count": int(value.get("run_count") or 0),
-    }
-
-
-def normalize_triggers(value: Any, *, generate_webhook_keys: bool = False) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    allowed = {trigger_type for group in TRIGGER_CATALOG for trigger_type in [item["type"] for item in group["triggers"]]}
-    normalized = []
-    for index, raw in enumerate(value):
-        if not isinstance(raw, dict):
-            continue
-        trigger_type = str(raw.get("type") or "").strip()
-        if trigger_type not in allowed:
-            continue
-        config = as_dict(raw.get("config"))
-        normalized.append(
-            {
-                "id": str(raw.get("id") or f"trigger-{index + 1}"),
-                "type": trigger_type,
-                "config": normalize_trigger_config(
-                    trigger_type,
-                    config,
-                    generate_webhook_key=generate_webhook_keys,
-                ),
-            }
-        )
-    return normalized
-
-
-def normalize_trigger_config(
-    trigger_type: str,
-    config: dict[str, Any],
-    *,
-    generate_webhook_key: bool = False,
-) -> dict[str, Any]:
-    if trigger_type == "time.every_x":
-        unit = str(config.get("unit") or "minutes").lower()
-        if unit not in {"minutes", "hours", "days"}:
-            unit = "minutes"
-        return {
-            "interval": safe_int(config.get("interval"), default=1, minimum=1),
-            "unit": unit,
-            "start_at": optional_text(config.get("start_at")),
-            "end_at": optional_text(config.get("end_at")),
-        }
-    if trigger_type in {"time.cron", "time.ai_text"}:
-        return {
-            "cron_expression": optional_text(config.get("cron_expression")),
-            "timezone": optional_text(config.get("timezone")) or "Europe/London",
-            "start_at": optional_text(config.get("start_at")),
-            "end_at": optional_text(config.get("end_at")),
-            "natural_text": optional_text(config.get("natural_text")),
-            "summary": optional_text(config.get("summary")),
-        }
-    if trigger_type == "time.specific_datetime":
-        recurrence = str(config.get("recurrence") or "none").lower()
-        if recurrence not in {"none", "daily", "weekly", "monthly"}:
-            recurrence = "none"
-        return {
-            "run_at": optional_text(config.get("run_at")),
-            "single_use": config.get("single_use", recurrence == "none") is not False,
-            "recurrence": recurrence,
-            "end_at": optional_text(config.get("end_at")),
-        }
-    if trigger_type == "webhook.received":
-        webhook_key = optional_text(config.get("webhook_key"))
-        key_was_generated = False
-        if generate_webhook_key and not is_high_entropy_webhook_key(webhook_key):
-            webhook_key = generate_automation_webhook_key()
-            key_was_generated = True
-        return {
-            "webhook_key": webhook_key,
-            "webhook_key_strength": "server_generated"
-            if key_was_generated or is_high_entropy_webhook_key(webhook_key)
-            else "legacy",
-            "require_hmac": bool_config(config.get("require_hmac")),
-            "allowed_source_ips": normalize_string_list(config.get("allowed_source_ips")),
-            "rate_limit_per_minute": safe_int(
-                config.get("rate_limit_per_minute"),
-                default=WEBHOOK_RATE_LIMIT_PER_MINUTE,
-                minimum=1,
-            ),
-            "replay_window_seconds": safe_int(
-                config.get("replay_window_seconds"),
-                default=WEBHOOK_HMAC_WINDOW_SECONDS,
-                minimum=30,
-            ),
-            "source_ip": optional_text(config.get("source_ip")),
-        }
-    return {
-        key: item
-        for key, item in config.items()
-        if key
-        in {
-            "person_id",
-            "vehicle_id",
-            "registration_number",
-            "visitor_pass_id",
-            "phrase",
-            "match_mode",
-            "webhook_key",
-            "source_ip",
-        }
-    }
-
-
-def normalize_conditions(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    allowed = {condition["type"] for group in CONDITION_CATALOG for condition in group["conditions"]}
-    conditions = []
-    for index, raw in enumerate(value):
-        if not isinstance(raw, dict):
-            continue
-        condition_type = str(raw.get("type") or "").strip()
-        if condition_type not in allowed:
-            continue
-        config = as_dict(raw.get("config"))
-        conditions.append(
-            {
-                "id": str(raw.get("id") or f"condition-{index + 1}"),
-                "type": condition_type,
-                "config": {
-                    key: item
-                    for key, item in config.items()
-                    if key in {"person_id", "vehicle_id"}
-                },
-            }
-        )
-    return conditions
-
-
-def normalize_actions(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    allowed = {
-        action["type"]
-        for group in ACTION_CATALOG
-        for action in group["actions"]
-    } | registered_integration_action_types()
-    actions = []
-    for index, raw in enumerate(value):
-        if not isinstance(raw, dict):
-            continue
-        action_type = str(raw.get("type") or "").strip()
-        if action_type not in allowed:
-            continue
-        config = as_dict(raw.get("config"))
-        actions.append(
-            {
-                "id": str(raw.get("id") or f"action-{index + 1}"),
-                "type": action_type,
-                "config": normalize_action_config(action_type, config),
-                "reason_template": str(raw.get("reason_template") or ""),
-            }
-        )
-    return actions
-
-
-def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[str, Any]:
-    if action_type.startswith("notification."):
-        return {
-            "notification_rule_id": optional_text(config.get("notification_rule_id")),
-            "notification_rule_name": optional_text(config.get("notification_rule_name")),
-        }
-    if action_type.startswith("garage_door."):
-        return {
-            "target_entity_ids": normalize_string_list(config.get("target_entity_ids"))
-        }
-    if integration_action_for_type(action_type):
-        return integration_action_config(action_type, config)
-    return {}
-
-
-async def automation_garage_targets(action: dict[str, Any]) -> list[Any]:
-    action_config = as_dict(action.get("config"))
-    target_ids = set(normalize_string_list(action_config.get("target_entity_ids")))
-    return [
-        device
-        for device in await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
-        if not target_ids or device.key in target_ids
-    ]
-
-
 def action_paused_by_maintenance_mode(action_type: str) -> bool:
     return (
         action_type.startswith("notification.")
@@ -1437,15 +1059,6 @@ def action_paused_by_maintenance_mode(action_type: str) -> bool:
         or action_type == "maintenance_mode.enable"
         or action_type == "integration.whatsapp.send_message"
     )
-
-
-def generate_automation_webhook_key() -> str:
-    return f"{WEBHOOK_KEY_PREFIX}{secrets.token_urlsafe(WEBHOOK_KEY_RANDOM_BYTES)}"
-
-
-def is_high_entropy_webhook_key(value: Any) -> bool:
-    text = optional_text(value)
-    return text.startswith(WEBHOOK_KEY_PREFIX) and len(text) >= len(WEBHOOK_KEY_PREFIX) + 40
 
 
 def harden_webhook_triggers_for_actions(
@@ -1478,8 +1091,10 @@ async def webhook_policies_for_key(session: AsyncSession, webhook_key: str) -> l
         await session.scalars(
             select(AutomationRule)
             .where(AutomationRule.is_active.is_(True))
-            .where(AutomationRule.trigger_keys.contains(["webhook.received"]))
-            .order_by(AutomationRule.created_at)
+            .where(or_(*(AutomationRule.trigger_keys.contains([key]) for key in
+                         ("webhook.received", "webhook.new_sender", "webhook.unrecognized"))))
+            .order_by(AutomationRule.created_at, AutomationRule.id)
+            .with_for_update().execution_options(populate_existing=True)
         )
     ).all()
     policies: list[dict[str, Any]] = []
@@ -1658,10 +1273,6 @@ async def record_rejected_webhook_sender(
         await session.commit()
 
 
-def trigger_keys_for_triggers(triggers: list[dict[str, Any]]) -> list[str]:
-    return list(dict.fromkeys(str(trigger["type"]) for trigger in triggers if trigger.get("type")))
-
-
 def serialize_rule(rule: AutomationRule | dict[str, Any]) -> dict[str, Any]:
     if isinstance(rule, dict):
         return normalize_rule_payload(rule)
@@ -1691,10 +1302,14 @@ def serialize_run(run: AutomationRun) -> dict[str, Any]:
         "rule_id": str(run.rule_id) if run.rule_id else None,
         "trigger_key": run.trigger_key,
         "status": run.status,
-        "started_at": run.started_at.isoformat(),
+        "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "trigger_payload": run.trigger_payload,
-        "context": run.context,
+        "context": {key: value for key, value in (run.context or {}).items() if key not in {"dispatch", "rule_fingerprint"}},
+        "recovery_version": run.recovery_version,
+        "review_reason": ("historical_unfinished" if run.recovery_version is None and run.status in {"claimed", "running", "queued", "processing"} else run.review_reason),
+        "requires_review": bool(run.review_reason) or (run.recovery_version is None and run.status in {"claimed", "running", "queued", "processing"}),
+        "action_states": [{"index": item.get("index"), "id": as_dict(item.get("action")).get("id"), "operation_id": item.get("operation_id"), "state": item.get("state")} for item in (run.action_plan or []) if isinstance(item, dict)],
         "condition_results": run.condition_results,
         "action_results": run.action_results,
         "trace_id": run.trace_id,
@@ -1725,32 +1340,6 @@ def automation_skip_reason(
             if reason:
                 return reason
     return "Automation run was skipped."
-
-
-def automation_execution_context_snapshot(
-    context: AutomationContext,
-    rule: AutomationRule,
-    *,
-    captured_at: datetime,
-) -> dict[str, Any]:
-    """Persist the evaluated rule shape so later investigations do not use today's config."""
-
-    return sanitize_payload(
-        {
-            **context.to_payload(),
-            "configuration_snapshot": {
-                "source": "captured_at_execution",
-                "captured_at": captured_at.isoformat(),
-                "rule": {
-                    "id": str(rule.id),
-                    "name": rule.name,
-                    "triggers": normalize_triggers(rule.triggers),
-                    "conditions": normalize_conditions(rule.conditions),
-                    "actions": normalize_actions(rule.actions),
-                },
-            },
-        }
-    )
 
 
 def automation_condition_reason_code(
@@ -1861,124 +1450,6 @@ def variable_groups() -> list[dict[str, Any]]:
     ]
 
 
-def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    facts = as_dict(payload.get("facts"))
-    visitor_pass = as_dict(payload.get("visitor_pass"))
-    body = as_dict(payload.get("payload"))
-    merged = {**payload, **facts}
-    if visitor_pass:
-        merged.update(
-            {
-                "visitor_pass_id": visitor_pass.get("id"),
-                "visitor_name": visitor_pass.get("visitor_name"),
-                "visitor_pass_status": visitor_pass.get("status"),
-                "visitor_pass_expected_time": visitor_pass.get("expected_time"),
-                "visitor_pass_vehicle_registration": visitor_pass.get("number_plate"),
-                "visitor_pass_vehicle_make": visitor_pass.get("vehicle_make"),
-                "visitor_pass_vehicle_colour": visitor_pass.get("vehicle_colour"),
-                "visitor_pass_duration_on_site": visitor_pass.get("duration_human"),
-                "visitor_pass_duration_on_site_seconds": visitor_pass.get("duration_on_site_seconds"),
-                "registration_number": visitor_pass.get("number_plate"),
-                "vehicle_make": visitor_pass.get("vehicle_make"),
-                "vehicle_colour": visitor_pass.get("vehicle_colour"),
-            }
-        )
-    if trigger_key.startswith("webhook."):
-        merged.update(
-            {
-                "webhook_key": payload.get("webhook_key"),
-                "webhook_sender_ip": payload.get("source_ip"),
-                "message": json.dumps(body)[:500] if body else payload.get("message"),
-            }
-        )
-    if trigger_key.startswith("ai."):
-        merged.update(
-            {
-                "alfred_phrase": payload.get("phrase") or payload.get("message"),
-                "alfred_issue": payload.get("issue") or payload.get("message"),
-            }
-        )
-    return merged
-
-
-def entities_from_payload(payload: dict[str, Any]) -> dict[str, str]:
-    facts = as_dict(payload.get("facts"))
-    visitor_pass = as_dict(payload.get("visitor_pass"))
-    merged = {**payload, **facts}
-    entities = {
-        "person_id": optional_text(merged.get("person_id")),
-        "vehicle_id": optional_text(merged.get("vehicle_id")),
-        "visitor_pass_id": optional_text(visitor_pass.get("id") or merged.get("visitor_pass_id")),
-        "access_event_id": optional_text(merged.get("access_event_id") or merged.get("event_id")),
-    }
-    return {key: value for key, value in entities.items() if value}
-
-
-def build_context_variables(context: AutomationContext) -> dict[str, str]:
-    facts = {canonical_key(key): "" if value is None else str(value) for key, value in context.facts.items()}
-
-    def pick(*keys: str, default: str = "") -> str:
-        for key in keys:
-            value = facts.get(canonical_key(key))
-            if value:
-                return value
-        return default
-
-    occurred_at = pick("occurred_at", "created_at", default=datetime.now(tz=UTC).isoformat())
-    variables = {
-        "FirstName": pick("first_name"),
-        "LastName": pick("last_name"),
-        "DisplayName": pick("display_name", "person_name"),
-        "PersonId": pick("person_id", default=context.entities.get("person_id", "")),
-        "Registration": pick("registration_number", "vehicle_registration_number", "visitor_pass_vehicle_registration"),
-        "VehicleRegistrationNumber": pick("vehicle_registration_number", "registration_number", "visitor_pass_vehicle_registration"),
-        "VehicleId": pick("vehicle_id", default=context.entities.get("vehicle_id", "")),
-        "VehicleName": pick("vehicle_name", "vehicle_display_name", "vehicle_description", "registration_number"),
-        "VehicleMake": pick("vehicle_make", "make", "visitor_pass_vehicle_make"),
-        "VehicleColour": pick("vehicle_colour", "vehicle_color", "colour", "color", "visitor_pass_vehicle_colour"),
-        "VehicleColor": pick("vehicle_color", "vehicle_colour", "color", "colour", "visitor_pass_vehicle_colour"),
-        "VisitorPassId": pick("visitor_pass_id", default=context.entities.get("visitor_pass_id", "")),
-        "VisitorName": pick("visitor_name"),
-        "VisitorPassVehicleRegistration": pick("visitor_pass_vehicle_registration", "number_plate", "registration_number"),
-        "VisitorPassVehicleMake": pick("visitor_pass_vehicle_make", "vehicle_make"),
-        "VisitorPassVehicleColour": pick("visitor_pass_vehicle_colour", "vehicle_colour", "vehicle_color"),
-        "VisitorPassDurationOnSite": pick("visitor_pass_duration_on_site", "duration_human"),
-        "MaintenanceModeReason": pick("maintenance_mode_reason", "reason"),
-        "MaintenanceModeDuration": pick("maintenance_mode_duration", "duration_label"),
-        "WebhookKey": pick("webhook_key"),
-        "WebhookSenderIp": pick("webhook_sender_ip", "source_ip"),
-        "AlfredPhrase": pick("alfred_phrase", "phrase", "message"),
-        "AlfredIssue": pick("alfred_issue", "issue", "message"),
-        "OccurredAt": occurred_at,
-        "Date": date_label(occurred_at),
-        "Time": time_label(occurred_at),
-        "EventType": context.trigger_key.replace(".", " ").replace("_", " ").title(),
-        "Subject": context.subject,
-        "Message": pick("message", default=context.subject),
-        "Source": pick("source"),
-    }
-    return {key: "" if value is None else str(value) for key, value in variables.items()}
-
-
-def context_missing_references(context: AutomationContext, value: Any) -> list[str]:
-    missing: list[str] = []
-    for name in sorted(referenced_variable_names(value)):
-        variable = VARIABLE_BY_NAME.get(name.lower())
-        if not variable:
-            context.warnings.append(f"Unknown variable @{name}.")
-            missing.append(name)
-            continue
-        if variable.scope not in context.scopes:
-            context.warnings.append(f"Variable @{name} is not available for {context.trigger_key}.")
-            missing.append(variable.name)
-            continue
-        if not context.variables.get(variable.name):
-            missing.append(variable.name)
-    if missing:
-        context.missing_required_variables = sorted(set([*context.missing_required_variables, *missing]))
-    return sorted(set(missing))
-
-
 def render_with_context(template: str, context: AutomationContext) -> str:
     return render_template(template, context.variables)
 
@@ -1987,77 +1458,6 @@ def render_action_reason(action: dict[str, Any], context: AutomationContext, rul
     template = str(action.get("reason_template") or "")
     rendered = render_with_context(template, context) if template else ""
     return rendered or f"Automation {rule.name}: {action['type']}"
-
-
-def trigger_matches(trigger: dict[str, Any], context: AutomationContext) -> bool:
-    if trigger["type"] != context.trigger_key:
-        return False
-    config = as_dict(trigger.get("config"))
-    facts = {canonical_key(key): str(value).lower() for key, value in context.facts.items() if value is not None}
-    if config.get("person_id") and str(config["person_id"]) != context.entities.get("person_id"):
-        return False
-    if config.get("vehicle_id") and str(config["vehicle_id"]) != context.entities.get("vehicle_id"):
-        return False
-    if config.get("visitor_pass_id") and str(config["visitor_pass_id"]) != context.entities.get("visitor_pass_id"):
-        return False
-    if config.get("registration_number"):
-        expected = str(config["registration_number"]).strip().replace(" ", "").lower()
-        actual = facts.get(canonical_key("registration_number"), "").replace(" ", "")
-        if expected and expected != actual:
-            return False
-    if config.get("webhook_key") and str(config["webhook_key"]) != str(context.facts.get("webhook_key") or ""):
-        return False
-    if config.get("source_ip") and str(config["source_ip"]) != str(context.facts.get("source_ip") or ""):
-        return False
-    phrase = str(config.get("phrase") or "").strip().lower()
-    if phrase:
-        actual_phrase = str(context.facts.get("alfred_phrase") or context.facts.get("message") or "").lower()
-        if str(config.get("match_mode") or "contains") == "exact":
-            return actual_phrase == phrase
-        return phrase in actual_phrase
-    return True
-
-
-def condition_result(condition: dict[str, Any], passed: bool, details: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": condition["id"],
-        "type": condition["type"],
-        "passed": passed,
-        "details": details,
-    }
-
-
-async def person_is_present(session: AsyncSession, person_id: str) -> bool:
-    parsed = parse_uuid(person_id)
-    if not parsed:
-        return False
-    presence = await session.get(Presence, parsed)
-    return bool(presence and presence.state == PresenceState.PRESENT)
-
-
-async def vehicle_is_present(session: AsyncSession, vehicle_id: str) -> bool:
-    parsed = parse_uuid(vehicle_id)
-    if not parsed:
-        return False
-    vehicle = await session.get(Vehicle, parsed)
-    if not vehicle or not vehicle.person_id:
-        return False
-    return await person_is_present(session, str(vehicle.person_id))
-
-
-async def resolve_notification_rule(session: AsyncSession, config: dict[str, Any]) -> NotificationRule | None:
-    rule_id = parse_uuid(config.get("notification_rule_id"))
-    if rule_id:
-        return await session.get(NotificationRule, rule_id)
-    name = str(config.get("notification_rule_name") or "").strip().lower()
-    if not name:
-        return None
-    rules = (await session.scalars(select(NotificationRule).order_by(NotificationRule.name))).all()
-    exact = [rule for rule in rules if rule.name.lower() == name]
-    if exact:
-        return exact[0]
-    partial = [rule for rule in rules if name in rule.name.lower()]
-    return partial[0] if len(partial) == 1 else None
 
 
 def next_run_for_triggers(
@@ -2207,72 +1607,11 @@ def validate_schedule_parse(
     }
 
 
-def subject_for_trigger(trigger_key: str, payload: dict[str, Any]) -> str:
-    facts = as_dict(payload.get("facts"))
-    visitor_pass = as_dict(payload.get("visitor_pass"))
-    return str(
-        payload.get("subject")
-        or facts.get("subject")
-        or payload.get("message")
-        or visitor_pass.get("visitor_name")
-        or trigger_key.replace(".", " ").title()
-    )
-
-
-def date_label(value: str) -> str:
-    parsed = parse_datetime(value)
-    return parsed.strftime("%Y-%m-%d") if parsed else ""
-
-
-def time_label(value: str) -> str:
-    parsed = parse_datetime(value)
-    return parsed.strftime("%H:%M") if parsed else ""
-
-
-def parse_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return ensure_aware(value)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return ensure_aware(parsed)
-    except ValueError:
-        return None
-
-
-def ensure_aware(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
-
-
 def timezone_for(value: Any) -> ZoneInfo:
     try:
         return ZoneInfo(str(value or "UTC"))
     except ZoneInfoNotFoundError:
         return ZoneInfo("UTC")
-
-
-def optional_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def bool_config(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def safe_int(value: Any, *, default: int = 1, minimum: int | None = None) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    if minimum is not None:
-        parsed = max(minimum, parsed)
-    return parsed
 
 
 def parse_uuid(value: Any) -> uuid.UUID | None:
@@ -2302,3 +1641,16 @@ _automation_service = AutomationService()
 
 def get_automation_service() -> AutomationService:
     return _automation_service
+
+
+def validated_rule_name(name: str) -> str:
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
+        raise AutomationError("Automation name must contain 1–160 characters.")
+    return name.strip()
+
+
+def automation_hardware_deadline(run: AutomationRun) -> datetime:
+    value = datetime.fromisoformat(run.context["dispatch"]["source_time"])
+    if value.tzinfo is None:
+        raise ValueError("Hardware source time must include a timezone.")
+    return value + timedelta(seconds=60)

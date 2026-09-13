@@ -1,20 +1,18 @@
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user
 from app.db.session import get_db_session
+from app.services.messaging.incoming_messages import IncomingMessageStore
 from app.models import User
-from app.modules.notifications.base import NotificationDeliveryError
-from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
-from app.services.telemetry import (
-    TELEMETRY_CATEGORY_INTEGRATIONS,
-    actor_from_user,
-    emit_audit_log,
-)
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service, load_whatsapp_config
+from app.modules.notifications.base import NotificationContext
+from app.api.confirmations import send_confirmed_notification
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.messaging.whatsapp_configuration import load_whatsapp_config
 
 router = APIRouter()
 
@@ -28,12 +26,12 @@ class WhatsAppTestRequest(BaseModel):
 
 @router.get("/status")
 async def whatsapp_status(_: User = Depends(admin_user)) -> dict[str, Any]:
-    return await get_whatsapp_messaging_service().status()
+    return await get_whatsapp_delivery_service().status()
 
 
 @router.get("/admin-targets")
 async def whatsapp_admin_targets(_: User = Depends(admin_user)) -> dict[str, Any]:
-    return {"targets": await get_whatsapp_messaging_service().available_admin_targets()}
+    return {"targets": await get_whatsapp_delivery_service().available_admin_targets()}
 
 
 @router.post("/test")
@@ -41,19 +39,7 @@ async def send_whatsapp_test(
     request: WhatsAppTestRequest,
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict[str, bool]:
-    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    try:
-        await consume_action_confirmation(
-            session,
-            user=user,
-            action="whatsapp.test_message",
-            payload=confirmation_payload,
-            confirmation_token=request.confirmation_token,
-        )
-    except ActionConfirmationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
+) -> dict[str, Any]:
     target = request.phone_number or user.mobile_phone_number
     if not target:
         raise HTTPException(status_code=400, detail="Provide a WhatsApp phone number or add one to your Admin profile.")
@@ -62,16 +48,31 @@ async def send_whatsapp_test(
         raise HTTPException(status_code=400, detail="Enable WhatsApp before sending a test message.")
     if not config.access_token or not config.phone_number_id:
         raise HTTPException(status_code=400, detail="WhatsApp access token and phone number ID are required.")
-    try:
-        await get_whatsapp_messaging_service().send_text_message(target, request.message, config=config)
-    except NotificationDeliveryError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    emit_audit_log(
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="whatsapp.test_message",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="WhatsApp",
-        metadata={"target": "current_admin" if not request.phone_number else "manual_phone"},
+    result = await send_confirmed_notification(
+        session, user=user, action="whatsapp.test_message",
+        payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
+        confirmation_token=request.confirmation_token,
+        context=NotificationContext("integration_test", "WhatsApp test", "info", {}),
+        direct_action={"type": "whatsapp", "delivery_mode": "literal", "target": target,
+            "title": "", "message": request.message}, ephemeral_config=config,
     )
-    return {"ok": True}
+    return {"ok": True, "notification_run_id": result.run_id}
+
+
+@router.get("/incoming")
+async def incoming_messages(
+    _: User = Depends(admin_user), limit: int = Query(default=25, ge=1, le=100),
+    before_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    try:
+        return await IncomingMessageStore().recovery_page(provider="whatsapp", limit=limit, before_id=before_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Incoming message cursor not found.") from exc
+
+
+@router.get("/incoming/{incoming_id}")
+async def incoming_message(incoming_id: uuid.UUID, _: User = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        return await IncomingMessageStore().recovery_detail(incoming_id, provider="whatsapp")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Incoming message not found.") from exc

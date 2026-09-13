@@ -3,18 +3,19 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.confirmations import send_confirmed_notification
 from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import MessagingIdentity, Person, User
-from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
-from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
-from app.services.discord_messaging import get_discord_messaging_service
+from app.modules.notifications.base import NotificationContext
+from app.services.discord_messaging import get_discord_messaging_service, load_current_discord_config
+from app.services.messaging.incoming_messages import IncomingMessageStore
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, actor_from_user, emit_audit_log
 
 router = APIRouter()
@@ -102,48 +103,46 @@ async def send_discord_test(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, bool]:
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    try:
-        await consume_action_confirmation(
-            session,
-            user=user,
-            action="discord.test_notification",
-            payload=confirmation_payload,
-            confirmation_token=request.confirmation_token,
-        )
-    except ActionConfirmationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-    service = get_discord_messaging_service()
-    status = await service.status()
-    channel_id = request.channel_id or str(status.get("default_notification_channel_id") or "")
+    config = await load_current_discord_config()
+    channel_id = str(request.channel_id or config.default_notification_channel_id or "").strip()
     if not channel_id:
         raise HTTPException(status_code=400, detail="Select a Discord channel or configure a default channel.")
-    try:
-        await service.send_notification_to_channels(
-            [channel_id],
-            "IACS Discord integration test",
-            request.message,
-            NotificationContext(
-                event_type="integration_test",
-                subject="IACS Discord integration test",
-                severity="info",
-                facts={},
-            ),
-        )
-    except NotificationDeliveryError as exc:
+    if not channel_id.isdecimal():
         raise HTTPException(
             status_code=400,
-            detail=f"{exc} Use the numeric Discord channel ID or pick a discovered channel from the Discord settings panel.",
-        ) from exc
-    emit_audit_log(
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            detail="Use the numeric Discord channel ID or pick a discovered channel from the Discord settings panel.",
+        )
+    await send_confirmed_notification(
+        session,
+        user=user,
         action="discord.test_notification",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="Discord",
-        target_id=channel_id,
-        target_label="Discord test notification",
-        metadata={"channel_id": channel_id},
+        payload=confirmation_payload,
+        confirmation_token=request.confirmation_token,
+        context=NotificationContext(
+            event_type="integration_test",
+            subject="IACS Discord integration test",
+            severity="info",
+            facts={},
+        ),
+        rules_override=[
+            {
+                "id": "discord-integration-test",
+                "name": "IACS Discord integration test",
+                "trigger_event": "integration_test",
+                "conditions": [],
+                "actions": [
+                    {
+                        "id": "discord-integration-test-action",
+                        "type": "discord",
+                        "target_mode": "selected",
+                        "target_ids": [f"discord:{channel_id}"],
+                        "title_template": "IACS Discord integration test",
+                        "message_template": request.message,
+                    }
+                ],
+                "is_active": True,
+            }
+        ],
     )
     return {"ok": True}
 
@@ -163,3 +162,22 @@ def _serialize_identity(identity: MessagingIdentity) -> dict[str, Any]:
         "last_seen_at": identity.last_seen_at.isoformat() if identity.last_seen_at else None,
         "metadata": identity.metadata_ or {},
     }
+
+
+@router.get("/incoming")
+async def incoming_messages(
+    _: User = Depends(admin_user), limit: int = Query(default=25, ge=1, le=100),
+    before_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    try:
+        return await IncomingMessageStore().recovery_page(provider="discord", limit=limit, before_id=before_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Incoming message cursor not found.") from exc
+
+
+@router.get("/incoming/{incoming_id}")
+async def incoming_message(incoming_id: uuid.UUID, _: User = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        return await IncomingMessageStore().recovery_detail(incoming_id, provider="discord")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Incoming message not found.") from exc

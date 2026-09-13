@@ -1,35 +1,42 @@
 import asyncio
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
-import uuid
 
 import pytest
 
 from app.models import AccessEvent, LprIngestEvent, MovementSessionRecord
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
-from app.modules.gate.base import GateState
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
+from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services import access_events as access_events_module
+from app.services import person_presence_input_booleans as presence_input_booleans_module
+from app.services.access import enrichment as access_enrichment_module
 from app.services.access import hardware as access_hardware_module
 from app.services.access import snapshots as access_snapshots_module
+from app.services.access.decision import plan_access
+from app.services.access.enrichment import (
+    AccessEnrichment,
+    dvla_mot_alert_required,
+    dvla_tax_alert_required,
+)
+from app.services.access.evidence import AccessEvidenceResolver, PreparedCameraEvidence
+from app.services.access.execution import AccessExecution
 from app.services.access.hardware import (
     open_garage_doors_for_access_event,
     open_gate_for_access_event,
     publish_gate_open_skipped,
 )
 from app.services.access.payloads import (
+    _access_event_raw_payload,
     access_event_realtime_payload,
     authorized_entry_message,
     notification_facts,
 )
-from app.services.access.snapshots import capture_access_event_snapshot
-from app.services import access_events as access_events_module
-from app.services.movement import sessions as movement_sessions_module
-from app.services import person_presence_input_booleans as presence_input_booleans_module
-from app.services.access_events import (
-    AccessEventService,
+from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
     GATE_MALFUNCTION_PAYLOAD_KEY,
     GATE_OBSERVATION_PAYLOAD_KEY,
@@ -38,12 +45,15 @@ from app.services.access_events import (
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     PROCESSING_ATTEMPT_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
-    dvla_mot_alert_required,
-    dvla_tax_alert_required,
+    _webhook_trace_for_window,
+    lpr_ingest_id_from_read,
 )
+from app.services.access.snapshots import capture_access_event_snapshot
+from app.services.access_events import AccessEventService
 from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.lpr_ingest import LPR_INGEST_STATUS_PENDING, LPR_INGEST_STATUS_SUCCEEDED
+from app.services.movement import sessions as movement_sessions_module
 from app.services.snapshots import access_event_snapshot_relative_path
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
@@ -169,7 +179,8 @@ async def test_lpr_ingest_read_persists_pending_row_before_processing(monkeypatc
     assert row.idempotency_key.startswith("lpr-ingest:")
     assert row.normalized_payload["raw_payload"] == {"event_id": "protect-event"}
     wrapped = service._read_with_lpr_ingest_event(read, row)
-    assert service._lpr_ingest_event_id_from_read(wrapped) == row.id
+    assert lpr_ingest_id_from_read(wrapped) == row.id
+
 
 
 @pytest.mark.asyncio
@@ -205,6 +216,7 @@ async def test_lpr_ingest_duplicate_does_not_wake_worker(monkeypatch) -> None:
     assert fake_session.added == []
 
 
+
 @pytest.mark.asyncio
 async def test_suppressed_read_publish_waits_for_durable_movement(monkeypatch) -> None:
     service = AccessEventService()
@@ -234,6 +246,7 @@ async def test_suppressed_read_publish_waits_for_durable_movement(monkeypatch) -
     assert published == []
 
 
+
 def fake_movement_ledger(service: AccessEventService) -> FakeMovementLedger:
     ledger = getattr(service, "_movement_ledger", None)
     if isinstance(ledger, FakeMovementLedger):
@@ -241,6 +254,7 @@ def fake_movement_ledger(service: AccessEventService) -> FakeMovementLedger:
     ledger = FakeMovementLedger()
     setattr(service, "_movement_ledger", ledger)
     return ledger
+
 
 
 class FakePresenceSession:
@@ -309,11 +323,11 @@ class FakeAccessDeviceService:
         detail: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        self.device = SimpleNamespace(key="cover.main_garage_door", name="Main Garage", kind="garage_door")
+        self.device = SimpleNamespace(device_id=str(uuid.uuid4()), key="cover.main_garage_door", name="Main Garage", kind="garage_door")
         self.accepted = accepted
         self.state = state
         self.detail = detail
-        self.metadata = metadata or {}
+        self.metadata = {"command_id": str(uuid.uuid4()), **(metadata or {})}
         self.commands: list[tuple[str, str, str]] = []
 
     async def list_devices(self, *, kind: str | None = None, enabled_only: bool = False):
@@ -331,11 +345,16 @@ class FakeAccessDeviceService:
             primary_provider="home_assistant",
             failover_used=False,
             attempts=[],
+            delivery="accepted" if self.accepted else "not_sent" if self.metadata.get("schedule_denied") or self.metadata.get("verified") else "rejected",
+            requires_reconciliation=False,
+            verified=bool(self.metadata.get("verified")),
             metadata=self.metadata,
             as_payload=lambda: {
                 "entity_id": self.device.key,
                 "name": self.device.name,
                 "accepted": self.accepted,
+                "delivery": "accepted" if self.accepted else "not_sent" if self.metadata.get("schedule_denied") or self.metadata.get("verified") else "rejected",
+                "verified": bool(self.metadata.get("verified")),
                 "state": self.state.value,
                 "detail": self.detail or reason,
             },
@@ -375,6 +394,7 @@ def hardware_audit_subjects():
     return event, person, vehicle
 
 
+
 def gate_command_outcome(
     intent: GateCommandIntent,
     *,
@@ -396,6 +416,7 @@ def gate_command_outcome(
     )
 
 
+
 def install_gate_command_outcome(monkeypatch, outcome_factory):
     class FakeCoordinator:
         async def execute_open(self, intent):
@@ -406,6 +427,7 @@ def install_gate_command_outcome(monkeypatch, outcome_factory):
         "get_gate_command_coordinator",
         lambda: FakeCoordinator(),
     )
+
 
 
 def capture_hardware_audits(monkeypatch):
@@ -449,10 +471,14 @@ def capture_hardware_audits(monkeypatch):
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
+    monkeypatch.setattr(access_hardware_module, "reserve_garage_outcome_outputs", AsyncMock(return_value=True))
+    monkeypatch.setattr(access_hardware_module, "_recognition_expiry", AsyncMock(return_value=timestamp + timedelta(seconds=60)))
+    FakeAuditSession.get = AsyncMock(return_value=None)
     monkeypatch.setattr(access_hardware_module, "AsyncSessionLocal", lambda: FakeAuditSession())
     monkeypatch.setattr(access_hardware_module, "write_audit_log", fake_write_audit_log)
     monkeypatch.setattr(access_hardware_module.event_bus, "publish", fake_publish)
     return audits, published
+
 
 
 def plate_read_with_gate_state(state: str) -> PlateRead:
@@ -471,6 +497,7 @@ def plate_read_with_gate_state(state: str) -> PlateRead:
     )
 
 
+
 def plate_read(registration_number: str, captured_at: datetime) -> PlateRead:
     return PlateRead(
         registration_number=registration_number,
@@ -479,6 +506,7 @@ def plate_read(registration_number: str, captured_at: datetime) -> PlateRead:
         captured_at=captured_at,
         raw_payload={},
     )
+
 
 
 def test_plate_read_webhook_trace_records_capture_to_receipt_latency() -> None:
@@ -495,6 +523,7 @@ def test_plate_read_webhook_trace_records_capture_to_receipt_latency() -> None:
     assert webhook_trace["captured_at"] == "2026-05-10T08:00:00+00:00"
     assert webhook_trace["received_at"] == "2026-05-10T08:00:00.875000+00:00"
     assert webhook_trace["captured_to_webhook_ms"] == 875.0
+
 
 
 def test_plate_read_webhook_trace_prefers_route_ingest_timestamp() -> None:
@@ -527,6 +556,7 @@ def test_plate_read_webhook_trace_prefers_route_ingest_timestamp() -> None:
     assert webhook_trace["webhook_trace_id"] == "trace-test"
 
 
+
 def test_access_event_raw_payload_includes_webhook_trace_and_debounce_timestamps() -> None:
     service = AccessEventService()
     captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
@@ -538,9 +568,9 @@ def test_access_event_raw_payload_includes_webhook_trace_and_debounce_timestamps
         first_seen=captured_at,
         updated_at=captured_at,
     )
-    webhook_trace = service._webhook_trace_for_window(window)
+    webhook_trace = _webhook_trace_for_window(window)
 
-    payload = service._access_event_raw_payload(
+    payload = _access_event_raw_payload(
         window=window,
         read=read,
         schedule_evaluation=None,
@@ -560,13 +590,14 @@ def test_access_event_raw_payload_includes_webhook_trace_and_debounce_timestamps
     assert payload["debounce"]["candidates"][0]["webhook_trace"]["received_at"] == "2026-05-10T08:00:00.250000+00:00"
 
 
+
 def test_access_event_payloads_expose_external_admission_metadata() -> None:
     service = AccessEventService()
     captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
     read = plate_read("UNK123", captured_at)
     external_admission = {"mode": "arrival", "source": "gate_state_changed"}
     window = SimpleNamespace(reads=[read], first_seen=captured_at, updated_at=captured_at)
-    payload = service._access_event_raw_payload(
+    payload = _access_event_raw_payload(
         window=window,
         read=read,
         schedule_evaluation=None,
@@ -576,7 +607,7 @@ def test_access_event_payloads_expose_external_admission_metadata() -> None:
         visitor_pass_mode=None,
         trace_id="0" * 32,
         finalize_started_at=captured_at,
-        webhook_trace=service._webhook_trace_for_window(window),
+        webhook_trace=_webhook_trace_for_window(window),
         external_admission=external_admission,
     )
     event = SimpleNamespace(
@@ -604,6 +635,7 @@ def test_access_event_payloads_expose_external_admission_metadata() -> None:
     assert facts["external_admission_source"] == "gate_state_changed"
 
 
+
 def plate_read_with_gate_state_at(registration_number: str, captured_at: datetime, state: str) -> PlateRead:
     return PlateRead(
         registration_number=registration_number,
@@ -618,6 +650,7 @@ def plate_read_with_gate_state_at(registration_number: str, captured_at: datetim
             }
         },
     )
+
 
 
 def plate_read_with_gate_malfunction(
@@ -651,6 +684,7 @@ def plate_read_with_gate_malfunction(
             },
         },
     )
+
 
 
 def plate_read_with_context(
@@ -690,6 +724,7 @@ def plate_read_with_context(
         captured_at=captured_at,
         raw_payload=raw_payload,
     )
+
 
 
 @pytest.mark.asyncio
@@ -748,9 +783,10 @@ async def test_open_gate_unknown_read_can_be_marked_as_external_admission() -> N
     assert external["presence_evidence"]["source"] == "uiprotect_event"
 
 
+
 @pytest.mark.asyncio
 async def test_external_admission_anomalies_alert_arrival_but_not_linked_departure() -> None:
-    service = AccessEventService()
+    service = AccessExecution(None, None, None)
     occurred_at = datetime(2026, 5, 10, 8, 0, tzinfo=UTC)
 
     def event_for(mode: str | None) -> AccessEvent:
@@ -789,6 +825,7 @@ async def test_external_admission_anomalies_alert_arrival_but_not_linked_departu
     assert [item.message for item in denied] == ["Unauthorised Plate, Access Denied"]
 
 
+
 def remember_session(
     service: AccessEventService,
     read: PlateRead,
@@ -806,6 +843,7 @@ def remember_session(
     )
     remember_movement_session(service, read, event=event, direction=direction, decision=decision)
     return event
+
 
 
 def remember_movement_session(
@@ -853,6 +891,7 @@ def remember_movement_session(
     return row
 
 
+
 def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
     raw_payload = dict(read.raw_payload or {})
     raw_payload[VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY] = {
@@ -867,6 +906,7 @@ def visitor_pass_departure_read(read: PlateRead) -> PlateRead:
         captured_at=read.captured_at,
         raw_payload=raw_payload,
     )
+
 
 
 @pytest.mark.asyncio
@@ -908,6 +948,7 @@ async def test_worker_iteration_failure_requeues_pulled_read_and_marks_degraded(
         await asyncio.gather(service._worker, return_exceptions=True)
 
 
+
 @pytest.mark.asyncio
 async def test_retry_gives_up_loudly_after_bounded_attempts(monkeypatch) -> None:
     service = AccessEventService()
@@ -947,6 +988,7 @@ async def test_retry_gives_up_loudly_after_bounded_attempts(monkeypatch) -> None
     ]
 
 
+
 @pytest.mark.asyncio
 async def test_on_site_visitor_closed_gate_reread_is_not_forced_to_departure(monkeypatch) -> None:
     service = AccessEventService()
@@ -968,6 +1010,7 @@ async def test_on_site_visitor_closed_gate_reread_is_not_forced_to_departure(mon
 
     assert matched.registration_number == "DP25 MOU"
     assert VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY not in matched.raw_payload
+
 
 
 @pytest.mark.asyncio
@@ -995,6 +1038,7 @@ async def test_on_site_visitor_departure_gate_state_marks_departure(monkeypatch)
         "visitor_pass_id": str(visitor_pass_id),
         "registration_number": "DP25MOU",
     }
+
 
 
 def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1036,6 +1080,7 @@ def test_access_event_realtime_payload_includes_snapshot_metadata(tmp_path, monk
     assert payload["snapshot_width"] == 320
     assert payload["snapshot_height"] == 180
     assert payload["snapshot_camera"] == "camera.gate"
+
 
 
 @pytest.mark.asyncio
@@ -1094,9 +1139,10 @@ async def test_capture_event_snapshot_falls_back_to_protect_thumbnail(monkeypatc
     assert event.snapshot_camera == "camera.gate"
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_known_vehicle_last_live_exit_resolves_as_entry() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia")
     vehicle = SimpleNamespace(id=uuid.uuid4())
     captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
@@ -1120,12 +1166,13 @@ async def test_gate_malfunction_known_vehicle_last_live_exit_resolves_as_entry()
     assert resolution["source"] == "gate_malfunction_vehicle_history"
     assert resolution["previous_live_direction"] == "exit"
     assert resolution["previous_live_event_id"] == str(previous_event.id)
-    assert not service._automatic_open_allowed(resolution)
+    assert not plan_access(allowed=True, direction=direction, gate_state=GateState(resolution["gate_observation"]["state"])).gate_command_required
+
 
 
 @pytest.mark.asyncio
 async def test_gate_malfunction_known_vehicle_last_live_entry_resolves_as_exit() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
     vehicle = SimpleNamespace(id=uuid.uuid4())
     captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
@@ -1150,9 +1197,10 @@ async def test_gate_malfunction_known_vehicle_last_live_entry_resolves_as_exit()
     assert resolution["previous_live_direction"] == "entry"
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_uses_latest_person_or_vehicle_history() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
     vehicle = SimpleNamespace(id=uuid.uuid4())
     captured_at = datetime(2026, 5, 3, 15, 58, 3, tzinfo=UTC)
@@ -1191,9 +1239,10 @@ async def test_gate_malfunction_uses_latest_person_or_vehicle_history() -> None:
     assert resolution["previous_live_direction"] == "exit"
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_vehicle_history_excludes_backfills_for_sylvia_case() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia Smith")
     vehicle = SimpleNamespace(id=uuid.uuid4())
     captured_at = datetime(2026, 5, 2, 18, 17, 5, 796000, tzinfo=UTC)
@@ -1225,9 +1274,10 @@ async def test_gate_malfunction_vehicle_history_excludes_backfills_for_sylvia_ca
     assert resolution["previous_live_direction"] == "exit"
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_without_prior_live_vehicle_event_defaults_to_entry() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Sylvia")
     vehicle = SimpleNamespace(id=uuid.uuid4())
     captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
@@ -1245,9 +1295,10 @@ async def test_gate_malfunction_without_prior_live_vehicle_event_defaults_to_ent
     assert resolution["previous_live_event_id"] is None
 
 
+
 @pytest.mark.asyncio
 async def test_visitor_pass_departure_match_resolves_allowed_unknown_gate_read_as_exit() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
 
     direction, resolution = await service._resolve_direction(
         FakePresenceSession(),
@@ -1260,21 +1311,22 @@ async def test_visitor_pass_departure_match_resolves_allowed_unknown_gate_read_a
     assert resolution["source"] == "visitor_pass_presence"
 
 
+
 @pytest.mark.asyncio
-async def test_duplicate_arrival_uses_camera_tiebreaker_as_source_of_truth(monkeypatch) -> None:
-    service = AccessEventService()
+async def test_duplicate_arrival_uses_camera_tiebreaker_as_source_of_truth() -> None:
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Steph")
 
-    async def fake_camera_tiebreaker(_read, _person):
-        return {"direction": "exit", "confidence": 0.91, "reason": "Vehicle is facing away."}
-
-    monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
+    read = plate_read_with_gate_state("closed")
+    prepared = PreparedCameraEvidence.for_read(person.id, read,
+        {"direction": "exit", "confidence": 0.91, "reason": "Vehicle is facing away."})
 
     direction, resolution = await service._resolve_direction(
         FakePresenceSession(PresenceState.PRESENT),
-        plate_read_with_gate_state("closed"),
+        read,
         person,
         allowed=True,
+        camera_evidence=prepared,
     )
 
     assert direction == AccessDirection.EXIT
@@ -1282,21 +1334,22 @@ async def test_duplicate_arrival_uses_camera_tiebreaker_as_source_of_truth(monke
     assert resolution["camera_tiebreaker"]["confidence"] == 0.91
 
 
+
 @pytest.mark.asyncio
-async def test_duplicate_arrival_accepts_moderate_exit_tiebreaker(monkeypatch) -> None:
-    service = AccessEventService()
+async def test_duplicate_arrival_accepts_moderate_exit_tiebreaker() -> None:
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Jason")
 
-    async def fake_camera_tiebreaker(_read, _person):
-        return {"direction": "exit", "confidence": 0.60, "reason": "Rear of vehicle is more visible."}
-
-    monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
+    read = plate_read_with_gate_state("closed")
+    prepared = PreparedCameraEvidence.for_read(person.id, read,
+        {"direction": "exit", "confidence": 0.60, "reason": "Rear of vehicle is more visible."})
 
     direction, resolution = await service._resolve_direction(
         FakePresenceSession(PresenceState.PRESENT),
-        plate_read_with_gate_state("closed"),
+        read,
         person,
         allowed=True,
+        camera_evidence=prepared,
     )
 
     assert direction == AccessDirection.EXIT
@@ -1305,38 +1358,41 @@ async def test_duplicate_arrival_accepts_moderate_exit_tiebreaker(monkeypatch) -
     assert "camera_tiebreaker_ignored_reason" not in resolution
 
 
+
 @pytest.mark.asyncio
-async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_is_uncertain(monkeypatch) -> None:
-    service = AccessEventService()
+async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_is_uncertain() -> None:
+    service = AccessEvidenceResolver()
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Ash")
 
-    async def fake_camera_tiebreaker(_read, _person):
-        return {"direction": "exit", "confidence": 0.54, "reason": "Vehicle might be facing away."}
-
-    monkeypatch.setattr(service, "_resolve_duplicate_arrival_with_camera", fake_camera_tiebreaker)
+    read = plate_read_with_gate_state("closed")
+    prepared = PreparedCameraEvidence.for_read(person.id, read,
+        {"direction": "exit", "confidence": 0.54, "reason": "Vehicle might be facing away."})
 
     direction, resolution = await service._resolve_direction(
         FakePresenceSession(PresenceState.PRESENT),
-        plate_read_with_gate_state("closed"),
+        read,
         person,
         allowed=True,
+        camera_evidence=prepared,
     )
 
     assert direction == AccessDirection.ENTRY
     assert resolution["source"] == "gate_state"
     assert resolution["camera_tiebreaker"]["confidence"] == 0.54
     assert resolution["camera_tiebreaker_ignored_reason"] == "low_confidence"
-    assert service._automatic_open_allowed(resolution)
+    assert plan_access(allowed=True, direction=direction, gate_state=GateState(resolution["gate_observation"]["state"])).gate_command_required
+
 
 
 def test_camera_direction_parser_accepts_json_and_text() -> None:
-    service = AccessEventService()
+    service = AccessEvidenceResolver()
 
     assert service._parse_camera_direction_analysis(
         '{"direction":"exit","confidence":0.87,"reason":"rear of vehicle visible"}'
     ) == ("exit", 0.87, "rear of vehicle visible")
     assert service._parse_camera_direction_analysis("The vehicle is facing towards the camera.")[0] == "entry"
     assert service._parse_camera_direction_analysis("The vehicle is away from the camera.")[0] == "exit"
+
 
 
 def test_known_vehicle_plate_match_canonicalizes_likely_misreads() -> None:
@@ -1358,6 +1414,7 @@ def test_known_vehicle_plate_match_canonicalizes_likely_misreads() -> None:
     assert exact is not None
     assert exact["registration_number"] == "MD25VNO"
     assert exact["exact"] is True
+
 
 
 @pytest.mark.asyncio
@@ -1432,6 +1489,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     assert service._pending == []
 
 
+
 @pytest.mark.asyncio
 async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(monkeypatch) -> None:
     service = AccessEventService()
@@ -1489,6 +1547,7 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
         }
     ]
     assert service._pending == []
+
 
 
 @pytest.mark.asyncio
@@ -1556,6 +1615,7 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
             },
         )
     ]
+
 
 
 @pytest.mark.asyncio
@@ -1631,6 +1691,7 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
     ]
 
 
+
 @pytest.mark.asyncio
 async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(monkeypatch) -> None:
     service = AccessEventService()
@@ -1700,6 +1761,7 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
     assert published == []
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypatch) -> None:
     service = AccessEventService()
@@ -1759,6 +1821,7 @@ async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypat
     assert [event_type for event_type, _payload in published] == []
 
 
+
 @pytest.mark.asyncio
 async def test_gate_malfunction_unknown_read_is_ignored_before_finalize(monkeypatch) -> None:
     service = AccessEventService()
@@ -1792,6 +1855,7 @@ async def test_gate_malfunction_unknown_read_is_ignored_before_finalize(monkeypa
 
     assert len(ignored) == 1
     assert service._pending == []
+
 
 
 @pytest.mark.asyncio
@@ -1853,8 +1917,9 @@ async def test_ignored_gate_malfunction_unknown_read_emits_realtime_and_audit(mo
     assert published[1][0] == "audit.log.created"
 
 
+
 @pytest.mark.asyncio
-async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
+async def test_automatic_gate_open_projects_receipt_without_second_audit_owner(monkeypatch) -> None:
     event, person, vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
 
@@ -1871,17 +1936,31 @@ async def test_automatic_gate_open_writes_accepted_audit(monkeypatch) -> None:
     outcome = await open_gate_for_access_event(event, person, open_garage_doors=False)
 
     assert outcome.accepted is True
-    gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
-    assert gate_audit["outcome"] == "accepted"
-    assert gate_audit["target_entity"] == "Gate"
-    assert gate_audit["metadata"]["source"] == "automatic_lpr_grant"
-    assert gate_audit["metadata"]["access_event_id"] == str(event.id)
-    assert gate_audit["metadata"]["registration_number"] == "PE70DHX"
-    assert gate_audit["metadata"]["person_id"] == str(person.id)
-    assert gate_audit["metadata"]["vehicle_id"] == str(vehicle.id)
-    assert gate_audit["metadata"]["controller"] == "configured"
-    assert gate_audit["metadata"]["accepted"] is True
-    assert any(event_type == "audit.log.created" for event_type, _payload in published)
+    assert audits == []  # Durable finalizer owns the audit; tested with PostgreSQL.
+    event_type, payload = published[-1]
+    assert event_type == "gate.open_requested"
+    assert payload["accepted"] is True and payload["delivery"] == "accepted"
+    assert payload["event_id"] == str(event.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery,expected_status", [("not_sent", "ok"), ("partial", "error"), ("unknown", "error")])
+async def test_verified_entry_does_not_hide_other_target_failures_in_trace(monkeypatch, delivery, expected_status):
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    event, person, _ = hardware_audit_subjects()
+    capture_hardware_audits(monkeypatch)
+    install_gate_command_outcome(monkeypatch, lambda intent: replace(
+        gate_command_outcome(intent, accepted=False, state=GateState.OPEN, detail="Synthetic target result"),
+        delivery=delivery, admission_verified=True,
+    ))
+    span = Mock()
+    trace = SimpleNamespace(start_span=Mock(return_value=span))
+    await open_gate_for_access_event(event, person, open_garage_doors=False, trace=trace)
+    assert span.finish.call_args.kwargs["status"] == expected_status
+    assert span.finish.call_args.kwargs["output_payload"]["delivery"] == delivery
+
 
 
 @pytest.mark.asyncio
@@ -1904,8 +1983,9 @@ async def test_automatic_gate_skip_writes_skipped_audit(monkeypatch) -> None:
     assert any(event_type == "audit.log.created" for event_type, _payload in published)
 
 
+
 @pytest.mark.asyncio
-async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) -> None:
+async def test_automatic_gate_controller_error_projects_receipt_without_optional_notification(monkeypatch) -> None:
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -1920,17 +2000,16 @@ async def test_automatic_gate_controller_error_writes_failed_audit(monkeypatch) 
             exception_class="UnsupportedModuleError",
         ),
     )
-    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
     outcome = await open_gate_for_access_event(event, person, open_garage_doors=False)
 
     assert outcome.accepted is False
-    gate_audit = next(audit for audit in audits if audit["action"] == "gate.open.automatic")
-    assert gate_audit["outcome"] == "failed"
-    assert gate_audit["level"] == "error"
-    assert gate_audit["metadata"]["detail"] == "Unsupported gate controller: missing"
-    assert any(event_type == "gate.open_failed" for event_type, _payload in published)
-    assert len(notifications.contexts) == 1
+    assert audits == [] and notifications.contexts == []
+    event_type, payload = published[-1]
+    assert event_type == "gate.open_failed"
+    assert payload["accepted"] is False
+    assert payload["detail"] == "Unsupported gate controller: missing"
+
 
 
 @pytest.mark.asyncio
@@ -1989,8 +2068,9 @@ async def test_person_presence_input_boolean_commands_apply_to_all_entities(monk
     assert [record["outcome"] for record in records] == ["accepted", "accepted"]
 
 
+
 @pytest.mark.asyncio
-async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> None:
+async def test_automatic_garage_open_hands_receipt_to_single_delivery_owner(monkeypatch) -> None:
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     devices = FakeAccessDeviceService()
@@ -1999,18 +2079,17 @@ async def test_automatic_garage_door_open_writes_accepted_audit(monkeypatch) -> 
 
     await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
-    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
-    assert garage_audit["outcome"] == "accepted"
-    assert garage_audit["target_id"] == "cover.main_garage_door"
-    assert garage_audit["target_label"] == "Main Garage"
-    assert garage_audit["metadata"]["accepted"] is True
-    assert garage_audit["metadata"]["state"] == "opening"
+    assert audits == []
+    access_hardware_module.reserve_garage_outcome_outputs.assert_awaited_once()
+    assert access_hardware_module.reserve_garage_outcome_outputs.await_args.kwargs["command_id"] == uuid.UUID(devices.metadata["command_id"])
+    assert published[-1][1]["delivery"] == "accepted"
     assert devices.commands == [("cover.main_garage_door", "open", "Automatic LPR grant")]
     assert any(event_type == "garage_door.open_requested" for event_type, _payload in published)
 
 
+
 @pytest.mark.asyncio
-async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monkeypatch) -> None:
+async def test_automatic_garage_door_schedule_denial_records_not_sent(monkeypatch) -> None:
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -2022,21 +2101,21 @@ async def test_automatic_garage_door_schedule_denial_writes_rejected_audit(monke
     )
 
     monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
-    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
     await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
-    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
-    assert garage_audit["outcome"] == "rejected"
-    assert garage_audit["level"] == "warning"
-    assert garage_audit["metadata"]["state"] == "schedule_denied"
-    assert garage_audit["metadata"]["detail"] == "Main Garage is outside schedule."
+    assert audits == []
+    access_hardware_module.reserve_garage_outcome_outputs.assert_awaited_once()
+    assert access_hardware_module.reserve_garage_outcome_outputs.await_args.kwargs["command_id"] == uuid.UUID(devices.metadata["command_id"])
+    assert published[-1][1]["delivery"] == "not_sent"
+    assert devices.commands == [("cover.main_garage_door", "open", "Automatic LPR grant")]
     assert any(event_type == "garage_door.open_failed" for event_type, _payload in published)
-    assert len(notifications.contexts) == 1
+    assert notifications.contexts == []
+
 
 
 @pytest.mark.asyncio
-async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeypatch) -> None:
+async def test_automatic_garage_door_provider_rejection_is_recorded(monkeypatch) -> None:
     event, person, _vehicle = hardware_audit_subjects()
     audits, published = capture_hardware_audits(monkeypatch)
     notifications = FakeNotificationService()
@@ -2047,17 +2126,17 @@ async def test_automatic_garage_door_command_failure_writes_failed_audit(monkeyp
     )
 
     monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
-    monkeypatch.setattr(access_hardware_module, "get_notification_service", lambda: notifications)
 
     await open_garage_doors_for_access_event(event, person, "Automatic LPR grant")
 
-    garage_audit = next(audit for audit in audits if audit["action"] == "garage_door.open.automatic")
-    assert garage_audit["outcome"] == "failed"
-    assert garage_audit["level"] == "error"
-    assert garage_audit["metadata"]["accepted"] is False
-    assert garage_audit["metadata"]["detail"] == "Home Assistant rejected the command."
+    assert audits == []
+    access_hardware_module.reserve_garage_outcome_outputs.assert_awaited_once()
+    assert access_hardware_module.reserve_garage_outcome_outputs.await_args.kwargs["command_id"] == uuid.UUID(devices.metadata["command_id"])
+    assert published[-1][1]["delivery"] == "rejected"
+    assert devices.commands == [("cover.main_garage_door", "open", "Automatic LPR grant")]
     assert any(event_type == "garage_door.open_failed" for event_type, _payload in published)
-    assert len(notifications.contexts) == 1
+    assert notifications.contexts == []
+
 
 
 @pytest.mark.asyncio
@@ -2099,6 +2178,7 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
 
     assert finalized == [{"candidate_count": 2, "best_registration_number": "MD25VNO"}]
     assert service._pending == []
+
 
 
 @pytest.mark.asyncio
@@ -2187,9 +2267,10 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
     ]
 
 
+
 @pytest.mark.asyncio
 async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
-    service = AccessEventService()
+    service = AccessEnrichment()
     vehicle = SimpleNamespace(
         id=uuid.uuid4(),
         registration_number="PE70DHX",
@@ -2207,7 +2288,7 @@ async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
         raise AssertionError("same-day cache should skip DVLA")
 
     monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
-    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fail_lookup)
+    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fail_lookup)
 
     result = await service._dvla_enrichment_for_event(
         vehicle=vehicle,
@@ -2229,9 +2310,10 @@ async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
     }
 
 
+
 @pytest.mark.asyncio
 async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
-    service = AccessEventService()
+    service = AccessEnrichment()
     vehicle = SimpleNamespace(
         id=uuid.uuid4(),
         registration_number="MD25VNO",
@@ -2258,7 +2340,7 @@ async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
-    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
 
     result = await service._dvla_enrichment_for_event(
         vehicle=vehicle,
@@ -2278,9 +2360,10 @@ async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
     assert result["mot_expiry"] == "2026-01-01"
 
 
+
 @pytest.mark.asyncio
 async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypatch) -> None:
-    service = AccessEventService()
+    service = AccessEnrichment()
 
     async def fake_lookup(registration_number, **_kwargs):
         return NormalizedDvlaVehicle(
@@ -2293,7 +2376,7 @@ async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypat
             tax_expiry=None,
         )
 
-    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
 
     result = await service._dvla_enrichment_for_event(
         vehicle=None,
@@ -2309,14 +2392,15 @@ async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypat
     assert result["colour"] == "Silver"
 
 
+
 @pytest.mark.asyncio
 async def test_exit_events_skip_dvla_lookup(monkeypatch) -> None:
-    service = AccessEventService()
+    service = AccessEnrichment()
 
     async def fail_lookup(_registration_number, **_kwargs):
         raise AssertionError("exits should not call DVLA")
 
-    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fail_lookup)
+    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fail_lookup)
 
     result = await service._dvla_enrichment_for_event(
         vehicle=None,
@@ -2329,9 +2413,10 @@ async def test_exit_events_skip_dvla_lookup(monkeypatch) -> None:
     assert result is None
 
 
+
 @pytest.mark.asyncio
 async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None:
-    service = AccessEventService()
+    service = AccessEnrichment()
     published = []
 
     async def fake_lookup(_registration_number, **_kwargs):
@@ -2340,7 +2425,7 @@ async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    monkeypatch.setattr(access_events_module, "lookup_normalized_vehicle_registration", fake_lookup)
+    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
 
     result = await service._dvla_enrichment_for_event(
@@ -2364,6 +2449,7 @@ async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None
     ]
 
 
+
 def test_dvla_compliance_alert_helpers() -> None:
     assert not dvla_mot_alert_required("Valid")
     assert not dvla_mot_alert_required("Not Required")
@@ -2371,6 +2457,7 @@ def test_dvla_compliance_alert_helpers() -> None:
     assert not dvla_tax_alert_required("Taxed")
     assert not dvla_tax_alert_required("SORN")
     assert dvla_tax_alert_required("Untaxed")
+
 
 
 def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -> None:
@@ -2404,6 +2491,7 @@ def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -
     assert facts["vehicle_colour"] == "Grey"
     assert facts["vehicle_type"] == "Car"
     assert facts["detected_vehicle_colour"] == "Grey"
+
 
 
 @pytest.mark.parametrize(
@@ -2445,6 +2533,7 @@ def test_notification_facts_use_person_pronouns(
     assert facts["possessive_determiner"] == possessive_determiner
 
 
+
 @pytest.mark.parametrize(
     ("pronouns", "expected"),
     [
@@ -2474,6 +2563,7 @@ def test_authorized_entry_message_uses_person_pronouns(pronouns: str | None, exp
     assert authorized_entry_message(person, vehicle) == expected
 
 
+
 def test_authorized_entry_message_uses_them_for_unknown_unset_pronouns() -> None:
     person = SimpleNamespace(first_name="Taylor", display_name="Taylor Smith", pronouns=None)
     vehicle = SimpleNamespace(
@@ -2487,3 +2577,21 @@ def test_authorized_entry_message_uses_them_for_unknown_unset_pronouns() -> None
         authorized_entry_message(person, vehicle)
         == "Taylor's Tesla Model Y has been detected at the gate. I've let them in."
     )
+
+
+@pytest.mark.asyncio
+async def test_verified_already_open_garage_preserves_no_send_truth_without_failure_notice(monkeypatch):
+    event, person, _ = hardware_audit_subjects()
+    audits, published = capture_hardware_audits(monkeypatch)
+    notifications = FakeNotificationService()
+    devices = FakeAccessDeviceService(accepted=False, state=GateState.OPEN,
+        detail="Target already reports the requested state.", metadata={"verified": True})
+    monkeypatch.setattr(access_hardware_module, "get_access_device_service", lambda: devices)
+    await open_garage_doors_for_access_event(event, person, "Synthetic already-open garage")
+    assert audits == []
+    access_hardware_module.reserve_garage_outcome_outputs.assert_awaited_once()
+    assert published[-1][1]["accepted"] is False and published[-1][1]["receipt"]["verified"] is True
+    assert published[-1][1]["delivery"] == "not_sent"
+    assert notifications.contexts == []
+    assert any(kind == "garage_door.open_requested" for kind, _ in published)
+    assert not any(kind == "garage_door.open_failed" for kind, _ in published)

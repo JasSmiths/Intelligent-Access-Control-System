@@ -4,20 +4,15 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import Schedule, User
+from app.services import schedule_operations
+from app.services.schedule_operations import ScheduleOperationError
 from app.services.schedules import empty_time_blocks, normalize_time_blocks, schedule_dependencies
-from app.services.telemetry import (
-    TELEMETRY_CATEGORY_CRUD,
-    actor_from_user,
-    audit_diff,
-    write_audit_log,
-)
 
 router = APIRouter()
 
@@ -59,15 +54,6 @@ def serialize_schedule(schedule: Schedule) -> dict[str, Any]:
     }
 
 
-def schedule_audit_snapshot(schedule: Schedule) -> dict[str, Any]:
-    return {
-        "id": str(schedule.id),
-        "name": schedule.name,
-        "description": schedule.description,
-        "time_blocks": normalize_time_blocks(schedule.time_blocks),
-    }
-
-
 @router.get("", response_model=list[ScheduleResponse])
 async def list_schedules(
     _: User = Depends(current_user),
@@ -92,34 +78,10 @@ async def create_schedule(
         confirmation_token=request.confirmation_token,
     )
     try:
-        time_blocks = normalize_time_blocks(request.time_blocks)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    schedule = Schedule(
-        name=request.name.strip(),
-        description=request.description.strip() if request.description else None,
-        time_blocks=time_blocks,
-    )
-    session.add(schedule)
-    try:
-        await session.flush()
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_CRUD,
-            action="schedule.create",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="Schedule",
-            target_id=schedule.id,
-            target_label=schedule.name,
-            diff={"old": {}, "new": schedule_audit_snapshot(schedule)},
-        )
-        await session.commit()
-        await session.refresh(schedule)
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Schedule already exists") from exc
+        values = schedule_operations.validate_schedule_values(confirmation_payload)
+        schedule = await schedule_operations.create_schedule(session, values, user=user, source="api")
+    except ScheduleOperationError as exc:
+        raise _operation_http_error(exc) from exc
 
     return ScheduleResponse(**serialize_schedule(schedule))
 
@@ -155,31 +117,12 @@ async def update_schedule(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    before = schedule_audit_snapshot(schedule)
     try:
-        schedule.time_blocks = normalize_time_blocks(request.time_blocks)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    schedule.name = request.name.strip()
-    schedule.description = request.description.strip() if request.description else None
-    try:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_CRUD,
-            action="schedule.update",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="Schedule",
-            target_id=schedule.id,
-            target_label=schedule.name,
-            diff=audit_diff(before, schedule_audit_snapshot(schedule)),
+        schedule = await schedule_operations.update_schedule(
+            session, schedule_id, request.model_dump(exclude={"confirmation_token"}), user=user, source="api",
         )
-        await session.commit()
-        await session.refresh(schedule)
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Schedule already exists") from exc
+    except ScheduleOperationError as exc:
+        raise _operation_http_error(exc) from exc
     return ScheduleResponse(**serialize_schedule(schedule))
 
 
@@ -214,26 +157,18 @@ async def delete_schedule(
         confirmation_token=request.confirmation_token if request else None,
     )
 
-    dependencies = await schedule_dependencies(session, schedule_id)
-    if any(dependencies.values()):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Schedule is currently in use by {_dependency_summary(dependencies)}.",
-        )
+    try:
+        await schedule_operations.delete_schedule(session, schedule_id, user=user, source="api")
+    except ScheduleOperationError as exc:
+        raise _operation_http_error(exc) from exc
 
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_CRUD,
-        action="schedule.delete",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="Schedule",
-        target_id=schedule.id,
-        target_label=schedule.name,
-        diff={"old": schedule_audit_snapshot(schedule), "new": {}},
-    )
-    await session.delete(schedule)
-    await session.commit()
+
+def _operation_http_error(exc: ScheduleOperationError) -> HTTPException:
+    codes = {"schedule_not_found": 404, "schedule_exists": 409, "schedule_in_use": 409, "forbidden": 403}
+    detail = str(exc)
+    if exc.dependencies:
+        detail = f"Schedule is currently in use by {_dependency_summary(exc.dependencies)}."
+    return HTTPException(status_code=codes.get(exc.code, 422), detail=detail)
 
 
 def _dependency_summary(dependencies: dict[str, list[dict[str, str | None]]]) -> str:

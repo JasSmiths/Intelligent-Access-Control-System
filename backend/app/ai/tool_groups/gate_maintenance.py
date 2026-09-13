@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
-from app.ai.tool_groups.gate_maintenance_handlers import (
-    disable_maintenance_mode,
-    enable_maintenance_mode,
-    get_active_malfunctions,
-    get_maintenance_status,
-    get_malfunction_history,
-    open_device,
-    open_gate,
-    query_device_states,
-    toggle_maintenance_mode,
-    trigger_manual_malfunction_override,
-)
+from typing import Any
+
+from app.ai.tool_groups import gate_maintenance_handlers
 from app.ai.tool_groups.metadata import apply_group_metadata
 from app.ai.tools import AgentTool
+from app.services.type_helpers import as_dict
 
 TOOL_CATEGORIES = {
     "query_device_states": ("Gate_Hardware", "General"),
@@ -63,7 +55,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_device_states,
+                    handler=gate_maintenance_handlers.query_device_states,
                     example_inputs=(
                         {"target": "Top Gate", "kind": "gate"},
                         {"kind": "garage_door"},
@@ -81,7 +73,7 @@ def build_tools() -> list[AgentTool]:
                         "properties": {},
                         "additionalProperties": False,
                     },
-                    handler=get_maintenance_status,
+                    handler=gate_maintenance_handlers.get_maintenance_status,
                     example_inputs=({},),
                     return_schema={
                         "answer_types": ["maintenance_status"],
@@ -98,7 +90,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=get_active_malfunctions,
+                    handler=gate_maintenance_handlers.get_active_malfunctions,
                 ),
         AgentTool(
                     name="get_malfunction_history",
@@ -112,7 +104,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=get_malfunction_history,
+                    handler=gate_maintenance_handlers.get_malfunction_history,
                 ),
         AgentTool(
                     name="trigger_manual_malfunction_override",
@@ -131,7 +123,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["malfunction_id", "action", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=trigger_manual_malfunction_override,
+                    handler=gate_maintenance_handlers.trigger_manual_malfunction_override,
                 ),
         AgentTool(
                     name="enable_maintenance_mode",
@@ -145,7 +137,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=enable_maintenance_mode,
+                    handler=gate_maintenance_handlers.enable_maintenance_mode,
                 ),
         AgentTool(
                     name="disable_maintenance_mode",
@@ -158,7 +150,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=disable_maintenance_mode,
+                    handler=gate_maintenance_handlers.disable_maintenance_mode,
                 ),
         AgentTool(
                     name="open_device",
@@ -189,7 +181,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=open_device,
+                    handler=gate_maintenance_handlers.open_device,
                     example_inputs=(
                         {"target": "Top Gate", "kind": "gate", "action": "open", "confirm": False},
                         {"target": "Main Garage Door", "kind": "garage_door", "action": "close", "confirm": False},
@@ -224,7 +216,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["action", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=open_device,
+                    handler=gate_maintenance_handlers.open_device,
                 ),
         AgentTool(
                     name="open_gate",
@@ -242,7 +234,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=open_gate,
+                    handler=gate_maintenance_handlers.open_gate,
                 ),
         AgentTool(
                     name="toggle_maintenance_mode",
@@ -257,9 +249,39 @@ def build_tools() -> list[AgentTool]:
                         "required": ["state", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=toggle_maintenance_mode,
+                    handler=gate_maintenance_handlers.toggle_maintenance_mode,
                 ),
         ],
         categories=TOOL_CATEGORIES,
+        button_handler=confirmation_button,
+        summary_handler=confirmation_summary,
+        status_labels={'query_device_states': 'Checking device states...', 'get_maintenance_status': 'Checking Maintenance Mode...', 'get_active_malfunctions': 'Checking gate malfunction state...', 'get_malfunction_history': 'Reviewing gate malfunction history...', 'trigger_manual_malfunction_override': 'Preparing gate malfunction override...', 'enable_maintenance_mode': 'Preparing Maintenance Mode...', 'disable_maintenance_mode': 'Preparing Maintenance Mode...', 'open_device': 'Preparing device command...', 'command_device': 'Preparing device command...', 'open_gate': 'Preparing gate open command...', 'toggle_maintenance_mode': 'Preparing Maintenance Mode...'},
+        success_fields={'enable_maintenance_mode': ('enabled',), 'disable_maintenance_mode': ('disabled',), 'open_device': ('accepted', 'opened', 'closed'), 'command_device': ('accepted', 'opened', 'closed'), 'open_gate': ('opened',), 'toggle_maintenance_mode': ('changed',)},
+        finish_after_confirmation=frozenset({'open_gate', 'command_device', 'open_device'}),
         confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
     )
+
+
+def confirmation_summary(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name in {'open_device', 'command_device', 'open_gate'}:
+        device = as_dict(output.get('device'))
+        name = device.get('name') or output.get('target') or 'the gate'
+        action = 'open' if tool_name == 'open_gate' else str(output.get('action') or 'open')
+        past = 'Opened' if action == 'open' else 'Closed'
+        success = bool(output.get('opened') if action == 'open' else output.get('closed'))
+        return f'{past} {name}. Logged, tidy, and pleasingly uneventful.' if success else f'I could not {action} {name}.'
+    if tool_name in {'toggle_maintenance_mode', 'enable_maintenance_mode', 'disable_maintenance_mode'}:
+        if output.get('changed') or output.get('enabled') or output.get('disabled'):
+            state = output.get('state') or ('enabled' if output.get('enabled') else 'disabled')
+            return f'Maintenance Mode is now {state}.'
+        return str(output.get('detail') or output.get('error') or 'I did not change Maintenance Mode.')
+    return str(output.get("detail") or "Action completed.")
+
+
+def confirmation_button(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name in {'open_device', 'command_device', 'open_gate'}:
+        action = 'open' if tool_name == 'open_gate' else str((output or {}).get('action') or 'open')
+        return 'Close' if action == 'close' else 'Open'
+    if tool_name in {'toggle_maintenance_mode', 'enable_maintenance_mode', 'disable_maintenance_mode'}:
+        return 'Confirm'
+    return "Confirm"

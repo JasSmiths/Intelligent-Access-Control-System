@@ -1,6 +1,8 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import Awaitable, Callable
 import asyncio
 from datetime import UTC, datetime
+from functools import partial
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -9,10 +11,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings, validate_startup_security_config
+from app.core.recovery_hold import is_recovery_hold
+from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
 from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, engine
 from app.services.auth import authenticate_request, count_users
+from app.services.chat import chat_service
+from app.services.alfred.feedback import alfred_feedback_service
 from app.services.access_devices import get_access_device_service
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
@@ -43,7 +49,10 @@ from app.services.telemetry import (
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.visitor_passes import get_visitor_pass_service
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.messaging.whatsapp_incoming import get_whatsapp_incoming_dispatcher
+from app.services.messaging.discord_incoming import DiscordIncomingGateway
+from app.services.messaging_bridge import messaging_bridge_service
 
 logger = get_logger(__name__)
 
@@ -61,90 +70,98 @@ class RequestBodyTooLarge(RuntimeError):
         super().__init__(f"Request body exceeds {limit_bytes} bytes.")
 
 
+async def _stop_owned_service(name: str, stop: Callable[[], Awaitable[None]]) -> None:
+    try:
+        await asyncio.wait_for(stop(), timeout=20)
+    except (Exception, asyncio.CancelledError) as exc:
+        # One failed resource must not keep later resources alive or conceal the
+        # original startup exception. Stop methods remain responsible for children.
+        logger.error("service_cleanup_failed", extra={"service": name, "error_class": type(exc).__name__})
+
+
+async def _cancel_owned_task(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("background_task_failed", extra={"task": task.get_name(), "error_class": type(exc).__name__})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start and stop process-wide services.
-
-    Long-lived services are registered here so route handlers stay focused on
-    request validation and orchestration.
-    """
-
+    """One process owner; unwind partial startup and drain producers before sinks."""
+    app.state.startup_complete = False
     configure_logging()
     validate_startup_security_config()
-    logger.info(
-        "starting_backend",
-        extra={"app_name": settings.app_name, "environment": settings.environment},
-    )
-    await init_database()
-    await event_bus.start()
-    await get_dependency_update_service().start()
-    await get_notification_service().start()
-    await get_automation_service().start()
-    await get_discord_messaging_service().start()
-    await get_visitor_pass_service().start()
-    await get_access_device_service().start()
-    await get_access_event_service().start()
-    await get_movement_reconciliation_service().start()
-    await get_home_assistant_service().start()
-    await get_gate_malfunction_service().start()
-    await get_unifi_protect_service().start()
-    startup_at = datetime.now(tz=UTC)
-    previous_runtime_state = read_backend_runtime_state()
-    runtime_heartbeat_task = asyncio.create_task(
-        run_backend_runtime_heartbeat(started_at=startup_at, previous_state=previous_runtime_state),
-        name="backend-runtime-heartbeat",
-    )
-    missed_event_backfill_task = asyncio.create_task(
-        backfill_missed_access_events_safely(
-            previous_runtime_state=previous_runtime_state,
-            startup_at=startup_at,
-        ),
-        name="missed-access-event-backfill",
-    )
-    missed_event_reconciliation_task = asyncio.create_task(
-        run_missed_access_event_reconciliation(),
-        name="missed-access-event-reconciliation",
-    )
-    snapshot_recovery_task = asyncio.create_task(
-        recover_missing_access_event_snapshots_safely(),
-        name="access-event-snapshot-recovery",
-    )
+    logger.info("starting_backend", extra={"app_name": settings.app_name, "environment": settings.environment})
     try:
-        yield
+        async with AsyncExitStack() as resources, AsyncExitStack() as approvals, AsyncExitStack() as producers:
+            resources.push_async_callback(_stop_owned_service, "database", engine.dispose)
+            if is_recovery_hold():
+                await verify_readable_schema()
+                app.state.startup_complete = True
+                try:
+                    yield
+                finally:
+                    app.state.startup_complete = False
+                return
+            await init_database()
+            # Drain intake first, then its shielded approval tasks, while hardware,
+            # delivery sinks and database resources are still available.
+            approvals.push_async_callback(_stop_owned_service, "alfred_approvals", chat_service.stop)
+            resources.push_async_callback(_stop_owned_service, "whatsapp_delivery", get_whatsapp_delivery_service().stop)
+            discord_service = get_discord_messaging_service()
+            discord_gateway = DiscordIncomingGateway(
+                discord_service, message_handler=messaging_bridge_service.handle_message,
+                confirmation_handler=partial(messaging_bridge_service.handle_confirmation, provider="discord"),
+            )
+            discord_service.configure_gateway(discord_gateway)
+            # Register before start so a partially started service is also closed.
+            for name, service in (
+                ("realtime", event_bus),
+                ("dependency_updates", get_dependency_update_service()),
+                ("notifications", get_notification_service()),
+                ("automations", get_automation_service()),
+                ("alfred_feedback", alfred_feedback_service),
+                ("discord", discord_service),
+                ("visitor_passes", get_visitor_pass_service()),
+                ("access_devices", get_access_device_service()),
+                ("access_events", get_access_event_service()),
+                ("movement_reconciliation", get_movement_reconciliation_service()),
+                ("home_assistant", get_home_assistant_service()),
+                ("gate_malfunctions", get_gate_malfunction_service()),
+                ("unifi_protect", get_unifi_protect_service()),
+            ):
+                if name == "discord":
+                    # Reverse cleanup stops the bot producer before draining its
+                    # incoming worker, while notification sinks and DB stay alive.
+                    producers.push_async_callback(_stop_owned_service, "discord_incoming", discord_gateway.stop)
+                    discord_gateway.start()
+                owner = producers if name in {
+                    "discord", "automations", "unifi_protect", "access_events", "movement_reconciliation"
+                } else resources
+                owner.push_async_callback(_stop_owned_service, name, service.stop)
+                await service.start()
+            whatsapp_incoming = get_whatsapp_incoming_dispatcher()
+            producers.push_async_callback(_stop_owned_service, "whatsapp_incoming", whatsapp_incoming.stop)
+            whatsapp_incoming.start()
+            startup_at = datetime.now(tz=UTC)
+            previous_runtime_state = read_backend_runtime_state()
+            for name, create_coroutine in (
+                ("backend-runtime-heartbeat", lambda: run_backend_runtime_heartbeat(started_at=startup_at, previous_state=previous_runtime_state)),
+                ("missed-access-event-backfill", lambda: backfill_missed_access_events_safely(previous_runtime_state=previous_runtime_state, startup_at=startup_at)),
+                ("missed-access-event-reconciliation", lambda: run_missed_access_event_reconciliation()),
+                ("access-event-snapshot-recovery", lambda: recover_missing_access_event_snapshots_safely()),
+            ):
+                producers.push_async_callback(_cancel_owned_task, asyncio.create_task(create_coroutine(), name=name))
+            app.state.startup_complete = True
+            try:
+                yield
+            finally:
+                app.state.startup_complete = False
     finally:
-        missed_event_backfill_task.cancel()
-        try:
-            await missed_event_backfill_task
-        except asyncio.CancelledError:
-            pass
-        missed_event_reconciliation_task.cancel()
-        try:
-            await missed_event_reconciliation_task
-        except asyncio.CancelledError:
-            pass
-        snapshot_recovery_task.cancel()
-        try:
-            await snapshot_recovery_task
-        except asyncio.CancelledError:
-            pass
-        runtime_heartbeat_task.cancel()
-        try:
-            await runtime_heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        await get_dependency_update_service().stop()
-        await get_unifi_protect_service().stop()
-        await get_gate_malfunction_service().stop()
-        await get_home_assistant_service().stop()
-        await get_movement_reconciliation_service().stop()
-        await get_access_event_service().stop()
-        await get_access_device_service().stop()
-        await get_visitor_pass_service().stop()
-        await get_whatsapp_messaging_service().stop()
-        await get_discord_messaging_service().stop()
-        await get_automation_service().stop()
-        await get_notification_service().stop()
-        await event_bus.stop()
         logger.info("stopped_backend")
 
 
@@ -213,7 +230,7 @@ MAINTENANCE_IGNORED_WEBHOOK_PATHS = {
 
 
 def _requires_auth(path: str) -> bool:
-    if path in {"/", "/health", "/api/v1/health"}:
+    if path in {"/", "/health", "/api/v1/health", "/api/v1/health/ready"}:
         return False
     if path in PUBLIC_AUTH_PATHS:
         return False
@@ -342,6 +359,8 @@ async def auth_guard(request: Request, call_next):
 @app.middleware("http")
 async def telemetry_http_middleware(request: Request, call_next):
     path = request.url.path
+    if is_recovery_hold():
+        return await call_next(request)
     if not _should_trace_api_request(request.method, path):
         return await call_next(request)
 
@@ -446,3 +465,4 @@ async def service_root() -> dict[str, object]:
 
 
 app.include_router(api_router, prefix="/api/v1")
+app.add_middleware(RecoveryHoldMiddleware)

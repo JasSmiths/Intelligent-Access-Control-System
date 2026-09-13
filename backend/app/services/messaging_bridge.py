@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -12,7 +12,10 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import MessagingIdentity, Person, User
 from app.models.enums import UserRole
-from app.modules.messaging.base import IncomingChatMessage, MessagingActor, MessagingBridgeResult
+from app.modules.messaging.base import (
+    IncomingChatMessage, MessagingActor, MessagingBridgeResult,
+    MessagingAuthorityBinding, MessagingAuthorityChanged,
+)
 from app.services.alfred.feedback import AlfredFeedbackError, alfred_feedback_service, parse_feedback_command
 from app.services.chat import chat_service
 from app.services.type_helpers import as_dict, as_list
@@ -23,13 +26,41 @@ MESSAGING_SESSION_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "iacs.messaging.ses
 
 
 class MessagingBridgeService:
+    async def handle_confirmation(
+        self, *, session_id: str, confirmation_id: str, decision: str,
+        user_id: str | None, user_role: str, provider: Literal["discord", "whatsapp"],
+    ) -> MessagingBridgeResult:
+        """A channel adapter presents an approval; Alfred owns its durable claim.
+
+        The injected caller supplies its freshly resolved IACS actor. The Alfred
+        approval owner still revalidates the current requester and auth version;
+        a channel session or provider role never substitutes for that authority.
+        """
+        result = await chat_service.handle_tool_confirmation(
+            session_id=session_id, confirmation_id=confirmation_id, decision=decision,
+            user_id=user_id, user_role=user_role,
+            client_context={"source": f"{provider}_button"},
+        )
+        return MessagingBridgeResult(
+            session_id=session_id,
+            response_text=naturalize_messaging_response(
+                result.text, result.tool_results, f"{provider.title()} confirmation",
+            ),
+        )
+
     async def handle_message(
         self,
         message: IncomingChatMessage,
         *,
         is_admin_hint: bool = False,
+        expected_authority: MessagingAuthorityBinding | None = None,
     ) -> MessagingBridgeResult:
-        actor = await self.resolve_actor(message, is_admin_hint=is_admin_hint)
+        if expected_authority is None:
+            actor = await self.resolve_actor(message, is_admin_hint=is_admin_hint)
+        else:
+            actor = await self.resolve_actor(
+                message, is_admin_hint=is_admin_hint, expected_authority=expected_authority,
+            )
         session_id = deterministic_session_id(message)
         feedback_command = parse_feedback_command(message.text)
         if feedback_command and actor.is_admin:
@@ -91,10 +122,11 @@ class MessagingBridgeService:
         message: IncomingChatMessage,
         *,
         is_admin_hint: bool = False,
+        expected_authority: MessagingAuthorityBinding | None = None,
     ) -> MessagingActor:
         now = datetime.now(tz=UTC)
         async with AsyncSessionLocal() as session:
-            identity = await session.scalar(
+            query = (
                 select(MessagingIdentity)
                 .options(
                     selectinload(MessagingIdentity.user),
@@ -103,6 +135,21 @@ class MessagingBridgeService:
                 .where(MessagingIdentity.provider == message.provider)
                 .where(MessagingIdentity.provider_user_id == message.author_provider_id)
             )
+            if expected_authority is not None:
+                query = query.with_for_update().execution_options(populate_existing=True)
+            identity = await session.scalar(query)
+            user: User | None = identity.user if identity else None
+            if expected_authority is not None:
+                if identity and identity.user_id:
+                    user = await session.scalar(select(User).where(User.id == identity.user_id)
+                        .with_for_update().execution_options(populate_existing=True))
+                current = MessagingAuthorityBinding(
+                    user_id=str(user.id) if user and user.is_active else None,
+                    user_role=user.role.value if user and user.is_active else "standard",
+                    auth_session_version=user.auth_session_version if user and user.is_active else None,
+                )
+                if current != expected_authority:
+                    raise MessagingAuthorityChanged("sender_binding_changed")
             if not identity:
                 identity = MessagingIdentity(
                     provider=message.provider,
@@ -123,7 +170,6 @@ class MessagingBridgeService:
             }
             await session.commit()
 
-            user: User | None = identity.user
             person: Person | None = identity.person
             linked_admin = bool(user and user.is_active and user.role == UserRole.ADMIN)
             user_role = user.role.value if user and user.is_active else "standard"

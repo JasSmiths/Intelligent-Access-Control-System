@@ -1,11 +1,54 @@
 """Schedule Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+import re
+from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
-from app.ai.tool_groups._shared import *
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.ai.context import get_chat_tool_context
+from app.ai.tool_groups._shared import (
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _bounded_int,
+    _cover_target_match_score,
+    _normalize,
+    _parse_agent_datetime,
+    _person_record_matches,
+    _schedule_answer_artifacts,
+    _uuid_from_value,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import (
+    Person,
+    Schedule,
+    User,
+    Vehicle,
+)
+from app.modules.access_devices.base import AccessDeviceEntity
+from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.modules.home_assistant.covers import cover_entity_state_payload
+from app.services import schedule_operations
+from app.services.access_devices import get_access_device_service
+from app.services.schedule_assignments import set_schedule_assignment
+from app.services.schedule_operations import ScheduleOperationError
+from app.services.schedule_overrides import (
+    create_schedule_override,
+    publish_schedule_override_created,
+)
+from app.services.schedules import (
+    evaluate_person_schedule,
+    evaluate_schedule_id,
+    evaluate_vehicle_schedule,
+    normalize_time_blocks,
+    schedule_allows_at,
+    schedule_dependencies,
+)
+from app.services.settings import get_runtime_config
 
 NATURAL_SCHEDULE_DAY_ALIASES = {
     "mon": 0,
@@ -116,6 +159,7 @@ async def _load_vehicle_with_schedule(session, vehicle_id: UUID) -> Vehicle | No
             selectinload(Vehicle.schedule),
             selectinload(Vehicle.owner).selectinload(Person.schedule),
         )
+        .execution_options(populate_existing=True)
         .where(Vehicle.id == vehicle_id)
     )
 
@@ -124,6 +168,7 @@ async def _load_person_with_schedule(session, person_id: UUID) -> Person | None:
     return await session.scalar(
         select(Person)
         .options(selectinload(Person.schedule), selectinload(Person.group))
+        .execution_options(populate_existing=True)
         .where(Person.id == person_id)
     )
 
@@ -170,62 +215,47 @@ def _serialize_vehicle_schedule_target(vehicle: Vehicle) -> dict[str, Any]:
     }
 
 
-async def _schedule_door_targets(*, entity_type: str, search: str) -> list[dict[str, Any]]:
-    config = await get_runtime_config()
-    schedule_names = await _schedule_name_map()
-    targets: list[dict[str, Any]] = []
-    for kind, entities in _cover_entities_by_kind(config).items():
-        if entity_type not in {"", "all", "door", kind}:
+def _schedule_device_payload(device: AccessDeviceEntity) -> dict[str, Any]:
+    return {**cover_entity_state_payload({
+        "entity_id": device.key, "name": device.name, "enabled": device.enabled,
+        "schedule_id": device.schedule_id,
+    }), "kind": device.kind}
+
+
+async def _resolve_schedule_device(arguments: dict[str, Any], entity_type: str) -> AccessDeviceEntity | None:
+    requested_id = str(arguments.get("entity_id") or "").strip()
+    requested_name = _normalize(arguments.get("entity_name") or arguments.get("name") or arguments.get("target"))
+    matches: list[tuple[int, AccessDeviceEntity]] = []
+    for device in await get_access_device_service().list_devices():
+        if entity_type not in {"door", device.kind}:
             continue
-        for entity in entities:
-            label = f"{entity.get('entity_id')} {entity.get('name')}".lower()
-            if search and search not in label:
-                continue
-            payload = cover_entity_state_payload(entity)
-            schedule_id = payload.get("schedule_id")
-            targets.append(
-                {
-                    **payload,
-                    "kind": kind,
-                    "schedule_name": schedule_names.get(str(schedule_id)) if schedule_id else None,
-                }
-            )
-    return targets
+        if requested_id:
+            if device.key == requested_id:
+                return device
+            continue
+        score = _cover_target_match_score(requested_name, device.name, device.key, device.kind)
+        if score >= 2:
+            matches.append((score, device))
+    matches.sort(key=lambda match: match[0], reverse=True)
+    if matches and (len(matches) == 1 or matches[0][0] > matches[1][0]):
+        return matches[0][1]
+    return None
+
+
+async def _schedule_door_targets(*, entity_type: str, search: str) -> list[dict[str, Any]]:
+    schedule_names = await _schedule_name_map()
+    return [
+        {**_schedule_device_payload(device), "schedule_name": schedule_names.get(str(device.schedule_id))}
+        for device in await get_access_device_service().list_devices()
+        if entity_type in {"", "all", "door", device.kind}
+        and (not search or search in f"{device.key} {device.name}".lower())
+    ]
 
 
 async def _schedule_name_map() -> dict[str, str]:
     async with AsyncSessionLocal() as session:
         schedules = (await session.scalars(select(Schedule))).all()
     return {str(schedule.id): schedule.name for schedule in schedules}
-
-
-async def _assign_schedule_to_cover(arguments: dict[str, Any], *, schedule_id: str | None) -> dict[str, Any]:
-    entity_type = _normalize(arguments.get("entity_type"))
-    target = await _resolve_cover_target(arguments, entity_type=entity_type)
-    if not target:
-        return {"assigned": False, "error": "Door/gate target not found."}
-
-    config = await get_runtime_config()
-    setting_key = str(target["setting_key"])
-    existing_entities = (
-        list(config.home_assistant_gate_entities)
-        if setting_key == "home_assistant_gate_entities"
-        else list(config.home_assistant_garage_door_entities)
-    )
-    updated_entities: list[dict[str, Any]] = []
-    for entity in existing_entities:
-        updated = dict(entity)
-        if str(updated.get("entity_id")) == str(target["entity"]["entity_id"]):
-            updated["schedule_id"] = schedule_id
-        updated_entities.append(updated)
-
-    await update_settings({setting_key: updated_entities})
-    refreshed = await _resolve_cover_target(arguments, entity_type=entity_type)
-    return {
-        "assigned": True,
-        "entity_type": refreshed["kind"] if refreshed else target["kind"],
-        "door": refreshed["entity"] if refreshed else {**target["entity"], "schedule_id": schedule_id},
-    }
 
 
 def _schedule_summary(time_blocks: dict[str, list[dict[str, str]]]) -> str:
@@ -413,31 +443,23 @@ async def override_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
                 "detail": f"Create a temporary access override for {person.display_name}?",
             }
 
-        context = get_chat_tool_context()
-        override = ScheduleOverride(
-            person_id=person.id,
-            starts_at=starts_at,
-            ends_at=ends_at,
-            reason=reason,
-            created_by_user_id=_uuid_from_value(context.get("user_id")),
-            source="alfred",
-            is_active=True,
-        )
-        session.add(override)
-        await session.commit()
-        await session.refresh(override)
+        try:
+            override = await create_schedule_override(
+                session, person_id=person.id, starts_at=starts_at,
+                duration_minutes=duration_minutes, reason=reason,
+                user=await _schedule_actor(session), source="alfred",
+            )
+        except ScheduleOperationError as exc:
+            return _schedule_operation_error(exc, "created")
 
-    await event_bus.publish(
-        "schedule.override_created",
-        {
-            "override_id": str(override.id),
-            "person_id": str(person.id),
-            "person": person.display_name,
-            "starts_at": _agent_datetime_iso(starts_at, config.site_timezone),
-            "ends_at": _agent_datetime_iso(ends_at, config.site_timezone),
-            "source": "alfred",
-        },
-    )
+    await publish_schedule_override_created({
+        "override_id": str(override.id),
+        "person_id": str(person.id),
+        "person": person.display_name,
+        "starts_at": _agent_datetime_iso(starts_at, config.site_timezone),
+        "ends_at": _agent_datetime_iso(ends_at, config.site_timezone),
+        "source": "alfred",
+    })
     return {
         "created": True,
         "override_id": str(override.id),
@@ -484,15 +506,31 @@ async def get_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+async def _schedule_actor(session) -> User:
+    user_id = _uuid_from_value(get_chat_tool_context().get("user_id"))
+    user = await session.get(User, user_id) if user_id else None
+    if user is None:
+        raise ScheduleOperationError("forbidden", "Admin access required")
+    return user
+
+
+def _schedule_operation_error(exc: ScheduleOperationError, outcome: str) -> dict[str, Any]:
+    result: dict[str, Any] = {outcome: False, "error": str(exc).rstrip(".") + "."}
+    if exc.dependencies:
+        result["dependencies"] = exc.dependencies
+    return result
+
+
 async def create_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
-    name = str(arguments.get("name") or "").strip()
-    if not name:
-        return {"created": False, "error": "Schedule name is required."}
     try:
-        time_blocks = _time_blocks_from_agent_arguments(arguments)
+        values = schedule_operations.validate_schedule_values({
+            "name": arguments.get("name"),
+            "description": arguments.get("description"),
+            "time_blocks": _time_blocks_from_agent_arguments(arguments),
+        })
     except (TypeError, ValueError) as exc:
         return {"created": False, "error": str(exc)}
-    if not _schedule_has_allowed_time(time_blocks):
+    if not _schedule_has_allowed_time(values.time_blocks):
         return {
             "created": False,
             "requires_details": True,
@@ -503,28 +541,20 @@ async def create_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
             "created": False,
             "requires_confirmation": True,
             "confirmation_field": "confirm",
-            "target": name,
-            "detail": f"Create schedule {name}?",
+            "target": values.name,
+            "detail": f"Create schedule {values.name}?",
         }
 
     async with AsyncSessionLocal() as session:
-        schedule = Schedule(
-            name=name,
-            description=_optional_text(arguments.get("description")),
-            time_blocks=time_blocks,
-        )
-        session.add(schedule)
         try:
-            await session.commit()
-            await session.refresh(schedule)
-        except IntegrityError:
-            await session.rollback()
-            return {
-                "created": False,
-                "error": "Schedule already exists.",
-                "error_code": "schedule_exists",
-                "schedule_name": name,
-            }
+            schedule = await schedule_operations.create_schedule(
+                session, values, user=await _schedule_actor(session), source="alfred",
+            )
+        except ScheduleOperationError as exc:
+            result = _schedule_operation_error(exc, "created")
+            if exc.code == "schedule_exists":
+                result.update(error_code="schedule_exists", schedule_name=values.name)
+            return result
         return {"created": True, "schedule": _serialize_schedule_for_agent(schedule)}
 
 
@@ -534,22 +564,21 @@ async def update_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
         if not schedule:
             return {"updated": False, "error": "Schedule not found."}
 
-        has_time_update = "time_blocks" in arguments or bool(_natural_schedule_text_from_arguments(arguments))
-        next_time_blocks = None
-        if has_time_update:
-            try:
-                next_time_blocks = _time_blocks_from_agent_arguments(arguments)
-            except (TypeError, ValueError) as exc:
-                return {"updated": False, "error": str(exc)}
-        next_name = None
-        if "name" in arguments:
-            next_name = str(arguments.get("name") or "").strip()
-            if not next_name:
-                return {"updated": False, "error": "Schedule name cannot be empty."}
-        next_description = None
-        has_description_update = "description" in arguments
-        if has_description_update:
-            next_description = _optional_text(arguments.get("description"))
+        changes: dict[str, Any] = {key: arguments[key] for key in ("name", "description") if key in arguments}
+        try:
+            if (
+                "time_blocks" in arguments
+                or bool(arguments.get("time_description"))
+                or _parse_natural_schedule_time_blocks(_natural_schedule_text_from_arguments(arguments)) is not None
+            ):
+                changes["time_blocks"] = _time_blocks_from_agent_arguments(arguments)
+            # Validate the preview without changing the ORM object. The operation
+            # merges again against the locked current record at execution time.
+            schedule_operations.validate_schedule_values({
+                **schedule_operations.schedule_audit_snapshot(schedule), **changes,
+            })
+        except (TypeError, ValueError) as exc:
+            return {"updated": False, "error": str(exc)}
 
         if not bool(arguments.get("confirm")):
             return {
@@ -561,19 +590,12 @@ async def update_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
                 "detail": f"Update the {schedule.name} schedule?",
             }
 
-        if has_time_update:
-            schedule.time_blocks = next_time_blocks
-        if next_name is not None:
-            schedule.name = next_name
-        if has_description_update:
-            schedule.description = next_description
-
         try:
-            await session.commit()
-            await session.refresh(schedule)
-        except IntegrityError:
-            await session.rollback()
-            return {"updated": False, "error": "Schedule already exists."}
+            schedule = await schedule_operations.update_schedule(
+                session, schedule.id, changes, user=await _schedule_actor(session), source="alfred",
+            )
+        except ScheduleOperationError as exc:
+            return _schedule_operation_error(exc, "updated")
         return {"updated": True, "schedule": _serialize_schedule_for_agent(schedule)}
 
 
@@ -600,8 +622,12 @@ async def delete_schedule(arguments: dict[str, Any]) -> dict[str, Any]:
                 "schedule": serialized,
                 "detail": f"Delete the {schedule.name} schedule? This cannot be undone.",
             }
-        await session.delete(schedule)
-        await session.commit()
+        try:
+            await schedule_operations.delete_schedule(
+                session, schedule.id, user=await _schedule_actor(session), source="alfred",
+            )
+        except ScheduleOperationError as exc:
+            return {**_schedule_operation_error(exc, "deleted"), "schedule_name": serialized["name"]}
         return {"deleted": True, "schedule": serialized}
 
 
@@ -690,8 +716,12 @@ async def assign_schedule_to_entity(arguments: dict[str, Any]) -> dict[str, Any]
             person = await _resolve_person(session, arguments)
             if not person:
                 return {"assigned": False, "error": "Person not found."}
-            person.schedule_id = schedule.id if schedule else None
-            await session.commit()
+            try:
+                await set_schedule_assignment(session, person, schedule.id if schedule else None,
+                                              user=await _schedule_actor(session), source="alfred")
+                await session.commit()
+            except ScheduleOperationError as exc:
+                return _schedule_operation_error(exc, "assigned")
             refreshed = await _load_person_with_schedule(session, person.id)
             return {
                 "assigned": True,
@@ -703,8 +733,12 @@ async def assign_schedule_to_entity(arguments: dict[str, Any]) -> dict[str, Any]
             vehicle = await _resolve_vehicle(session, arguments)
             if not vehicle:
                 return {"assigned": False, "error": "Vehicle not found."}
-            vehicle.schedule_id = schedule.id if schedule else None
-            await session.commit()
+            try:
+                await set_schedule_assignment(session, vehicle, schedule.id if schedule else None,
+                                              user=await _schedule_actor(session), source="alfred")
+                await session.commit()
+            except ScheduleOperationError as exc:
+                return _schedule_operation_error(exc, "assigned")
             refreshed = await _load_vehicle_with_schedule(session, vehicle.id)
             return {
                 "assigned": True,
@@ -713,8 +747,18 @@ async def assign_schedule_to_entity(arguments: dict[str, Any]) -> dict[str, Any]
                 "inheritance": "inherits owner schedule when schedule_id is null",
             }
 
-    if entity_type in {"gate", "garage_door", "door"}:
-        return await _assign_schedule_to_cover(arguments, schedule_id=str(schedule.id) if schedule else None)
+        if entity_type in {"gate", "garage_door", "door"}:
+            device = await _resolve_schedule_device(arguments, entity_type)
+            if device is None:
+                return {"assigned": False, "error": "Door/gate target not found."}
+            try:
+                updated_device = await get_access_device_service().assign_schedule(
+                    device.key, str(schedule.id) if schedule else None,
+                    user=await _schedule_actor(session), source="alfred",
+                )
+            except (ScheduleOperationError, LookupError) as exc:
+                return {"assigned": False, "error": str(exc)}
+            return {"assigned": True, "entity_type": updated_device.kind, "door": _schedule_device_payload(updated_device)}
 
     return {"assigned": False, "error": "entity_type must be person, vehicle, gate, garage_door, or door."}
 
@@ -806,23 +850,23 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             return payload
 
     if entity_type in {"gate", "garage_door", "door"}:
-        door = await _resolve_cover_target(arguments, entity_type=entity_type)
+        door = await _resolve_schedule_device(arguments, entity_type)
         if not door:
             return {"verified": False, "error": "Door/gate target not found."}
         async with AsyncSessionLocal() as session:
             evaluation = await evaluate_schedule_id(
                 session,
-                door["entity"].get("schedule_id"),
+                door.schedule_id,
                 occurred_at,
                 timezone_name=config.site_timezone,
                 default_policy=config.schedule_default_policy,
-                source=str(door["kind"]),
+                source=door.kind,
             )
         payload = {
             "verified": True,
-            "entity_type": door["kind"],
-            "entity_id": door["entity"]["entity_id"],
-            "name": door["entity"]["name"],
+            "entity_type": door.kind,
+            "entity_id": door.key,
+            "name": door.name,
             "allowed": evaluation.allowed,
             "source": evaluation.source,
             "schedule_id": str(evaluation.schedule_id) if evaluation.schedule_id else None,
@@ -832,7 +876,7 @@ async def verify_schedule_access(arguments: dict[str, Any]) -> dict[str, Any]:
             "timezone": config.site_timezone,
             "reason": evaluation.reason,
         }
-        payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=door["entity"]["name"])
+        payload["answer_artifacts"] = _schedule_answer_artifacts(payload, subject=door.name)
         return payload
 
     return {"verified": False, "error": "entity_type must be schedule, person, vehicle, gate, garage_door, or door."}

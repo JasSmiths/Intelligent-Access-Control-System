@@ -1,25 +1,23 @@
-from datetime import UTC, datetime
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
 import app.simulation.router as simulation_router_module
+import app.simulation.scenarios as simulation_scenarios
 from app.api.dependencies import current_user
 from app.models import User
 from app.models.enums import UserRole
 from app.modules.lpr.base import PlateRead
-from app.services.access_events import (
+from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
     PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
-    AccessEventService,
 )
+from app.services.access_events import AccessEventService
 from app.simulation.scenarios import (
-    FullAccessFlowReport,
-    FullAccessFlowRequest,
     SimulationRecorder,
-    SimulationSummary,
     available_scenario_ids,
     recommended_fix_for_issue,
 )
@@ -65,7 +63,7 @@ def test_wrong_direction_recommendation_names_convoy_fix() -> None:
     recommendation = recommended_fix_for_issue("wrong_direction")
 
     assert "open-gate convoy" in recommendation
-    assert "AccessEventService._resolve_direction" in recommendation
+    assert "AccessEvidenceResolver._resolve_direction" in recommendation
 
 
 @pytest.mark.asyncio
@@ -93,52 +91,44 @@ async def test_simulation_gate_observation_hook_preserves_supplied_state() -> No
 
 
 @pytest.mark.asyncio
-async def test_full_access_endpoint_requires_admin(monkeypatch) -> None:
-    async def fail_runner(_request: FullAccessFlowRequest) -> FullAccessFlowReport:
-        raise AssertionError("Standard users must not run the E2E simulation.")
+async def test_full_access_endpoint_is_retired_before_runner(monkeypatch) -> None:
+    calls = 0
 
-    monkeypatch.setattr(simulation_router_module, "run_full_access_flow", fail_runner)
+    async def fail_runner(*_args, **_kwargs) -> None:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("The retired endpoint must not invoke the E2E simulation.")
+
+    monkeypatch.setattr(simulation_scenarios, "run_full_access_flow", fail_runner)
     app = app_for_user(user_with_role(UserRole.STANDARD))
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/api/v1/simulation/e2e/full-access-flow", json={})
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Admin access required"
+    assert response.status_code == 410
+    assert response.json()["detail"] == (
+        "Full access-flow simulation is available only through the isolated test harness."
+    )
+    assert calls == 0
 
 
 @pytest.mark.asyncio
-async def test_full_access_endpoint_returns_runner_report(monkeypatch) -> None:
-    captured: dict[str, FullAccessFlowRequest] = {}
-    confirmation: dict[str, object] = {}
+async def test_full_access_endpoint_is_retired_before_confirmation_or_runner(monkeypatch) -> None:
+    runner_calls = 0
+    confirmation_calls = 0
 
-    async def fake_runner(request: FullAccessFlowRequest) -> FullAccessFlowReport:
-        captured["request"] = request
-        now = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
-        return FullAccessFlowReport(
-            run_id="run-1",
-            status="passed",
-            started_at=now,
-            finished_at=now,
-            summary=SimulationSummary(
-                scenarios=0,
-                steps=0,
-                access_events=0,
-                suppressed_reads=0,
-                anomalies=0,
-                simulated_gate_actions=0,
-                notification_intents=0,
-                issues=0,
-            ),
-            issues=[],
-            scenarios=[],
-            )
+    async def fail_runner(*_args, **_kwargs) -> None:
+        nonlocal runner_calls
+        runner_calls += 1
+        raise AssertionError("The retired endpoint must not invoke the E2E simulation.")
 
-    async def fake_confirmation(_session, **kwargs) -> None:
-        confirmation.update(kwargs)
+    async def fake_confirmation(_session, **_kwargs) -> None:
+        nonlocal confirmation_calls
+        confirmation_calls += 1
+        raise AssertionError("The retired endpoint must not consume a confirmation token.")
 
-    monkeypatch.setattr(simulation_router_module, "run_full_access_flow", fake_runner)
+    monkeypatch.setattr(simulation_scenarios, "run_full_access_flow", fail_runner)
     monkeypatch.setattr(simulation_router_module, "require_confirmed_action", fake_confirmation)
     app = app_for_user(user_with_role(UserRole.ADMIN))
     transport = httpx.ASGITransport(app=app)
@@ -154,18 +144,12 @@ async def test_full_access_endpoint_returns_runner_report(monkeypatch) -> None:
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "passed"
-    assert captured["request"].cleanup is False
-    assert captured["request"].scenario_ids == ["unknown_plate_denied"]
-    assert captured["request"].include_debug is True
-    assert confirmation["action"] == "simulation.full_access_flow"
-    assert confirmation["confirmation_token"] == "server-token"
-    assert confirmation["payload"] == {
-        "cleanup": False,
-        "scenario_ids": ["unknown_plate_denied"],
-        "include_debug": True,
-    }
+    assert response.status_code == 410
+    assert response.json()["detail"] == (
+        "Full access-flow simulation is available only through the isolated test harness."
+    )
+    assert runner_calls == 0
+    assert confirmation_calls == 0
 
 
 def test_recorder_counts_suppressed_reads() -> None:

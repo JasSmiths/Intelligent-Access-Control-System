@@ -1,0 +1,72 @@
+{
+  "pending": {
+    "status": "pending",
+    "pending_action": {
+      "confirmation_id": "confirm-synthetic",
+      "session_id": "11111111-1111-4111-8111-111111111111",
+      "tool_name": "open_gate",
+      "title": "Open Synthetic Gate?",
+      "description": "Confirm the selected synthetic gate.",
+      "confirm_label": "Open Gate",
+      "cancel_label": "Cancel",
+      "risk_level": "high",
+      "target": "Synthetic Gate",
+      "expires_at": "2099-01-01T00:10:00+00:00"
+    },
+    "result": null
+  },
+  "in_progress": {
+    "status": "in_progress",
+    "pending_action": null,
+    "result": null
+  },
+  "completed": {
+    "status": "completed",
+    "pending_action": null,
+    "result": {
+      "session_id": "11111111-1111-4111-8111-111111111111",
+      "provider": "local",
+      "text": "The controller accepted the request.",
+      "tool_results": [
+        {
+          "call_id": "confirmed-22222222-2222-4222-8222-222222222222",
+          "name": "open_gate",
+          "arguments": {
+            "target": "Synthetic Gate",
+            "confirm": true
+          },
+          "output": {
+            "accepted": true,
+            "delivery": "accepted",
+            "mechanically_confirmed": false,
+            "requires_reconciliation": true
+          }
+        }
+      ],
+      "attachments": [],
+      "pending_action": null,
+      "user_message_id": "33333333-3333-4333-8333-333333333333",
+      "assistant_message_id": "44444444-4444-4444-8444-444444444444"
+    }
+  },
+  "unknown": {
+    "status": "unknown",
+    "pending_action": null,
+    "result": null
+  },
+  "cancelled": {
+    "status": "cancelled",
+    "pending_action": null,
+    "result": null
+  },
+  "expired": {
+    "status": "expired",
+    "pending_action": null,
+    "result": null
+  },
+  "unavailable": {
+    "status": "unavailable",
+    "pending_action": null,
+    "result": null
+  }
+}

@@ -8,8 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Person, Schedule, ScheduleOverride, Vehicle
-from app.services.access_devices import get_access_device_service
+from app.models import AccessDevice, Person, Schedule, ScheduleOverride, Vehicle
 
 MINUTES_PER_SLOT = 30
 SLOTS_PER_DAY = 48
@@ -227,7 +226,10 @@ async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -
             .order_by(Vehicle.registration_number)
         )
     ).all()
-    schedule_id_text = str(schedule_id)
+    # Dependency reporting is a persistence query, not a hardware operation.
+    # Use the caller's transaction so deletion sees one authoritative snapshot.
+    devices = (await session.scalars(select(AccessDevice).where(AccessDevice.schedule_id == schedule_id)
+                                    .order_by(AccessDevice.sort_order, AccessDevice.name))).all()
     doors = [
         {
             "id": device.key,
@@ -235,8 +237,7 @@ async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -
             "entity_id": device.key,
             "kind": device.kind,
         }
-        for device in await get_access_device_service().list_devices()
-        if str(device.schedule_id or "") == schedule_id_text
+        for device in devices
     ]
     return {
         "people": [

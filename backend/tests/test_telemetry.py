@@ -4,7 +4,7 @@ import uuid
 
 from app.api.v1 import telemetry as telemetry_api
 from app.ai.providers import ToolCall
-from app.ai.tools import set_chat_tool_context
+from app.ai.context import set_chat_tool_context
 from app.models import AccessEvent, AuditLog, GateCommandRecord, MovementSagaRecord, TelemetrySpan, TelemetryTrace
 from app.models.enums import (
     AccessDecision,

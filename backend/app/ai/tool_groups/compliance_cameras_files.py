@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-from app.ai.tool_groups.compliance_cameras_files_handlers import (
-    analyze_camera_snapshot,
-    export_presence_report_csv,
-    generate_contractor_invoice_pdf,
-    get_camera_snapshot,
-    lookup_dvla_vehicle,
-    read_chat_attachment,
-)
+from app.ai.tool_groups import compliance_cameras_files_handlers
 from app.ai.tool_groups.metadata import apply_group_metadata
 from app.ai.tools import AgentTool
 
@@ -40,7 +33,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["registration_number"],
                         "additionalProperties": False,
                     },
-                    handler=lookup_dvla_vehicle,
+                    handler=compliance_cameras_files_handlers.lookup_dvla_vehicle,
                     example_inputs=(
                         {"registration_number": "PE70DHX"},
                     ),
@@ -66,7 +59,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["prompt"],
                         "additionalProperties": False,
                     },
-                    handler=analyze_camera_snapshot,
+                    handler=compliance_cameras_files_handlers.analyze_camera_snapshot,
                     example_inputs=(
                         {"camera_name": "Gate", "prompt": "Is there a vehicle at the gate?"},
                     ),
@@ -91,7 +84,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["file_id"],
                         "additionalProperties": False,
                     },
-                    handler=read_chat_attachment,
+                    handler=compliance_cameras_files_handlers.read_chat_attachment,
                 ),
         AgentTool(
                     name="export_presence_report_csv",
@@ -105,7 +98,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=export_presence_report_csv,
+                    handler=compliance_cameras_files_handlers.export_presence_report_csv,
                 ),
         AgentTool(
                     name="generate_contractor_invoice_pdf",
@@ -120,7 +113,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=generate_contractor_invoice_pdf,
+                    handler=compliance_cameras_files_handlers.generate_contractor_invoice_pdf,
                 ),
         AgentTool(
                     name="get_camera_snapshot",
@@ -133,8 +126,11 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=get_camera_snapshot,
+                    handler=compliance_cameras_files_handlers.get_camera_snapshot,
                 ),
         ],
         categories=TOOL_CATEGORIES,
+        status_labels={'lookup_dvla_vehicle': 'Looking up vehicle details...', 'analyze_camera_snapshot': 'Analyzing camera snapshot...', 'read_chat_attachment': 'Reading attachment...', 'export_presence_report_csv': 'Generating CSV report...', 'generate_contractor_invoice_pdf': 'Generating PDF invoice...', 'get_camera_snapshot': 'Fetching camera snapshot...'},
+        success_fields={},
+        finish_after_confirmation=frozenset(),
     )

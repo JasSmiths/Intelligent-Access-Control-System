@@ -131,7 +131,7 @@ async def test_suppressed_movement_survives_commit_and_new_session(reason):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('accepted,gate_state,expected,reconcile', [
-    (True, 'opening', 'accepted', False),
+    (True, 'opening', 'reconciled', False),
     (False, 'closed', 'rejected', False),
     (True, 'closed', 'reconciliation_required', True),
 ])
@@ -144,7 +144,9 @@ async def test_gate_outcome_and_replay_survive_new_coordinator(accepted, gate_st
     calls = []
 
     class FakeGate:
-        async def open_gate(self, reason, *, bypass_schedule=False):
+        async def open_gate(self, reason, *, bypass_schedule=False, command_context):
+            assert command_context.command_id and command_context.lease_token
+            assert command_context.idempotency_key == key
             calls.append(reason)
             return GateCommandResult(accepted, GateState(gate_state), 'Synthetic outcome')
 

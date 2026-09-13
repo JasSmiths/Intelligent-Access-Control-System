@@ -2,25 +2,8 @@
 
 from __future__ import annotations
 
+from app.ai.tool_groups import system_operations_handlers
 from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
-from app.ai.tool_groups.system_operations_handlers import (
-    analyze_dependency_update,
-    apply_dependency_update,
-    check_dependency_updates,
-    configure_dependency_backup_storage,
-    query_alfred_runtime_events,
-    query_auth_secret_status,
-    query_dependency_backups,
-    query_dependency_update_job,
-    query_dependency_updates,
-    query_integration_health,
-    query_system_settings,
-    restore_dependency_backup,
-    rotate_auth_secret_tool,
-    test_integration_connection,
-    update_system_settings,
-    validate_dependency_backup_storage,
-)
 from app.ai.tools import AgentTool
 
 TOOL_CATEGORIES = {
@@ -96,7 +79,7 @@ def build_tools() -> list[AgentTool]:
                 },
                 "additionalProperties": False,
             },
-            handler=query_integration_health,
+            handler=system_operations_handlers.query_integration_health,
             example_inputs=(
                 {"integration": "all"},
                 {"integration": "llm"},
@@ -118,7 +101,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["integration", "confirm"],
                 "additionalProperties": False,
             },
-            handler=test_integration_connection,
+            handler=system_operations_handlers.test_integration_connection,
         ),
         AgentTool(
             name="query_system_settings",
@@ -128,7 +111,7 @@ def build_tools() -> list[AgentTool]:
                 "properties": {"category": {"type": "string"}},
                 "additionalProperties": False,
             },
-            handler=query_system_settings,
+            handler=system_operations_handlers.query_system_settings,
         ),
         AgentTool(
             name="update_system_settings",
@@ -142,13 +125,13 @@ def build_tools() -> list[AgentTool]:
                 "required": ["values", "confirm"],
                 "additionalProperties": False,
             },
-            handler=update_system_settings,
+            handler=system_operations_handlers.update_system_settings,
         ),
         AgentTool(
             name="query_auth_secret_status",
             description="Return auth-secret source/readiness status without revealing the secret value.",
             parameters={"type": "object", "properties": {}, "additionalProperties": False},
-            handler=query_auth_secret_status,
+            handler=system_operations_handlers.query_auth_secret_status,
             example_inputs=({},),
             return_schema={
                 "answer_types": ["auth_secret_status"],
@@ -166,7 +149,7 @@ def build_tools() -> list[AgentTool]:
                 },
                 "additionalProperties": False,
             },
-            handler=query_alfred_runtime_events,
+            handler=system_operations_handlers.query_alfred_runtime_events,
             example_inputs=(
                 {"hours": 24, "limit": 20},
             ),
@@ -184,7 +167,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["confirm"],
                 "additionalProperties": False,
             },
-            handler=rotate_auth_secret_tool,
+            handler=system_operations_handlers.rotate_auth_secret_tool,
         ),
         AgentTool(
             name="query_dependency_updates",
@@ -194,7 +177,7 @@ def build_tools() -> list[AgentTool]:
                 "properties": {"update_only": {"type": "boolean"}},
                 "additionalProperties": False,
             },
-            handler=query_dependency_updates,
+            handler=system_operations_handlers.query_dependency_updates,
         ),
         AgentTool(
             name="check_dependency_updates",
@@ -208,7 +191,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["confirm"],
                 "additionalProperties": False,
             },
-            handler=check_dependency_updates,
+            handler=system_operations_handlers.check_dependency_updates,
         ),
         AgentTool(
             name="analyze_dependency_update",
@@ -224,7 +207,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["dependency_id", "confirm"],
                 "additionalProperties": False,
             },
-            handler=analyze_dependency_update,
+            handler=system_operations_handlers.analyze_dependency_update,
         ),
         AgentTool(
             name="apply_dependency_update",
@@ -239,7 +222,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["dependency_id", "confirm"],
                 "additionalProperties": False,
             },
-            handler=apply_dependency_update,
+            handler=system_operations_handlers.apply_dependency_update,
         ),
         AgentTool(
             name="query_dependency_backups",
@@ -249,7 +232,7 @@ def build_tools() -> list[AgentTool]:
                 "properties": {"dependency_id": {"type": "string"}},
                 "additionalProperties": False,
             },
-            handler=query_dependency_backups,
+            handler=system_operations_handlers.query_dependency_backups,
         ),
         AgentTool(
             name="restore_dependency_backup",
@@ -263,7 +246,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["backup_id", "confirm"],
                 "additionalProperties": False,
             },
-            handler=restore_dependency_backup,
+            handler=system_operations_handlers.restore_dependency_backup,
         ),
         AgentTool(
             name="query_dependency_update_job",
@@ -274,7 +257,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["job_id"],
                 "additionalProperties": False,
             },
-            handler=query_dependency_update_job,
+            handler=system_operations_handlers.query_dependency_update_job,
         ),
         AgentTool(
             name="configure_dependency_backup_storage",
@@ -292,7 +275,7 @@ def build_tools() -> list[AgentTool]:
                 "required": ["mode", "confirm"],
                 "additionalProperties": False,
             },
-            handler=configure_dependency_backup_storage,
+            handler=system_operations_handlers.configure_dependency_backup_storage,
         ),
         AgentTool(
             name="validate_dependency_backup_storage",
@@ -303,10 +286,13 @@ def build_tools() -> list[AgentTool]:
                 "required": ["confirm"],
                 "additionalProperties": False,
             },
-            handler=validate_dependency_backup_storage,
+            handler=system_operations_handlers.validate_dependency_backup_storage,
         ),
         ],
         categories=TOOL_CATEGORIES,
+        status_labels={'query_integration_health': 'Checking integration health...', 'test_integration_connection': 'Preparing integration test...', 'query_system_settings': 'Reading redacted settings...', 'update_system_settings': 'Preparing settings update...', 'query_auth_secret_status': 'Checking auth-secret status...', 'rotate_auth_secret': 'Preparing auth-secret rotation...', 'query_dependency_updates': 'Checking dependency update state...', 'check_dependency_updates': 'Preparing dependency update check...', 'analyze_dependency_update': 'Preparing dependency analysis...', 'apply_dependency_update': 'Preparing dependency apply job...', 'query_dependency_backups': 'Checking dependency backups...', 'restore_dependency_backup': 'Preparing dependency restore job...', 'query_dependency_update_job': 'Checking dependency job...', 'configure_dependency_backup_storage': 'Preparing backup storage update...', 'validate_dependency_backup_storage': 'Preparing backup storage validation...'},
+        success_fields={'update_system_settings': ('updated',)},
+        finish_after_confirmation=frozenset(),
         confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
         default_limits=DEFAULT_LIMITS,
         required_permissions=REQUIRED_PERMISSIONS,

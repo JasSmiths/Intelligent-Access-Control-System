@@ -1,15 +1,81 @@
 """Access diagnostics Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+import asyncio
+import re
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
 from typing import Any
 
+from sqlalchemy import (
+    func,
+    or_,
+    select,
+)
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import selectinload
 
-from app.ai.tool_groups._shared import *
+from app.ai.providers import analyze_image_with_provider
+from app.ai.tool_groups._shared import (
+    DEFAULT_AGENT_TIMEZONE,
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _agent_now,
+    _bounded_int,
+    _compact_observation,
+    _compact_time_label,
+    _compact_value,
+    _normalize,
+    _payload_summary,
+    _person_map,
+    _person_match_key,
+    _person_record_matches,
+    _preferred_subject_label,
+    _uuid_from_value,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    NotificationRule,
+    Person,
+    TelemetrySpan,
+    TelemetryTrace,
+    Vehicle,
+)
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+)
+from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.modules.notifications.base import (
+    NotificationContext,
+    NotificationDeliveryError,
+)
+from app.services.alfred.answer_contracts import artifact_payload
+from app.services.event_bus import event_bus
+from app.services.leaderboard import get_leaderboard_service
+from app.services.lpr_timing import get_lpr_timing_recorder
+from app.services.maintenance import get_status as get_maintenance_mode_status
 from app.services.movement.sessions import GATE_OBSERVATION_PAYLOAD_KEY
 from app.services.movement.sessions import datetime_from_payload as _datetime_from_agent_value
+from app.services.notifications import get_notification_service
+from app.services.settings import get_runtime_config
+from app.services.snapshots import (
+    alert_snapshot_metadata,
+    alert_snapshot_path,
+    get_snapshot_manager,
+)
+from app.services.telemetry import telemetry
+from app.services.type_helpers import (
+    as_dict,
+    as_dict_list,
+    as_list,
+)
 
 
 def _answer_fact(fact_id: str, label: str, value: Any, display_value: Any, kind: str, source: str, *, must_appear: bool = False, metadata: dict[str, Any] | None = None) -> dict[str, Any]:

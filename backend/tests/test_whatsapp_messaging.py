@@ -10,7 +10,6 @@ import uuid
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 from app.ai.providers import LlmResult
@@ -19,15 +18,24 @@ from app.api.v1 import webhooks, whatsapp as whatsapp_api
 from app.models import VisitorPass
 from app.models.enums import UserRole, VisitorPassStatus, VisitorPassType
 from app.modules.notifications.base import NotificationContext
-from app.services import whatsapp_messaging
+from app.services.messaging import whatsapp_helpers
 from app.services.messaging import whatsapp_webhook as whatsapp_webhook_module
+from app.services.messaging import visitor_conversation as visitor_conversation_module
+from app.services.messaging import whatsapp_delivery as whatsapp_delivery_module
 from app.services.settings import DEFAULT_DYNAMIC_SETTINGS, SECRET_KEYS
 from app.services.visitor_passes import visitor_pass_whatsapp_history
-from app.services.whatsapp_messaging import (
-    WhatsAppIntegrationConfig,
+from app.modules.messaging.whatsapp import WhatsAppIntegrationConfig, normalize_graph_api_version
+from app.services.event_bus import event_bus
+from app.services.visitor_conversations import get_visitor_conversation_service
+from app.services import visitor_conversations as conversation_state_module
+from app.services.messaging import identities as identity_module
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.messaging.visitor_conversation import get_whatsapp_visitor_conversation_service
+from app.services.messaging.whatsapp_webhook import get_whatsapp_webhook_service
+from app.services.messaging.whatsapp_router import WhatsAppRouter
+from app.services.messaging.whatsapp_replies import WhatsAppSender
+from app.services.messaging.whatsapp_helpers import (
     feedback_rating_for_reaction,
-    get_whatsapp_messaging_service,
-    normalize_graph_api_version,
     normalize_whatsapp_phone_number,
     parse_confirmation_button_id,
     parse_reaction_message,
@@ -37,6 +45,42 @@ from app.services.whatsapp_messaging import (
 )
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
+
+
+def make_whatsapp_router():
+    visitor = get_whatsapp_visitor_conversation_service()
+    return WhatsAppRouter(delivery=get_whatsapp_delivery_service(), visitor=visitor, identities=visitor._identities)
+
+
+async def route_bound_message(service, message, **kwargs):
+    """Supply the routing precondition; PG inbox tests verify its durable owner."""
+    sender = normalize_whatsapp_phone_number(message.get("from") or whatsapp_helpers.contact_wa_id(kwargs["contacts"]))
+    admin = await service._identities.admin_for_phone(sender)
+    visitor, state = (None, None) if admin else await service._visitor._state.visitor_pass_for_phone(sender)
+    await service._handle_incoming_message(message, **kwargs,
+        sender_state=WhatsAppSender(kwargs["config"], admin=admin, visitor_pass=visitor, visitor_state=state))
+
+
+def patch_whatsapp_boundary(monkeypatch, name, value):
+    """Patch the same DB/config/provider boundaries now owned explicitly."""
+    owners = {
+        "load_whatsapp_config": (visitor_conversation_module, whatsapp_delivery_module, whatsapp_webhook_module),
+        "AsyncSessionLocal": (conversation_state_module, identity_module),
+        "get_visitor_pass_service": (visitor_conversation_module, conversation_state_module),
+        "write_audit_log": (conversation_state_module, identity_module),
+        "get_runtime_config": (visitor_conversation_module,),
+        "get_llm_provider": (visitor_conversation_module,),
+    }
+    for owner in owners[name]:
+        monkeypatch.setattr(owner, name, value)
+
+
+@pytest.fixture
+def no_pending_admin_feedback(monkeypatch):
+    """Exercise real routing against an explicitly empty conversation store."""
+    import app.services.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "chat_service", FakeWhatsAppFeedbackMemory({}))
 
 
 def enabled_config(**overrides):
@@ -85,35 +129,28 @@ def make_request(
 
 @pytest.fixture(autouse=True)
 async def cleanup_whatsapp_test_runtime(monkeypatch):
-    service = get_whatsapp_messaging_service()
-    previous_debounce = service._visitor_message_debounce_seconds
+    delivery = get_whatsapp_delivery_service()
+    visitor = get_whatsapp_visitor_conversation_service()
+    webhook = get_whatsapp_webhook_service()
+    # Explicit composition lets each assertion patch its actual boundary.
+    monkeypatch.setattr(delivery, "_conversations", visitor._state)
+    monkeypatch.setattr(delivery, "_identities", visitor._identities)
+    monkeypatch.setattr(webhook, "_state", visitor._state)
+    monkeypatch.setattr(webhook, "_identities", visitor._identities)
 
     async def noop(*_args, **_kwargs):
         return None
 
-    async def not_privileged(*_args, **_kwargs):
+    async def false(*_args, **_kwargs):
         return False
 
-    async def not_muted(*_args, **_kwargs):
-        return False
-
-    async def no_plate_change_attempt(*_args, **_kwargs):
-        return False
-
-    service._visitor_message_debounce_seconds = 0
-    monkeypatch.setattr(service, "mark_incoming_message_read", noop)
-    monkeypatch.setattr(service, "_record_inbound_visitor_message", noop)
-    monkeypatch.setattr(service, "_visitor_plate_is_privileged", not_privileged)
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", not_muted)
-    monkeypatch.setattr(service, "_record_visitor_plate_change_attempt", no_plate_change_attempt)
+    monkeypatch.setattr(delivery, "mark_incoming_message_read", noop)
+    monkeypatch.setattr(visitor, "_record_inbound_visitor_message", noop)
+    monkeypatch.setattr(visitor._state, "record_outbound_visitor_message", noop)
+    monkeypatch.setattr(visitor._state, "plate_is_known_vehicle", false)
+    monkeypatch.setattr(visitor._state, "visitor_reply_is_muted", false)
+    monkeypatch.setattr(visitor._state, "record_visitor_plate_change_attempt", false)
     yield
-    service._visitor_message_debounce_seconds = previous_debounce
-    tasks = list(service._visitor_message_tasks.values())
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    service._visitor_message_tasks.clear()
     from app.db.session import engine
 
     await engine.dispose()
@@ -166,9 +203,9 @@ def test_whatsapp_reaction_feedback_rating() -> None:
 
 
 def test_visitor_emoji_only_messages_are_preference_not_content() -> None:
-    assert whatsapp_messaging.visitor_message_is_emoji_only("😂👍")
-    assert not whatsapp_messaging.visitor_message_is_emoji_only("AB12 CDE 👍")
-    assert whatsapp_messaging.visitor_message_contains_emoji("AB12 CDE 👍")
+    assert whatsapp_helpers.visitor_message_is_emoji_only("😂👍")
+    assert not whatsapp_helpers.visitor_message_is_emoji_only("AB12 CDE 👍")
+    assert whatsapp_helpers.visitor_message_contains_emoji("AB12 CDE 👍")
 
 
 @pytest.mark.asyncio
@@ -335,7 +372,7 @@ async def test_webhook_post_accepts_valid_signature(monkeypatch, caplog) -> None
     monkeypatch.setattr(webhooks, "load_whatsapp_config", load_config)
     caplog.set_level(logging.INFO, logger=webhooks.logger.name)
 
-    async def handle(payload, *, signature_verified, unsigned_allowed):
+    async def handle(payload, *, signature_verified, unsigned_allowed, config=None):
         handled.update(
             {
                 "payload": payload,
@@ -344,7 +381,7 @@ async def test_webhook_post_accepts_valid_signature(monkeypatch, caplog) -> None
             }
         )
 
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_webhook_service()
     monkeypatch.setattr(service, "handle_webhook_payload", handle)
     body = json.dumps({"entry": []}).encode()
     signature = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
@@ -377,7 +414,7 @@ async def test_webhook_post_accepts_valid_signature(monkeypatch, caplog) -> None
 
 
 def test_whatsapp_signature_validation_fails_closed_without_secret() -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_webhook_service()
     body = json.dumps({"entry": []}).encode()
     signature = hmac.new(b"", body, hashlib.sha256).hexdigest()
 
@@ -386,7 +423,7 @@ def test_whatsapp_signature_validation_fails_closed_without_secret() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_sender_is_dropped_before_messaging_bridge(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     calls = {"denied": 0, "sent": 0}
 
     async def no_admin(_sender):
@@ -403,12 +440,12 @@ async def test_unknown_sender_is_dropped_before_messaging_bridge(monkeypatch) ->
     async def send_text(*_args, **_kwargs):
         calls["sent"] += 1
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", no_visitor)
-    monkeypatch.setattr(service, "_audit_denied_sender", audit)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", no_visitor)
+    monkeypatch.setattr(service._identities, "audit_denied_sender", audit)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.1", "from": "+44 7700 900123", "type": "text", "text": {"body": "status"}},
         contacts=[],
         phone_number_id="123456789",
@@ -420,8 +457,8 @@ async def test_unknown_sender_is_dropped_before_messaging_bridge(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_admin_sender_routes_text_to_messaging_bridge(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_admin_sender_routes_text_to_messaging_bridge(monkeypatch, no_pending_admin_feedback) -> None:
+    service = make_whatsapp_router()
     admin = SimpleNamespace(
         id=uuid.uuid4(),
         person_id=uuid.uuid4(),
@@ -446,16 +483,16 @@ async def test_admin_sender_routes_text_to_messaging_bridge(monkeypatch) -> None
         async def handle_message(self, incoming, *, is_admin_hint=False):
             captured["incoming"] = incoming
             captured["is_admin_hint"] = is_admin_hint
-            return SimpleNamespace(response_text="Gate is closed.", pending_action=None)
+            return SimpleNamespace(session_id=str(uuid.UUID(int=401)), response_text="Gate is closed.", pending_action=None)
 
     import app.services.messaging_bridge as messaging_bridge
 
-    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
-    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._identities, "admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service._identities, "ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
     monkeypatch.setattr(messaging_bridge, "messaging_bridge_service", Bridge())
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.2", "from": "447700900123", "type": "text", "text": {"body": "gate status"}},
         contacts=[{"wa_id": "447700900123", "profile": {"name": "Jason"}}],
         phone_number_id="123456789",
@@ -497,7 +534,7 @@ class FakeWhatsAppFeedbackMemory:
 
 
 async def configure_admin_reaction_feedback_test(monkeypatch, *, memory: dict | None = None):
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     admin = whatsapp_admin_user()
     sent = []
     fake_chat = FakeWhatsAppFeedbackMemory(memory)
@@ -514,9 +551,9 @@ async def configure_admin_reaction_feedback_test(monkeypatch, *, memory: dict | 
 
     import app.services.chat as chat_module
 
-    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
-    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._identities, "admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service._identities, "ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
     monkeypatch.setattr(chat_module, "chat_service", fake_chat)
     return service, admin, sent, fake_chat
 
@@ -525,7 +562,7 @@ async def configure_admin_reaction_feedback_test(monkeypatch, *, memory: dict | 
 async def test_admin_whatsapp_thumbs_down_reaction_asks_for_feedback_detail(monkeypatch) -> None:
     service, _admin, sent, fake_chat = await configure_admin_reaction_feedback_test(monkeypatch)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {
             "id": "wamid.react",
             "from": "447700900123",
@@ -538,8 +575,8 @@ async def test_admin_whatsapp_thumbs_down_reaction_asks_for_feedback_detail(monk
         signature_verified=True,
     )
 
-    assert sent == [("447700900123", whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_PROMPT)]
-    state = fake_chat.memory[whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY]
+    assert sent == [("447700900123", whatsapp_helpers.ADMIN_ALFRED_FEEDBACK_PROMPT)]
+    state = fake_chat.memory[whatsapp_helpers.ADMIN_ALFRED_FEEDBACK_STATE_KEY]
     assert state["rating"] == "down"
     assert state["reacted_message_id"] == "wamid.bad-response"
 
@@ -547,7 +584,7 @@ async def test_admin_whatsapp_thumbs_down_reaction_asks_for_feedback_detail(monk
 @pytest.mark.asyncio
 async def test_admin_whatsapp_feedback_followup_submits_reason_and_ideal(monkeypatch) -> None:
     memory = {
-        whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY: {
+        whatsapp_helpers.ADMIN_ALFRED_FEEDBACK_STATE_KEY: {
             "rating": "down",
             "reacted_message_id": "wamid.bad-response",
         }
@@ -564,7 +601,7 @@ async def test_admin_whatsapp_feedback_followup_submits_reason_and_ideal(monkeyp
 
     monkeypatch.setattr(feedback_module, "alfred_feedback_service", FeedbackService())
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {
             "id": "wamid.explain",
             "from": "447700900123",
@@ -585,7 +622,7 @@ async def test_admin_whatsapp_feedback_followup_submits_reason_and_ideal(monkeyp
     assert captured["actor_role"] == UserRole.ADMIN.value
     assert captured["reason"] == "It kept asking for a plate after I said I don't know it."
     assert captured["ideal_answer"] == "Accept that optional details can be unknown."
-    assert whatsapp_messaging.ADMIN_ALFRED_FEEDBACK_STATE_KEY not in fake_chat.memory
+    assert whatsapp_helpers.ADMIN_ALFRED_FEEDBACK_STATE_KEY not in fake_chat.memory
     assert sent == [
         (
             "447700900123",
@@ -595,8 +632,8 @@ async def test_admin_whatsapp_feedback_followup_submits_reason_and_ideal(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_admin_whatsapp_visitor_pass_text_uses_shared_alfred_bridge(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_admin_whatsapp_visitor_pass_text_uses_shared_alfred_bridge(monkeypatch, no_pending_admin_feedback) -> None:
+    service = make_whatsapp_router()
     admin = whatsapp_admin_user()
     captured = {}
     sent = []
@@ -620,21 +657,21 @@ async def test_admin_whatsapp_visitor_pass_text_uses_shared_alfred_bridge(monkey
             captured["incoming"] = incoming
             captured["is_admin_hint"] = is_admin_hint
             return SimpleNamespace(
-                response_text="Create a Visitor Pass for John Doe?",
+                session_id=str(uuid.UUID(int=401)), response_text="Create a Visitor Pass for John Doe?",
                 pending_action={"tool_name": "create_visitor_pass", "confirmation_id": "confirm-pass"},
             )
 
     import app.services.messaging_bridge as messaging_bridge
 
-    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
-    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
-    monkeypatch.setattr(service, "send_text_message", send_text)
-    monkeypatch.setattr(service, "send_confirmation_message", send_confirmation)
+    monkeypatch.setattr(service._identities, "admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service._identities, "ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    monkeypatch.setattr(service._delivery, "send_confirmation_message", send_confirmation)
     monkeypatch.setattr(messaging_bridge, "messaging_bridge_service", Bridge())
 
     assert not hasattr(service, "_handle_admin_visitor_pass_workflow")
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {
             "id": "wamid.pass",
             "from": "447700900123",
@@ -655,8 +692,8 @@ async def test_admin_whatsapp_visitor_pass_text_uses_shared_alfred_bridge(monkey
 
 
 @pytest.mark.asyncio
-async def test_incoming_admin_message_is_marked_read_with_typing_indicator(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_incoming_admin_message_is_marked_read_with_typing_indicator(monkeypatch, no_pending_admin_feedback) -> None:
+    service = make_whatsapp_router()
     admin = SimpleNamespace(
         id=uuid.uuid4(),
         person_id=uuid.uuid4(),
@@ -681,17 +718,17 @@ async def test_incoming_admin_message_is_marked_read_with_typing_indicator(monke
     class Bridge:
         async def handle_message(self, _incoming, *, is_admin_hint=False):
             assert is_admin_hint is True
-            return SimpleNamespace(response_text="Gate is closed.", pending_action=None)
+            return SimpleNamespace(session_id=str(uuid.UUID(int=401)), response_text="Gate is closed.", pending_action=None)
 
     import app.services.messaging_bridge as messaging_bridge
 
-    monkeypatch.setattr(service, "_admin_for_phone", admin_for_phone)
-    monkeypatch.setattr(service, "_ensure_admin_identity", ensure_identity)
-    monkeypatch.setattr(service, "mark_incoming_message_read", mark_read)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._identities, "admin_for_phone", admin_for_phone)
+    monkeypatch.setattr(service._identities, "ensure_admin_identity", ensure_identity)
+    monkeypatch.setattr(service._delivery, "mark_incoming_message_read", mark_read)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
     monkeypatch.setattr(messaging_bridge, "messaging_bridge_service", Bridge())
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.ack", "from": "447700900123", "type": "text", "text": {"body": "gate status"}},
         contacts=[{"wa_id": "447700900123", "profile": {"name": "Jason"}}],
         phone_number_id="123456789",
@@ -704,7 +741,7 @@ async def test_incoming_admin_message_is_marked_read_with_typing_indicator(monke
 
 @pytest.mark.asyncio
 async def test_mark_read_payload_can_include_typing_indicator(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     captured = {}
 
     async def post(config, payload):
@@ -712,7 +749,7 @@ async def test_mark_read_payload_can_include_typing_indicator(monkeypatch) -> No
         captured["payload"] = payload
         return {"success": True}
 
-    monkeypatch.setattr(service, "_post_message", post)
+    monkeypatch.setattr(service._transport, "send", post)
     result = await type(service).mark_incoming_message_read(
         service,
         "wamid.in",
@@ -732,7 +769,7 @@ async def test_mark_read_payload_can_include_typing_indicator(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_status_webhook_tracks_visitor_message_received_and_read(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_webhook_service()
     updates = []
 
     async def load_config(*_args, **_kwargs):
@@ -741,8 +778,8 @@ async def test_status_webhook_tracks_visitor_message_received_and_read(monkeypat
     async def update_delivery(phone_number, status, *, message_id=None):
         updates.append((phone_number, status, message_id))
 
-    monkeypatch.setattr(whatsapp_messaging, "load_whatsapp_config", load_config)
-    monkeypatch.setattr(service, "_update_visitor_delivery_status_for_phone", update_delivery)
+    patch_whatsapp_boundary(monkeypatch, "load_whatsapp_config", load_config)
+    monkeypatch.setattr(service._state, "update_visitor_delivery_status_for_phone", update_delivery)
 
     await service.handle_webhook_payload(
         {
@@ -773,50 +810,41 @@ async def test_status_webhook_tracks_visitor_message_received_and_read(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_incoming_whatsapp_message_claim_rejects_duplicate_provider_id(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
-    added: list[Any] = []
-    fail_next_commit = False
+async def test_incoming_whatsapp_acceptance_commits_before_wakeup(monkeypatch) -> None:
+    service = get_whatsapp_webhook_service()
+    calls, identity = [], uuid.uuid4()
 
-    class FakeSession:
-        def add(self, row):
-            added.append(row)
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def commit(self): calls.append("committed")
 
-        async def commit(self):
-            if fail_next_commit:
-                raise IntegrityError("insert", {}, Exception("duplicate"))
+    class Store:
+        sessions = Session
+        async def accept_in_session(self, session, **values):
+            calls.append("accepted")
+            assert values["provider"] == "whatsapp"
+            assert values["author_provider_id"] == "447700900123"
+            assert values["routing_context"] == {"kind": "denied", "business_account_id": "987654321"}
+            assert values["envelope"]["message"]["id"] == "wamid.dedupe"
+            return identity
 
-        async def rollback(self):
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            return None
-
-    monkeypatch.setattr(whatsapp_webhook_module, "AsyncSessionLocal", lambda: FakeSession())
-
-    first = await service._claim_incoming_provider_message(
-        {"id": "wamid.dedupe", "from": "+44 7700 900123", "timestamp": "1782319200"},
-        phone_number_id="123456789",
-    )
-    fail_next_commit = True
-    second = await service._claim_incoming_provider_message(
-        {"id": "wamid.dedupe", "from": "+44 7700 900123", "timestamp": "1782319200"},
-        phone_number_id="123456789",
-    )
-
-    assert first is True
-    assert second is False
-    assert added[0].provider == "whatsapp"
-    assert added[0].provider_message_id == "wamid.dedupe"
-    assert added[0].author_provider_id == "447700900123"
+    async def no_admin(_sender): return None
+    async def no_visitor(_sender): return None, "not_found"
+    monkeypatch.setattr(service, "_store", Store())
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._state, "visitor_pass_for_phone", no_visitor)
+    monkeypatch.setattr(service._dispatcher, "wake", lambda: calls.append("wake"))
+    first = await service._accept_incoming_provider_message(
+        {"id": "wamid.dedupe", "type": "text", "text": {"body": "hello"}, "from": "+44 7700 900123"},
+        contacts=[], phone_number_id="123456789", config=enabled_config(), signature_verified=True)
+    assert first == str(identity)
+    assert calls == ["accepted", "committed", "wake"]
 
 
 @pytest.mark.asyncio
 async def test_text_send_payload_uses_meta_cloud_api_shape(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     captured = {}
 
     async def post(config, payload):
@@ -824,7 +852,7 @@ async def test_text_send_payload_uses_meta_cloud_api_shape(monkeypatch) -> None:
         captured["payload"] = payload
         return {"messages": [{"id": "wamid.out"}]}
 
-    monkeypatch.setattr(service, "_post_message", post)
+    monkeypatch.setattr(service._transport, "send", post)
     result = await service.send_text_message("+44 7700 900123", "Hello", config=enabled_config())
 
     assert result["messages"][0]["id"] == "wamid.out"
@@ -888,19 +916,24 @@ async def test_visitor_pass_custom_message_endpoint_uses_pass_scoped_service(mon
         "metadata": {"origin": "dashboard_custom", "sender_user_id": str(user.id)},
     }
 
+    run_id, claim, stages = uuid.uuid4(), object(), []
     class Service:
-        async def send_visitor_pass_custom_message(self, pass_id_arg, message, *, actor_user):
-            captured["pass_id"] = pass_id_arg
-            captured["message"] = message
-            captured["actor_user"] = actor_user
-            return {"visitor_pass": visitor_payload, "message": message_payload}
-
-    monkeypatch.setattr(visitor_passes_api, "get_whatsapp_messaging_service", lambda: Service())
-
-    async def fake_confirmation(_session, **kwargs) -> None:
-        captured["confirmation"] = kwargs
-
-    monkeypatch.setattr(visitor_passes_api, "require_confirmed_action", fake_confirmation)
+        async def reserve_custom_message_in_session(self, session, pass_id_arg, message, *, actor_user, confirmation_token):
+            captured.update(pass_id=pass_id_arg, message=message, actor_user=actor_user, token=confirmation_token)
+            stages.append("reserved")
+            return run_id, claim
+    class Session:
+        async def commit(self): stages.append("committed")
+    async def dispatch(identity, row):
+        assert identity == run_id and row is claim
+        stages.append("dispatched")
+        return SimpleNamespace(status="sent")
+    async def result(pass_arg, identity):
+        assert pass_arg == pass_id and identity == run_id
+        return {"visitor_pass": visitor_payload, "message": message_payload}
+    monkeypatch.setattr(visitor_passes_api, "get_whatsapp_visitor_conversation_service", lambda: Service())
+    monkeypatch.setattr(visitor_passes_api, "get_notification_service", lambda: SimpleNamespace(dispatch_reserved=dispatch))
+    monkeypatch.setattr(visitor_passes_api, "get_visitor_conversation_service", lambda: SimpleNamespace(get_notification_result=result))
 
     response = await visitor_passes_api.send_visitor_pass_whatsapp_message(
         pass_id,
@@ -908,23 +941,13 @@ async def test_visitor_pass_custom_message_endpoint_uses_pass_scoped_service(mon
             message="  Do you want me to move your visitor pass to tomorrow?  ",
             confirmation_token="server-token",
         ),
-        user=user,
+        user=user, session=Session(),
     )
 
-    assert captured == {
-        "pass_id": pass_id,
-        "message": "Do you want me to move your visitor pass to tomorrow?",
-        "actor_user": user,
-        "confirmation": {
-            "user": user,
-            "action": "visitor_pass.whatsapp_send",
-            "payload": {
-                "pass_id": str(pass_id),
-                "message": "Do you want me to move your visitor pass to tomorrow?",
-            },
-            "confirmation_token": "server-token",
-        },
-    }
+    assert captured == {"pass_id": pass_id, "message": "Do you want me to move your visitor pass to tomorrow?",
+        "actor_user": user, "token": "server-token"}
+    assert stages == ["reserved", "committed", "dispatched"]
+    assert response.notification_run_id == str(run_id)
     assert response.message.body == "Do you want me to move your visitor pass to tomorrow?"
     assert response.message.metadata["origin"] == "dashboard_custom"
     assert response.visitor_pass.id == str(pass_id)
@@ -975,7 +998,7 @@ async def test_visitor_pass_whatsapp_unblock_endpoint_uses_pass_scoped_service(m
             captured["actor_user"] = actor_user
             return visitor_payload
 
-    monkeypatch.setattr(visitor_passes_api, "get_whatsapp_messaging_service", lambda: Service())
+    monkeypatch.setattr(visitor_passes_api, "get_visitor_conversation_service", lambda: Service())
 
     async def fake_confirmation(_session, **kwargs) -> None:
         captured["confirmation"] = kwargs
@@ -1003,89 +1026,38 @@ async def test_visitor_pass_whatsapp_unblock_endpoint_uses_pass_scoped_service(m
 
 
 @pytest.mark.asyncio
-async def test_custom_message_send_records_history_on_exact_pass(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
-    actor = SimpleNamespace(id=uuid.uuid4(), username="jas", full_name="Jason Ash")
-    pass_id = uuid.uuid4()
-    visitor_pass = VisitorPass(
-        id=pass_id,
-        visitor_name="Ash",
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        expected_time=datetime(2026, 5, 4, 8, 0, tzinfo=UTC),
-        valid_from=datetime(2026, 5, 4, 8, 0, tzinfo=UTC),
-        valid_until=datetime(2026, 5, 4, 20, 30, tzinfo=UTC),
-        status=VisitorPassStatus.SCHEDULED,
-        creation_source="ui",
-        source_metadata={},
-    )
-    visitor_pass.created_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    visitor_pass.updated_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    captured: dict[str, Any] = {"published": []}
+async def test_custom_message_reserves_exact_pass_and_literal_body_without_io(monkeypatch) -> None:
+    from app.services import notifications as notification_module
+    service = get_whatsapp_visitor_conversation_service()
+    actor, visitor = SimpleNamespace(id=uuid.uuid4(), auth_session_version=4), SimpleNamespace(id=uuid.uuid4())
+    origin, calls, session = {"recipient": "447700900123", "pass_id": str(visitor.id)}, [], object()
+    async def prepare(session_arg, pass_id, **kwargs):
+        assert session_arg is session and pass_id == visitor.id
+        assert kwargs == {"actor_user_id": actor.id, "auth_version": 4, "kind": "custom"}
+        return visitor, origin
+    async def reserve(session_arg, **kwargs):
+        assert session_arg is session
+        calls.append(kwargs)
+        return uuid.UUID(int=8), object()
+    monkeypatch.setattr(service._state, "prepare_manual_notification_origin", prepare)
+    monkeypatch.setattr(notification_module, "get_notification_service", lambda: SimpleNamespace(reserve_confirmed_request=reserve))
+    async def forbidden(*args, **kwargs): raise AssertionError("Intake must not send")
+    monkeypatch.setattr(service._transport, "send", forbidden)
+    identity, _claim = await service.reserve_custom_message_in_session(session, visitor.id,
+        "Do you want me to move your visitor pass to tomorrow?", actor_user=actor, confirmation_token="token")
+    assert identity == uuid.UUID(int=8)
+    assert calls[0]["visitor_origin"] is origin
+    assert calls[0]["action"] == "visitor_pass.whatsapp_send"
+    assert calls[0]["payload"] == {"pass_id": str(visitor.id), "message": "Do you want me to move your visitor pass to tomorrow?"}
+    assert calls[0]["direct_action"] == {"type": "whatsapp", "delivery_mode": "literal", "target": "447700900123",
+        "title": "", "message": "Do you want me to move your visitor pass to tomorrow?"}
 
-    class Session:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def get(self, model, key):
-            assert model is VisitorPass
-            assert key == pass_id
-            return visitor_pass
-
-        async def commit(self):
-            captured["committed"] = True
-
-        async def refresh(self, row):
-            captured["refreshed"] = row.id
-
-    class VisitorPassService:
-        async def refresh_statuses(self, **_kwargs):
-            return []
-
-    async def post(config, payload):
-        captured["config"] = config
-        captured["payload"] = payload
-        return {"messages": [{"id": "wamid.custom"}]}
-
-    async def audit(*_args, **kwargs):
-        captured["audit"] = kwargs
-
-    async def publish(event, payload):
-        captured["published"].append((event, payload))
-
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging, "get_visitor_pass_service", lambda: VisitorPassService())
-    monkeypatch.setattr(whatsapp_messaging, "write_audit_log", audit)
-    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
-    monkeypatch.setattr(service, "_post_message", post)
-
-    result = await service.send_visitor_pass_custom_message(
-        pass_id,
-        "Do you want me to move your visitor pass to tomorrow?",
-        actor_user=actor,
-        config=enabled_config(),
-    )
-
-    assert captured["payload"]["to"] == "447700900123"
-    assert captured["payload"]["text"]["body"] == "Do you want me to move your visitor pass to tomorrow?"
-    history = visitor_pass_whatsapp_history(visitor_pass)
-    assert len(history) == 1
-    assert history[0]["body"] == "Do you want me to move your visitor pass to tomorrow?"
-    assert history[0]["provider_message_id"] == "wamid.custom"
-    assert history[0]["metadata"]["origin"] == "dashboard_custom"
-    assert history[0]["metadata"]["sender_user_id"] == str(actor.id)
-    assert captured["audit"]["action"] == "visitor_pass.whatsapp_custom_message_sent"
-    assert captured["published"][0][0] == "visitor_pass.updated"
-    assert result["message"]["id"] == history[0]["id"]
 
 
 @pytest.mark.asyncio
 async def test_clear_visitor_abuse_mute_removes_cooldown_and_records_status(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
-    actor = SimpleNamespace(id=uuid.uuid4(), username="jas", full_name="Jason Ash")
+    service = get_visitor_conversation_service()
+    actor = SimpleNamespace(id=uuid.uuid4(), username="jas", full_name="Jason Ash", auth_session_version=0)
     pass_id = uuid.uuid4()
     visitor_pass = VisitorPass(
         id=pass_id,
@@ -1120,6 +1092,10 @@ async def test_clear_visitor_abuse_mute_removes_cooldown_and_records_status(monk
             assert key == pass_id
             return visitor_pass
 
+        async def scalar(self, statement):
+            assert statement._for_update_arg is not None
+            return visitor_pass
+
         async def commit(self):
             captured["committed"] = True
 
@@ -1132,9 +1108,14 @@ async def test_clear_visitor_abuse_mute_removes_cooldown_and_records_status(monk
     async def publish(event, payload):
         captured["published"].append((event, payload))
 
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging, "write_audit_log", audit)
-    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
+    patch_whatsapp_boundary(monkeypatch, "AsyncSessionLocal", lambda: Session())
+    patch_whatsapp_boundary(monkeypatch, "write_audit_log", audit)
+    monkeypatch.setattr(event_bus, "publish", publish)
+
+    async def current_actor(session, user_id, *, auth_version, lock):
+        assert user_id == actor.id and auth_version == 0 and lock is True
+        return actor
+    monkeypatch.setattr(conversation_state_module, "load_active_admin", current_actor)
 
     result = await service.clear_visitor_abuse_mute(pass_id, actor_user=actor)
 
@@ -1151,7 +1132,7 @@ async def test_clear_visitor_abuse_mute_removes_cooldown_and_records_status(monk
 
 @pytest.mark.asyncio
 async def test_template_send_payload_uses_configured_sender_id(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     captured = {}
     config = enabled_config(phone_number_id="configured-sender-id")
 
@@ -1160,7 +1141,7 @@ async def test_template_send_payload_uses_configured_sender_id(monkeypatch) -> N
         captured["payload"] = payload
         return {"messages": [{"id": "wamid.template"}]}
 
-    monkeypatch.setattr(service, "_post_message", post)
+    monkeypatch.setattr(service._transport, "send", post)
 
     await service.send_template_message(
         "+44 7700 900123",
@@ -1188,52 +1169,39 @@ async def test_template_send_payload_uses_configured_sender_id(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_visitor_pass_outreach_uses_approved_welcome_template_shape(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
-    captured = {}
-    visitor_pass = VisitorPass(
-        id=uuid.uuid4(),
-        visitor_name="Ash",
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        expected_time=datetime(2026, 5, 3, 9, 0, tzinfo=UTC),
-        valid_from=datetime(2026, 5, 3, 9, 0, tzinfo=UTC),
-        valid_until=datetime(2026, 5, 3, 17, 0, tzinfo=UTC),
-        status=VisitorPassStatus.SCHEDULED,
-        creation_source="ui",
-    )
+async def test_visitor_pass_outreach_reserves_approved_welcome_template_shape(monkeypatch) -> None:
+    from app.services import notification_runs
+    service, captured = get_whatsapp_delivery_service(), {}
+    visitor = VisitorPass(id=uuid.uuid4(), visitor_name="Ash", pass_type=VisitorPassType.DURATION,
+        visitor_phone="447700900123", status=VisitorPassStatus.SCHEDULED)
+    actor = uuid.uuid4()
+    class Session:
+        async def flush(self): pass
+    session = Session()
+    async def prepare(session_arg, identity, **kwargs):
+        assert session_arg is session and identity == visitor.id
+        return visitor, {"version": 1, "kind": "outreach", "pass_id": str(visitor.id), "recipient": visitor.visitor_phone}
+    async def enqueue(_self, session_arg, context, **kwargs):
+        assert session_arg is session
+        captured.update(context=context, **kwargs)
+        return kwargs["run_id"]
+    async def config(**kwargs): return enabled_config()
+    monkeypatch.setattr(service._conversations, "prepare_manual_notification_origin", prepare)
+    monkeypatch.setattr(whatsapp_delivery_module, "load_whatsapp_config", config)
+    monkeypatch.setattr(whatsapp_delivery_module, "get_visitor_pass_service", lambda: SimpleNamespace(status_for=lambda *_: VisitorPassStatus.SCHEDULED))
+    monkeypatch.setattr(notification_runs.NotificationRunStore, "enqueue_prepared_in_session", enqueue)
+    result = await service.reserve_outreach_in_session(session, visitor, actor_user_id=actor, auth_version=0, source="ui")
+    assert result == uuid.uuid5(visitor.id, "visitor-outreach")
+    action = captured["plan"][0]["action"]
+    assert action["template_name"] == "iacs_visitor_welcome" and action["language_code"] == "en"
+    assert action["body_parameters"] == ["Ash"] and action["target"] == "447700900123"
+    assert captured["plan"][0]["state"] == "pending"
 
-    async def post(config_arg, payload):
-        captured["config"] = config_arg
-        captured["payload"] = payload
-        return {"messages": [{"id": "wamid.template"}]}
-
-    async def update_status(*_args, **_kwargs):
-        captured["status_updated"] = True
-
-    async def record_outbound(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(service, "_post_message", post)
-    monkeypatch.setattr(service, "_update_visitor_concierge_status", update_status)
-    monkeypatch.setattr(service, "_record_outbound_visitor_message", record_outbound)
-
-    await service.send_visitor_pass_outreach(visitor_pass, config=enabled_config())
-
-    assert captured["payload"]["template"]["name"] == "iacs_visitor_welcome"
-    assert captured["payload"]["template"]["language"] == {"code": "en"}
-    assert captured["payload"]["template"]["components"] == [
-        {
-            "type": "body",
-            "parameters": [{"type": "text", "text": "Ash"}],
-        }
-    ]
-    assert captured["status_updated"] is True
 
 
 @pytest.mark.asyncio
 async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     captured = {}
     pass_id = uuid.uuid4()
     visitor_pass = VisitorPass(
@@ -1253,7 +1221,7 @@ async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeyp
         captured["body"] = body
         captured["buttons"] = buttons
 
-    monkeypatch.setattr(service, "send_interactive_buttons", send_buttons)
+    monkeypatch.setattr(service._delivery, "send_interactive_buttons", send_buttons)
 
     await service.send_visitor_plate_confirmation(
         "447700900123",
@@ -1291,7 +1259,7 @@ async def test_visitor_plate_confirmation_buttons_use_namespaced_payload(monkeyp
 
 @pytest.mark.asyncio
 async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     pass_id = uuid.uuid4()
     visitor_pass = VisitorPass(
         id=pass_id,
@@ -1327,16 +1295,24 @@ async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) 
             assert key == pass_id
             return visitor_pass
 
+        async def scalar(self, statement):
+            assert statement._for_update_arg is not None
+            return visitor_pass
+
         async def commit(self):
             captured["committed"] = True
 
-        async def refresh(self, row):
+        async def flush(self): pass
+
+        async def refresh(self, row, **kwargs):
             captured["refreshed"] = row.id
 
         async def rollback(self):
             captured["rolled_back"] = True
 
     class VisitorPassService:
+        def status_for(self, row, now): return row.status
+
         async def refresh_statuses(self, **_kwargs):
             return []
 
@@ -1352,10 +1328,15 @@ async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) 
     async def send_text(to, body, **_kwargs):
         captured["sent"].append((to, body))
 
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging, "get_visitor_pass_service", lambda: VisitorPassService())
-    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    patch_whatsapp_boundary(monkeypatch, "AsyncSessionLocal", lambda: Session())
+    patch_whatsapp_boundary(monkeypatch, "get_visitor_pass_service", lambda: VisitorPassService())
+    monkeypatch.setattr(event_bus, "publish", publish)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+
+    async def enqueue(store, session, context, *, run_id):
+        captured.setdefault("reserved", []).append((context, run_id))
+        return run_id
+    monkeypatch.setattr(conversation_state_module.NotificationRunStore, "enqueue_in_session", enqueue)
 
     button = parse_visitor_pass_button_id(f"iacs:vp:confirm:{pass_id}:nonce123")
     assert button is not None
@@ -1372,7 +1353,7 @@ async def test_visitor_plate_confirmation_publishes_arranged_event(monkeypatch) 
 
 
 def test_visitor_plate_saved_message_is_warm_and_vehicle_aware() -> None:
-    body = whatsapp_messaging.visitor_plate_saved_message(
+    body = whatsapp_helpers.visitor_plate_saved_message(
         {
             "visitor_name": "Josh",
             "number_plate": "C25UNY",
@@ -1404,7 +1385,7 @@ def test_visitor_confirmation_does_not_name_alfred_without_visitor_mention() -> 
         creation_source="ui",
     )
 
-    body = whatsapp_messaging.visitor_plate_confirmation_message(
+    body = whatsapp_helpers.visitor_plate_confirmation_message(
         visitor_pass,
         "C25UNY",
         vehicle_make="Tesla",
@@ -1431,7 +1412,7 @@ def test_visitor_freeform_reply_strips_unprompted_alfred_name() -> None:
         creation_source="ui",
     )
 
-    body = whatsapp_messaging.style_visitor_freeform_reply(
+    body = whatsapp_helpers.style_visitor_freeform_reply(
         "Alfred says you're all set. You're all set.",
         visitor_pass,
         "thanks",
@@ -1443,7 +1424,7 @@ def test_visitor_freeform_reply_strips_unprompted_alfred_name() -> None:
 
 
 def test_visitor_registration_not_found_message_is_plain() -> None:
-    body = whatsapp_messaging.visitor_registration_not_found_message("B00B1ES")
+    body = whatsapp_helpers.visitor_registration_not_found_message("B00B1ES")
 
     assert "B00B1ES" in body
     assert "Please check the registration" in body
@@ -1452,7 +1433,7 @@ def test_visitor_registration_not_found_message_is_plain() -> None:
 
 @pytest.mark.asyncio
 async def test_visitor_alfred_name_nod_is_llm_generated(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1474,8 +1455,8 @@ async def test_visitor_alfred_name_nod_is_llm_generated(monkeypatch) -> None:
             captured["messages"] = messages
             return LlmResult('{"nod":"Alfred says Jason has reached maximum access-control wizardry."}')
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     nod = await service._visitor_alfred_name_nod(visitor_pass, "Thanks Alfred")
 
@@ -1490,7 +1471,7 @@ async def test_visitor_alfred_name_nod_is_llm_generated(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -1519,7 +1500,7 @@ async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch
 
     async def lookup_vehicle(plate):
         assert plate == "AB12CDE"
-        return whatsapp_messaging.VisitorVehicleLookup(make="Tesla", colour="Silver")
+        return whatsapp_helpers.VisitorVehicleLookup(make="Tesla", colour="Silver")
 
     async def store_pending(pass_id, sender, plate, nonce, **kwargs):
         captured["pending"] = (pass_id, sender, plate, nonce)
@@ -1529,14 +1510,14 @@ async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch
         captured["confirmation"] = (to, pass_arg.id, plate, nonce)
         captured["confirmation_details"] = _kwargs
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
-    monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
-    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
-    monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor, "_visitor_concierge_result", visitor_result)
+    monkeypatch.setattr(service._visitor, "_lookup_visitor_vehicle_details", lookup_vehicle)
+    monkeypatch.setattr(service._visitor._state, "store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service._visitor, "send_visitor_plate_confirmation", send_confirmation)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.visitor", "from": "+44 7700 900123", "type": "text", "text": {"body": "yeah it is ab12 cde"}},
         contacts=[],
         phone_number_id="123456789",
@@ -1556,7 +1537,7 @@ async def test_visitor_sender_routes_to_sandbox_not_messaging_bridge(monkeypatch
 
 @pytest.mark.asyncio
 async def test_muted_visitor_message_is_marked_read_without_typing(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -1589,14 +1570,14 @@ async def test_muted_visitor_message_is_marked_read_without_typing(monkeypatch) 
     async def handle_visitor(*_args, **_kwargs):
         raise AssertionError("Muted visitors should not enter Concierge processing.")
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", muted)
-    monkeypatch.setattr(service, "mark_incoming_message_read", mark_read)
-    monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
-    monkeypatch.setattr(service, "_handle_visitor_message", handle_visitor)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor._state, "visitor_reply_is_muted", muted)
+    monkeypatch.setattr(service._delivery, "mark_incoming_message_read", mark_read)
+    monkeypatch.setattr(service._visitor, "_record_inbound_visitor_message", record_inbound)
+    monkeypatch.setattr(service._visitor, "_handle_visitor_message", handle_visitor)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.muted", "from": "+44 7700 900123", "type": "text", "text": {"body": "hello?"}},
         contacts=[],
         phone_number_id="123456789",
@@ -1610,7 +1591,7 @@ async def test_muted_visitor_message_is_marked_read_without_typing(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_visitor_plate_is_rejected_when_vehicle_lookup_fails(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1633,7 +1614,7 @@ async def test_visitor_plate_is_rejected_when_vehicle_lookup_fails(monkeypatch) 
 
     async def lookup_vehicle(plate):
         assert plate == "B00B1ES"
-        return whatsapp_messaging.VisitorVehicleLookup(error="Vehicle not found")
+        return whatsapp_helpers.VisitorVehicleLookup(error="Vehicle not found")
 
     async def plate_change(*_args, **_kwargs):
         return False
@@ -1650,14 +1631,14 @@ async def test_visitor_plate_is_rejected_when_vehicle_lookup_fails(monkeypatch) 
     async def send_confirmation(*_args, **_kwargs):
         raise AssertionError("Unverified registrations must not be confirmed.")
 
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", not_muted)
+    monkeypatch.setattr(service._state, "visitor_reply_is_muted", not_muted)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
     monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
-    monkeypatch.setattr(service, "_record_visitor_plate_change_attempt", plate_change)
-    monkeypatch.setattr(service, "_record_unverified_visitor_plate", unverified)
-    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service._state, "record_visitor_plate_change_attempt", plate_change)
+    monkeypatch.setattr(service._state, "record_unverified_visitor_plate", unverified)
+    monkeypatch.setattr(service._state, "store_pending_visitor_plate", store_pending)
     monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
     await service._process_visitor_text(
         "447700900123",
@@ -1672,7 +1653,7 @@ async def test_visitor_plate_is_rejected_when_vehicle_lookup_fails(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_visitor_known_registration_is_rejected_with_llm_reply(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1701,7 +1682,7 @@ async def test_visitor_known_registration_is_rejected_with_llm_reply(monkeypatch
         captured["privileged"] = (pass_id, sender, plate)
 
     async def privileged_reply(pass_arg, plate, text):
-        captured["reply_context"] = (pass_arg.id, plate, text)
+        captured["reply_context"] = (pass_arg, plate, text)
         return "I can't use C25 UNY because it is already linked to privileged access. Please send the visitor vehicle registration instead."
 
     async def send_text(to, body, **_kwargs):
@@ -1713,14 +1694,14 @@ async def test_visitor_known_registration_is_rejected_with_llm_reply(monkeypatch
     async def store_pending(*_args, **_kwargs):
         raise AssertionError("Known privileged registrations must not become pending plates.")
 
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", not_muted)
+    monkeypatch.setattr(service._state, "visitor_reply_is_muted", not_muted)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
-    monkeypatch.setattr(service, "_visitor_plate_is_privileged", privileged)
-    monkeypatch.setattr(service, "_record_privileged_visitor_plate", record_privileged)
+    monkeypatch.setattr(service._state, "plate_is_known_vehicle", privileged)
+    monkeypatch.setattr(service._state, "record_privileged_visitor_plate", record_privileged)
     monkeypatch.setattr(service, "_visitor_privileged_plate_reply", privileged_reply)
     monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
-    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._state, "store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
     await service._process_visitor_text(
         "447700900123",
@@ -1730,7 +1711,7 @@ async def test_visitor_known_registration_is_rejected_with_llm_reply(monkeypatch
     )
 
     assert captured["privileged"] == (visitor_pass.id, "447700900123", "C25UNY")
-    assert captured["reply_context"] == (visitor_pass.id, "C25UNY", "Use C25 UNY")
+    assert captured["reply_context"] == (visitor_pass.visitor_name, "C25UNY", "Use C25 UNY")
     assert sent == [
         (
             "447700900123",
@@ -1741,7 +1722,7 @@ async def test_visitor_known_registration_is_rejected_with_llm_reply(monkeypatch
 
 @pytest.mark.asyncio
 async def test_privileged_registration_reply_is_llm_generated(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1765,10 +1746,10 @@ async def test_privileged_registration_reply_is_llm_generated(monkeypatch) -> No
                 '{"message":"I can\'t use C25 UNY for this Visitor Pass because it is already linked to privileged access. Please send the visitor vehicle registration instead."}'
             )
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
-    body = await service._visitor_privileged_plate_reply(visitor_pass, "C25UNY", "Use C25 UNY")
+    body = await service._visitor_privileged_plate_reply(visitor_pass.visitor_name, "C25UNY", "Use C25 UNY")
 
     assert "privileged access" in body
     assert "visitor vehicle registration" in body
@@ -1779,7 +1760,7 @@ async def test_privileged_registration_reply_is_llm_generated(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_repeated_plate_changes_trigger_llm_mute(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1801,7 +1782,7 @@ async def test_repeated_plate_changes_trigger_llm_mute(monkeypatch) -> None:
         return {"action": "plate_detected", "registration_number": "AB12CDE"}
 
     async def lookup_vehicle(_plate):
-        return whatsapp_messaging.VisitorVehicleLookup(found=True, make="Tesla", colour="Silver")
+        return whatsapp_helpers.VisitorVehicleLookup(found=True, make="Tesla", colour="Silver")
 
     async def plate_change(*_args, **_kwargs):
         return True
@@ -1815,12 +1796,12 @@ async def test_repeated_plate_changes_trigger_llm_mute(monkeypatch) -> None:
     async def send_confirmation(*_args, **_kwargs):
         raise AssertionError("Abusive plate changes should not be confirmed.")
 
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", not_muted)
+    monkeypatch.setattr(service._state, "visitor_reply_is_muted", not_muted)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
     monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
-    monkeypatch.setattr(service, "_record_visitor_plate_change_attempt", plate_change)
+    monkeypatch.setattr(service._state, "record_visitor_plate_change_attempt", plate_change)
     monkeypatch.setattr(service, "_trigger_visitor_abuse_mute", abuse)
-    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service._state, "store_pending_visitor_plate", store_pending)
     monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
 
     await service._process_visitor_text(
@@ -1837,7 +1818,7 @@ async def test_repeated_plate_changes_trigger_llm_mute(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_repeated_post_complete_replies_trigger_llm_mute(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1867,11 +1848,11 @@ async def test_repeated_post_complete_replies_trigger_llm_mute(monkeypatch) -> N
     async def send_text(*_args, **_kwargs):
         raise AssertionError("Abuse mute response should be sent through the abuse path.")
 
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", not_muted)
+    monkeypatch.setattr(service._state, "visitor_reply_is_muted", not_muted)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
-    monkeypatch.setattr(service, "_record_visitor_post_complete_reply", chatter)
+    monkeypatch.setattr(service._state, "record_visitor_post_complete_reply", chatter)
     monkeypatch.setattr(service, "_trigger_visitor_abuse_mute", abuse)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
     await service._process_visitor_text(
         "447700900123",
@@ -1887,7 +1868,7 @@ async def test_repeated_post_complete_replies_trigger_llm_mute(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_abuse_stop_reply_is_llm_generated_and_mentions_pause(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1910,8 +1891,8 @@ async def test_abuse_stop_reply_is_llm_generated_and_mentions_pause(monkeypatch)
             captured["messages"] = messages
             return LlmResult('{"message":"All sorted, so I am pausing replies for 30 minutes before this chat earns a timesheet."}')
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     body = await service._visitor_abuse_stop_reply(visitor_pass, "hello again", reason="post_complete_replies")
 
@@ -1924,7 +1905,7 @@ async def test_abuse_stop_reply_is_llm_generated_and_mentions_pause(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_terminal_visitor_pass_reply_is_sent_once(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1955,6 +1936,10 @@ async def test_terminal_visitor_pass_reply_is_sent_once(monkeypatch) -> None:
             assert key == visitor_pass.id
             return visitor_pass
 
+        async def scalar(self, statement):
+            assert statement._for_update_arg is not None
+            return visitor_pass
+
         async def commit(self):
             return None
 
@@ -1967,9 +1952,9 @@ async def test_terminal_visitor_pass_reply_is_sent_once(monkeypatch) -> None:
     async def publish(event, payload):
         published.append((event, payload))
 
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    patch_whatsapp_boundary(monkeypatch, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(event_bus, "publish", publish)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
     first = await service._send_terminal_visitor_pass_reply_once(visitor_pass, "447700900123", config=enabled_config())
     second = await service._send_terminal_visitor_pass_reply_once(visitor_pass, "447700900123", config=enabled_config())
@@ -1978,13 +1963,13 @@ async def test_terminal_visitor_pass_reply_is_sent_once(monkeypatch) -> None:
     assert second is False
     assert len(sent) == 1
     assert "cancelled" in sent[0][1]
-    assert visitor_pass.source_metadata["whatsapp_terminal_notice_sent_at"]
+    assert visitor_pass.source_metadata["whatsapp_terminal_notice_reserved_at"]
     assert published[0][0] == "visitor_pass.updated"
 
 
 @pytest.mark.asyncio
-async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_preference(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_claimed_visitor_text_preserves_emoji_preference(monkeypatch) -> None:
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -1998,16 +1983,6 @@ async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_p
     )
     captured = {}
 
-    async def consume(pass_id, sender, token):
-        assert pass_id == visitor_pass.id
-        assert sender == "447700900123"
-        assert token == "token-1"
-        return {
-            "visitor_pass": visitor_pass,
-            "text": "Hi Alfred\nmy reg is\nAB12 CDE",
-            "emoji_preferred": True,
-        }
-
     async def visitor_result(sender, pass_arg, text, **_kwargs):
         captured["text"] = text
         captured["alfred_mentioned"] = _kwargs.get("alfred_mentioned")
@@ -2017,7 +1992,7 @@ async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_p
 
     async def lookup_vehicle(plate):
         assert plate == "AB12CDE"
-        return whatsapp_messaging.VisitorVehicleLookup(make="Tesla", colour="Silver")
+        return whatsapp_helpers.VisitorVehicleLookup(make="Tesla", colour="Silver")
 
     async def store_pending(*_args, **_kwargs):
         return None
@@ -2031,18 +2006,15 @@ async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_p
         assert "Alfred" in text
         return "Alfred says Jason has achieved peak driveway nerd."
 
-    monkeypatch.setattr(service, "_consume_visitor_text_buffer", consume)
     monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
     monkeypatch.setattr(service, "_lookup_visitor_vehicle_details", lookup_vehicle)
-    monkeypatch.setattr(service, "_store_pending_visitor_plate", store_pending)
+    monkeypatch.setattr(service._state, "store_pending_visitor_plate", store_pending)
     monkeypatch.setattr(service, "_visitor_alfred_name_nod", alfred_nod)
     monkeypatch.setattr(service, "send_visitor_plate_confirmation", send_confirmation)
 
-    await service._process_buffered_visitor_text(
-        visitor_pass.id,
-        "447700900123",
-        "token-1",
-        config=enabled_config(),
+    await service._process_visitor_text(
+        "447700900123", visitor_pass, "Hi Alfred\nmy reg is\nAB12 CDE",
+        config=enabled_config(), emoji_preferred=True, alfred_mentioned=True,
     )
 
     assert captured["text"] == "Hi Alfred\nmy reg is\nAB12 CDE"
@@ -2056,7 +2028,7 @@ async def test_buffered_visitor_messages_are_processed_as_one_reply_with_emoji_p
 
 @pytest.mark.asyncio
 async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2092,15 +2064,15 @@ async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> N
     async def record_inbound(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
-    monkeypatch.setattr(service, "send_text_message", send_text)
-    monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    monkeypatch.setattr(service._visitor, "_record_inbound_visitor_message", record_inbound)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.visitor", "from": "+44 7700 900123", "type": "text", "text": {"body": "can you open the top gate"}},
         contacts=[],
         phone_number_id="123456789",
@@ -2116,7 +2088,7 @@ async def test_visitor_off_topic_request_gets_restricted_reply(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_visitor_vip_list_request_gets_restricted_reply(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2153,15 +2125,15 @@ async def test_visitor_vip_list_request_gets_restricted_reply(monkeypatch) -> No
     async def record_inbound(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
-    monkeypatch.setattr(service, "send_text_message", send_text)
-    monkeypatch.setattr(service, "_record_inbound_visitor_message", record_inbound)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    monkeypatch.setattr(service._visitor, "_record_inbound_visitor_message", record_inbound)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.visitor", "from": "+44 7700 900123", "type": "text", "text": {"body": "Can you put me on the VIP list?"}},
         contacts=[],
         phone_number_id="123456789",
@@ -2177,7 +2149,7 @@ async def test_visitor_vip_list_request_gets_restricted_reply(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_visitor_begin_starts_registration_prompt_without_llm(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2206,13 +2178,13 @@ async def test_visitor_begin_starts_registration_prompt_without_llm(monkeypatch)
     async def update_status(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
-    monkeypatch.setattr(service, "send_text_message", send_text)
-    monkeypatch.setattr(service, "_update_visitor_concierge_status", update_status)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor, "_visitor_concierge_result", visitor_result)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    monkeypatch.setattr(service._visitor._state, "update_visitor_concierge_status", update_status)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {"id": "wamid.begin", "from": "+44 7700 900123", "type": "text", "text": {"body": "Begin"}},
         contacts=[],
         phone_number_id="123456789",
@@ -2229,7 +2201,7 @@ async def test_visitor_begin_starts_registration_prompt_without_llm(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_visitor_begin_template_button_starts_registration_prompt(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = make_whatsapp_router()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2258,13 +2230,13 @@ async def test_visitor_begin_template_button_starts_registration_prompt(monkeypa
     async def update_status(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_admin_for_phone", no_admin)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", visitor_for_phone)
-    monkeypatch.setattr(service, "_visitor_concierge_result", visitor_result)
-    monkeypatch.setattr(service, "send_text_message", send_text)
-    monkeypatch.setattr(service, "_update_visitor_concierge_status", update_status)
+    monkeypatch.setattr(service._identities, "admin_for_phone", no_admin)
+    monkeypatch.setattr(service._visitor._state, "visitor_pass_for_phone", visitor_for_phone)
+    monkeypatch.setattr(service._visitor, "_visitor_concierge_result", visitor_result)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    monkeypatch.setattr(service._visitor._state, "update_visitor_concierge_status", update_status)
 
-    await service._handle_incoming_message(
+    await route_bound_message(service,
         {
             "id": "wamid.begin",
             "from": "+44 7700 900123",
@@ -2304,7 +2276,7 @@ def test_visitor_timeframe_confirmation_button_payload_round_trips() -> None:
 
 @pytest.mark.asyncio
 async def test_visitor_timeframe_change_uses_llm_for_exact_range(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2332,9 +2304,9 @@ async def test_visitor_timeframe_change_uses_llm_for_exact_range(monkeypatch) ->
                 '"valid_until":"2026-05-02T07:30:00","summary":"Visitor requested 07:00 to 07:30."}'
             )
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2357,7 +2329,7 @@ async def test_visitor_timeframe_change_uses_llm_for_exact_range(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_visitor_concierge_prompt_includes_latest_dashboard_custom_message(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Ash",
@@ -2405,9 +2377,9 @@ async def test_visitor_concierge_prompt_includes_latest_dashboard_custom_message
             captured["messages"] = messages
             return LlmResult('{"action":"reply","message":"All set."}')
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     result = await service._visitor_concierge_result("447700900123", visitor_pass, "Yes")
 
@@ -2421,7 +2393,7 @@ async def test_visitor_concierge_prompt_includes_latest_dashboard_custom_message
 
 @pytest.mark.asyncio
 async def test_visitor_timeframe_change_is_not_keyword_parsed_without_llm(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Sarah",
@@ -2440,8 +2412,8 @@ async def test_visitor_timeframe_change_is_not_keyword_parsed_without_llm(monkey
     async def pass_details(_sender):
         return {"found": True, "visitor_pass": {"id": str(visitor_pass.id)}}
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2457,7 +2429,7 @@ async def test_visitor_timeframe_change_is_not_keyword_parsed_without_llm(monkey
 
 @pytest.mark.asyncio
 async def test_visitor_thanks_after_confirmed_plate_gets_warm_reply_not_reconfirmation(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -2481,9 +2453,9 @@ async def test_visitor_thanks_after_confirmed_plate_gets_warm_reply_not_reconfir
         async def complete(self, _messages, **_kwargs):
             return LlmResult('{"action":"plate_detected","registration_number":"C25UNY"}')
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2496,7 +2468,7 @@ async def test_visitor_thanks_after_confirmed_plate_gets_warm_reply_not_reconfir
 
 @pytest.mark.asyncio
 async def test_visitor_random_text_after_confirmed_plate_is_not_treated_as_new_plate_with_llm(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -2520,9 +2492,9 @@ async def test_visitor_random_text_after_confirmed_plate_is_not_treated_as_new_p
         async def complete(self, _messages, **_kwargs):
             return LlmResult('{"action":"plate_detected","registration_number":"AB12CDE"}')
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
-    monkeypatch.setattr(whatsapp_messaging, "get_llm_provider", lambda _provider_name: Provider())
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_llm_provider", lambda _provider_name: Provider())
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2535,7 +2507,7 @@ async def test_visitor_random_text_after_confirmed_plate_is_not_treated_as_new_p
 
 @pytest.mark.asyncio
 async def test_visitor_random_text_after_confirmed_plate_fails_closed_without_llm(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -2555,8 +2527,8 @@ async def test_visitor_random_text_after_confirmed_plate_fails_closed_without_ll
     async def pass_details(_sender):
         return {"found": True, "visitor_pass": {"id": str(visitor_pass.id), "number_plate": "C25UNY"}}
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2572,7 +2544,7 @@ async def test_visitor_random_text_after_confirmed_plate_fails_closed_without_ll
 
 @pytest.mark.asyncio
 async def test_visitor_confirmed_pass_cannot_send_new_plate_without_llm(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     visitor_pass = VisitorPass(
         id=uuid.uuid4(),
         visitor_name="Josh",
@@ -2592,8 +2564,8 @@ async def test_visitor_confirmed_pass_cannot_send_new_plate_without_llm(monkeypa
     async def pass_details(_sender):
         return {"found": True, "visitor_pass": {"id": str(visitor_pass.id), "number_plate": "C25UNY"}}
 
-    monkeypatch.setattr(whatsapp_messaging, "get_runtime_config", runtime)
-    monkeypatch.setattr(service, "get_pass_details", pass_details)
+    patch_whatsapp_boundary(monkeypatch, "get_runtime_config", runtime)
+    monkeypatch.setattr(service._state, "get_pass_details", pass_details)
 
     result = await service._visitor_concierge_result(
         "447700900123",
@@ -2620,7 +2592,7 @@ def test_visitor_timeframe_auto_limit_uses_original_window_for_cumulative_change
     current_start = datetime(2026, 5, 2, 7, 30, tzinfo=UTC)
     current_end = datetime(2026, 5, 2, 8, 0, tzinfo=UTC)
 
-    original_start, original_end = whatsapp_messaging.visitor_timeframe_original_window(
+    original_start, original_end = whatsapp_helpers.visitor_timeframe_original_window(
         metadata,
         current_start,
         current_end,
@@ -2628,13 +2600,13 @@ def test_visitor_timeframe_auto_limit_uses_original_window_for_cumulative_change
 
     assert original_start == datetime(2026, 5, 2, 8, 0, tzinfo=UTC)
     assert original_end == datetime(2026, 5, 2, 8, 30, tzinfo=UTC)
-    assert whatsapp_messaging.timeframe_change_within_auto_limit(
+    assert whatsapp_helpers.timeframe_change_within_auto_limit(
         original_start,
         original_end,
         datetime(2026, 5, 2, 7, 0, tzinfo=UTC),
         datetime(2026, 5, 2, 7, 30, tzinfo=UTC),
     )
-    assert not whatsapp_messaging.timeframe_change_within_auto_limit(
+    assert not whatsapp_helpers.timeframe_change_within_auto_limit(
         original_start,
         original_end,
         datetime(2026, 5, 2, 6, 30, tzinfo=UTC),
@@ -2644,7 +2616,7 @@ def test_visitor_timeframe_auto_limit_uses_original_window_for_cumulative_change
 
 @pytest.mark.asyncio
 async def test_pending_timeframe_approval_blocks_new_time_request(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_visitor_conversation_service()
     pass_id = uuid.uuid4()
     visitor_pass = VisitorPass(
         id=pass_id,
@@ -2666,6 +2638,7 @@ async def test_pending_timeframe_approval_blocks_new_time_request(monkeypatch) -
             }
         },
     )
+    visitor_pass.created_at = visitor_pass.updated_at = datetime(2026, 5, 2, tzinfo=UTC)
     sent = []
 
     class Session:
@@ -2680,10 +2653,16 @@ async def test_pending_timeframe_approval_blocks_new_time_request(monkeypatch) -
             assert key == pass_id
             return visitor_pass
 
+        async def scalar(self, statement):
+            assert statement._for_update_arg is not None
+            return visitor_pass
+
         async def commit(self):
             return None
 
     class VisitorPassService:
+        def status_for(self, row, now): return row.status
+
         async def refresh_statuses(self, **_kwargs):
             return []
 
@@ -2704,10 +2683,10 @@ async def test_pending_timeframe_approval_blocks_new_time_request(monkeypatch) -
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
 
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging, "get_visitor_pass_service", lambda: VisitorPassService())
+    patch_whatsapp_boundary(monkeypatch, "AsyncSessionLocal", lambda: Session())
+    patch_whatsapp_boundary(monkeypatch, "get_visitor_pass_service", lambda: VisitorPassService())
     monkeypatch.setattr(service, "_visitor_pending_timeframe_reply", pending_reply)
-    monkeypatch.setattr(service, "send_text_message", send_text)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
 
     await service._handle_visitor_timeframe_change(
         "447700900123",
@@ -2730,116 +2709,26 @@ async def test_pending_timeframe_approval_blocks_new_time_request(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_dashboard_custom_timeframe_consent_applies_directly(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
-    pass_id = uuid.uuid4()
-    visitor_pass = VisitorPass(
-        id=pass_id,
-        visitor_name="Ash",
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        expected_time=datetime(2026, 5, 4, 8, 0, tzinfo=UTC),
-        valid_from=datetime(2026, 5, 4, 8, 0, tzinfo=UTC),
-        valid_until=datetime(2026, 5, 4, 20, 30, tzinfo=UTC),
-        number_plate="Y90AGS",
-        status=VisitorPassStatus.SCHEDULED,
-        creation_source="ui",
-        source_metadata={
-            "whatsapp_chat_history": [
-                {
-                    "id": "custom-1",
-                    "direction": "outbound",
-                    "kind": "text",
-                    "body": "Do you want me to move your visitor pass to tomorrow?",
-                    "actor_label": "IACS",
-                    "created_at": "2026-05-02T18:01:00+01:00",
-                    "metadata": {"origin": "dashboard_custom", "sender_label": "Jason Ash"},
-                }
-            ]
-        },
-    )
-    visitor_pass.created_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    visitor_pass.updated_at = datetime(2026, 5, 2, 17, 0, tzinfo=UTC)
-    sent = []
-    audits = []
-    published = []
-    requested_from = datetime(2026, 5, 5, 8, 0, tzinfo=UTC)
-    requested_until = datetime(2026, 5, 5, 20, 30, tzinfo=UTC)
+async def test_llm_direct_apply_uses_canonical_consent_policy(monkeypatch) -> None:
+    from app.services.visitor_conversations import VisitorConversationOutcome
 
-    class Session:
-        async def __aenter__(self):
-            return self
+    service = get_whatsapp_visitor_conversation_service()
+    visitor_pass = VisitorPass(id=uuid.uuid4(), visitor_name="Synthetic Visitor")
+    proposed = {"valid_from": "2026-05-05T08:00:00+00:00", "valid_until": "2026-05-05T20:30:00+00:00",
+                "direct_apply": True, "source": "dashboard_custom_proposal"}
+    calls = []
+    async def request_timeframe(pass_id, sender, text, value):
+        assert (pass_id, sender, text, value) == (visitor_pass.id, "447700900123", "Yes", proposed)
+        calls.append("canonical_policy")
+        return VisitorConversationOutcome("approval_required", {"id": str(pass_id)})
+    async def send_text(to, body, **kwargs): calls.append((to, body))
+    monkeypatch.setattr(service._state, "request_timeframe_change", request_timeframe)
+    monkeypatch.setattr(service._delivery, "send_text_message", send_text)
+    await service._handle_visitor_timeframe_change("447700900123", visitor_pass, "Yes", proposed, config=enabled_config())
+    assert calls == ["canonical_policy", ("447700900123", whatsapp_helpers.VISITOR_TIMEFRAME_APPROVAL_REPLY)]
+    # Real PostgreSQL tests in test_visitor_conversation_authority prove the
+    # untrusted flag cannot alter the stored pass without consent/authority.
 
-        async def __aexit__(self, *_args):
-            return None
-
-        async def get(self, model, key):
-            assert model is VisitorPass
-            assert key == pass_id
-            return visitor_pass
-
-        async def commit(self):
-            return None
-
-        async def refresh(self, _row):
-            return None
-
-    class VisitorPassService:
-        async def refresh_statuses(self, **_kwargs):
-            return []
-
-        def window_start(self, pass_):
-            return pass_.valid_from
-
-        def window_end(self, pass_):
-            return pass_.valid_until
-
-        async def update_pass(self, _session, pass_, **kwargs):
-            pass_.valid_from = kwargs["valid_from"]
-            pass_.valid_until = kwargs["valid_until"]
-            pass_.expected_time = kwargs["valid_from"]
-            pass_.source_metadata = kwargs["source_metadata"]
-            return pass_
-
-    async def send_text(to, body, **_kwargs):
-        sent.append((to, body))
-
-    async def audit(*_args, **kwargs):
-        audits.append(kwargs)
-
-    async def publish(event, payload):
-        published.append((event, payload))
-
-    monkeypatch.setattr(whatsapp_messaging, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(whatsapp_messaging, "get_visitor_pass_service", lambda: VisitorPassService())
-    monkeypatch.setattr(whatsapp_messaging, "write_audit_log", audit)
-    monkeypatch.setattr(whatsapp_messaging.event_bus, "publish", publish)
-    monkeypatch.setattr(service, "send_text_message", send_text)
-
-    await service._handle_visitor_timeframe_change(
-        "447700900123",
-        visitor_pass,
-        "Yes",
-        {
-            "valid_from": requested_from.isoformat(),
-            "valid_until": requested_until.isoformat(),
-            "summary": "Visitor agreed to dashboard proposal.",
-            "direct_apply": True,
-            "source": "dashboard_custom_proposal",
-        },
-        config=enabled_config(),
-    )
-
-    assert visitor_pass.valid_from == requested_from
-    assert visitor_pass.valid_until == requested_until
-    assert visitor_pass.source_metadata["whatsapp_timeframe_last_change"]["status"] == "dashboard_custom_confirmed"
-    assert visitor_pass.source_metadata["whatsapp_timeframe_last_change"]["operator_message"] == (
-        "Do you want me to move your visitor pass to tomorrow?"
-    )
-    assert audits[0]["action"] == "visitor_pass.dashboard_custom_timeframe_applied"
-    assert published[0][0] == "visitor_pass.updated"
-    assert sent[0][0] == "447700900123"
-    assert "now valid" in sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -2853,7 +2742,6 @@ async def test_whatsapp_test_endpoint_rejects_disabled_integration(monkeypatch) 
     async def consume_confirmation(*_args, **_kwargs):
         return SimpleNamespace()
 
-    monkeypatch.setattr(whatsapp_api, "consume_action_confirmation", consume_confirmation)
 
     with pytest.raises(HTTPException) as exc:
         await whatsapp_api.send_whatsapp_test(
@@ -2866,50 +2754,30 @@ async def test_whatsapp_test_endpoint_rejects_disabled_integration(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_whatsapp_test_endpoint_uses_modal_values(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_whatsapp_test_endpoint_binds_typed_ephemeral_modal_config(monkeypatch) -> None:
     captured = {}
-
     async def load_config(values):
         captured["values"] = values
-        return await async_enabled_config(phone_number_id=str(values["whatsapp_phone_number_id"]))
-
-    async def send_text(to, body, *, config=None):
-        captured["to"] = to
-        captured["body"] = body
-        captured["config"] = config
-
+        return enabled_config(phone_number_id=str(values["whatsapp_phone_number_id"]))
+    async def send_confirmed(session, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id="synthetic-run")
     monkeypatch.setattr(whatsapp_api, "load_whatsapp_config", load_config)
-    monkeypatch.setattr(whatsapp_api, "emit_audit_log", lambda **_kwargs: None)
-    monkeypatch.setattr(service, "send_text_message", send_text)
-
-    async def consume_confirmation(*_args, **_kwargs):
-        return SimpleNamespace()
-
-    monkeypatch.setattr(whatsapp_api, "consume_action_confirmation", consume_confirmation)
-
+    monkeypatch.setattr(whatsapp_api, "send_confirmed_notification", send_confirmed)
     result = await whatsapp_api.send_whatsapp_test(
-        whatsapp_api.WhatsAppTestRequest(
-            message="Test",
-            values={
-                "whatsapp_enabled": True,
-                "whatsapp_phone_number_id": "phone-id-from-form",
-            },
-            confirmation_token="confirmed",
-        ),
-        SimpleNamespace(id=uuid.uuid4(), mobile_phone_number="+44 7700 900123"),
-    )
+        whatsapp_api.WhatsAppTestRequest(message="Test", values={"whatsapp_enabled": True,
+            "whatsapp_phone_number_id": "phone-id-from-form"}, confirmation_token="confirmed"),
+        SimpleNamespace(id=uuid.uuid4(), mobile_phone_number="+44 7700 900123"))
+    assert result == {"ok": True, "notification_run_id": "synthetic-run"}
+    assert captured["direct_action"] == {"type": "whatsapp", "delivery_mode": "literal", "target": "+44 7700 900123", "title": "", "message": "Test"}
+    assert captured["ephemeral_config"].phone_number_id == "phone-id-from-form"
+    assert captured["payload"]["values"] == captured["values"]
 
-    assert result == {"ok": True}
-    assert captured["values"]["whatsapp_enabled"] is True
-    assert captured["to"] == "+44 7700 900123"
-    assert captured["body"] == "Test"
-    assert captured["config"].phone_number_id == "phone-id-from-form"
 
 
 @pytest.mark.asyncio
 async def test_interactive_confirmation_buttons_bind_session_and_confirmation(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     captured = {}
 
     async def send_buttons(to, body, buttons, **_kwargs):
@@ -2939,12 +2807,12 @@ async def test_interactive_confirmation_buttons_bind_session_and_confirmation(mo
 
 @pytest.mark.asyncio
 async def test_notification_action_delivers_to_dynamic_whatsapp_target(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     sent = []
     async def load_config(*_args, **_kwargs):
         return await async_enabled_config()
 
-    monkeypatch.setattr(whatsapp_messaging, "load_whatsapp_config", load_config)
+    patch_whatsapp_boundary(monkeypatch, "load_whatsapp_config", load_config)
 
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
@@ -2955,11 +2823,12 @@ async def test_notification_action_delivers_to_dynamic_whatsapp_target(monkeypat
         {
             "target_mode": "selected",
             "target_ids": ["whatsapp:number:@AdminPhone"],
+            "frozen_whatsapp_recipients": [{"kind": "number", "phone": "447700900123"}],
             "title": "Gate alert",
             "message": "Gate is open.",
         },
         NotificationContext("gate_malfunction", "Gate alert", "warning", {"malfunction_stage": "initial"}),
-        variables={"AdminPhone": "+44 7700 900123"},
+        variables={"AdminPhone": "+44 7700 900123"}, config=enabled_config(),
     )
 
     assert sent == [("447700900123", "Gate alert\n\nGate is open.")]
@@ -2967,7 +2836,7 @@ async def test_notification_action_delivers_to_dynamic_whatsapp_target(monkeypat
 
 @pytest.mark.asyncio
 async def test_timeframe_notification_uses_whatsapp_interactive_buttons(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_delivery_service()
     sent = []
 
     async def load_config(*_args, **_kwargs):
@@ -2976,13 +2845,14 @@ async def test_timeframe_notification_uses_whatsapp_interactive_buttons(monkeypa
     async def send_buttons(to, body, buttons, **_kwargs):
         sent.append((to, body, buttons))
 
-    monkeypatch.setattr(whatsapp_messaging, "load_whatsapp_config", load_config)
+    patch_whatsapp_boundary(monkeypatch, "load_whatsapp_config", load_config)
     monkeypatch.setattr(service, "send_interactive_buttons", send_buttons)
 
     await service.send_notification_action(
         {
             "target_mode": "selected",
             "target_ids": ["whatsapp:number:@AdminPhone"],
+            "frozen_whatsapp_recipients": [{"kind": "number", "phone": "447700900123"}],
             "title": "Timeframe request",
             "message": "Sarah wants to stay later.",
         },
@@ -2995,7 +2865,7 @@ async def test_timeframe_notification_uses_whatsapp_interactive_buttons(monkeypa
                 "visitor_pass_timeframe_request_id": "request-1",
             },
         ),
-        variables={"AdminPhone": "+44 7700 900123"},
+        variables={"AdminPhone": "+44 7700 900123"}, config=enabled_config(),
     )
 
     assert sent[0][0] == "447700900123"
@@ -3011,13 +2881,13 @@ async def test_timeframe_notification_uses_whatsapp_interactive_buttons(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_automation_whatsapp_action_executes_dynamic_target(monkeypatch) -> None:
-    service = get_whatsapp_messaging_service()
+async def test_whatsapp_delivery_preserves_dynamic_recipient_and_rendered_body(monkeypatch) -> None:
+    service = get_whatsapp_delivery_service()
     sent = []
     async def load_config(*_args, **_kwargs):
         return await async_enabled_config()
 
-    monkeypatch.setattr(whatsapp_messaging, "load_whatsapp_config", load_config)
+    patch_whatsapp_boundary(monkeypatch, "load_whatsapp_config", load_config)
 
     async def send_text(to, body, **_kwargs):
         sent.append((to, body))
@@ -3025,21 +2895,12 @@ async def test_automation_whatsapp_action_executes_dynamic_target(monkeypatch) -
     monkeypatch.setattr(service, "send_text_message", send_text)
     context = SimpleNamespace(subject="Gate alert", variables={"AdminPhone": "+44 7700 900123", "Subject": "Gate alert"})
 
-    result = await service.execute_automation_action(
-        SimpleNamespace(),
-        {
-            "id": "action-1",
-            "type": "integration.whatsapp.send_message",
-            "config": {
-                "target_mode": "dynamic",
-                "phone_number_template": "@AdminPhone",
-                "message_template": "@Subject",
-            },
-        },
-        context,
-        rule=SimpleNamespace(name="Gate rule"),
+    await service.send_notification_action(
+        {"target_mode": "selected", "target_ids": ["whatsapp:number:@AdminPhone"],
+         "frozen_whatsapp_recipients": [{"kind": "number", "phone": "447700900123"}],
+         "title": context.subject, "message": ""},
+        NotificationContext("automation.whatsapp", context.subject, "info", {}),
+        variables=context.variables, config=enabled_config(),
     )
 
-    assert result["status"] == "success"
-    assert result["delivered_count"] == 1
     assert sent == [("447700900123", "Gate alert")]

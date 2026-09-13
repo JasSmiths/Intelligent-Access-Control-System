@@ -1,11 +1,47 @@
 """System operations Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from sqlalchemy import select
+
+from app.ai.tool_groups._shared import (
+    _bounded_int,
+    _require_admin_user,
+    _uuid_from_value,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import AuditLog
+from app.services.access_events import get_access_event_service
+from app.services.auth_secret_management import (
+    AuthSecretRotationError,
+    auth_secret_security_status,
+    rotate_auth_secret,
+)
+from app.services.dependency_updates import (
+    DependencyUpdateError,
+    get_dependency_update_service,
+)
+from app.services.discord_messaging import get_discord_messaging_service
+from app.services.home_assistant import get_home_assistant_service
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.settings import (
+    UnknownDynamicSettingsError,
+    get_runtime_config,
+    list_settings,
+    update_settings,
+)
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_ALFRED,
+    telemetry,
+)
+from app.services.unifi_protect import get_unifi_protect_service
 
 
 async def query_integration_health(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -16,7 +52,7 @@ async def query_integration_health(arguments: dict[str, Any]) -> dict[str, Any]:
         "access_events": get_access_event_service().status(),
         "unifi_protect": await get_unifi_protect_service().status(refresh=False),
         "discord": await get_discord_messaging_service().status(),
-        "whatsapp": await get_whatsapp_messaging_service().status(),
+        "whatsapp": await get_whatsapp_delivery_service().status(),
         "dvla": {"configured": bool(runtime.dvla_api_key), "endpoint": runtime.dvla_vehicle_enquiry_url},
         "llm": {
             "provider": runtime.llm_provider,
@@ -58,7 +94,7 @@ async def test_integration_connection(arguments: dict[str, Any]) -> dict[str, An
             await get_discord_messaging_service().test_connection({})
             result = {"ok": True}
         elif integration == "whatsapp":
-            await get_whatsapp_messaging_service().test_connection({})
+            await get_whatsapp_delivery_service().test_connection({})
             result = {"ok": True}
         elif integration == "apprise":
             runtime = await get_runtime_config()
@@ -99,7 +135,7 @@ async def update_system_settings(arguments: dict[str, Any]) -> dict[str, Any]:
             "setting_keys": sorted(str(key) for key in values),
         }
     try:
-        rows = await update_settings(values)
+        rows = await update_settings(values, user=admin, source="alfred")
     except UnknownDynamicSettingsError as exc:
         return {
             "updated": False,
@@ -107,6 +143,8 @@ async def update_system_settings(arguments: dict[str, Any]) -> dict[str, Any]:
             "unknown_keys": exc.unknown_keys,
             "allowed_keys": exc.allowed_keys,
         }
+    except ValueError as exc:
+        return {"updated": False, "error": str(exc)}
     changed_keys = sorted(str(key) for key in values)
     return {
         "updated": True,

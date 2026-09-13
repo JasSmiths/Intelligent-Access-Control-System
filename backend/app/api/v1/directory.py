@@ -16,21 +16,23 @@ from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import AccessEvent, Group, Person, Schedule, User, Vehicle, VehiclePersonAssignment
+from app.models import AccessEvent, Group, Person, User, Vehicle, VehiclePersonAssignment
 from app.models.enums import GroupCategory
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, friendly_vehicle_text
+from app.services.access_devices import get_access_device_service
 from app.services.dvla import NormalizedDvlaVehicle, lookup_normalized_vehicle_registration
-from app.services.profile_photos import (
-    ProfilePhotoError,
-    normalize_profile_photo_data_url,
-    stored_image_url,
-)
 from app.services.person_presence_input_booleans import (
     DEFAULT_INPUT_BOOLEAN_ACTION,
     normalize_input_boolean_action,
     normalize_input_boolean_entity_ids,
 )
-from app.services.access_devices import get_access_device_service
+from app.services.profile_photos import (
+    ProfilePhotoError,
+    normalize_profile_photo_data_url,
+    stored_image_url,
+)
+from app.services.schedule_assignments import set_schedule_assignment
+from app.services.schedule_operations import ScheduleOperationError
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -609,11 +611,13 @@ async def get_group_or_404(session: AsyncSession, group_id: uuid.UUID | None) ->
     return group
 
 
-async def get_schedule_or_404(session: AsyncSession, schedule_id: uuid.UUID | None) -> Schedule | None:
-    schedule = await session.get(Schedule, schedule_id) if schedule_id else None
-    if schedule_id and not schedule:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    return schedule
+async def _set_schedule_assignment_or_http(session, target, schedule_id, user):
+    try:
+        await set_schedule_assignment(session, target, schedule_id, user=user, source="api")
+    except ScheduleOperationError as exc:
+        code = 404 if exc.code == "schedule_not_found" else 403 if exc.code == "forbidden" else 422
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+
 
 
 async def get_vehicles_or_404(session: AsyncSession, vehicle_ids: list[uuid.UUID]) -> list[Vehicle]:
@@ -748,7 +752,6 @@ async def add_person(
         confirmation_token=request.confirmation_token,
     )
     group = await get_group_or_404(session, request.group_id)
-    schedule = await get_schedule_or_404(session, request.schedule_id)
     vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
     garage_door_entity_ids = await validate_garage_door_entity_ids(request.garage_door_entity_ids)
 
@@ -759,7 +762,6 @@ async def add_person(
         pronouns=normalize_person_pronouns(request.pronouns),
         profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
         group_id=group.id if group else None,
-        schedule_id=schedule.id if schedule else None,
         garage_door_entity_ids=garage_door_entity_ids,
         home_assistant_mobile_app_notify_service=normalize_home_assistant_mobile_notify_service(
             request.home_assistant_mobile_app_notify_service
@@ -780,6 +782,7 @@ async def add_person(
     await session.flush()
 
     await set_person_vehicle_assignments(session, person, vehicles)
+    await _set_schedule_assignment_or_http(session, person, request.schedule_id, user)
 
     await write_audit_log(
         session,
@@ -842,8 +845,7 @@ async def update_person(
         person.group_id = group.id if group else None
 
     if "schedule_id" in request.model_fields_set:
-        schedule = await get_schedule_or_404(session, request.schedule_id)
-        person.schedule_id = schedule.id if schedule else None
+        await _set_schedule_assignment_or_http(session, person, request.schedule_id, user)
 
     if request.vehicle_ids is not None:
         vehicles = await get_vehicles_or_404(session, request.vehicle_ids)
@@ -980,11 +982,9 @@ async def add_vehicle(
     )
     person_ids = requested_vehicle_person_ids(request) or []
     people = await get_people_or_404(session, person_ids)
-    schedule = await get_schedule_or_404(session, request.schedule_id)
 
     vehicle = Vehicle(
         person_id=derived_vehicle_person_id([person.id for person in people]),
-        schedule_id=schedule.id if schedule else None,
         registration_number=normalize_registration_number(request.registration_number),
         vehicle_photo_data_url=await normalize_profile_photo_or_400(request.vehicle_photo_data_url),
         make=normalize_vehicle_text(request.make),
@@ -1003,6 +1003,7 @@ async def add_vehicle(
     try:
         await session.flush()
         await set_vehicle_person_assignments(session, vehicle, people)
+        await _set_schedule_assignment_or_http(session, vehicle, request.schedule_id, user)
         await write_audit_log(
             session,
             category=TELEMETRY_CATEGORY_CRUD,
@@ -1066,8 +1067,7 @@ async def update_vehicle(
         await set_vehicle_person_assignments(session, vehicle, people)
 
     if "schedule_id" in request.model_fields_set:
-        schedule = await get_schedule_or_404(session, request.schedule_id)
-        vehicle.schedule_id = schedule.id if schedule else None
+        await _set_schedule_assignment_or_http(session, vehicle, request.schedule_id, user)
 
     if request.registration_number is not None:
         vehicle.registration_number = normalize_registration_number(request.registration_number)

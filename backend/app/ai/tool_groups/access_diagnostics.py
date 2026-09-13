@@ -2,27 +2,9 @@
 
 from __future__ import annotations
 
-from app.ai.tool_groups.access_diagnostics_handlers import (
-    analyze_alert_snapshot,
-    calculate_absence_duration,
-    calculate_visit_duration,
-    diagnose_access_event,
-    get_telemetry_trace,
-    query_access_events,
-    query_alert_activity,
-    query_anomalies,
-    query_leaderboard,
-    query_lpr_timing,
-    query_vehicle_detection_history,
-    summarize_access_rhythm,
-    trigger_anomaly_alert,
-)
-from app.ai.tool_groups.access_incident_handlers import (
-    backfill_access_event_from_protect,
-    investigate_access_incident,
-    query_unifi_protect_events,
-    test_unifi_alarm_webhook,
-)
+from typing import Any
+
+from app.ai.tool_groups import access_diagnostics_handlers, access_incident_handlers
 from app.ai.tool_groups.metadata import apply_group_metadata
 from app.ai.tools import AgentTool
 
@@ -98,7 +80,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_access_events,
+                    handler=access_diagnostics_handlers.query_access_events,
                     example_inputs=(
                         {"person": "Steph", "day": "today", "direction": "exit", "limit": 1},
                         {"registration_number": "PE70DHX", "day": "recent", "decision": "granted"},
@@ -138,7 +120,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=diagnose_access_event,
+                    handler=access_diagnostics_handlers.diagnose_access_event,
                     example_inputs=(
                         {"person": "Steph", "day": "today", "direction": "entry"},
                         {"access_event_id": "access-event-uuid", "span_limit": 20},
@@ -178,7 +160,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=investigate_access_incident,
+                    handler=access_incident_handlers.investigate_access_incident,
                     example_inputs=(
                         {"person": "Steph", "day": "today", "direction": "exit", "incident_type": "missing_event"},
                         {"registration_number": "PE70DHX", "expected_time": "07:38", "window_minutes": 20},
@@ -210,7 +192,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_unifi_protect_events,
+                    handler=access_incident_handlers.query_unifi_protect_events,
                 ),
         AgentTool(
                     name="backfill_access_event_from_protect",
@@ -244,7 +226,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=backfill_access_event_from_protect,
+                    handler=access_incident_handlers.backfill_access_event_from_protect,
                 ),
         AgentTool(
                     name="test_unifi_alarm_webhook",
@@ -261,7 +243,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["trigger_id", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=test_unifi_alarm_webhook,
+                    handler=access_incident_handlers.test_unifi_alarm_webhook,
                 ),
         AgentTool(
                     name="query_lpr_timing",
@@ -286,7 +268,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_lpr_timing,
+                    handler=access_diagnostics_handlers.query_lpr_timing,
                 ),
         AgentTool(
                     name="query_vehicle_detection_history",
@@ -304,7 +286,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_vehicle_detection_history,
+                    handler=access_diagnostics_handlers.query_vehicle_detection_history,
                 ),
         AgentTool(
                     name="get_telemetry_trace",
@@ -319,7 +301,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=get_telemetry_trace,
+                    handler=access_diagnostics_handlers.get_telemetry_trace,
                 ),
         AgentTool(
                     name="query_leaderboard",
@@ -346,7 +328,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_leaderboard,
+                    handler=access_diagnostics_handlers.query_leaderboard,
                 ),
         AgentTool(
                     name="query_anomalies",
@@ -378,7 +360,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_anomalies,
+                    handler=access_diagnostics_handlers.query_anomalies,
                     example_inputs=(
                         {"status": "all", "day": "recent", "search": "oil delivery Dove Fuels truck tanker", "suspected_delivery": True, "limit": 25},
                         {"status": "open", "day": "today", "limit": 10},
@@ -411,7 +393,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_alert_activity,
+                    handler=access_diagnostics_handlers.query_alert_activity,
                     example_inputs=(
                         {"day": "today", "status": "all"},
                         {"day": "yesterday", "status": "resolved"},
@@ -439,7 +421,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["alert_id"],
                         "additionalProperties": False,
                     },
-                    handler=analyze_alert_snapshot,
+                    handler=access_diagnostics_handlers.analyze_alert_snapshot,
                 ),
         AgentTool(
                     name="summarize_access_rhythm",
@@ -449,7 +431,7 @@ def build_tools() -> list[AgentTool]:
                         "properties": {"day": {"type": "string", "enum": ["today", "yesterday", "recent"]}},
                         "additionalProperties": False,
                     },
-                    handler=summarize_access_rhythm,
+                    handler=access_diagnostics_handlers.summarize_access_rhythm,
                 ),
         AgentTool(
                     name="calculate_visit_duration",
@@ -468,7 +450,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=calculate_visit_duration,
+                    handler=access_diagnostics_handlers.calculate_visit_duration,
                     example_inputs=(
                         {"person": "Gardener", "day": "today"},
                         {"group": "contractor", "day": "recent"},
@@ -495,7 +477,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=calculate_absence_duration,
+                    handler=access_diagnostics_handlers.calculate_absence_duration,
                     example_inputs=(
                         {"person": "Ash", "day": "today", "mode": "latest"},
                         {"person_id": "person-uuid", "day": "today", "mode": "total"},
@@ -520,10 +502,39 @@ def build_tools() -> list[AgentTool]:
                         "required": ["subject", "severity", "message", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=trigger_anomaly_alert,
+                    handler=access_diagnostics_handlers.trigger_anomaly_alert,
                 ),
         ],
         categories=TOOL_CATEGORIES,
+        button_handler=confirmation_button,
+        summary_handler=confirmation_summary,
+        status_labels={'query_access_events': 'Reviewing access events...', 'diagnose_access_event': 'Diagnosing access event...', 'investigate_access_incident': 'Investigating access incident...', 'query_unifi_protect_events': 'Checking UniFi Protect history...', 'backfill_access_event_from_protect': 'Preparing access event backfill...', 'test_unifi_alarm_webhook': 'Preparing Protect webhook test...', 'query_lpr_timing': 'Checking LPR timing...', 'query_vehicle_detection_history': 'Counting vehicle detections...', 'get_telemetry_trace': 'Reading telemetry trace...', 'query_leaderboard': 'Checking Top Charts...', 'query_anomalies': 'Checking anomaly records...', 'summarize_access_rhythm': 'Summarizing site rhythm...', 'calculate_visit_duration': 'Calculating visit duration...', 'calculate_absence_duration': 'Calculating absence duration...', 'trigger_anomaly_alert': 'Preparing alert notification...'},
+        success_fields={'test_unifi_alarm_webhook': ('sent',), 'trigger_anomaly_alert': ('sent',)},
+        finish_after_confirmation=frozenset(),
         confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
         default_limits=DEFAULT_LIMITS,
     )
+
+
+def confirmation_summary(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name in {'backfill_access_event_from_protect', 'investigate_access_incident'}:
+        if output.get('backfilled'):
+            return f"Backfilled the {output.get('direction') or 'access'} event for {output.get('registration_number') or 'that plate'} at {output.get('occurred_at_display') or output.get('occurred_at')}. Presence {('was' if output.get('presence_updated') else 'was not')} updated."
+        return str(output.get('detail') or output.get('error') or 'I did not backfill the access event.')
+    if tool_name == 'test_unifi_alarm_webhook':
+        if output.get('sent'):
+            return 'Sent the UniFi Protect Alarm Manager webhook test and checked for a matching IACS webhook trace.'
+        return str(output.get('detail') or output.get('error') or 'I did not send the UniFi Protect webhook test.')
+    if tool_name == 'trigger_anomaly_alert':
+        if output.get('sent'):
+            return f"Sent the anomaly alert: {output.get('title') or 'Alert'}."
+        return str(output.get('detail') or output.get('error') or 'I did not send the anomaly alert.')
+    return str(output.get("detail") or "Action completed.")
+
+
+def confirmation_button(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name in {'backfill_access_event_from_protect', 'investigate_access_incident'}:
+        return 'Backfill event'
+    if tool_name == 'test_unifi_alarm_webhook':
+        return 'Send test'
+    return "Confirm"

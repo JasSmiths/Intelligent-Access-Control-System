@@ -1,48 +1,57 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.logging import get_logger
-from app.models import AccessEvent, Person, Presence
+from app.models import AccessEvent, Presence
 from app.models.enums import AccessDecision, AccessDirection, PresenceState
 
-logger = get_logger(__name__)
+@dataclass(frozen=True)
+class PresenceTransition:
+    changed: bool
+    result: str
 
 
-async def commit_presence_for_event(session: Any, event: Any, *, log_prefix: str = "movement") -> bool:
-    if not getattr(event, "person_id", None):
-        return False
-    presence = await session.get(Presence, event.person_id)
-    if not presence:
-        presence = Presence(person_id=event.person_id)
-        session.add(presence)
-    if presence.last_changed_at and event.occurred_at < presence.last_changed_at:
-        logger.info(
-            f"{log_prefix}_presence_stale_skipped",
-            extra={
-                "event_id": str(event.id),
-                "event_occurred_at": event.occurred_at.isoformat(),
-                "presence_last_changed_at": presence.last_changed_at.isoformat(),
-            },
-        )
-        return False
-    presence.state = PresenceState.PRESENT if event.direction == AccessDirection.ENTRY else PresenceState.EXITED
-    presence.last_event_id = event.id
-    presence.last_changed_at = event.occurred_at
-    return True
+def event_order(event: AccessEvent) -> tuple[datetime, datetime, str]:
+    """Deterministic conflict resolution, not an inferred physical sequence."""
+    return _aware(event.occurred_at), _aware(event.created_at), str(event.id)
 
 
-async def commit_latest_presence_for_person(session: Any, person: Person, event: AccessEvent) -> bool:
-    latest_event = await session.scalar(
-        select(AccessEvent)
-        .where(
-            AccessEvent.person_id == person.id,
-            AccessEvent.decision == AccessDecision.GRANTED,
-            AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
-        )
-        .order_by(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc())
-        .limit(1)
-    )
-    return await commit_presence_for_event(session, latest_event or event, log_prefix="backfill")
+async def apply_eligible_event_in_session(session: AsyncSession, event: AccessEvent) -> PresenceTransition:
+    """Apply an event whose admission was established by movement.admission.
+
+    The person lock also serializes first insertion, where no Presence row exists
+    to lock yet. Every runtime writer uses this transition; it never commits.
+    """
+    if (event.person_id is None or event.decision != AccessDecision.GRANTED
+            or event.direction not in {AccessDirection.ENTRY, AccessDirection.EXIT}):
+        return PresenceTransition(False, "ineligible")
+    await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:person))"),
+                          {"person": f"iacs:presence:{event.person_id}"})
+    row = await session.get(Presence, event.person_id, with_for_update=True, populate_existing=True)
+    if row is not None:
+        if row.last_event_id == event.id:
+            return PresenceTransition(False, "already_applied")
+        if row.last_changed_at is not None:
+            if _aware(event.occurred_at) < _aware(row.last_changed_at):
+                return PresenceTransition(False, "stale")
+            if _aware(event.occurred_at) == _aware(row.last_changed_at):
+                previous = await session.get(AccessEvent, row.last_event_id, populate_existing=True) if row.last_event_id else None
+                if previous is None:
+                    return PresenceTransition(False, "legacy_equal_time")
+                if event_order(event) <= event_order(previous):
+                    return PresenceTransition(False, "stale")
+    else:
+        row = Presence(person_id=event.person_id)
+        session.add(row)
+    row.state = PresenceState.PRESENT if event.direction == AccessDirection.ENTRY else PresenceState.EXITED
+    row.last_event_id, row.last_changed_at = event.id, event.occurred_at
+    await session.flush()
+    return PresenceTransition(True, "applied")
+
+
+def _aware(value: datetime) -> datetime:
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC)

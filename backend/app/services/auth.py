@@ -12,7 +12,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import HTTPException, Request, Response, WebSocket, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -224,7 +224,6 @@ async def token_is_revoked(session: AsyncSession, payload: dict[str, Any]) -> bo
     jti = payload.get("jti")
     if not isinstance(jti, str) or not jti:
         return True
-    await purge_expired_revoked_tokens(session)
     return bool(
         await session.scalar(
             select(RevokedAuthToken.id).where(RevokedAuthToken.jti_hash == token_jti_hash(jti))
@@ -245,6 +244,9 @@ async def revoke_access_token(session: AsyncSession, token: str | None) -> None:
         user_id = uuid.UUID(str(subject)) if subject else None
     except ValueError:
         user_id = None
+    # Expired revocation cleanup belongs to this existing auth mutation, never
+    # to authenticated reads (including receipt/recovery inspection).
+    await purge_expired_revoked_tokens(session)
     session.add(
         RevokedAuthToken(
             jti_hash=token_jti_hash(jti),
@@ -259,16 +261,8 @@ async def revoke_access_token(session: AsyncSession, token: str | None) -> None:
 
 
 async def purge_expired_revoked_tokens(session: AsyncSession) -> None:
-    rows = (
-        await session.scalars(
-            select(RevokedAuthToken).where(RevokedAuthToken.expires_at <= datetime.now(tz=UTC))
-        )
-    ).all()
-    if not rows:
-        return
-    for row in rows:
-        await session.delete(row)
-    await session.commit()
+    """Auth-write participant; the caller owns commit/rollback."""
+    await session.execute(delete(RevokedAuthToken).where(RevokedAuthToken.expires_at <= func.clock_timestamp()))
 
 
 async def authenticate_request(session: AsyncSession, request: Request) -> User | None:

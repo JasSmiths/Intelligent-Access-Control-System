@@ -6,6 +6,7 @@ from time import monotonic
 from typing import Any, Callable, Coroutine
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.modules.unifi_protect.client import (
     UnifiProtectError,
     build_unifi_protect_client,
@@ -57,11 +58,14 @@ class UnifiProtectIntegrationService:
         self._lpr_track_probe_finished_event_ids: set[str] = set()
         self._lpr_track_probe_semaphore = asyncio.Semaphore(4)
         self._background_tasks: set[asyncio.Task] = set()
+        self._stopped = False
+        self._accept_background = True
 
     async def configured(self) -> bool:
         return is_unifi_protect_configured(await get_runtime_config())
 
     async def start(self) -> None:
+        self._stopped = False
         if not await self.configured():
             logger.info("unifi_protect_not_configured")
             return
@@ -76,12 +80,20 @@ class UnifiProtectIntegrationService:
             )
 
     async def stop(self) -> None:
+        self._stopped = True
+        await drain_owned(self._stop())
+
+    async def _stop(self) -> None:
         async with self._lock:
             await self._stop_locked()
 
     async def restart(self) -> None:
         async with self._lock:
-            await self._stop_locked()
+            if self._stopped:
+                raise UnifiProtectError("UniFi Protect is shutting down.")
+            await drain_owned(self._stop_locked())
+            if self._stopped:
+                raise UnifiProtectError("UniFi Protect is shutting down.")
         await self.start()
 
     async def status(self, *, refresh: bool = False) -> dict[str, Any]:
@@ -225,6 +237,8 @@ class UnifiProtectIntegrationService:
 
     async def _ensure_api(self, *, subscribe: bool, refresh: bool = False) -> Any:
         async with self._lock:
+            if self._stopped:
+                raise UnifiProtectError("UniFi Protect is shutting down.")
             if self._api is not None:
                 if refresh:
                     await load_unifi_protect_bootstrap(self._api)
@@ -234,11 +248,19 @@ class UnifiProtectIntegrationService:
 
             config = await get_runtime_config()
             api = await build_unifi_protect_client(config)
-            await load_unifi_protect_bootstrap(api)
+            try:
+                await load_unifi_protect_bootstrap(api)
+            except BaseException:
+                await drain_owned(close_unifi_protect_client(api))
+                raise
+            if self._stopped:
+                await drain_owned(close_unifi_protect_client(api))
+                raise UnifiProtectError("UniFi Protect is shutting down.")
             self._api = api
             self._connected = True
             self._last_error = None
             if subscribe:
+                self._accept_background = True
                 self._unsubscribers = subscribe_unifi_protect(
                     api,
                     self._handle_websocket_message,
@@ -254,19 +276,20 @@ class UnifiProtectIntegrationService:
             return api
 
     async def _stop_locked(self) -> None:
-        background_tasks = list(self._background_tasks)
-        for task in background_tasks:
-            task.cancel()
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-        self._background_tasks.clear()
-
+        self._accept_background = False
         for unsubscribe in self._unsubscribers:
             try:
                 unsubscribe()
             except Exception as exc:
                 logger.debug("unifi_protect_unsubscribe_failed", extra={"error": str(exc)})
         self._unsubscribers.clear()
+
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_tasks.difference_update(background_tasks)
 
         if self._api is not None:
             await close_unifi_protect_client(self._api)
@@ -372,6 +395,9 @@ class UnifiProtectIntegrationService:
         }
 
     def _spawn_background(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
+        if self._stopped or not self._accept_background:
+            coro.close()
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

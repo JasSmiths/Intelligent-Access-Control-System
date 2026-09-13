@@ -21,9 +21,15 @@ from app.services.visitor_passes import (
     VisitorPassError,
     get_visitor_pass_service,
     serialize_visitor_pass,
-    visitor_pass_whatsapp_history,
+    publish_pass_change,
 )
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service
+from app.services.messaging.visitor_conversation import get_whatsapp_visitor_conversation_service
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.visitor_conversations import get_visitor_conversation_service
+from app.services.visitor_conversations import VisitorConversationDenied
+from app.services.action_confirmations import ActionConfirmationError
+from app.services.mutation_context import MutationError
+from app.services.notifications import get_notification_service
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -133,6 +139,8 @@ class VisitorPassResponse(BaseModel):
 class VisitorPassWhatsAppSendResponse(BaseModel):
     visitor_pass: VisitorPassResponse
     message: VisitorPassWhatsAppMessageResponse
+    notification_run_id: str | None = None
+    delivery_status: str | None = None
 
 
 def visitor_pass_response(payload: dict[str, Any]) -> VisitorPassResponse:
@@ -222,18 +230,14 @@ async def create_visitor_pass(
             created_by_user_id=user.id,
             actor=actor_from_user(user),
         )
+        await get_whatsapp_delivery_service().reserve_outreach_in_session(
+            session, visitor_pass, actor_user_id=user.id, auth_version=user.auth_session_version, source="ui",
+        )
         await session.commit()
         await session.refresh(visitor_pass)
         payload = serialize_visitor_pass(visitor_pass)
-        await event_bus.publish("visitor_pass.created", {"visitor_pass": payload})
-        if visitor_pass.pass_type == VisitorPassType.DURATION and visitor_pass.visitor_phone:
-            try:
-                await get_whatsapp_messaging_service().send_visitor_pass_outreach(visitor_pass)
-            except Exception as exc:
-                logger.warning(
-                    "visitor_pass_whatsapp_outreach_failed",
-                    extra={"visitor_pass_id": str(visitor_pass.id), "error": str(exc)[:240]},
-                )
+        await publish_pass_change("visitor_pass.created", {"visitor_pass": payload})
+        get_notification_service().dispatcher.wake()
         return visitor_pass_response(payload)
     except VisitorPassError as exc:
         await session.rollback()
@@ -279,7 +283,8 @@ async def get_visitor_pass_whatsapp_messages(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
         if visitor_pass.pass_type != VisitorPassType.DURATION:
             return []
-        return [VisitorPassWhatsAppMessageResponse(**message) for message in visitor_pass_whatsapp_history(visitor_pass)]
+        history = await get_visitor_conversation_service().notification_history(pass_id)
+        return [VisitorPassWhatsAppMessageResponse(**message) for message in history]
     except HTTPException:
         raise
     except Exception as exc:
@@ -299,24 +304,35 @@ async def send_visitor_pass_whatsapp_message(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message is required.",
         )
-    await require_confirmed_action(
-        session,
-        user=user,
-        action="visitor_pass.whatsapp_send",
-        payload={"pass_id": str(pass_id), "message": message},
-        confirmation_token=request.confirmation_token,
-    )
     try:
-        result = await get_whatsapp_messaging_service().send_visitor_pass_custom_message(
-            pass_id,
-            message,
-            actor_user=user,
+        run_id, claimed = await get_whatsapp_visitor_conversation_service().reserve_custom_message_in_session(
+            session, pass_id, message, actor_user=user, confirmation_token=request.confirmation_token,
         )
+        await session.commit()
+        delivery = await get_notification_service().dispatch_reserved(run_id, claimed)
+        if delivery.status != "sent":
+            raise HTTPException(status_code=502,
+                detail="The message was not verified as delivered. Inspect its delivery record before sending again.",
+                headers={"X-IACS-Notification-Run-ID": str(run_id)})
+        result = await get_visitor_conversation_service().get_notification_result(pass_id, run_id)
         return VisitorPassWhatsAppSendResponse(
             visitor_pass=visitor_pass_response(result["visitor_pass"]),
             message=VisitorPassWhatsAppMessageResponse(**result["message"]),
+            notification_run_id=str(run_id), delivery_status=delivery.status,
         )
+    except ActionConfirmationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except MutationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except VisitorConversationDenied as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except VisitorPassError as exc:
+        await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except NotificationDeliveryError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
@@ -339,7 +355,7 @@ async def unblock_visitor_pass_whatsapp(
         confirmation_token=request.confirmation_token if request else None,
     )
     try:
-        payload = await get_whatsapp_messaging_service().clear_visitor_abuse_mute(pass_id, actor_user=user)
+        payload = await get_visitor_conversation_service().clear_visitor_abuse_mute(pass_id, actor_user=user)
         return visitor_pass_response(payload)
     except VisitorPassError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -441,7 +457,7 @@ async def update_visitor_pass(
         await session.commit()
         await session.refresh(visitor_pass)
         payload = serialize_visitor_pass(visitor_pass)
-        await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload})
+        await publish_pass_change("visitor_pass.updated", {"visitor_pass": payload})
         return visitor_pass_response(payload)
     except VisitorPassError as exc:
         await session.rollback()
@@ -489,7 +505,7 @@ async def cancel_visitor_pass(
         await session.commit()
         await session.refresh(visitor_pass)
         payload = serialize_visitor_pass(visitor_pass)
-        await event_bus.publish("visitor_pass.cancelled", {"visitor_pass": payload})
+        await publish_pass_change("visitor_pass.cancelled", {"visitor_pass": payload})
         return visitor_pass_response(payload)
     except VisitorPassError as exc:
         await session.rollback()
@@ -557,7 +573,7 @@ async def decide_visitor_pass_timeframe_request(
         confirmation_token=request.confirmation_token if request else None,
     )
     try:
-        return await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
+        return await get_whatsapp_visitor_conversation_service().decide_visitor_timeframe_request(
             str(pass_id),
             request_id,
             normalized_decision,

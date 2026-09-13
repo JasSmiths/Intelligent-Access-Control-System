@@ -59,8 +59,10 @@ async def list_access_devices(
     kind: Literal["gate", "garage_door"] | None = Query(default=None),
     _: User = Depends(current_user),
 ) -> list[dict[str, Any]]:
-    devices = await get_access_device_service().list_devices(kind=kind)
-    return [serialize_access_device(device) for device in devices]
+    service = get_access_device_service()
+    devices = await service.list_devices(kind=kind)
+    eligibility = await service.device_eligibility(devices)
+    return [{**serialize_access_device(device), **eligibility[device.key]} for device in devices]
 
 
 @router.post("")
@@ -78,7 +80,7 @@ async def create_access_device(
         confirmation_token=request.confirmation_token,
     )
     try:
-        device = await get_access_device_service().create_device(payload)
+        device = await get_access_device_service().create_device(payload, user=user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await write_audit_log(
@@ -118,7 +120,7 @@ async def update_access_device(
         confirmation_token=request.confirmation_token,
     )
     try:
-        device = await get_access_device_service().update_device(device_id, payload)
+        device = await get_access_device_service().update_device(device_id, payload, user=user)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

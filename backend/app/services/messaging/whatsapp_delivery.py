@@ -1,26 +1,83 @@
 from __future__ import annotations
 
-# ruff: noqa: F403,F405
-
 from typing import Any
-
-import httpx
-from sqlalchemy import select
+from datetime import UTC, datetime
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
 from app.core.logging import get_logger
-from app.models import AutomationRule, User
-from app.models.enums import UserRole
+from app.models import VisitorPass
+from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
-from app.services import whatsapp_messaging as wm
-from app.services.messaging.whatsapp_helpers import *  # noqa: F401,F403
-from app.services.type_helpers import as_dict
+from app.services.event_bus import event_bus
+from app.services.messaging.whatsapp_configuration import load_whatsapp_config
+from app.modules.messaging.whatsapp import WhatsAppIntegrationConfig, WhatsAppTransport
+from app.services.messaging.identities import WhatsAppIdentityService, get_whatsapp_identity_service
+from app.services.messaging.whatsapp_replies import WhatsAppReplyCheckpoint
+from app.services.visitor_conversations import VisitorConversationService, get_visitor_conversation_service
+from app.services.mutation_context import MutationError, load_active_admin
+from app.services.visitor_passes import get_visitor_pass_service
+from app.services.messaging.whatsapp_helpers import (
+    masked_phone_number,
+    normalize_whatsapp_phone_number,
+    visitor_pass_timeframe_notification_buttons,
+    whatsapp_confirmation_button_id,
+    whatsapp_response_message_id,
+    visitor_pass_window_label,
+)
 
 logger = get_logger(__name__)
 
-class WhatsAppDeliveryMixin:
+class WhatsAppDeliveryService:
+    def __init__(self, *, transport: WhatsAppTransport | None = None,
+        identities: WhatsAppIdentityService | None = None, conversations: VisitorConversationService | None = None,
+        replies: WhatsAppReplyCheckpoint | None = None):
+        self._transport = transport or WhatsAppTransport()
+        self._identities = identities or get_whatsapp_identity_service()
+        self._conversations = conversations or get_visitor_conversation_service()
+        self._replies = replies
+
+    async def reserve_outreach_in_session(
+        self, session: AsyncSession, visitor_pass: VisitorPass, *,
+        actor_user_id: uuid.UUID, auth_version: int, source: str,
+    ) -> uuid.UUID | None:
+        """The existing UI/Alfred creation transaction owns welcome intake."""
+        from app.services.notification_runs import NotificationRunStore
+
+        if visitor_pass.pass_type != VisitorPassType.DURATION or not visitor_pass.visitor_phone:
+            return None
+        await session.flush()
+        visitor, origin = await self._conversations.prepare_manual_notification_origin(
+            session, visitor_pass.id, actor_user_id=actor_user_id,
+            auth_version=auth_version, kind="outreach", source=source,
+        )
+        config = await load_whatsapp_config(session=session)
+        parameters = [str(visitor.visitor_name or "there")]
+        if config.visitor_pass_template_name.strip().lower() != "iacs_visitor_welcome":
+            parameters.append(visitor_pass_window_label(visitor))
+        action = {"type": "whatsapp", "delivery_mode": "whatsapp_template", "target": origin["recipient"],
+            "title": "", "message": "", "template_name": config.visitor_pass_template_name,
+            "language_code": config.visitor_pass_template_language, "body_parameters": parameters}
+        item = {"rule": {"id": "visitor-outreach", "name": "Visitor welcome", "trigger_event": "visitor_outreach"},
+            "action": action, "state": "pending"}
+        if not origin["recipient"]:
+            item.update(state="skipped", reason="whatsapp_outreach_recipient_invalid")
+        elif get_visitor_pass_service().status_for(visitor, datetime.now(tz=UTC)) not in {VisitorPassStatus.ACTIVE, VisitorPassStatus.SCHEDULED}:
+            item.update(state="skipped", reason="whatsapp_outreach_pass_invalid")
+        elif not config.configured or not config.visitor_pass_template_name:
+            item.update(state="skipped", reason="whatsapp_outreach_not_configured")
+        return await NotificationRunStore().enqueue_prepared_in_session(session,
+            {"event_type": "visitor_outreach", "subject": "Visitor welcome", "severity": "info", "facts": {},
+                "visitor_conversation_origin": origin},
+            run_id=uuid.uuid5(visitor.id, "visitor-outreach"), plan=[item])
+
+
+    async def stop(self) -> None:
+        await self._transport.stop()
+
     async def status(self) -> dict[str, Any]:
-        config = await wm.load_whatsapp_config()
+        config = await load_whatsapp_config()
         endpoints = await self.available_admin_targets()
         return {
             "enabled": config.enabled,
@@ -33,26 +90,12 @@ class WhatsAppDeliveryMixin:
             "visitor_pass_template_name": config.visitor_pass_template_name,
             "visitor_pass_template_language": config.visitor_pass_template_language,
             "admin_target_count": sum(endpoint["id"].startswith("whatsapp:admin:") for endpoint in endpoints),
-            "last_error": self._last_error,
+            "last_error": self._transport.last_error,
         }
 
-    async def test_connection(self, values: dict[str, Any]) -> None:
-        config = await wm.load_whatsapp_config(values)
-        if not config.access_token or not config.phone_number_id:
-            raise ValueError("WhatsApp access token and phone number ID are required.")
-        url = self._graph_url(config, config.phone_number_id)
-        headers = {"Authorization": f"Bearer {config.access_token}"}
-        client = await self._request_client()
-        response = await client.get(
-            url,
-            headers=headers,
-            params={"fields": "id,display_phone_number,verified_name"},
-        )
-        if response.status_code >= 400:
-            raise ValueError(f"WhatsApp API test failed with HTTP {response.status_code}: {response.text[:240]}")
 
     async def available_admin_targets(self) -> list[dict[str, str]]:
-        users = await self._admin_users_with_phone()
+        users = await self._identities.admin_users_with_phone()
         if not users:
             return []
         endpoints = [{
@@ -73,7 +116,8 @@ class WhatsAppDeliveryMixin:
         return endpoints
 
 
-    async def send_text_message(self, to: str, body: str, *, config: WhatsAppIntegrationConfig | None = None) -> dict[str, Any]:
+    async def send_text_message(self, to: str, body: str, *, config: WhatsAppIntegrationConfig | None = None,
+        visitor_pass_id: str | None = None, terminal_notice: bool = False, record_history: bool = True) -> dict[str, Any]:
         return await self._send_whatsapp_message(
             to,
             {
@@ -85,6 +129,8 @@ class WhatsAppDeliveryMixin:
             body[:4096],
             kind="text",
             config=config,
+            visitor_pass_id=visitor_pass_id,
+            terminal_notice=terminal_notice, record_history=record_history,
         )
 
     async def send_template_message(
@@ -95,6 +141,7 @@ class WhatsAppDeliveryMixin:
         language_code: str,
         body_parameters: list[str],
         config: WhatsAppIntegrationConfig | None = None,
+        record_history: bool = True,
     ) -> dict[str, Any]:
         name = str(template_name or "").strip()
         if not name:
@@ -117,7 +164,7 @@ class WhatsAppDeliveryMixin:
             f"Template {name}: {' · '.join(str(value) for value in body_parameters if str(value).strip())}",
             kind="template",
             metadata={"template_name": name, "language_code": language},
-            config=config,
+            config=config, record_history=record_history,
         )
 
     async def send_interactive_buttons(
@@ -173,17 +220,47 @@ class WhatsAppDeliveryMixin:
             {"id": whatsapp_confirmation_button_id("cancel", session_id, confirmation_id), "title": str(pending_action.get("cancel_label") or "Cancel")},
         ])
 
+    async def prepare_notification_action(self, action: dict[str, Any], context: NotificationContext, *,
+        variables: dict[str, str] | None = None) -> dict[str, Any]:
+        return {**action, "frozen_whatsapp_recipients": await self._identities.notification_recipient_bindings(action, variables or {})}
+
+    async def authorize_notification_action_in_session(self, session: AsyncSession, action: dict[str, Any]) -> str | None:
+        recipients = action.get("frozen_whatsapp_recipients")
+        if not isinstance(recipients, list) or not recipients:
+            return "whatsapp_frozen_recipients_unavailable"
+        if any(not isinstance(item, dict) for item in recipients):
+            return "whatsapp_frozen_recipients_invalid"
+        for item in sorted(recipients, key=lambda item: str(item.get("user_id") or "")):
+            phone = item.get("phone")
+            if not phone or normalize_whatsapp_phone_number(phone) != phone:
+                return "whatsapp_frozen_recipients_invalid"
+            if item.get("kind") == "number":
+                continue
+            version = item.get("auth_version")
+            if item.get("kind") != "admin" or type(version) is not int:
+                return "whatsapp_frozen_recipients_invalid"
+            try:
+                user = await load_active_admin(session, item.get("user_id"), auth_version=version, lock=True)
+            except MutationError:
+                return "whatsapp_recipient_changed"
+            if normalize_whatsapp_phone_number(user.mobile_phone_number) != phone:
+                return "whatsapp_recipient_changed"
+        return None
+
     async def send_notification_action(
         self,
         action: dict[str, Any],
         context: NotificationContext,
         *,
         variables: dict[str, str] | None = None,
+        config: WhatsAppIntegrationConfig,
     ) -> None:
-        config = await wm.load_whatsapp_config()
         if not config.configured:
             raise NotificationDeliveryError("WhatsApp integration is not enabled or configured.")
-        phones = await self._notification_target_phones(action, variables or {})
+        recipients = action.get("frozen_whatsapp_recipients")
+        if not isinstance(recipients, list) or any(not isinstance(item, dict) for item in recipients):
+            raise NotificationDeliveryError("Stored WhatsApp recipients are unavailable; review is required.")
+        phones = [str(item.get("phone") or "") for item in recipients]
         if not phones:
             raise NotificationDeliveryError("No WhatsApp Admin users or phone-number targets are configured or selected.")
         title = str(action.get("title") or context.subject).strip()
@@ -200,38 +277,7 @@ class WhatsAppDeliveryMixin:
         if delivered == 0:
             raise NotificationDeliveryError("No WhatsApp messages were delivered.")
 
-    async def execute_automation_action(
-        self,
-        session: AsyncSession,
-        action: dict[str, Any],
-        context: Any,
-        *,
-        rule: AutomationRule,
-    ) -> dict[str, Any]:
-        config = await wm.load_whatsapp_config()
-        if not config.configured:
-            return self._automation_result(action, "skipped", reason="whatsapp_not_configured")
-        action_config = as_dict(action.get("config"))
-        variables = getattr(context, "variables", {}) if isinstance(getattr(context, "variables", {}), dict) else {}
-        phones = await self._automation_target_phones(session, action_config, variables)
-        message_template = str(action_config.get("message_template") or "@Subject")
-        message = render_token_template(message_template, variables) or str(getattr(context, "subject", "") or rule.name)
-        if not phones:
-            return self._automation_result(action, "skipped", reason="no_whatsapp_targets")
-        delivered, failures = await self._send_to_phones(phones, message, config=config)
-        if failures:
-            return self._automation_result(action, "failed", error="; ".join(failures), delivered_count=delivered)
-        return self._automation_result(action, "success", target_count=len(phones), delivered_count=delivered)
 
-    def _automation_result(self, action: dict[str, Any], status: str, **extra: Any) -> dict[str, Any]:
-        return {
-            "id": action.get("id"),
-            "type": action.get("type"),
-            "status": status,
-            "integration_provider": "whatsapp",
-            "integration_action": "send_message",
-            **{key: value for key, value in extra.items() if value is not None},
-        }
 
     async def _send_to_phones(
         self,
@@ -262,7 +308,7 @@ class WhatsAppDeliveryMixin:
         config: WhatsAppIntegrationConfig | None = None,
         show_typing: bool = False,
     ) -> dict[str, Any] | None:
-        config = config or await wm.load_whatsapp_config()
+        config = config or await load_whatsapp_config()
         if not config.configured:
             return None
         normalized_message_id = str(message_id or "").strip()
@@ -276,7 +322,7 @@ class WhatsAppDeliveryMixin:
         if show_typing:
             payload["typing_indicator"] = {"type": "text"}
         try:
-            result = await self._post_message(config, payload)
+            result = await self._transport.send(config, payload)
         except Exception as exc:
             logger.info(
                 "whatsapp_read_receipt_failed",
@@ -287,7 +333,7 @@ class WhatsAppDeliveryMixin:
                 },
             )
             return None
-        await wm.event_bus.publish(
+        await event_bus.publish(
             "whatsapp.message_read",
             {
                 "message_id": normalized_message_id,
@@ -296,32 +342,6 @@ class WhatsAppDeliveryMixin:
         )
         return result
 
-    async def _automation_target_phones(
-        self,
-        session: AsyncSession,
-        config: dict[str, Any],
-        variables: dict[str, str],
-    ) -> list[str]:
-        target_mode = str(config.get("target_mode") or "selected")
-        if target_mode == "all":
-            users = await self._admin_users_with_phone()
-            return unique_phone_numbers(user.mobile_phone_number for user in users)
-        if target_mode == "dynamic":
-            phone = render_token_template(str(config.get("phone_number_template") or ""), variables)
-            return unique_phone_numbers([phone])
-        raw_user_ids = config.get("target_user_ids")
-        user_ids = [coerce_uuid(value) for value in raw_user_ids if str(value).strip()] if isinstance(raw_user_ids, list) else []
-        if not user_ids:
-            return []
-        users = (
-            await session.scalars(
-                select(User)
-                .where(User.id.in_([value for value in user_ids if value]))
-                .where(User.role == UserRole.ADMIN)
-                .where(User.is_active.is_(True))
-            )
-        ).all()
-        return unique_phone_numbers(user.mobile_phone_number for user in users)
 
     async def _send_whatsapp_message(
         self,
@@ -332,47 +352,40 @@ class WhatsAppDeliveryMixin:
         kind: str,
         config: WhatsAppIntegrationConfig | None = None,
         metadata: dict[str, Any] | None = None,
+        visitor_pass_id: str | None = None,
+        terminal_notice: bool = False,
+        record_history: bool = True,
     ) -> dict[str, Any]:
-        config = config or await wm.load_whatsapp_config()
+        config = config or await load_whatsapp_config()
         if not config.configured:
             raise NotificationDeliveryError("WhatsApp integration is not enabled or configured.")
         recipient = normalize_whatsapp_phone_number(to)
         if not recipient:
             raise NotificationDeliveryError("WhatsApp destination phone number is missing.")
         payload = {**payload, "to": recipient}
-        result = await self._post_message(config, payload)
-        await self._record_outbound_visitor_message(
-            recipient,
-            history_body,
-            kind=kind,
-            provider_message_id=whatsapp_response_message_id(result),
-            metadata=metadata,
-        )
+        result = (await self._replies.send(payload, visitor_pass_id=visitor_pass_id, terminal_notice=terminal_notice)
+                  if self._replies else await self._transport.send(config, payload))
+        if record_history:
+            await self._conversations.record_outbound_visitor_message(
+                recipient,
+                history_body,
+                kind=kind,
+                provider_message_id=whatsapp_response_message_id(result),
+                metadata=metadata,
+            )
         return result
 
-    async def _post_message(self, config: WhatsAppIntegrationConfig, payload: dict[str, Any]) -> dict[str, Any]:
-        url = self._graph_url(config, f"{config.phone_number_id}/messages")
-        headers = {
-            "Authorization": f"Bearer {config.access_token}",
-            "Content-Type": "application/json",
-        }
-        client = await self._request_client()
-        response = await client.post(url, headers=headers, json=payload)
-        if response.status_code >= 400:
-            self._last_error = f"HTTP {response.status_code}: {response.text[:240]}"
-            raise NotificationDeliveryError(f"WhatsApp API send failed with HTTP {response.status_code}: {response.text[:240]}")
-        self._last_error = None
-        try:
-            return response.json()
-        except ValueError:
-            return {"status": "ok"}
 
-    def _graph_url(self, config: WhatsAppIntegrationConfig, path: str) -> str:
-        version = normalize_graph_api_version(config.graph_api_version)
-        return f"https://graph.facebook.com/{version}/{path.lstrip('/')}"
 
-    async def _request_client(self) -> httpx.AsyncClient:
-        async with self._http_client_lock:
-            if self._http_client is None:
-                self._http_client = httpx.AsyncClient(timeout=15, trust_env=False)
-            return self._http_client
+
+    async def test_connection(self, values: dict[str, Any]) -> None:
+        await self._transport.test_connection(await load_whatsapp_config(values))
+
+
+_delivery_service: WhatsAppDeliveryService | None = None
+
+def get_whatsapp_delivery_service() -> WhatsAppDeliveryService:
+    global _delivery_service
+    if _delivery_service is None:
+        _delivery_service = WhatsAppDeliveryService()
+    return _delivery_service

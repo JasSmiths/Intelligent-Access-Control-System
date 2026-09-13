@@ -1,0 +1,648 @@
+{
+  "resolve_human_entity": {
+    "status_label": "Resolving system entity...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_presence": {
+    "status_label": "Checking presence logs...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "get_system_users": {
+    "status_label": "Checking user directory...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_device_states": {
+    "status_label": "Checking device states...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "get_maintenance_status": {
+    "status_label": "Checking Maintenance Mode...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "get_active_malfunctions": {
+    "status_label": "Checking gate malfunction state...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "get_malfunction_history": {
+    "status_label": "Reviewing gate malfunction history...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "trigger_manual_malfunction_override": {
+    "status_label": "Preparing gate malfunction override...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "enable_maintenance_mode": {
+    "status_label": "Preparing Maintenance Mode...",
+    "success_fields": [
+      "enabled"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "disable_maintenance_mode": {
+    "status_label": "Preparing Maintenance Mode...",
+    "success_fields": [
+      "disabled"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "open_device": {
+    "status_label": "Preparing device command...",
+    "success_fields": [
+      "accepted",
+      "opened",
+      "closed"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "command_device": {
+    "status_label": "Preparing device command...",
+    "success_fields": [
+      "accepted",
+      "opened",
+      "closed"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "open_gate": {
+    "status_label": "Preparing gate open command...",
+    "success_fields": [
+      "opened"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "toggle_maintenance_mode": {
+    "status_label": "Preparing Maintenance Mode...",
+    "success_fields": [
+      "changed"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.gate_maintenance.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.gate_maintenance.confirmation_button"
+  },
+  "query_visitor_passes": {
+    "status_label": "Checking Visitor Passes...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "get_visitor_pass": {
+    "status_label": "Checking Visitor Pass...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "create_visitor_pass": {
+    "status_label": "Preparing Visitor Pass...",
+    "success_fields": [
+      "created"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "update_visitor_pass": {
+    "status_label": "Preparing Visitor Pass update...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "cancel_visitor_pass": {
+    "status_label": "Preparing Visitor Pass cancellation...",
+    "success_fields": [
+      "cancelled"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "trigger_icloud_sync": {
+    "status_label": "Preparing iCloud Calendar sync...",
+    "success_fields": [
+      "synced"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.visitor_passes.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.visitor_passes.confirmation_button"
+  },
+  "query_access_events": {
+    "status_label": "Reviewing access events...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "diagnose_access_event": {
+    "status_label": "Diagnosing access event...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "investigate_access_incident": {
+    "status_label": "Investigating access incident...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_unifi_protect_events": {
+    "status_label": "Checking UniFi Protect history...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "backfill_access_event_from_protect": {
+    "status_label": "Preparing access event backfill...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "test_unifi_alarm_webhook": {
+    "status_label": "Preparing Protect webhook test...",
+    "success_fields": [
+      "sent"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_lpr_timing": {
+    "status_label": "Checking LPR timing...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_vehicle_detection_history": {
+    "status_label": "Counting vehicle detections...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "get_telemetry_trace": {
+    "status_label": "Reading telemetry trace...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_leaderboard": {
+    "status_label": "Checking Top Charts...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_anomalies": {
+    "status_label": "Checking anomaly records...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "query_alert_activity": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "analyze_alert_snapshot": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "summarize_access_rhythm": {
+    "status_label": "Summarizing site rhythm...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "calculate_visit_duration": {
+    "status_label": "Calculating visit duration...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "calculate_absence_duration": {
+    "status_label": "Calculating absence duration...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "trigger_anomaly_alert": {
+    "status_label": "Preparing alert notification...",
+    "success_fields": [
+      "sent"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.access_diagnostics.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.access_diagnostics.confirmation_button"
+  },
+  "lookup_dvla_vehicle": {
+    "status_label": "Looking up vehicle details...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "analyze_camera_snapshot": {
+    "status_label": "Analyzing camera snapshot...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "read_chat_attachment": {
+    "status_label": "Reading attachment...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "export_presence_report_csv": {
+    "status_label": "Generating CSV report...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "generate_contractor_invoice_pdf": {
+    "status_label": "Generating PDF invoice...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "get_camera_snapshot": {
+    "status_label": "Fetching camera snapshot...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_notification_catalog": {
+    "status_label": "Checking notification options...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "query_notification_workflows": {
+    "status_label": "Checking notification workflows...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "get_notification_workflow": {
+    "status_label": "Checking notification workflow...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "create_notification_workflow": {
+    "status_label": "Preparing notification workflow...",
+    "success_fields": [
+      "created"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "update_notification_workflow": {
+    "status_label": "Preparing notification workflow update...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "delete_notification_workflow": {
+    "status_label": "Preparing notification workflow deletion...",
+    "success_fields": [
+      "deleted"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "preview_notification_workflow": {
+    "status_label": "Previewing notification workflow...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "test_notification_workflow": {
+    "status_label": "Preparing notification test...",
+    "success_fields": [
+      "sent"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.notifications.confirmation_summary",
+    "button_owner": null
+  },
+  "query_automation_catalog": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "query_automations": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "get_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "create_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [
+      "created"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "edit_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "delete_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [
+      "deleted"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "enable_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "disable_automation": {
+    "status_label": "Running system tool...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.automations.confirmation_summary",
+    "button_owner": null
+  },
+  "override_schedule": {
+    "status_label": "Preparing schedule override...",
+    "success_fields": [
+      "created"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "query_schedules": {
+    "status_label": "Checking schedules...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "get_schedule": {
+    "status_label": "Checking schedule details...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "create_schedule": {
+    "status_label": "Creating schedule...",
+    "success_fields": [
+      "created"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "update_schedule": {
+    "status_label": "Updating schedule...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "delete_schedule": {
+    "status_label": "Deleting schedule...",
+    "success_fields": [
+      "deleted"
+    ],
+    "finish_after_confirmation": true,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "query_schedule_targets": {
+    "status_label": "Checking schedule assignments...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "assign_schedule_to_entity": {
+    "status_label": "Assigning schedule...",
+    "success_fields": [
+      "assigned"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "verify_schedule_access": {
+    "status_label": "Verifying schedule access...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": "app.ai.tool_groups.schedules.confirmation_summary",
+    "button_owner": "app.ai.tool_groups.schedules.confirmation_button"
+  },
+  "query_integration_health": {
+    "status_label": "Checking integration health...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "test_integration_connection": {
+    "status_label": "Preparing integration test...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_system_settings": {
+    "status_label": "Reading redacted settings...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "update_system_settings": {
+    "status_label": "Preparing settings update...",
+    "success_fields": [
+      "updated"
+    ],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_auth_secret_status": {
+    "status_label": "Checking auth-secret status...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_alfred_runtime_events": {
+    "status_label": "Running system tool...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "rotate_auth_secret": {
+    "status_label": "Preparing auth-secret rotation...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_dependency_updates": {
+    "status_label": "Checking dependency update state...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "check_dependency_updates": {
+    "status_label": "Preparing dependency update check...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "analyze_dependency_update": {
+    "status_label": "Preparing dependency analysis...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "apply_dependency_update": {
+    "status_label": "Preparing dependency apply job...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_dependency_backups": {
+    "status_label": "Checking dependency backups...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "restore_dependency_backup": {
+    "status_label": "Preparing dependency restore job...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "query_dependency_update_job": {
+    "status_label": "Checking dependency job...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "configure_dependency_backup_storage": {
+    "status_label": "Preparing backup storage update...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  },
+  "validate_dependency_backup_storage": {
+    "status_label": "Preparing backup storage validation...",
+    "success_fields": [],
+    "finish_after_confirmation": false,
+    "summary_owner": null,
+    "button_owner": null
+  }
+}

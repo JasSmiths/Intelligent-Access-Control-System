@@ -24,6 +24,7 @@ Zap
 import React from "react";
 
 import { api, createActionConfirmation } from "../api/client";
+import { integrationsApi } from "../api/integrations";
 import { displayUserName, formatDate } from "../lib/format";
 import { fileToDataUrl, mediaSource, UserAvatar } from "../lib/media";
 import { coerceSettingsPayload, SettingField, stringifySetting, useSettings } from "../lib/settings";
@@ -543,6 +544,7 @@ export function AccessDevicesSettingsView({
   schedules: Schedule[];
 }) {
   const [devices, setDevices] = React.useState<AccessDevice[]>([]);
+  const [admissionChoices, setAdmissionChoices] = React.useState<Array<{ key: string; name: string }>>([]);
   const [devicesLoading, setDevicesLoading] = React.useState(true);
   const [discoveryLoading, setDiscoveryLoading] = React.useState(false);
   const [savingKey, setSavingKey] = React.useState("");
@@ -559,7 +561,10 @@ export function AccessDevicesSettingsView({
     if (showLoading) setDevicesLoading(true);
     setError("");
     try {
-      setDevices(await api.get<AccessDevice[]>(`/api/v1/access-devices?kind=${kind}`));
+      const saved = await integrationsApi.getAccessDevices(kind);
+      setDevices(saved);
+      // Choices are server-validated saved devices, independent of unsaved editor drafts.
+      setAdmissionChoices(saved.filter((device) => device.admission_eligible === true).map(({ key, name }) => ({ key, name })));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load access devices.");
     } finally {
@@ -601,6 +606,7 @@ export function AccessDevicesSettingsView({
   const scheduleNameById = React.useMemo(() => new Map(schedules.map((schedule) => [schedule.id, schedule.name])), [schedules]);
   const primaryProvider = stringifySetting(accessSettings.values.gate_control_provider || "home_assistant");
   const failoverProvider = stringifySetting(accessSettings.values.gate_failover_provider || "none");
+  const admissionDeviceKey = stringifySetting(accessSettings.values.gate_admission_device_key || "");
   const deviceNoun = kind === "gate" ? "gate" : "garage door";
   const deviceNounPlural = kind === "gate" ? "gates" : "garage doors";
 
@@ -678,7 +684,9 @@ export function AccessDevicesSettingsView({
         kind: device.kind,
         name: device.name,
         enabled: device.enabled,
-        schedule_id: device.schedule_id || null,
+        // An empty string explicitly clears the assignment and remains bound
+        // to confirmation; null is omitted by the existing confirmation protocol.
+        schedule_id: device.schedule_id || "",
         open_for_access: device.open_for_access,
         sort_order: device.sort_order
       };
@@ -716,6 +724,7 @@ export function AccessDevicesSettingsView({
       }
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
       setMessage("Device saved.");
+      await loadDevices(false);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
     } finally {
@@ -723,7 +732,8 @@ export function AccessDevicesSettingsView({
     }
   };
 
-  const saveProviderSetting = async (key: "gate_control_provider" | "gate_failover_provider", value: string) => {
+  const saveProviderSetting = async (key: "gate_control_provider" | "gate_failover_provider" | "gate_admission_device_key", value: string) => {
+    const isAdmissionSelection = key === "gate_admission_device_key";
     if (!isAdmin) {
       setError("Administrator access is required to save provider preferences.");
       return;
@@ -736,13 +746,13 @@ export function AccessDevicesSettingsView({
       const confirmation = await createActionConfirmation("settings.update", { values: updates }, {
         target_entity: "SystemSetting",
         target_id: key,
-        target_label: providerLabel(value),
-        reason: "Update access-device provider preference"
+        target_label: isAdmissionSelection ? admissionChoices.find((device) => device.key === value)?.name || "No entry gate selected" : providerLabel(value),
+        reason: isAdmissionSelection ? "Designate the automatic-admission entry gate" : "Update access-device provider preference"
       });
       await accessSettings.save(updates, { confirmationToken: confirmation.confirmation_token });
-      setMessage("Provider preference saved.");
+      setMessage(isAdmissionSelection ? "Entry gate selection saved." : "Provider preference saved.");
     } catch (providerError) {
-      setError(providerError instanceof Error ? providerError.message : "Unable to save provider preference.");
+      setError(providerError instanceof Error ? providerError.message : isAdmissionSelection ? "Unable to save entry gate selection." : "Unable to save provider preference.");
     } finally {
       setProviderSavingKey("");
     }
@@ -807,7 +817,7 @@ export function AccessDevicesSettingsView({
               <span className="access-section-icon"><SlidersHorizontal size={17} /></span>
               <div>
                 <h2>Command route</h2>
-                <p>{providerLabel(primaryProvider)} sends {deviceNoun} commands first{failoverProvider === "none" ? "." : `, then ${providerLabel(failoverProvider)} only if needed.`}</p>
+                <p>{providerLabel(primaryProvider)} sends {deviceNoun} commands first{failoverProvider === "none" ? "." : `, then ${providerLabel(failoverProvider)} only before a command may have been sent.`}</p>
               </div>
             </div>
             <Badge tone={accessSettings.loading || providerSavingKey ? "gray" : "blue"}>{providerSavingKey ? "Saving" : "Global"}</Badge>
@@ -824,12 +834,33 @@ export function AccessDevicesSettingsView({
             <AccessProviderChoice
               allowNone
               disabled={!isAdmin || accessSettings.loading || Boolean(providerSavingKey)}
-              helper="Only used when the primary integration is unavailable."
+              helper="Only used when the primary cannot send. Uncertain commands require reconciliation."
               label="Failover"
               value={failoverProvider}
               onChange={(value) => saveProviderSetting("gate_failover_provider", value)}
             />
           </div>
+          {kind === "gate" ? (
+            <div className="field">
+              <label htmlFor="admission-gate">Automatic-admission entry gate</label>
+              <select
+                id="admission-gate"
+                value={admissionDeviceKey}
+                disabled={!isAdmin || devicesLoading || accessSettings.loading || Boolean(providerSavingKey)}
+                onChange={(event) => saveProviderSetting("gate_admission_device_key", event.target.value)}
+              >
+                <option value="">No entry gate selected</option>
+                {admissionDeviceKey && !admissionChoices.some((device) => device.key === admissionDeviceKey) ? (
+                  <option value={admissionDeviceKey}>{admissionDeviceKey} (not eligible or unverified)</option>
+                ) : null}
+                {admissionChoices.map((device) => (
+                  <option key={device.key} value={device.key}>{device.name}</option>
+                ))}
+              </select>
+              {admissionDeviceKey && !admissionChoices.some((device) => device.key === admissionDeviceKey) ? <p role="alert">The selected entry gate is not confirmed eligible. Automatic admission is blocked; select an eligible saved gate or correct its configuration.</p> : null}
+              <p>The server checks that the saved gate is enabled, commandable, and set to open for access events. Its physical opening verifies entry admission; it does not prove vehicle passage. Automatic admission stays blocked until an eligible gate is selected.</p>
+            </div>
+          ) : null}
         </section>
 
         <section className="access-settings-panel access-device-source-panel">

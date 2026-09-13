@@ -5,6 +5,8 @@ on:
     paths:
       - "backend/**"
       - "frontend/**"
+      - "scripts/phase1/**"
+      - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
       - ".github/workflows/backend-alfred.yml"
@@ -13,109 +15,73 @@ on:
     paths:
       - "backend/**"
       - "frontend/**"
+      - "scripts/phase1/**"
+      - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
       - ".github/workflows/backend-alfred.yml"
 
+permissions:
+  contents: read
+
 jobs:
-  backend:
+  isolated-contracts:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16@sha256:00ba258a66dac104fd5171074a0084462a64a1369d8513f3d0a634e2f24d15bc
-        env:
-          POSTGRES_DB: iacs
-          POSTGRES_USER: iacs
-          POSTGRES_PASSWORD: iacs_dev_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U iacs -d iacs"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
-        ports:
-          - 6379:6379
+    timeout-minutes: 60
     env:
-      IACS_ENVIRONMENT: testing
-      IACS_DATABASE_URL: postgresql+asyncpg://iacs:iacs_dev_password@localhost:5432/iacs
-      IACS_REDIS_URL: redis://localhost:6379/0
-    defaults:
-      run:
-        working-directory: backend
+      PYTHONDONTWRITEBYTECODE: "1"
+      PHASE1_BACKEND_IMAGE: iacs-backend:ci-runtime
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: |
-            backend/pyproject.toml
-            backend/uv.lock
-      - name: Check backend lockfile
+      - name: Validate source selection and required check classification
         run: |
-          python -m pip install uv
-          uv lock --check
-      - name: Install backend
-        run: python -m pip install -e ".[dev]"
-      - name: Ruff targeted Alfred modules
-        run: >
-          python -m ruff check
-          app/ai/tool_groups
-          app/services/alfred
-          app/services/chat.py
-          app/services/domain_events.py
-      - name: Mypy targeted Alfred modules
-        run: >
-          python -m mypy
-          app/ai/tool_groups
-          app/services/alfred/memory.py
-          app/services/domain_events.py
-      - name: Python dependency audit
-        run: |
-          python -m pip install pip-audit
-          uv export --locked --extra dev --format requirements-txt --no-emit-project --no-hashes > /tmp/iacs-requirements.txt
-          pip-audit --strict -r /tmp/iacs-requirements.txt
-      - name: Alembic migration smoke
-        env:
-          IACS_AUTO_CREATE_SCHEMA: "false"
-        run: |
-          alembic upgrade head
-          alembic current
-      - name: Run backend tests
-        run: python -m pytest
+          python3 scripts/phase1/test_source_snapshot.py
+          python3 scripts/phase1/test_harness_configuration.py
+      - name: Build backend runtime image
+        run: docker build --target runtime -t iacs-backend:ci-runtime backend
+      - name: Run the same isolated locked checks as local development
+        run: >-
+          python3 scripts/phase1/validate.py --mode full --allow-downloads
+          --evidence-root "${{ runner.temp }}/iacs-evidence"
+      - name: Retain commands, fingerprints and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-contract-evidence
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/iacs-evidence/*/*.json
+            ${{ runner.temp }}/iacs-evidence/*/*.log
+            ${{ runner.temp }}/iacs-evidence/*/artifacts/**
 
-  frontend:
+  dependency-audits:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: "frontend/package-lock.json"
-      - name: Install frontend
-        run: npm ci
-      - name: Frontend dependency audit
-        run: npm audit --audit-level=high
-      - name: Run frontend tests
-        run: npm run test
-      - name: Build frontend
-        run: npm run build
+      - name: Audit the locked Python dependency set
+        working-directory: backend
+        run: |
+          python -m pip install uv pip-audit
+          uv export --locked --extra dev --format requirements-txt --no-emit-project --no-hashes > "${{ runner.temp }}/iacs-requirements.txt"
+          pip-audit --strict -r "${{ runner.temp }}/iacs-requirements.txt"
+      - name: Audit the frontend lock
+        working-directory: frontend
+        run: npm audit --package-lock-only --audit-level=high
 
-  compose:
+  image-builds:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Validate compose config
-        run: docker compose config --quiet
-      - name: Build backend runtime image
-        run: docker build --target runtime -t iacs-backend:ci-runtime backend
       - name: Build backend development image
         run: docker build --target development -t iacs-backend:ci-development backend
       - name: Build frontend runtime image

@@ -1,26 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import re
-import sys
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.auth_secret import get_auth_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import MessagingIdentity
 from app.models.enums import UserRole
-from app.modules.messaging.base import IncomingChatMessage
+from app.modules.messaging.base import IncomingChatMessage, MessagingAuthorityChanged
+from app.modules.messaging.discord_transport import (
+    send_channel_message,
+    send_interaction_followup,
+)
 from app.modules.messaging.discord_bot import (
     DiscordConfirmationView,
     IacsDiscordBot,
     discord,
-    discord_author_is_provider_admin,
     discord_library_available,
 )
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
@@ -30,40 +35,9 @@ from app.modules.notifications.discord_formatter import (
     format_discord_notification,
 )
 from app.services.event_bus import event_bus
-from app.services.settings import get_runtime_config
+from app.services.settings import get_runtime_config, get_runtime_config_for_session
 
 logger = get_logger(__name__)
-
-
-@asynccontextmanager
-async def discord_typing(channel: Any):
-    typing = getattr(channel, "typing", None)
-    if not callable(typing):
-        yield
-        return
-    try:
-        manager = typing()
-    except Exception as exc:
-        logger.info("discord_typing_unavailable", extra={"error": str(exc)[:160]})
-        yield
-        return
-    if not hasattr(manager, "__aenter__") or not hasattr(manager, "__aexit__"):
-        yield
-        return
-    try:
-        await manager.__aenter__()
-    except Exception as exc:
-        logger.info("discord_typing_unavailable", extra={"error": str(exc)[:160]})
-        yield
-        return
-    try:
-        yield
-    except BaseException:
-        suppress = await manager.__aexit__(*sys.exc_info())
-        if not suppress:
-            raise
-    else:
-        await manager.__aexit__(None, None, None)
 
 
 @dataclass(frozen=True)
@@ -83,9 +57,24 @@ class DiscordIntegrationConfig:
         return bool(self.bot_token)
 
 
-@dataclass(frozen=True)
-class DiscordConfirmationResult:
-    response_text: str
+class DiscordNotificationDeliveryError(NotificationDeliveryError):
+    """Safe action-level truth for a Discord fanout that cannot be retried."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        delivery: str = "unknown",
+        destination_outcomes: list[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(message, delivery=delivery)  # type: ignore[arg-type]
+        self.destination_outcomes = list(destination_outcomes or [])
+        self.partial_failure = bool(
+            self.destination_outcomes
+            and any(item.get("delivery") != "accepted" for item in self.destination_outcomes)
+            and any(item.get("delivery") == "accepted" for item in self.destination_outcomes)
+        )
+        self.failure_count = sum(item.get("delivery") != "accepted" for item in self.destination_outcomes)
 
 
 class DiscordMessagingService:
@@ -95,12 +84,28 @@ class DiscordMessagingService:
         self._started = False
         self._last_error: str | None = None
         self._ready_at: datetime | None = None
+        self._sender_token_binding: str | None = None
+
+        # Lifecycle composition supplies the inbound gateway before startup.
+        # The transport owns the connected bot only; it never imports or owns
+        # durable intake, Alfred routing, or confirmation execution.
+        self._gateway: Any | None = None
+
+    def configure_gateway(self, gateway: Any) -> None:
+        """Bind bot callbacks before this transport is started."""
+        if self._started:
+            raise RuntimeError("Discord gateway cannot change while the transport is running.")
+        self._gateway = gateway
 
     async def start(self) -> None:
         if self._started:
             return
+        if self._gateway is None:
+            self._last_error = "Discord inbound gateway is not configured."
+            logger.warning("discord_gateway_missing")
+            return
         self._started = True
-        config = await load_discord_config()
+        config = await load_current_discord_config()
         if not config.bot_token:
             self._last_error = "Discord bot token is not configured."
             logger.warning("discord_bot_token_missing")
@@ -109,12 +114,14 @@ class DiscordMessagingService:
             self._last_error = "discord.py is not installed. Rebuild the backend image after dependency enrollment."
             logger.warning("discord_library_missing")
             return
-        self._client = IacsDiscordBot(self)
+        self._client = IacsDiscordBot(self._gateway)
+        self._sender_token_binding = discord_sender_binding(config.bot_token)
         self._task = asyncio.create_task(self._run_client(config.bot_token))
         logger.info("discord_bot_starting")
 
     async def stop(self) -> None:
         self._started = False
+        self._sender_token_binding = None
         client = self._client
         task = self._task
         self._client = None
@@ -129,6 +136,7 @@ class DiscordMessagingService:
                 await asyncio.wait_for(task, timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             except Exception as exc:
                 logger.warning("discord_bot_task_stop_failed", extra={"error": str(exc)})
         logger.info("discord_bot_stopped")
@@ -186,6 +194,11 @@ class DiscordMessagingService:
             "ready_at": self._ready_at.isoformat() if self._ready_at else None,
         }
 
+    @staticmethod
+    async def config_for_session(session) -> DiscordIntegrationConfig:
+        """Return an uncached transaction-scoped Discord configuration snapshot."""
+        return discord_config_from_runtime(await get_runtime_config_for_session(session))
+
     async def available_channels(self) -> list[dict[str, str]]:
         config = await load_discord_config()
         channels: list[dict[str, str]] = []
@@ -231,120 +244,84 @@ class DiscordMessagingService:
         finally:
             await client.close()
 
-    async def handle_provider_message(self, message: IncomingChatMessage, provider_message: Any) -> None:
-        allowed, reason = await self.message_is_allowed(message)
-        if not allowed:
-            logger.info(
-                "discord_message_denied",
-                extra={
-                    "reason": reason,
-                    "guild_id": message.provider_guild_id,
-                    "channel_id": message.provider_channel_id,
-                    "author_id": message.author_provider_id,
-                },
+    def delivery_ready(self) -> bool:
+        return bool(self._client and not self._client.is_closed() and getattr(self._client, "user", None))
+
+    async def assert_current_sender(self, config: DiscordIntegrationConfig | None = None) -> DiscordIntegrationConfig:
+        """Fence provider I/O against both the live bot token and fresh config."""
+        current = await load_current_discord_config()
+        if config is not None and discord_configuration_binding(config) != discord_configuration_binding(current):
+            raise NotificationDeliveryError(
+                "Discord configuration changed before sending; create a fresh notification request.",
+                delivery="not_sent",
             )
-            return
-        if not message.text:
-            return
-        is_admin = await self.author_is_admin(
-            message.author_provider_id,
-            message.author_role_ids,
-            provider_admin=message.author_is_provider_admin,
-        )
-        from app.services.messaging_bridge import messaging_bridge_service
-
-        channel = provider_message.channel
-        async with discord_typing(channel):
-            result = await messaging_bridge_service.handle_message(message, is_admin_hint=is_admin)
-            await self._send_chat_result(channel, result.response_text, result.pending_action, message.author_display_name)
-
-    async def handle_slash_command(self, interaction: Any, command: str, *, message: str | None = None) -> None:
-        incoming = incoming_from_interaction(interaction, command_text(command, message))
-        try:
-            allowed, reason = await self.message_is_allowed(incoming, slash_command=True)
-            if not allowed:
-                await interaction.response.send_message(f"Discord access denied: {reason}.", ephemeral=True)
-                return
-            if command == "help":
-                await interaction.response.send_message(DISCORD_HELP_TEXT, ephemeral=True)
-                return
-            is_admin = await self.author_is_admin(
-                incoming.author_provider_id,
-                incoming.author_role_ids,
-                provider_admin=incoming.author_is_provider_admin,
+        if (
+            not current.configured
+            or not self.delivery_ready()
+            or self._sender_token_binding != discord_sender_binding(current.bot_token)
+        ):
+            raise NotificationDeliveryError(
+                "Discord sender is unavailable or its configuration changed; reconnect before sending.",
+                delivery="not_sent",
             )
-            if command == "notify_test":
-                if not is_admin:
-                    await interaction.response.send_message("Admin permission is required for `/alfred notify_test`.", ephemeral=True)
-                    return
-                await interaction.response.defer(thinking=True)
-                target_channel_id = incoming.provider_channel_id or (await load_discord_config()).default_notification_channel_id
-                incoming = incoming_from_interaction(interaction, notify_test_command_text(target_channel_id))
-                from app.services.messaging_bridge import messaging_bridge_service
+        return current
 
-                result = await messaging_bridge_service.handle_message(incoming, is_admin_hint=True)
-                await interaction.followup.send(**self._slash_followup_kwargs(result, incoming.author_display_name))
-                return
-
-            await interaction.response.defer(thinking=True)
-            from app.services.messaging_bridge import messaging_bridge_service
-
-            result = await messaging_bridge_service.handle_message(incoming, is_admin_hint=is_admin)
-            await interaction.followup.send(**self._slash_followup_kwargs(result, incoming.author_display_name))
-        except Exception as exc:
-            logger.warning(
-                "discord_slash_command_failed",
-                extra={
-                    "command": command,
-                    "author_id": incoming.author_provider_id,
-                    "channel_id": incoming.provider_channel_id,
-                    "error": str(exc),
-                },
-            )
-            await self._send_interaction_error(interaction)
-
-    async def handle_confirmation_interaction(
+    async def refresh_incoming_membership(
         self,
-        interaction: Any,
+        message: IncomingChatMessage,
         *,
-        session_id: str,
-        confirmation_id: str,
-        decision: str,
-    ) -> None:
-        incoming = incoming_from_interaction(interaction, "")
-        allowed, reason = await self.message_is_allowed(incoming, slash_command=True)
-        if not allowed:
-            logger.info(
-                "discord_hitl_denied",
-                extra={"author_id": incoming.author_provider_id, "confirmation_id": confirmation_id, "reason": reason},
-            )
-            await interaction.response.send_message(f"Discord access denied: {reason}.", ephemeral=True)
-            return
-        provider_user_id = incoming.author_provider_id
-        linked_user_id = await self._linked_admin_user_id(provider_user_id)
-        if not linked_user_id:
-            logger.info("discord_hitl_denied", extra={"author_id": provider_user_id, "confirmation_id": confirmation_id})
-            await interaction.response.send_message(
-                "Admin permission is required to resolve this action. Link this Discord identity to an active IACS Admin account first.",
-                ephemeral=True,
-            )
-            return
-        logger.info(
-            "discord_hitl_resolution",
-            extra={"author_id": provider_user_id, "confirmation_id": confirmation_id, "decision": decision},
+        config: DiscordIntegrationConfig,
+    ) -> IncomingChatMessage:
+        if message.is_direct_message:
+            return message
+        client = self._client
+        get_guild = getattr(client, "get_guild", None)
+        guild = (
+            get_guild(int(message.provider_guild_id))
+            if callable(get_guild) and str(message.provider_guild_id or "").isdecimal()
+            else None
         )
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        result = await messaging_bridge_service_handle_confirmation(
-            session_id=session_id,
-            confirmation_id=confirmation_id,
-            decision=decision,
-            user_id=linked_user_id,
-            user_role="admin",
-        )
-        await interaction.followup.send(result.response_text[:1900] or "Action resolved.", ephemeral=True)
+        if guild is None:
+            raise MessagingAuthorityChanged("discord_membership_unavailable")
+        try:
+            member = await guild.fetch_member(int(message.author_provider_id))
+        except Exception as exc:
+            raise MessagingAuthorityChanged("discord_membership_unavailable") from exc
+        roles = [str(role.id) for role in getattr(member, "roles", [])]
+        return replace(message, author_role_ids=roles)
 
-    async def message_is_allowed(self, message: IncomingChatMessage, *, slash_command: bool = False) -> tuple[bool, str]:
-        config = await load_discord_config()
+    async def send_incoming_interaction_reply(self, interaction, payload):
+        kwargs = {"content": payload["content"], "allowed_mentions": {"parse": []}}
+        view = None
+        if payload.get("pending_action"):
+            kwargs["embeds"] = [
+                self._embed_to_payload(
+                    format_confirmation_embed(payload["pending_action"], payload["requester"])
+                )
+            ]
+            view = self._confirmation_view(payload["pending_action"])
+            if view is not None:
+                kwargs["components"] = view.to_components()
+        if payload["mode"] in {"confirmation", "help"}:
+            kwargs["flags"] = 64
+        await self.assert_current_sender()
+        result = await send_interaction_followup(
+            interaction.application_id,
+            interaction.token,
+            kwargs,
+        )
+        if view is not None:
+            self._register_sent_view(view, result.id)
+        return result
+
+    async def message_is_allowed(
+        self,
+        message: IncomingChatMessage,
+        *,
+        slash_command: bool = False,
+        config: DiscordIntegrationConfig | None = None,
+    ) -> tuple[bool, str]:
+        config = config or await load_current_discord_config()
         if message.is_direct_message:
             if not config.allow_direct_messages:
                 return False, "direct_messages_disabled"
@@ -383,20 +360,63 @@ class DiscordMessagingService:
         context: NotificationContext,
         *,
         attachment_paths: list[str] | None = None,
-    ) -> None:
-        target_ids = [target for target in action.get("target_ids", []) if str(target).startswith("discord:")]
-        if str(action.get("target_mode") or "all") == "all" or not target_ids:
-            default_channel = (await load_discord_config()).default_notification_channel_id
-            target_channel_ids = [default_channel] if default_channel else []
-        else:
-            target_channel_ids = [str(target).split(":", 1)[1] for target in target_ids]
-        await self.send_notification_to_channels(
-            target_channel_ids,
+        config: DiscordIntegrationConfig,
+    ) -> dict[str, Any]:
+        channels = _frozen_notification_channel_ids(action)
+        if not channels:
+            raise NotificationDeliveryError(
+                "Stored Discord notification channels are unavailable; review is required.",
+                delivery="not_sent",
+            )
+        if action.get("frozen_discord_configuration_binding") != discord_configuration_binding(config):
+            raise NotificationDeliveryError(
+                "Discord notification configuration changed; create a fresh notification request.",
+                delivery="not_sent",
+            )
+        await self.assert_current_sender(config)
+        return await self.send_notification_to_channels(
+            channels,
             str(action.get("title") or context.subject),
             str(action.get("message") or ""),
             context,
             attachment_paths=attachment_paths,
+            config=config,
         )
+
+    async def prepare_notification_action(
+        self,
+        action: dict[str, Any],
+        context: NotificationContext,
+    ) -> dict[str, Any]:
+        """Freeze numeric targets and the sender/configuration fingerprint before claims."""
+        del context
+        config = await load_current_discord_config()
+        return {
+            **action,
+            "frozen_discord_channel_ids": _notification_channel_ids(action, config),
+            "frozen_discord_configuration_binding": discord_configuration_binding(config),
+        }
+
+    async def authorize_notification_action_in_session(
+        self,
+        session,
+        action: dict[str, Any],
+        *,
+        config: DiscordIntegrationConfig | None = None,
+    ) -> str | None:
+        """Validate immutable Discord plan data using the fresh dispatch transaction config."""
+        channels = _frozen_notification_channel_ids(action)
+        if not channels:
+            return "discord_frozen_channels_unavailable"
+        if any(not channel.isdecimal() for channel in channels):
+            return "discord_frozen_channels_invalid"
+        binding = action.get("frozen_discord_configuration_binding")
+        if not isinstance(binding, str) or not binding:
+            return "discord_configuration_binding_unavailable"
+        config = config or await self.config_for_session(session)
+        if not config.configured or binding != discord_configuration_binding(config):
+            return "discord_configuration_changed"
+        return None
 
     async def send_notification_to_channels(
         self,
@@ -406,28 +426,61 @@ class DiscordMessagingService:
         context: NotificationContext,
         *,
         attachment_paths: list[str] | None = None,
-    ) -> None:
+        config: DiscordIntegrationConfig,
+    ) -> dict[str, Any]:
         if not channel_ids:
-            raise NotificationDeliveryError("No Discord channel is configured or selected.")
+            raise NotificationDeliveryError("No Discord channel is configured or selected.", delivery="not_sent")
         payload = format_discord_notification(title, message, context)
-        embeds = [self._embed_from_payload(embed) for embed in payload.embeds]
-        failures: list[str] = []
-        delivered = False
-        for channel_id in channel_ids:
+        embeds = [self._embed_to_payload(embed) for embed in payload.embeds]
+        outcomes: list[dict[str, str]] = []
+        for index, channel_id in enumerate(channel_ids):
             try:
                 await self.send_message(
                     channel_id,
                     payload.content,
                     embeds=embeds,
                     attachment_paths=attachment_paths,
+                    config=config,
                 )
-                delivered = True
+                outcomes.append({"target": channel_id, "delivery": "accepted"})
+            except NotificationDeliveryError as exc:
+                delivery = exc.delivery
+                outcomes.append({"target": channel_id, "delivery": delivery})
+                if delivery == "unknown":
+                    outcomes.extend(
+                        {"target": remaining, "delivery": "not_sent"}
+                        for remaining in channel_ids[index + 1 :]
+                    )
+                    raise DiscordNotificationDeliveryError(
+                        "Discord delivery outcome is uncertain; review is required before any resend.",
+                        delivery="unknown",
+                        destination_outcomes=outcomes,
+                    ) from exc
             except Exception as exc:
-                failures.append(f"{channel_id}: {exc}")
-        if failures:
-            raise NotificationDeliveryError("; ".join(failures))
-        if not delivered:
-            raise NotificationDeliveryError("No Discord notification endpoints were delivered.")
+                outcomes.append({"target": channel_id, "delivery": "unknown"})
+                outcomes.extend(
+                    {"target": remaining, "delivery": "not_sent"}
+                    for remaining in channel_ids[index + 1 :]
+                )
+                raise DiscordNotificationDeliveryError(
+                    "Discord delivery outcome is uncertain; review is required before any resend.",
+                    delivery="unknown",
+                    destination_outcomes=outcomes,
+                ) from exc
+        accepted = sum(item["delivery"] == "accepted" for item in outcomes)
+        failures = sum(item["delivery"] != "accepted" for item in outcomes)
+        if not accepted:
+            delivery = "rejected" if any(item["delivery"] == "rejected" for item in outcomes) else "not_sent"
+            raise DiscordNotificationDeliveryError(
+                "No Discord notification endpoints accepted the notification.",
+                delivery=delivery,
+                destination_outcomes=outcomes,
+            )
+        return {
+            "destination_outcomes": outcomes,
+            "partial_failure": bool(failures),
+            "failure_count": failures,
+        }
 
     async def send_message(
         self,
@@ -438,37 +491,65 @@ class DiscordMessagingService:
         view: Any | None = None,
         files: list[Any] | None = None,
         attachment_paths: list[str] | None = None,
-    ) -> None:
-        if discord is None:
-            raise NotificationDeliveryError("discord.py is not installed.")
-        channel = await self._resolve_channel(provider_channel_id)
+        config: DiscordIntegrationConfig | None = None,
+        _resolved_channel: Any | None = None,
+    ) -> Any:
+        channel = _resolved_channel or await self._resolve_channel(provider_channel_id)
         if channel is None:
-            raise NotificationDeliveryError(f"Discord channel {provider_channel_id} is unavailable.")
-        embed_batches = _chunked(embeds or [], 10) or [[]]
-        file_paths = attachment_paths or []
+            raise NotificationDeliveryError(
+                f"Discord channel {provider_channel_id} is unavailable.",
+                delivery="not_sent",
+            )
+        channel_id = str(getattr(channel, "id", "") or "")
+        if not channel_id.isdecimal():
+            raise NotificationDeliveryError("Discord reply channel is unavailable.", delivery="not_sent")
+        embed_batches = _discord_embed_batches(
+            [_discord_embed_to_payload(embed) for embed in embeds or []]
+        )
+        request_payloads: list[dict[str, Any]] = []
         for index, embed_batch in enumerate(embed_batches):
-            initial_files = list(files or []) if index == 0 else []
-            batch_files = _discord_files(file_paths) if index == 0 and file_paths else []
-            content = (text or "")[:1900] if index == 0 else ""
+            request_payload: dict[str, Any] = {
+                "content": (text or "")[:1900] if index == 0 else "",
+                "embeds": embed_batch,
+                "allowed_mentions": {"parse": []},
+            }
+            if index == 0 and view is not None:
+                request_payload["components"] = view.to_components()
+            request_payloads.append(request_payload)
+
+        result = None
+        accepted_any = False
+        for index, request_payload in enumerate(request_payloads):
             try:
-                await channel.send(
-                    content=content,
-                    embeds=embed_batch,
-                    view=view if index == 0 else None,
-                    files=[*initial_files, *batch_files],
-                    allowed_mentions=discord.AllowedMentions.none(),
+                current = await self.assert_current_sender(config)
+                result = await send_channel_message(
+                    channel_id,
+                    current.bot_token,
+                    request_payload,
+                    files=files if index == 0 else None,
+                    attachment_paths=attachment_paths if index == 0 else None,
                 )
-            except Exception:
-                if not embed_batch:
-                    raise
-                fallback_files = list(files or []) if index == 0 else []
-                fallback_files.extend(_discord_files(file_paths) if index == 0 and file_paths else [])
-                await channel.send(
-                    content=content or _plain_fallback_from_embeds(embed_batch),
-                    view=view if index == 0 else None,
-                    files=fallback_files,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                accepted_any = True
+                if index == 0 and view is not None:
+                    self._register_sent_view(view, result.id)
+            except NotificationDeliveryError as exc:
+                if accepted_any:
+                    raise NotificationDeliveryError(
+                        "Discord message was partially delivered; review is required before any resend.",
+                        delivery="unknown",
+                    ) from exc
+                raise
+            except Exception as exc:
+                if accepted_any:
+                    raise NotificationDeliveryError(
+                        "Discord message was partially delivered; review is required before any resend.",
+                        delivery="unknown",
+                    ) from exc
+                raise NotificationDeliveryError(
+                    f"Discord channel {provider_channel_id} delivery is uncertain.",
+                    delivery="unknown",
+                ) from exc
+        return result
 
     def _author_allowlisted(self, message: IncomingChatMessage, config: DiscordIntegrationConfig) -> bool:
         role_ids = set(message.author_role_ids)
@@ -484,49 +565,32 @@ class DiscordMessagingService:
         response_text: str,
         pending_action: dict[str, Any] | None,
         requester: str,
-    ) -> None:
-        kwargs: dict[str, Any] = {
-            "content": (response_text or "Alfred completed the request.")[:1900],
-        }
-        if discord is not None:
-            kwargs["allowed_mentions"] = discord.AllowedMentions.none()
+    ) -> Any:
+        channel_id = str(getattr(channel, "id", "") or "")
+        if not channel_id.isdecimal():
+            raise NotificationDeliveryError(
+                "Discord reply channel unavailable",
+                delivery="not_sent",
+            )
+        embeds = None
+        view = None
         if pending_action:
-            kwargs["embeds"] = [self._embed_from_payload(format_confirmation_embed(pending_action, requester))]
-            kwargs["view"] = self._confirmation_view(pending_action)
-        await channel.send(**kwargs)
-
-    def _slash_followup_kwargs(self, result: Any, requester: str) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
-            "content": (result.response_text or "Alfred completed the request.")[:1900],
-        }
-        if discord is not None:
-            kwargs["allowed_mentions"] = discord.AllowedMentions.none()
-        if result.pending_action:
-            kwargs["embeds"] = [self._embed_from_payload(format_confirmation_embed(result.pending_action, requester))]
-            view = self._confirmation_view(result.pending_action)
-            if view is not None:
-                kwargs["view"] = view
-        return kwargs
-
-    async def _send_interaction_error(self, interaction: Any) -> None:
-        message = "Alfred hit a Discord integration error while answering that command. Please try again."
-        response = getattr(interaction, "response", None)
-        try:
-            if response is not None and not response.is_done():
-                await response.send_message(message, ephemeral=True)
-                return
-        except Exception:
-            logger.debug("discord_slash_error_response_failed")
-        try:
-            await interaction.followup.send(message, ephemeral=True)
-        except Exception as exc:
-            logger.warning("discord_slash_error_followup_failed", extra={"error": str(exc)})
+            embeds = [self._embed_to_payload(format_confirmation_embed(pending_action, requester))]
+            view = self._confirmation_view(pending_action)
+        return await self.send_message(
+            channel_id,
+            response_text or "Alfred completed the request.",
+            embeds=embeds,
+            view=view,
+            _resolved_channel=channel,
+        )
 
     def _confirmation_view(self, pending_action: dict[str, Any] | None) -> Any | None:
-        if not pending_action or DiscordConfirmationView is None:
+        gateway = self._gateway
+        if not pending_action or DiscordConfirmationView is None or gateway is None:
             return None
         return DiscordConfirmationView(
-            self,
+            gateway,
             session_id=str(pending_action.get("session_id") or ""),
             confirmation_id=str(pending_action.get("confirmation_id") or ""),
             confirm_label=str(pending_action.get("confirm_label") or "Confirm"),
@@ -534,19 +598,19 @@ class DiscordMessagingService:
             risk_level=str(pending_action.get("risk_level") or "medium"),
         )
 
-    def _embed_from_payload(self, payload: DiscordEmbedPayload) -> Any:
-        if discord is None:
-            return payload
-        embed = discord.Embed(title=payload.title, description=payload.description, color=payload.color)
-        if payload.footer:
-            embed.set_footer(text=payload.footer)
-        for field in payload.fields:
-            embed.add_field(
-                name=str(field.get("name", ""))[:256],
-                value=str(field.get("value", ""))[:1024],
-                inline=bool(field.get("inline", False)),
+    @staticmethod
+    def _embed_to_payload(payload: DiscordEmbedPayload) -> dict[str, Any]:
+        return _discord_embed_to_payload(payload)
+
+    def _register_sent_view(self, view: Any, message_id: str) -> None:
+        register = getattr(self._client, "register_sent_view", None)
+        if not callable(register) or not register(view, message_id):
+            # The message was accepted, but an interactive confirmation without a
+            # matching gateway handler is unsafe and cannot be resent automatically.
+            raise NotificationDeliveryError(
+                "Discord confirmation delivery is uncertain; review is required.",
+                delivery="unknown",
             )
-        return embed
 
     async def _resolve_channel(self, channel_id: str) -> Any | None:
         client = self._client
@@ -597,91 +661,17 @@ class DiscordMessagingService:
             logger.warning("discord_channel_name_ambiguous", extra={"requested": identifier, "count": len(matches)})
         return None
 
-def incoming_from_interaction(interaction: Any, text: str) -> IncomingChatMessage:
-    guild = getattr(interaction, "guild", None)
-    channel = getattr(interaction, "channel", None)
-    user = getattr(interaction, "user", None)
-    interaction_permissions = getattr(interaction, "permissions", None)
-    author_is_provider_admin = discord_author_is_provider_admin(user, guild) or bool(
-        getattr(interaction_permissions, "administrator", False)
-    )
-    role_ids = [
-        str(getattr(role, "id", ""))
-        for role in getattr(user, "roles", []) or []
-        if str(getattr(role, "id", "")).strip()
-    ]
-    return IncomingChatMessage(
-        provider="discord",
-        provider_message_id=str(getattr(interaction, "id", "")),
-        provider_channel_id=str(getattr(channel, "id", "")),
-        provider_guild_id=str(getattr(guild, "id", "")) if guild else None,
-        author_provider_id=str(getattr(user, "id", "")),
-        author_display_name=str(getattr(user, "display_name", None) or getattr(user, "name", "") or "Discord user"),
-        author_role_ids=role_ids,
-        author_is_provider_admin=author_is_provider_admin,
-        text=text,
-        is_direct_message=guild is None,
-        mentioned_bot=True,
-        raw_payload={
-            "interaction_id": str(getattr(interaction, "id", "")),
-            "command": "alfred",
-            "channel_id": str(getattr(channel, "id", "")),
-            "guild_id": str(getattr(guild, "id", "")) if guild else None,
-            "author_is_provider_admin": author_is_provider_admin,
-        },
-        received_at=datetime.now(tz=UTC),
-    )
-
-
-def command_text(command: str, message: str | None = None) -> str:
-    if command == "ask":
-        return str(message or "").strip()
-    prompts = {
-        "status": "Give a concise current IACS status: who is home, gate state, and active alerts.",
-        "last_event": "Explain the most recent access event in one concise paragraph.",
-        "arrivals_today": "Summarise today's known and unknown arrivals.",
-        "presence": "Show current home occupancy.",
-    }
-    return prompts.get(command, command)
-
-
-def notify_test_command_text(channel_id: str) -> str:
-    return (
-        "Prepare a Discord notification test for this channel. "
-        "Use the test_notification_workflow tool with confirm_send=false and an unsaved notification rule. "
-        "The rule should be named 'IACS Discord notification test', use trigger_event 'integration_test', "
-        "and have one action with type 'discord', target_mode 'selected', "
-        f"target_ids ['discord:{channel_id}'], title_template 'IACS Discord notification test', "
-        "and message_template 'Discord notifications are configured and reachable.'"
-    )
-
-
-async def messaging_bridge_service_handle_confirmation(
-    *,
-    session_id: str,
-    confirmation_id: str,
-    decision: str,
-    user_id: str | None,
-    user_role: str,
-):
-    from app.services.chat import chat_service
-    from app.services.messaging_bridge import naturalize_messaging_response
-
-    result = await chat_service.handle_tool_confirmation(
-        session_id=session_id,
-        confirmation_id=confirmation_id,
-        decision=decision,
-        user_id=user_id,
-        user_role=user_role,
-        client_context={"source": "discord_button"},
-    )
-    return DiscordConfirmationResult(
-        response_text=naturalize_messaging_response(result.text, result.tool_results, "Discord confirmation")
-    )
-
-
 async def load_discord_config() -> DiscordIntegrationConfig:
-    runtime = await get_runtime_config()
+    return discord_config_from_runtime(await get_runtime_config())
+
+
+async def load_current_discord_config() -> DiscordIntegrationConfig:
+    """Read the live setting rows instead of the short-lived display cache."""
+    async with AsyncSessionLocal() as session:
+        return discord_config_from_runtime(await get_runtime_config_for_session(session))
+
+
+def discord_config_from_runtime(runtime) -> DiscordIntegrationConfig:
     return DiscordIntegrationConfig(
         bot_token=runtime.discord_bot_token,
         guild_allowlist=set(runtime.discord_guild_allowlist),
@@ -695,25 +685,125 @@ async def load_discord_config() -> DiscordIntegrationConfig:
     )
 
 
-def _chunked(items: list[Any], size: int) -> list[list[Any]]:
-    return [items[index : index + size] for index in range(0, len(items), size)]
+def discord_sender_binding(token: str) -> str:
+    return _discord_binding_hash(token)
 
 
-def _discord_files(paths: list[str]) -> list[Any]:
-    if discord is None:
+def discord_configuration_binding(config: DiscordIntegrationConfig) -> str:
+    values = {key: sorted(value) if isinstance(value, set) else value for key, value in config.__dict__.items()}
+    return _discord_binding_hash(json.dumps(values, sort_keys=True, separators=(",", ":")))
+
+
+def _discord_binding_hash(value: str) -> str:
+    return hmac.new(
+        get_auth_secret().encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _notification_channel_ids(action: dict[str, Any], config: DiscordIntegrationConfig) -> list[str]:
+    """Resolve only the persisted notification target grammar into numeric snowflakes.
+
+    Inbound guild/channel allowlists deliberately do not constrain notification
+    destinations. A configured bot can send to an explicit channel it can resolve.
+    """
+    target_ids = [str(target) for target in action.get("target_ids", []) if str(target).startswith("discord:")]
+    mode = str(action.get("target_mode") or "all")
+    if mode == "all" or not target_ids or "discord:*" in target_ids:
+        candidates = [config.default_notification_channel_id]
+    else:
+        candidates = [target.split(":", 1)[1] for target in target_ids]
+    channels: list[str] = []
+    for candidate in candidates:
+        identifier = _discord_channel_id_from_identifier(str(candidate))
+        if identifier.isdecimal():
+            channels.append(identifier)
+    return channels
+
+
+def _frozen_notification_channel_ids(action: dict[str, Any]) -> list[str]:
+    channels = action.get("frozen_discord_channel_ids")
+    if not isinstance(channels, list) or not channels:
         return []
-    return [discord.File(path) for path in paths]
+    values = [str(channel) for channel in channels]
+    return values if all(channel.isdecimal() for channel in values) else []
 
 
-def _plain_fallback_from_embeds(embeds: list[Any]) -> str:
-    parts: list[str] = []
+_DISCORD_EMBEDS_PER_MESSAGE = 10
+_DISCORD_EMBED_TOTAL_CHARACTERS = 6000
+
+
+def _discord_embed_to_payload(embed: Any) -> dict[str, Any]:
+    if isinstance(embed, DiscordEmbedPayload):
+        payload: dict[str, Any] = {
+            "title": embed.title,
+            "description": embed.description,
+            "color": embed.color,
+        }
+        if embed.footer:
+            payload["footer"] = {"text": embed.footer}
+        if embed.fields:
+            payload["fields"] = [dict(field) for field in embed.fields]
+        return payload
+    if isinstance(embed, dict):
+        return dict(embed)
+    to_dict = getattr(embed, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, dict):
+            return dict(payload)
+    raise NotificationDeliveryError("Discord embed could not be prepared.", delivery="not_sent")
+
+
+def _discord_embed_batches(embeds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Bound batches by Discord's count and aggregate embed-character limits."""
+    batches: list[list[dict[str, Any]]] = []
+    batch: list[dict[str, Any]] = []
+    batch_characters = 0
     for embed in embeds:
-        title = getattr(embed, "title", "")
-        description = getattr(embed, "description", "")
-        combined = "\n".join(str(part) for part in [title, description] if str(part).strip())
-        if combined:
-            parts.append(combined)
-    return "\n\n".join(parts)[:1900] or "IACS notification"
+        characters = _discord_embed_character_count(embed)
+        if characters > _DISCORD_EMBED_TOTAL_CHARACTERS:
+            raise NotificationDeliveryError(
+                "Discord embed exceeds the message character limit.",
+                delivery="not_sent",
+            )
+        if batch and (
+            len(batch) >= _DISCORD_EMBEDS_PER_MESSAGE
+            or batch_characters + characters > _DISCORD_EMBED_TOTAL_CHARACTERS
+        ):
+            batches.append(batch)
+            batch = []
+            batch_characters = 0
+        batch.append(embed)
+        batch_characters += characters
+    if batch:
+        batches.append(batch)
+    return batches or [[]]
+
+
+def _discord_embed_character_count(embed: dict[str, Any]) -> int:
+    total = _discord_text_length(embed.get("title")) + _discord_text_length(
+        embed.get("description")
+    )
+    footer = embed.get("footer")
+    if isinstance(footer, dict):
+        total += _discord_text_length(footer.get("text"))
+    author = embed.get("author")
+    if isinstance(author, dict):
+        total += _discord_text_length(author.get("name"))
+    fields = embed.get("fields")
+    if isinstance(fields, list):
+        for field in fields:
+            if isinstance(field, dict):
+                total += _discord_text_length(field.get("name")) + _discord_text_length(
+                    field.get("value")
+                )
+    return total
+
+
+def _discord_text_length(value: Any) -> int:
+    return len(value) if isinstance(value, str) else 0
 
 
 def _discord_channel_id_from_identifier(identifier: str) -> str:
@@ -734,18 +824,6 @@ def _normalize_channel_name(identifier: str) -> str:
     value = re.sub(r"^discord channel\s+", "", value)
     value = re.sub(r"\s+", "-", value)
     return value
-
-
-DISCORD_HELP_TEXT = (
-    "**Alfred Discord commands**\n"
-    "Warm, witty, and annoyingly serious about safety.\n"
-    "`/alfred status` - concise site state\n"
-    "`/alfred last_event` - most recent access event\n"
-    "`/alfred arrivals_today` - today's arrivals\n"
-    "`/alfred presence` - current occupancy\n"
-    "`/alfred ask <message>` - ask Alfred naturally\n"
-    "`/alfred notify_test` - Admin-only test notification, with confirmation"
-)
 
 
 discord_messaging_service = DiscordMessagingService()

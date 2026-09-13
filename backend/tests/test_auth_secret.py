@@ -38,6 +38,9 @@ class FakeSession:
     async def scalars(self, _query):
         return FakeScalars(self._row_sets.pop(0))
 
+    async def execute(self, _query, _params=None):
+        return None
+
     async def commit(self):
         self.committed = True
 

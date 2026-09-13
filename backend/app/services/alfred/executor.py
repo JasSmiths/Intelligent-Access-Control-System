@@ -29,4 +29,3 @@ def can_execute_parallel(calls: list[ToolCall], tools_by_name: dict[str, AgentTo
         if not tool.read_only and not is_unconfirmed_action_preview(call, tool):
             return False
     return True
-

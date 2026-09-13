@@ -1,19 +1,21 @@
 from difflib import SequenceMatcher
 import re
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.confirmations import require_confirmed_action
+from app.api.confirmations import require_confirmed_action, send_confirmed_notification
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
-from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
 from app.models import Person, User
 from app.modules.access_devices.registry import get_access_device_provider
+from app.modules.access_devices.base import resolve_legacy_cover_key
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
     detected_garage_door_entities,
@@ -34,10 +36,6 @@ from app.modules.notifications.apprise_client import (
     summarize_apprise_url,
     validate_apprise_urls,
 )
-from app.modules.notifications.home_assistant_mobile import (
-    HomeAssistantMobileAppNotifier,
-    HomeAssistantMobileAppTarget,
-)
 from app.services.dependency_updates import get_dependency_update_service
 from app.services.access_devices import get_access_device_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
@@ -50,7 +48,6 @@ from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
-    audit_diff,
     emit_audit_log,
     write_audit_log,
 )
@@ -63,12 +60,6 @@ def _home_assistant_client() -> DefaultHomeAssistantClient:
     if HomeAssistantClient is DefaultHomeAssistantClient:
         return get_home_assistant_client()
     return HomeAssistantClient()
-
-GARAGE_COVER_ENTITIES = {
-    "main_garage_door": "cover.main_garage_door",
-    "mums_garage_door": "cover.mums_garage_door",
-}
-
 
 async def _raise_if_maintenance_active() -> None:
     if await is_maintenance_mode_active():
@@ -84,28 +75,6 @@ async def _commit_if_supported(session: AsyncSession) -> None:
         await commit()
 
 
-def emit_settings_update_audit(
-    user: User,
-    *,
-    before: dict,
-    after: dict,
-) -> None:
-    diff = audit_diff(before, after)
-    if not diff.get("old") and not diff.get("new"):
-        return
-    changed_keys = sorted(set(before) | set(after))
-    emit_audit_log(
-        category=TELEMETRY_CATEGORY_CRUD,
-        action="settings.update",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="SystemSetting",
-        target_label=", ".join(changed_keys[:8]),
-        diff=diff,
-        metadata={"keys": changed_keys, "source": "integrations_endpoint"},
-    )
-
-
 async def update_integration_settings(
     user: User,
     values: dict,
@@ -113,8 +82,10 @@ async def update_integration_settings(
     before: dict,
     after: dict,
 ) -> None:
-    await update_settings(values)
-    emit_settings_update_audit(user, before=before, after=after)
+    try:
+        await update_settings(values, user=user, source="integrations_endpoint")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if any(key.startswith("home_assistant_") for key in values):
         service = get_home_assistant_service()
         await service.stop()
@@ -126,6 +97,7 @@ async def update_integration_settings(
 
 
 class GateOpenRequest(BaseModel):
+    target_device_key: str | None = Field(default=None, min_length=1, max_length=120)
     reason: str = Field(default="Manual dashboard command", max_length=240)
     confirmation_token: str | None = Field(default=None, max_length=160)
 
@@ -616,72 +588,43 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
     }
 
 
-@router.post("/gate/open")
+@router.post("/gate/open", response_model=None)
 async def open_gate(
     request: GateOpenRequest,
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict | JSONResponse:
     await _raise_if_maintenance_active()
-    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmed_action(
+    if not request.confirmation_token:
+        raise HTTPException(status_code=428, detail="Server-side confirmation is required for this action.")
+    try:
+        plan = await get_access_device_service().preview_gate_open(target_device_key=request.target_device_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    confirmation = await require_confirmed_action(
         session,
         user=user,
         action="gate.open",
-        payload=confirmation_payload,
+        payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
         confirmation_token=request.confirmation_token,
+        expected_hardware_plan=plan,
     )
     result = await get_gate_command_coordinator().execute_open(
         GateCommandIntent(
             reason=request.reason,
             source="manual_admin",
             actor=actor_from_user(user),
-            metadata={"actor_user_id": str(user.id)},
+            actor_user_id=str(user.id), auth_version=user.auth_session_version,
+            metadata={"actor_user_id": str(user.id), "actor_auth_session_version": user.auth_session_version},
+            intent_id=str(confirmation.id),
+            idempotency_key=str(confirmation.id),
+            target_device_key=request.target_device_key,
+            target_plan=plan,
+            require_admission=False,
+            expires_at=confirmation.expires_at,
         )
     )
-    if not result.accepted:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action="gate.open",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="Gate",
-            target_label="Configured Gate",
-            outcome="failed",
-            level="error",
-            metadata={
-                "reason": request.reason,
-                "detail": result.detail,
-                "state": result.state.value,
-                "intent_id": result.intent.intent_id,
-                "command_id": result.command_id,
-                "mechanically_confirmed": result.mechanically_confirmed,
-                "requires_reconciliation": result.requires_reconciliation,
-            },
-        )
-        await _commit_if_supported(session)
-        raise HTTPException(status_code=503, detail=result.detail or "Gate command failed.")
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="gate.open",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="Gate",
-        target_label="Configured Gate",
-        metadata={
-            "reason": request.reason,
-            "state": result.state.value,
-            "detail": result.detail,
-            "intent_id": result.intent.intent_id,
-            "command_id": result.command_id,
-            "mechanically_confirmed": result.mechanically_confirmed,
-            "requires_reconciliation": result.requires_reconciliation,
-        },
-    )
-    await _commit_if_supported(session)
-    return {
+    receipt = {
         "accepted": result.accepted,
         "state": result.state.value,
         "detail": result.detail,
@@ -689,17 +632,89 @@ async def open_gate(
         "command_id": result.command_id,
         "mechanically_confirmed": result.mechanically_confirmed,
         "requires_reconciliation": result.requires_reconciliation,
+        "delivery": result.delivery,
+        "admission_verified": result.admission_verified,
+        "target_receipts": result.target_receipts,
     }
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="gate.open",
+        actor=actor_from_user(user),
+        actor_user_id=user.id,
+        target_entity="Gate",
+        target_label=request.target_device_key or "All configured access gates",
+        outcome="uncertain" if result.delivery == "unknown" else "success" if result.accepted else "failed",
+        level="warning" if result.delivery == "unknown" else "info" if result.accepted else "error",
+        metadata={"reason": request.reason, **receipt},
+    )
+    await _commit_if_supported(session)
+    if not result.accepted:
+        # Keep the legacy HTTP status/detail while exposing the durable outcome.
+        return JSONResponse(status_code=503, content={**receipt, "detail": result.detail or "Gate command failed."})
+    return receipt
 
 
-@router.post("/cover/command")
+@router.get("/gate/commands/{command_id}")
+async def gate_command_receipt(command_id: UUID, response: Response, user: User = Depends(admin_user)) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    receipt = await get_gate_command_coordinator().get_receipt(command_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Gate command not found.")
+    return receipt
+
+
+@router.get("/gate/commands")
+async def gate_command_receipt_by_intent(
+    response: Response, intent_id: UUID | None = None, before_id: UUID | None = None,
+    limit: int = Query(default=25, ge=1, le=100), user: User = Depends(admin_user),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if intent_id is None:
+        try:
+            return await get_gate_command_coordinator().list_receipts(limit=limit, before_id=before_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    receipt = await get_gate_command_coordinator().get_receipt(intent_id=str(intent_id))
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="No recorded gate command is available for this intent.")
+    return receipt
+
+
+@router.get("/cover/commands/{command_id}")
+async def cover_command_receipt(command_id: UUID, response: Response, user: User = Depends(admin_user)) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    receipt = await get_access_device_service().command_receipt(command_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Device command not found.")
+    return receipt
+
+
+@router.get("/cover/commands")
+async def cover_command_receipt_by_intent(
+    response: Response, intent_id: UUID | None = None, before_id: UUID | None = None,
+    limit: int = Query(default=25, ge=1, le=100), user: User = Depends(admin_user),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if intent_id is None:
+        try:
+            return await get_access_device_service().list_command_receipts(limit=limit, before_id=before_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    receipt = await get_access_device_service().command_receipt(intent_id=str(intent_id))
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="No recorded device command is available for this intent.")
+    return receipt
+
+
+@router.post("/cover/command", response_model=None)
 async def cover_command(
     request: CoverCommandRequest,
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict | JSONResponse:
     await _raise_if_maintenance_active()
-    device_key = request.entity_id or (GARAGE_COVER_ENTITIES.get(request.target or "") if request.target else None)
+    device_key = resolve_legacy_cover_key(entity_id=request.entity_id, target=request.target)
     if not device_key:
         raise HTTPException(status_code=400, detail="A configured garage door entity is required.")
 
@@ -711,13 +726,18 @@ async def cover_command(
     if not device:
         raise HTTPException(status_code=404, detail="Garage door entity is not configured.")
 
+    try:
+        plan = await get_access_device_service().preview_device_command(device.key, request.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmed_action(
+    confirmation = await require_confirmed_action(
         session,
         user=user,
         action=f"cover.{request.action}",
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
+        expected_hardware_plan=plan,
     )
 
     outcome = await get_access_device_service().command_device(
@@ -725,30 +745,27 @@ async def cover_command(
         request.action,
         request.reason,
         schedule_source="garage_door",
+        actor_user_id=str(user.id), auth_version=user.auth_session_version,
+        intent_id=str(confirmation.id),
+        idempotency_key=str(confirmation.id),
+        target_plan=plan,
+        expires_at=confirmation.expires_at,
     )
-    if not outcome.accepted:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action=f"cover.{request.action}",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="Cover",
-            target_id=device.key,
-            target_label=device.name,
-            outcome="failed",
-            level="error",
-            metadata={
-                "reason": request.reason,
-                "state": outcome.state.value,
-                "detail": outcome.detail,
-                "verified": outcome.verified,
-                "used_provider": outcome.used_provider,
-                "failover_used": outcome.failover_used,
-            },
-        )
-        await _commit_if_supported(session)
-        raise HTTPException(status_code=503, detail=outcome.detail or "Garage door command failed.")
+    receipt = {
+        "accepted": outcome.accepted,
+        "entity_id": device.key,
+        "target": request.target or device.key,
+        "action": request.action,
+        "state": outcome.state.value,
+        "detail": outcome.detail or request.reason,
+        "used_provider": outcome.used_provider,
+        "failover_used": outcome.failover_used,
+        "verified": outcome.verified,
+        "delivery": outcome.delivery,
+        "requires_reconciliation": outcome.requires_reconciliation,
+        "command_id": outcome.metadata.get("command_id"),
+        "target_receipt": outcome.metadata.get("target_receipt"),
+    }
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -758,27 +775,14 @@ async def cover_command(
         target_entity="Cover",
         target_id=device.key,
         target_label=device.name,
-        metadata={
-            "reason": request.reason,
-            "state": outcome.state.value,
-            "detail": outcome.detail,
-            "verified": outcome.verified,
-            "used_provider": outcome.used_provider,
-            "failover_used": outcome.failover_used,
-        },
+        outcome="uncertain" if outcome.delivery == "unknown" else "success" if outcome.accepted else "failed",
+        level="warning" if outcome.delivery == "unknown" else "info" if outcome.accepted else "error",
+        metadata={"reason": request.reason, **receipt},
     )
     await _commit_if_supported(session)
-    return {
-        "accepted": True,
-        "entity_id": device.key,
-        "target": request.target or device.key,
-        "action": request.action,
-        "state": outcome.state.value,
-        "detail": request.reason,
-        "used_provider": outcome.used_provider,
-        "failover_used": outcome.failover_used,
-        "verified": outcome.verified,
-    }
+    if not outcome.accepted:
+        return JSONResponse(status_code=503, content={**receipt, "detail": outcome.detail or "Garage door command failed."})
+    return receipt
 
 
 @router.post("/announcements/say")
@@ -794,44 +798,17 @@ async def say_announcement(
         raise HTTPException(status_code=400, detail="No media_player entity configured or supplied.")
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmed_action(
-        session,
-        user=user,
-        action="announcement.say",
-        payload=confirmation_payload,
+    result = await send_confirmed_notification(
+        session, user=user, action="announcement.say", payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
+        context=NotificationContext(event_type="integration_test", subject="Announcement", severity="info",
+                                    facts={"message": request.message}),
+        direct_action={"type": "voice", "delivery_mode": "literal", "target": target,
+                       "title": "Announcement", "message": request.message,
+                       "configured_default": not bool(request.entity_id)},
     )
+    return {"status": "sent", "entity_id": target, "notification_run_id": result.run_id}
 
-    try:
-        await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), request.message)
-    except (HomeAssistantError, ValueError) as exc:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action="announcement.say",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="MediaPlayer",
-            target_id=target,
-            outcome="failed",
-            level="error",
-            metadata={"message": request.message, "error": str(exc)},
-        )
-        await _commit_if_supported(session)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="announcement.say",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="MediaPlayer",
-        target_id=target,
-        metadata={"message": request.message},
-    )
-    await _commit_if_supported(session)
-    return {"status": "sent", "entity_id": target}
 
 
 @router.post("/home-assistant/mobile-notifications/test")
@@ -841,54 +818,18 @@ async def send_home_assistant_mobile_notification_test(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     person_name = request.person_name.strip() or "this person"
-    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmed_action(
-        session,
-        user=user,
-        action="notification.mobile_test",
-        payload=confirmation_payload,
+    body = f"Mobile notifications are linked for {person_name}."
+    result = await send_confirmed_notification(
+        session, user=user, action="notification.mobile_test",
+        payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
         confirmation_token=request.confirmation_token,
+        context=NotificationContext(event_type="integration_test", subject="IACS Home Assistant test",
+                                    severity="info", facts={"message": body}),
+        direct_action={"type": "mobile", "delivery_mode": "literal", "target": request.service_name,
+                       "title": "IACS Home Assistant test", "message": body},
     )
-    try:
-        await HomeAssistantMobileAppNotifier().send(
-            HomeAssistantMobileAppTarget(request.service_name),
-            "IACS Home Assistant test",
-            f"Mobile notifications are linked for {person_name}.",
-            NotificationContext(
-                event_type="integration_test",
-                subject="IACS Home Assistant test",
-                severity="info",
-                facts={"message": f"Mobile notifications are linked for {person_name}."},
-            ),
-    )
-    except NotificationDeliveryError as exc:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action="notification.mobile_test",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="NotificationTarget",
-            target_id=request.service_name,
-            outcome="failed",
-            level="error",
-            metadata={"error": str(exc), "person_name": person_name},
-        )
-        await _commit_if_supported(session)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"status": "sent", "service_name": request.service_name, "notification_run_id": result.run_id}
 
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="notification.mobile_test",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="NotificationTarget",
-        target_id=request.service_name,
-        metadata={"person_name": person_name},
-    )
-    await _commit_if_supported(session)
-    return {"status": "sent", "service_name": request.service_name}
 
 
 @router.post("/notifications/test")
@@ -901,58 +842,18 @@ async def send_test_notification(
     if not config.apprise_urls:
         raise HTTPException(status_code=400, detail="Apprise is not configured.")
 
-    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmed_action(
-        session,
-        user=user,
-        action="notification.test",
-        payload=confirmation_payload,
+    result = await send_confirmed_notification(
+        session, user=user, action="notification.test",
+        payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
         confirmation_token=request.confirmation_token,
+        context=NotificationContext(event_type="integration_test", subject=request.subject,
+                                    severity=request.severity, facts={"message": request.message}),
     )
-
-    try:
-        result = await get_notification_service().send_notification_now_with_result(
-            NotificationContext(
-                event_type="integration_test",
-                subject=request.subject,
-                severity=request.severity,
-                facts={"message": request.message},
-            ),
-            raise_on_failure=True,
-    )
-    except NotificationDeliveryError as exc:
-        await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action="notification.test",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="Notification",
-            target_label=request.subject,
-            outcome="failed",
-            level="error",
-            metadata={"severity": request.severity, "error": str(exc)},
-        )
-        await _commit_if_supported(session)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="notification.test",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="Notification",
-        target_label=request.subject,
-        metadata={"severity": request.severity},
-    )
-    await _commit_if_supported(session)
     return {
-        "status": "sent",
-        "delivery_status": result.status,
-        "notification_run_id": result.run_id,
-        "title": result.notification.title,
-        "body": result.notification.body,
+        "status": "sent", "delivery_status": result.status, "notification_run_id": result.run_id,
+        "title": result.notification.title, "body": result.notification.body,
     }
+
 
 
 def _esphome_device_summary(device: dict) -> dict:

@@ -11,6 +11,7 @@ from app.modules.access_devices.base import (
     AccessDeviceDiscoveryItem,
     AccessDeviceEntity,
     AccessDeviceProviderUnavailable,
+    AccessDeviceStateObservation,
 )
 from app.modules.access_devices import esphome as esphome_module
 from app.modules.access_devices.esphome import ESPHomeAccessDeviceProvider
@@ -57,6 +58,9 @@ class FakeProvider:
         if self.unavailable:
             raise AccessDeviceProviderUnavailable(f"{self.name} down")
         return self.state
+
+    async def observe_state(self, binding: AccessDeviceBinding, *, runtime_config=None):
+        return AccessDeviceStateObservation(await self.current_state(binding), datetime.now(tz=UTC))
 
     async def command_cover(self, binding: AccessDeviceBinding, action: str, reason: str):
         self.commands.append((binding.external_id, action))
@@ -377,7 +381,7 @@ async def test_access_device_command_does_not_fail_over_after_accepted_unverifie
 
 
 @pytest.mark.asyncio
-async def test_access_device_close_retries_same_provider_before_failover(monkeypatch) -> None:
+async def test_access_device_close_stops_after_accepted_unverified_state(monkeypatch) -> None:
     primary = FakeProvider(
         "home_assistant",
         state=GateState.OPEN,
@@ -412,18 +416,18 @@ async def test_access_device_close_retries_same_provider_before_failover(monkeyp
     outcome = await service._command_with_failover(device, "close", "test")
 
     assert outcome.accepted is True
-    assert outcome.verified is True
-    assert outcome.used_provider == "esphome"
-    assert outcome.failover_used is True
+    assert outcome.verified is False
+    assert outcome.requires_reconciliation is True
+    assert outcome.used_provider == "home_assistant"
+    assert outcome.failover_used is False
     assert primary.commands == [
         ("cover.main_garage_door", "close"),
-        ("cover.main_garage_door", "close"),
     ]
-    assert failover.commands == [("athom_garage_door", "close")]
+    assert failover.commands == []
 
 
 @pytest.mark.asyncio
-async def test_access_device_close_tries_failover_once_before_failure(monkeypatch) -> None:
+async def test_access_device_close_does_not_turn_uncertainty_into_rejection(monkeypatch) -> None:
     primary = FakeProvider(
         "home_assistant",
         state=GateState.OPEN,
@@ -461,23 +465,21 @@ async def test_access_device_close_tries_failover_once_before_failure(monkeypatc
 
     outcome = await service._command_with_failover(device, "close", "test")
 
-    assert outcome.accepted is False
+    assert outcome.accepted is True
+    assert outcome.requires_reconciliation is True
     assert outcome.verified is False
     assert primary.commands == [
         ("cover.main_garage_door", "close"),
-        ("cover.main_garage_door", "close"),
     ]
-    assert failover.commands == [("athom_garage_door", "close")]
+    assert failover.commands == []
     assert [attempt.provider for attempt in outcome.attempts] == [
         "home_assistant",
-        "home_assistant",
-        "esphome",
     ]
     assert "did not report closed" in (outcome.detail or "")
 
 
 @pytest.mark.asyncio
-async def test_access_device_close_retry_can_confirm_without_failover(monkeypatch) -> None:
+async def test_access_device_close_read_only_polling_can_confirm_without_resend(monkeypatch) -> None:
     primary = FakeProvider(
         "home_assistant",
         state=GateState.OPEN,
@@ -506,6 +508,10 @@ async def test_access_device_close_retry_can_confirm_without_failover(monkeypatc
             "esphome": AccessDeviceBinding("esphome", "athom_garage_door"),
         },
     )
+    async def confirmed_state(_binding):
+        return GateState.CLOSED
+
+    monkeypatch.setattr(primary, "current_state", confirmed_state)
     service = AccessDeviceService()
     monkeypatch.setattr(service, "_remember_state", _noop_remember_state)
 
@@ -516,7 +522,6 @@ async def test_access_device_close_retry_can_confirm_without_failover(monkeypatc
     assert outcome.used_provider == "home_assistant"
     assert outcome.failover_used is False
     assert primary.commands == [
-        ("cover.main_garage_door", "close"),
         ("cover.main_garage_door", "close"),
     ]
     assert failover.commands == []
@@ -572,7 +577,7 @@ async def test_access_device_read_state_uses_configured_binding_when_primary_mis
         bindings={"home_assistant": AccessDeviceBinding("home_assistant", "cover.main_garage_door")},
     )
 
-    result = await AccessDeviceService().read_state(device)
+    result = await AccessDeviceService().read_state(device, runtime_config=await fake_runtime_config())
 
     assert result.accepted is True
     assert result.provider == "home_assistant"

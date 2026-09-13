@@ -1,3 +1,4 @@
+import { ApprovalHistory } from "../features/alfred/ApprovalHistory";
 import {
 Activity,
 AlertTriangle,
@@ -36,6 +37,7 @@ import { useSettings } from "../lib/settings";
 import type { MaintenanceStatus, SettingsMap, UserAccount } from "../api/types";
 import type { LlmProviderKey } from "../lib/format";
 import { type ChatAttachment, uploadChatAttachment } from "../api/chat";
+import { useApprovalRecovery } from "../features/alfred/useApprovalRecovery";
 
 
 
@@ -47,12 +49,9 @@ export type ChatAttachmentDraft = ChatAttachment & {
 
 export type ChatConfirmationAction = {
   type: string;
-  confirmationId?: string;
-  toolName: string;
-  toolArguments: Record<string, unknown>;
-  target: string;
+  confirmationId: string;
+  sessionId: string;
   displayTarget: string;
-  command: string;
   title: string;
   description: string;
   buttonLabel: string;
@@ -216,16 +215,6 @@ export function clientId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function formatDeviceTargetName(value: string) {
-  return value
-    .replace(/\*\*/g, "")
-    .replace(/[_-]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .map((part) => part ? part[0].toUpperCase() + part.slice(1) : part)
-    .join(" ");
-}
-
 export function cleanChatText(text: string, attachments: ChatAttachment[] = []) {
   const fileLinkReplacement = attachments.length
     ? (attachments.some((attachment) => attachment.kind === "image") ? "the snapshot" : "the attached file")
@@ -333,9 +322,10 @@ export async function copyToClipboard(text: string) {
 
 export function chatPendingAction(pendingAction: unknown): ChatConfirmationAction | null {
   if (!isRecord(pendingAction)) return null;
-  const confirmationId = String(pendingAction.confirmation_id || "").trim();
+  const confirmationId = typeof pendingAction.confirmation_id === "string" ? pendingAction.confirmation_id.trim() : "";
+  const sessionId = typeof pendingAction.session_id === "string" ? pendingAction.session_id.trim() : "";
   const toolName = String(pendingAction.tool_name || "").trim();
-  if (!confirmationId || !toolName) return null;
+  if (!confirmationId || !sessionId || !toolName) return null;
   const target = String(pendingAction.target || toolName.replace(/_/g, " ")).trim();
   const title = String(pendingAction.title || `Confirm ${target}?`);
   const description = String(pendingAction.description || "This action needs confirmation before Alfred continues.");
@@ -343,11 +333,8 @@ export function chatPendingAction(pendingAction: unknown): ChatConfirmationActio
   return {
     type: toolName,
     confirmationId,
-    toolName,
-    toolArguments: {},
-    target,
+    sessionId,
     displayTarget: target,
-    command: `confirm ${target}`,
     title,
     description,
     buttonLabel,
@@ -357,121 +344,13 @@ export function chatPendingAction(pendingAction: unknown): ChatConfirmationActio
   };
 }
 
-export function chatConfirmationAction(toolResults: unknown): ChatConfirmationAction | null {
-  if (!Array.isArray(toolResults)) return null;
-  const result = [...toolResults].reverse().find((item) => isRecord(item) && isRecord(item.output));
-  if (!isRecord(result) || !isRecord(result.output) || result.output.requires_confirmation !== true) return null;
-  const args = isRecord(result.arguments) ? result.arguments : {};
-  const toolName = String(result.name || "").trim();
-  const confirmationField = String(result.output.confirmation_field || (toolName === "test_notification_workflow" ? "confirm_send" : "confirm"));
-  const toolArguments = { ...args, [confirmationField]: true };
-  if (result.name === "open_device") {
-    const target = String(result.output.target || args.target || args.entity_id || "").trim();
-    if (!target) return null;
-    const displayTarget = formatDeviceTargetName(target);
-    return {
-      type: "open_device",
-      toolName,
-      toolArguments,
-      target,
-      displayTarget,
-      command: `confirm open ${target}`,
-      title: `Open ${displayTarget}?`,
-      description: "This will be logged as an Alfred action.",
-      buttonLabel: "Confirm",
-      pendingLabel: "Confirmed",
-      statusLabel: `Opening ${displayTarget}...`,
-      userEcho: `Confirmed: open ${displayTarget}`
-    };
-  }
-  if (result.name === "update_schedule") {
-    const target = String(result.output.schedule_name || args.schedule_name || args.name || "").trim();
-    if (!target) return null;
-    const summary = typeof result.output.summary === "string" ? result.output.summary : "the requested times";
-    return {
-      type: "update_schedule",
-      toolName,
-      toolArguments,
-      target,
-      displayTarget: target,
-      command: `confirm update ${target} schedule`,
-      title: `Update ${target}?`,
-      description: `Replace the existing allowed times with ${summary}.`,
-      buttonLabel: "Update schedule",
-      pendingLabel: "Update confirmed",
-      statusLabel: `Updating ${target}...`,
-      userEcho: `Confirmed: update ${target}`
-    };
-  }
-  if (result.name === "delete_schedule") {
-    const schedule = isRecord(result.output.schedule) ? result.output.schedule : {};
-    const target = String(result.output.schedule_name || schedule.name || args.schedule_name || args.name || "").trim();
-    if (!target) return null;
-    return {
-      type: "delete_schedule",
-      toolName,
-      toolArguments,
-      target,
-      displayTarget: target,
-      command: `confirm delete ${target} schedule`,
-      title: `Delete ${target}?`,
-      description: String(result.output.detail || "This schedule will be permanently deleted."),
-      buttonLabel: "Delete schedule",
-      pendingLabel: "Delete confirmed",
-      statusLabel: `Deleting ${target}...`,
-      userEcho: `Confirmed: delete ${target}`
-    };
-  }
-  if ([
-    "create_notification_workflow",
-    "update_notification_workflow",
-    "delete_notification_workflow",
-    "test_notification_workflow"
-  ].includes(toolName)) {
-    const target = String(result.output.workflow_name || args.rule_name || args.name || "notification workflow").trim();
-    const actionVerb = toolName === "create_notification_workflow"
-      ? "Create"
-      : toolName === "update_notification_workflow"
-        ? "Update"
-        : toolName === "delete_notification_workflow"
-          ? "Delete"
-          : "Send test for";
-    return {
-      type: toolName,
-      toolName,
-      toolArguments,
-      target,
-      displayTarget: target,
-      command: `${actionVerb.toLowerCase()} ${target}`,
-      title: `${actionVerb} ${target}?`,
-      description: String(result.output.detail || "This changes notification workflow behaviour."),
-      buttonLabel: toolName === "test_notification_workflow" ? "Send test" : actionVerb,
-      pendingLabel: "Confirmed",
-      statusLabel: `${actionVerb} ${target}...`,
-      userEcho: `Confirmed: ${actionVerb.toLowerCase()} ${target}`
-    };
-  }
-  if (toolName) {
-    const target = String(result.output.target || result.output.schedule_name || result.output.workflow_name || args.target || args.schedule_name || args.name || toolName.replace(/_/g, " ")).trim();
-    return {
-      type: toolName,
-      toolName,
-      toolArguments,
-      target,
-      displayTarget: target,
-      command: `confirm ${toolName}`,
-      title: `Confirm ${target}?`,
-      description: String(result.output.detail || "This action needs confirmation before Alfred continues."),
-      buttonLabel: "Confirm",
-      pendingLabel: "Confirmed",
-      statusLabel: `Confirming ${target}...`,
-      userEcho: `Confirmed: ${target}`
-    };
-  }
-  return null;
+export function ChatWidget(props: {
+  currentUser: UserAccount; initialOpen?: boolean; maintenanceStatus: MaintenanceStatus | null;
+}) {
+  return <ChatSessionWidget key={`${props.currentUser.id}:${props.currentUser.role}`} {...props} />;
 }
 
-export function ChatWidget({
+function ChatSessionWidget({
   currentUser,
   initialOpen = false,
   maintenanceStatus
@@ -492,6 +371,7 @@ export function ChatWidget({
   const [llmFeedback, setLlmFeedback] = React.useState("");
   const [pendingAttachments, setPendingAttachments] = React.useState<ChatAttachmentDraft[]>([]);
   const [connected, setConnected] = React.useState(false);
+  const [showApprovalHistory, setShowApprovalHistory] = React.useState(false);
   const [connectionNonce, setConnectionNonce] = React.useState(0);
   const [thinking, setThinking] = React.useState(false);
   const [slowResponse, setSlowResponse] = React.useState(false);
@@ -514,8 +394,14 @@ export function ChatWidget({
   const awaitingResponseRef = React.useRef(false);
   const activeTurnStartedAtRef = React.useRef<number | null>(null);
   const activeTurnPhaseRef = React.useRef<string>("idle");
+  const activeApprovalRef = React.useRef<string | null>(null);
   const lastUserRequestRef = React.useRef<ChatRetryAction | null>(null);
   const pendingAttachmentsRef = React.useRef<ChatAttachmentDraft[]>([]);
+  const {
+    approval: retainedApproval, approvalRef, inspection: approvalInspection, error: approvalError,
+    approvals: savedApprovals, loading: checkingApproval, remember: rememberApproval, forget: forgetApproval,
+    select: selectSavedApproval, recheck: recheckApproval
+  } = useApprovalRecovery(`${currentUser.id}:${currentUser.role}`, open && (connected || showApprovalHistory) && !thinking, connectionNonce);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
   const activeLlmProvider = normalizeLlmProvider(llmSettings.values.llm_provider);
   const headerStatusLabel = chatProviderStatusLabel(agentStatus, connected, activeLlmProvider);
@@ -666,6 +552,107 @@ export function ChatWidget({
     }
   }, [open]);
 
+  const applyChatResponse = React.useCallback((payload: Record<string, unknown>, origin: "chat" | "completed_approval" | "uncertain_approval" = "chat") => {
+    awaitingResponseRef.current = false;
+    const responseDurationMs = finishTurnDuration();
+    const text = typeof payload.text === "string" ? payload.text : "";
+    const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
+    const confirmationAction = chatPendingAction(payload.pending_action);
+    if (confirmationAction) rememberApproval({ sessionId: confirmationAction.sessionId, confirmationId: confirmationAction.confirmationId });
+    // A transport response may contain an uncertain outcome. Only the durable
+    // read-only approval inspection can retire its recovery receipt.
+    const completedId = origin === "completed_approval" ? approvalRef.current?.confirmationId : null;
+    if (completedId) forgetApproval(completedId);
+    activeApprovalRef.current = null;
+    const userMessageId = typeof payload.user_message_id === "string" ? payload.user_message_id : null;
+    const assistantMessageId = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id : null;
+    const turnPhase = activeTurnPhaseRef.current;
+    const responseStatus: ChatMessageStatus = confirmationAction
+      ? "awaiting_confirmation"
+      : origin === "uncertain_approval" || turnPhase === "provider_error"
+        ? "failed"
+        : "completed";
+    const retryAction = responseStatus === "failed" && lastUserRequestRef.current
+      ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
+      : null;
+    if (typeof payload.session_id === "string") setSessionId(payload.session_id);
+    setMessages((current) => {
+      const activeId = activeAssistantMessageRef.current ?? clientId("alfred");
+      activeAssistantMessageRef.current = null;
+      const existing = current.find((message) => message.id === activeId || Boolean(assistantMessageId && message.assistantMessageId === assistantMessageId));
+      if (existing) {
+        return current.map((message) =>
+          message.id === existing.id
+            ? {
+              ...message,
+              text,
+              createdAt: message.createdAt ?? Date.now(),
+              attachments: responseAttachments,
+              confirmationAction,
+              streaming: false,
+              status: responseStatus,
+              retryAction,
+                userMessageId,
+                assistantMessageId,
+                responseDurationMs
+            }
+            : message
+        );
+      }
+      return [
+        ...current,
+        {
+          id: activeId,
+          role: "assistant",
+          text,
+          createdAt: Date.now(),
+          attachments: responseAttachments,
+          confirmationAction,
+          status: responseStatus,
+          retryAction,
+            userMessageId,
+            assistantMessageId,
+            responseDurationMs
+        }
+      ];
+    });
+    activeTurnPhaseRef.current = "idle";
+    lastUserRequestRef.current = null;
+    setThinking(false);
+    setToolStatus("");
+    setToolActivities([]);
+    setRunActivity(null);
+  }, [approvalRef, finishTurnDuration, forgetApproval, rememberApproval]);
+
+  React.useEffect(() => {
+    if (!approvalInspection || !retainedApproval) return;
+    if (approvalInspection.result) {
+      applyChatResponse(approvalInspection.result, approvalInspection.status === "unknown" ? "uncertain_approval" : "completed_approval");
+      return;
+    }
+    if (approvalInspection.status === "pending") {
+      const action = chatPendingAction(approvalInspection.pending_action);
+      if (!action) return;
+      setSessionId(action.sessionId);
+      setMessages((current) => {
+        const existing = current.find((message) => message.confirmationAction?.confirmationId === action.confirmationId);
+        if (existing) return current.map((message) => message.id === existing.id
+          ? { ...message, confirmationAction: action, status: "awaiting_confirmation" } : message);
+        return [...current, { id: clientId("alfred-approval"), role: "assistant", text: action.description,
+          confirmationAction: action, status: "awaiting_confirmation", createdAt: Date.now() }];
+      });
+      return;
+    }
+    if (["cancelled", "expired", "unavailable", "completed"].includes(approvalInspection.status)) {
+      const text = approvalInspection.status === "cancelled" ? "That action was cancelled." : approvalInspection.status === "completed"
+        ? "That action completed, but its saved response is unavailable. Check the audit history before taking further action."
+        : "That approval is expired or unavailable. Ask Alfred to prepare a fresh action if it is still needed.";
+      setMessages((current) => [...current, { id: clientId("alfred-approval-status"), role: "assistant", text,
+        status: approvalInspection.status === "cancelled" ? "cancelled" : "failed", createdAt: Date.now() }]);
+      forgetApproval(retainedApproval.confirmationId);
+    }
+  }, [applyChatResponse, approvalInspection, forgetApproval, retainedApproval]);
+
   React.useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -729,10 +716,12 @@ export function ChatWidget({
       if (socket.readyState !== WebSocket.OPEN) socket.close();
     }, 10000);
     socket.onopen = () => {
+      if (cancelled || socketRef.current !== socket) return;
       clearConnectionTimeout();
       setConnected(true);
     };
     socket.onmessage = (event) => {
+      if (cancelled || socketRef.current !== socket) return;
       let data: { type: string; payload?: Record<string, unknown> };
       try {
         data = JSON.parse(event.data) as { type: string; payload?: Record<string, unknown> };
@@ -865,69 +854,7 @@ export function ChatWidget({
         return;
       }
       if (data.type === "chat.response") {
-        awaitingResponseRef.current = false;
-        const responseDurationMs = finishTurnDuration();
-        const text = typeof payload.text === "string" ? payload.text : "";
-        const responseAttachments = Array.isArray(payload.attachments) ? payload.attachments as ChatAttachment[] : [];
-        const confirmationAction = chatPendingAction(payload.pending_action) ?? chatConfirmationAction(payload.tool_results);
-        const userMessageId = typeof payload.user_message_id === "string" ? payload.user_message_id : null;
-        const assistantMessageId = typeof payload.assistant_message_id === "string" ? payload.assistant_message_id : null;
-        const turnPhase = activeTurnPhaseRef.current;
-        const responseStatus: ChatMessageStatus = confirmationAction
-          ? "awaiting_confirmation"
-          : turnPhase === "provider_error"
-            ? "failed"
-            : "completed";
-        const retryAction = responseStatus === "failed" && lastUserRequestRef.current
-          ? { ...lastUserRequestRef.current, attachments: [...lastUserRequestRef.current.attachments] }
-          : null;
-        if (typeof payload.session_id === "string") setSessionId(payload.session_id);
-        setMessages((current) => {
-          const activeId = activeAssistantMessageRef.current ?? clientId("alfred");
-          activeAssistantMessageRef.current = null;
-          const existing = current.find((message) => message.id === activeId);
-          if (existing) {
-            return current.map((message) =>
-              message.id === activeId
-                ? {
-                  ...message,
-                  text,
-                  createdAt: message.createdAt ?? Date.now(),
-                  attachments: responseAttachments,
-                  confirmationAction,
-                  streaming: false,
-                  status: responseStatus,
-                  retryAction,
-                    userMessageId,
-                    assistantMessageId,
-                    responseDurationMs
-                }
-                : message
-            );
-          }
-          return [
-            ...current,
-            {
-              id: activeId,
-              role: "assistant",
-              text,
-              createdAt: Date.now(),
-              attachments: responseAttachments,
-              confirmationAction,
-              status: responseStatus,
-              retryAction,
-                userMessageId,
-                assistantMessageId,
-                responseDurationMs
-            }
-          ];
-        });
-        activeTurnPhaseRef.current = "idle";
-        lastUserRequestRef.current = null;
-        setThinking(false);
-        setToolStatus("");
-        setToolActivities([]);
-        setRunActivity(null);
+        applyChatResponse(payload);
         return;
       }
       if (data.type === "chat.error") {
@@ -938,16 +865,20 @@ export function ChatWidget({
       }
     };
     socket.onerror = () => {
+      if (cancelled || socketRef.current !== socket) return;
       console.warn("Alfred websocket error; reconnecting");
       socket.close();
     };
     socket.onclose = () => {
+      if (cancelled || socketRef.current !== socket) return;
       clearConnectionTimeout();
       if (socketRef.current === socket) socketRef.current = null;
       const interruptedTurn = awaitingResponseRef.current;
       setConnected(false);
       if (!cancelled && interruptedTurn) {
-        failActiveTurn("Alfred disconnected while answering. I logged the failure for review; please try again.", "alfred-disconnect");
+        failActiveTurn(activeApprovalRef.current
+          ? "Alfred disconnected after your confirmation. The saved action result will be checked without sending another command."
+          : "Alfred disconnected while answering. Please try again.", "alfred-disconnect");
       } else {
         awaitingResponseRef.current = false;
         activeTurnStartedAtRef.current = null;
@@ -977,7 +908,7 @@ export function ChatWidget({
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [applyRunActivityPayload, connectionNonce, finishTurnDuration, markTurnStarted, open]);
+  }, [applyChatResponse, applyRunActivityPayload, approvalRef, connectionNonce, finishTurnDuration, markTurnStarted, open]);
 
   React.useEffect(() => {
     if (!feedRef.current) return;
@@ -1049,7 +980,9 @@ export function ChatWidget({
 
   const sendConfirmationAction = React.useCallback((messageId: string, action: ChatConfirmationAction, decision: "confirm" | "cancel" = "confirm") => {
     const socket = socketRef.current;
-    if (!connected || thinking || awaitingResponseRef.current || !socket || socket.readyState !== WebSocket.OPEN || action.sent) return;
+    if (!connected || thinking || awaitingResponseRef.current || !socket || socket.readyState !== WebSocket.OPEN || action.sent || !action.confirmationId || !action.sessionId) return;
+    activeApprovalRef.current = action.confirmationId;
+    rememberApproval({ sessionId: action.sessionId, confirmationId: action.confirmationId, decision });
     const userEcho = decision === "confirm" ? action.userEcho : `Cancelled: ${action.displayTarget}`;
     awaitingResponseRef.current = true;
     activeTurnPhaseRef.current = decision === "confirm" ? "using_tools" : "cancelled";
@@ -1079,11 +1012,10 @@ export function ChatWidget({
     try {
       socket.send(JSON.stringify({
         message: userEcho,
-        session_id: sessionId,
+        session_id: action.sessionId,
         attachments: [],
         client_context: chatClientContext(),
         tool_confirmation: {
-          id: action.confirmationId,
           confirmation_id: action.confirmationId,
           decision
         }
@@ -1100,13 +1032,13 @@ export function ChatWidget({
         {
           id: clientId("alfred-send-error"),
           role: "assistant",
-          text: "Alfred could not send that confirmation. Please try again.",
+          text: "The confirmation connection failed. Check the saved action result before deciding whether to confirm again.",
           createdAt: Date.now(),
           status: "failed"
         }
       ]);
     }
-  }, [connected, markTurnStarted, sessionId, thinking]);
+  }, [connected, markTurnStarted, rememberApproval, thinking]);
 
   const submitFeedback = React.useCallback(async (
     message: ChatMessageItem,
@@ -1250,6 +1182,7 @@ export function ChatWidget({
       !socket ||
       socket.readyState !== WebSocket.OPEN
     ) return;
+    activeApprovalRef.current = null;
     const text = sourceText.trim() || "Please inspect the attached file.";
     awaitingResponseRef.current = true;
     lastUserRequestRef.current = { text, attachments: attachments.map((attachment) => ({ ...attachment })) };
@@ -1392,6 +1325,29 @@ export function ChatWidget({
                   />
                 ))}
               </>
+              {currentUser.role === "admin" ? <div>
+                <button type="button" className="chat-confirm-button secondary" aria-expanded={showApprovalHistory} onClick={() => setShowApprovalHistory((value) => !value)}>{showApprovalHistory ? "Hide saved actions" : "Find saved actions"}</button>
+                {showApprovalHistory ? <ApprovalHistory currentUser={currentUser} busy={thinking} onInspect={rememberApproval} /> : null}
+              </div> : null}
+              {retainedApproval ? (
+                <div className="chat-llm-feedback" role="status">
+                  <span>{checkingApproval ? "Checking saved action result…" : approvalError || (
+                    approvalInspection?.status === "unknown" ? "The action outcome is uncertain and needs review. No command has been retried."
+                    : approvalInspection?.status === "in_progress" ? "The action is still in progress. No command has been retried."
+                    : approvalInspection?.status === "pending" ? "The action is awaiting confirmation."
+                    : "The approval is saved for result recovery."
+                  )}</span>
+                  {savedApprovals.length > 1 ? (
+                    <select aria-label="Saved action" value={retainedApproval.confirmationId} disabled={thinking}
+                      onChange={(event) => selectSavedApproval(event.target.value)}>
+                      {savedApprovals.map((item, index) => <option key={item.confirmationId} value={item.confirmationId}>Saved action {index + 1}</option>)}
+                    </select>
+                  ) : null}
+                  <button type="button" className="chat-confirm-button secondary" disabled={checkingApproval || thinking || !connected} onClick={recheckApproval}>
+                    Check action result
+                  </button>
+                </div>
+              ) : null}
               {thinking ? <TypingIndicator activities={toolActivities} runActivity={runActivity} slow={slowResponse} status={toolStatus} /> : null}
             </div>
 

@@ -1,0 +1,20 @@
+{
+  "aggregate": [
+    {"id": "verified-first-unverified-second", "targets": [[true, "opening"], [true, "closed"]], "all_verified": false, "review_needed": true},
+    {"id": "unverified-first-verified-second", "targets": [[true, "closed"], [true, "opening"]], "all_verified": false, "review_needed": true},
+    {"id": "accepted-first-rejected-second", "targets": [[true, "opening"], [false, "fault"]], "all_verified": false, "review_needed": false},
+    {"id": "rejected-first-accepted-second", "targets": [[false, "fault"], [true, "opening"]], "all_verified": false, "review_needed": false},
+    {"id": "all-verified-support", "targets": [[true, "opening"], [true, "open"]], "all_verified": true, "review_needed": false},
+    {"id": "all-rejected-support", "targets": [[false, "fault"], [false, "fault"]], "all_verified": false, "review_needed": false}
+  ],
+  "recognition_payload": {
+    "event_id": "a1000000-0000-0000-0000-000000000001",
+    "registration_number": "ZZSYN99",
+    "decision": "denied",
+    "direction": "denied",
+    "vehicle_id": null,
+    "person_id": null,
+    "source": "synthetic-recognition",
+    "occurred_at": "2026-09-12T12:00:00+00:00"
+  }
+}

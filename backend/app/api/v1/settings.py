@@ -33,11 +33,10 @@ from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
-    audit_diff,
     emit_audit_log,
 )
 from app.services.unifi_protect import get_unifi_protect_service
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
 
 router = APIRouter()
 
@@ -129,9 +128,8 @@ async def patch_settings(
         payload={"values": request.values},
         confirmation_token=request.confirmation_token,
     )
-    before = {row["key"]: row["value"] for row in await list_settings()}
     try:
-        rows = await update_settings(request.values)
+        rows = await update_settings(request.values, user=user, source="settings_endpoint")
     except UnknownDynamicSettingsError as exc:
         raise HTTPException(
             status_code=400,
@@ -141,22 +139,8 @@ async def patch_settings(
                 "allowed_keys": exc.allowed_keys,
             },
         ) from exc
-    after = {row["key"]: row["value"] for row in rows}
-    changed = {key: after.get(key) for key in request.values if before.get(key) != after.get(key)}
-    if changed:
-        emit_audit_log(
-            category=TELEMETRY_CATEGORY_CRUD,
-            action="settings.update",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="SystemSetting",
-            target_label=", ".join(sorted(changed.keys())[:8]),
-            diff=audit_diff(
-                {key: before.get(key) for key in changed},
-                {key: after.get(key) for key in changed},
-            ),
-            metadata={"keys": sorted(changed.keys())},
-        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if any(key.startswith("home_assistant_") for key in request.values):
         service = get_home_assistant_service()
         await service.stop()
@@ -308,7 +292,7 @@ async def _test_discord(values: dict[str, Any]) -> None:
 
 
 async def _test_whatsapp(values: dict[str, Any]) -> None:
-    await get_whatsapp_messaging_service().test_connection(values)
+    await get_whatsapp_delivery_service().test_connection(values)
 
 
 async def _test_dvla(values: dict[str, Any]) -> None:

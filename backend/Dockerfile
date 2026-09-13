@@ -21,8 +21,12 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 
-RUN pip install --upgrade pip \
-    && pip install uv \
+# Copied source may retain owner-only host permissions; runtime is non-root.
+RUN chmod -R a+rX /app/app /app/alembic \
+    && chmod a+r /app/pyproject.toml /app/uv.lock /app/README.md /app/alembic.ini
+
+RUN pip install pip==26.2.1 \
+    && pip install uv==0.12.13 \
     && uv sync --locked --no-dev --no-editable --compile-bytecode
 
 RUN groupadd --system iacs \

@@ -17,3 +17,6 @@ auth-secret.key.previous
 # Runtime state is mounted into containers as host directories.
 data/
 logs/
+
+# Host-specific release pins and bind mounts; never portable deployment defaults.
+docker-compose.override.yml

@@ -15,14 +15,16 @@ class HomeAssistantTtsAnnouncer:
     def __init__(self, client: HomeAssistantClient | None = None) -> None:
         self._client = client or get_home_assistant_client()
 
-    async def announce(self, target: AnnouncementTarget, message: str) -> None:
-        config = await get_runtime_config()
+    async def announce(self, target: AnnouncementTarget, message: str, *, runtime_config=None) -> None:
+        config = runtime_config if runtime_config is not None else await get_runtime_config()
+        options = {"runtime_config": config} if runtime_config is not None else {}
         await self._client.call_service(
             config.home_assistant_tts_service,
             {
                 "entity_id": target.entity_id,
                 "message": message,
             },
+            **options,
         )
 
     async def announce_default(self, message: str) -> None:

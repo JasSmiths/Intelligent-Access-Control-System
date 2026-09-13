@@ -3,6 +3,7 @@ import hashlib
 import hmac
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -12,31 +13,26 @@ from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 from app.ai import tools as ai_tools
+from app.ai.tool_groups import automations_handlers as alfred_automations_handlers
+from app.ai.tool_groups import registry as alfred_registry
 from app.api.v1 import automations as automations_api
 from app.models import AutomationRule, AutomationRun, Presence
-from app.models.enums import PresenceState
+from app.models.enums import PresenceState, UserRole
 from app.services import automation_integration_actions
 from app.services import automations
 from app.services.automation_integration_actions import registered_integration_action_types
 from app.services.automations import (
-    ACTION_CATALOG,
-    CONDITION_CATALOG,
-    TRIGGER_CATALOG,
-    AutomationContext,
     AutomationService,
-    ScheduledAutomationClaim,
-    build_context_variables,
-    context_missing_references,
     cron_from_recurrence,
     due_time_trigger,
-    facts_from_payload,
     next_run_for_trigger,
-    normalize_actions,
-    normalize_conditions,
-    normalize_triggers,
-    trigger_keys_for_triggers,
     validate_schedule_parse,
 )
+from app.services.workflows.automation_definition import (
+    ACTION_CATALOG, CONDITION_CATALOG, TRIGGER_CATALOG, AutomationContext, build_context_variables, context_missing_references, facts_from_payload, normalize_actions, normalize_conditions, normalize_triggers, trigger_keys_for_triggers,
+    INTEGRATION_ACTION_KEYS, automation_triggers_for_origin, generate_automation_webhook_key, is_high_entropy_webhook_key,
+)
+from app.services.automation_intake import public_automation_context, automation_execution_context_snapshot
 from app.services.event_bus import RealtimeEvent
 
 
@@ -122,7 +118,7 @@ def test_automation_evidence_helpers_preserve_config_and_dispatch_truth() -> Non
         trigger_payload={"registration_number": "IACS1"},
     )
 
-    snapshot = automations.automation_execution_context_snapshot(
+    snapshot = automation_execution_context_snapshot(
         context,
         rule,
         captured_at=datetime(2026, 7, 14, 21, 47, tzinfo=UTC),
@@ -267,7 +263,7 @@ async def test_visitor_pass_used_context_maps_registration_variable() -> None:
     assert context.variables["Registration"] == "AB12 CDE"
     assert context.variables["VisitorName"] == "Pat"
     assert context_missing_references(context, {"reason_template": "@VisitorPassVehicleRegistration"}) == []
-    assert context.to_payload()["missing_required_variables"] == []
+    assert public_automation_context(context)["missing_required_variables"] == []
 
 
 def test_missing_variable_references_skip_unavailable_trigger_scopes() -> None:
@@ -286,7 +282,7 @@ def test_missing_variable_references_skip_unavailable_trigger_scopes() -> None:
     )
 
     assert missing == ["VisitorPassVehicleRegistration"]
-    assert context.to_payload()["missing_required_variables"] == ["VisitorPassVehicleRegistration"]
+    assert public_automation_context(context)["missing_required_variables"] == ["VisitorPassVehicleRegistration"]
     assert "not available" in context.warnings[0]
 
 
@@ -303,41 +299,28 @@ def test_missing_unknown_variable_references_skip_cleanly() -> None:
     missing = context_missing_references(context, {"reason_template": "Open for @UnknownVariable"})
 
     assert missing == ["UnknownVariable"]
-    assert context.to_payload()["missing_required_variables"] == ["UnknownVariable"]
+    assert public_automation_context(context)["missing_required_variables"] == ["UnknownVariable"]
     assert "Unknown variable @UnknownVariable" in context.warnings[0]
 
 
 def test_event_bridge_uses_direct_access_event_domain_events() -> None:
-    service = AutomationService()
     created_at = "2026-04-30T20:15:00+00:00"
 
-    known = service._event_to_triggers(
-        RealtimeEvent(
-            "access_event.finalized",
-            {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at},
-            created_at,
-        )
+    known = automation_triggers_for_origin(
+        "access_event.finalized", {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at},
+        occurred_at=created_at,
     )
-    outside_schedule = service._event_to_triggers(
-        RealtimeEvent(
-            "access_event.finalized",
-            {"decision": "denied", "vehicle_id": "vehicle-1", "occurred_at": created_at},
-            created_at,
-        )
+    outside_schedule = automation_triggers_for_origin(
+        "access_event.finalized", {"decision": "denied", "vehicle_id": "vehicle-1", "occurred_at": created_at},
+        occurred_at=created_at,
     )
-    unknown = service._event_to_triggers(
-        RealtimeEvent(
-            "access_event.finalized",
-            {"decision": "denied", "registration_number": "AB12 CDE", "occurred_at": created_at},
-            created_at,
-        )
+    unknown = automation_triggers_for_origin(
+        "access_event.finalized", {"decision": "denied", "registration_number": "AB12 CDE", "occurred_at": created_at},
+        occurred_at=created_at,
     )
-    backfilled = service._event_to_triggers(
-        RealtimeEvent(
-            "access_event.finalized",
-            {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at, "backfilled": True},
-            created_at,
-        )
+    backfilled = automation_triggers_for_origin(
+        "access_event.finalized", {"decision": "granted", "vehicle_id": "vehicle-1", "occurred_at": created_at, "backfilled": True},
+        occurred_at=created_at,
     )
 
     assert known[0][0] == "vehicle.known_plate"
@@ -347,7 +330,6 @@ def test_event_bridge_uses_direct_access_event_domain_events() -> None:
 
 
 def test_event_bridge_ignores_notification_and_automation_status_events() -> None:
-    service = AutomationService()
     for event_type in (
         "notification.trigger",
         "notification.sent",
@@ -357,7 +339,10 @@ def test_event_bridge_ignores_notification_and_automation_status_events() -> Non
         "automation.run.failed",
         "automation.run.skipped",
     ):
-        assert service._event_to_triggers(RealtimeEvent(event_type, {"event_type": "unauthorized_plate"}, "2026-04-30T20:15:00+00:00")) == []
+        assert automation_triggers_for_origin(
+            event_type, {"event_type": "unauthorized_plate"},
+            occurred_at="2026-04-30T20:15:00+00:00",
+        ) == []
 
 
 @pytest.mark.asyncio
@@ -365,7 +350,7 @@ async def test_person_condition_evaluation_uses_presence_state() -> None:
     person_id = "11111111-1111-1111-1111-111111111111"
 
     class Session:
-        async def get(self, model, _id):
+        async def get(self, model, _id, **kwargs):
             assert model is Presence
             return SimpleNamespace(state=PresenceState.PRESENT)
 
@@ -647,15 +632,15 @@ def test_webhook_payload_facts_capture_sender_and_shape_message() -> None:
 
 @pytest.mark.asyncio
 async def test_alfred_automation_tools_require_confirmation() -> None:
-    create_result = await ai_tools.create_automation(
+    create_result = await alfred_automations_handlers.create_automation(
         {
             "name": "Open for Steph outside schedule",
             "triggers": [{"type": "vehicle.outside_schedule", "config": {"person_id": "person-1"}}],
             "actions": [{"type": "gate.open", "config": {}}],
         }
     )
-    delete_result = await ai_tools.delete_automation({"automation_name": "Open for Steph outside schedule"})
-    enable_result = await ai_tools.enable_automation({"automation_name": "Open for Steph outside schedule"})
+    delete_result = await alfred_automations_handlers.delete_automation({"automation_name": "Open for Steph outside schedule"})
+    enable_result = await alfred_automations_handlers.enable_automation({"automation_name": "Open for Steph outside schedule"})
 
     assert create_result["requires_confirmation"] is True
     assert create_result["confirmation_field"] == "confirm"
@@ -664,7 +649,7 @@ async def test_alfred_automation_tools_require_confirmation() -> None:
 
 
 def test_alfred_registers_automation_tool_metadata() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     assert tools["query_automation_catalog"].requires_confirmation is False
     assert tools["create_automation"].requires_confirmation is True
@@ -681,7 +666,7 @@ def test_webhook_triggers_generate_high_entropy_keys_when_requested() -> None:
     )
 
     config = triggers[0]["config"]
-    assert automations.is_high_entropy_webhook_key(config["webhook_key"])
+    assert is_high_entropy_webhook_key(config["webhook_key"])
     assert config["webhook_key_strength"] == "server_generated"
 
 
@@ -695,13 +680,13 @@ def test_high_impact_webhook_triggers_require_hmac_for_hardware_actions() -> Non
     automations.harden_webhook_triggers_for_actions(triggers, actions)
 
     config = triggers[0]["config"]
-    assert automations.is_high_entropy_webhook_key(config["webhook_key"])
+    assert is_high_entropy_webhook_key(config["webhook_key"])
     assert config["require_hmac"] is True
     assert config["rate_limit_per_minute"] == automations.WEBHOOK_RATE_LIMIT_PER_MINUTE
 
 
 def test_webhook_hmac_and_source_policy_helpers() -> None:
-    key = automations.generate_automation_webhook_key()
+    key = generate_automation_webhook_key()
     now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
     timestamp = str(int(now.timestamp()))
     nonce = "nonce-1"
@@ -817,194 +802,171 @@ async def test_receive_automation_webhook_rejects_invalid_json() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_claims_due_rule_before_execution(monkeypatch) -> None:
-    now = datetime(2026, 5, 3, 12, 0, tzinfo=UTC)
-    rule = AutomationRule(
-        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-        name="Every 15 minutes",
-        is_active=True,
-        triggers=[{"type": "time.every_x", "config": {"interval": 15, "unit": "minutes"}}],
-        trigger_keys=["time.every_x"],
-        conditions=[],
-        actions=[{"id": "action-1", "type": "notification.enable", "config": {}, "reason_template": ""}],
-        next_run_at=now - timedelta(minutes=1),
-        last_fired_at=now - timedelta(minutes=16),
-        run_count=0,
-    )
-
-    class ScalarRows:
-        def all(self):
-            return [rule]
-
-    class FakeSession:
-        def __init__(self):
-            self.added = []
-            self.committed = False
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def scalars(self, _statement):
-            return ScalarRows()
-
-        def add(self, row):
-            self.added.append(row)
-
-        async def flush(self):
-            for row in self.added:
-                if isinstance(row, AutomationRun) and row.id is None:
-                    row.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
-
-        async def commit(self):
-            self.committed = True
-
-    fake_session = FakeSession()
-    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: fake_session)
-
-    claims = await AutomationService()._claim_due_rules(now)
-
-    assert fake_session.committed is True
-    assert len(claims) == 1
-    assert claims[0].rule_id == str(rule.id)
-    assert claims[0].run_id == "22222222-2222-2222-2222-222222222222"
-    assert claims[0].trigger_key == "time.every_x"
-    assert claims[0].trigger_payload["scheduled_for"] == "2026-05-03T11:59:00+00:00"
-    assert rule.next_run_at == now + timedelta(minutes=15)
-    assert fake_session.added[0].status == "claimed"
-
-
-@pytest.mark.asyncio
-async def test_process_due_rules_executes_claimed_runs(monkeypatch) -> None:
+async def test_scheduler_reserves_before_wakeup_without_in_memory_execution_handoff(monkeypatch) -> None:
     service = AutomationService()
-    claim = ScheduledAutomationClaim(
-        rule_id="11111111-1111-1111-1111-111111111111",
-        run_id="22222222-2222-2222-2222-222222222222",
-        trigger_key="time.every_x",
-        trigger_payload={"scheduled_for": "2026-05-03T12:00:00+00:00"},
-    )
     calls = []
-
-    async def fake_claim_due_rules(_now):
-        return [claim]
-
-    async def fake_execute_rule(rule_id, **kwargs):
-        calls.append({"rule_id": rule_id, **kwargs})
-        return {"status": "success"}
-
-    monkeypatch.setattr(service, "_claim_due_rules", fake_claim_due_rules)
-    monkeypatch.setattr(service, "execute_rule", fake_execute_rule)
-
+    async def reserve():
+        calls.append("reserve_and_commit")
+        return 1
+    def wake():
+        calls.append("wake")
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Scheduler must not hand execution through an in-memory run list")
+    monkeypatch.setattr(service, "_reserve_due_rules", reserve)
+    monkeypatch.setattr(service.dispatcher, "wake", wake)
+    monkeypatch.setattr(service, "execute_rule", forbidden)
     await service._process_due_rules()
-
-    assert calls == [
-        {
-            "rule_id": claim.rule_id,
-            "trigger_key": claim.trigger_key,
-            "trigger_payload": claim.trigger_payload,
-            "actor": "Automation Scheduler",
-            "source": "scheduler",
-            "claimed_run_id": claim.run_id,
-        }
-    ]
+    assert calls == ["reserve_and_commit", "wake"]
 
 
 @pytest.mark.asyncio
-async def test_execute_rule_serializes_payloads_before_session_closes(monkeypatch) -> None:
-    rule = AutomationRule(
-        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-        name="Skip when maintenance is off",
-        is_active=True,
-        triggers=[{"type": "time.every_x", "config": {"interval": 15, "unit": "minutes"}}],
-        trigger_keys=["time.every_x"],
-        conditions=[{"id": "condition-1", "type": "maintenance_mode.enabled", "config": {}}],
-        actions=[{"id": "action-1", "type": "gate.open", "config": {}, "reason_template": ""}],
-        next_run_at=datetime(2026, 5, 3, 12, 15, tzinfo=UTC),
-        last_fired_at=datetime(2026, 5, 3, 12, 0, tzinfo=UTC),
-        run_count=0,
-    )
-
-    class FakeTrace:
-        trace_id = "trace-1"
-
-        def record_span(self, *_args, **_kwargs):
-            return None
-
-        def finish(self, **_kwargs):
-            return None
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-            self.added = []
-
+async def test_run_response_serializes_payload_before_session_closes(monkeypatch) -> None:
+    run = AutomationRun(id=uuid.uuid4(), rule_id=None, trigger_key="time.every_x", status="skipped",
+        started_at=datetime.now(tz=UTC), context={}, trigger_payload={}, condition_results=[], action_results=[])
+    class Session:
+        closed = False
         async def __aenter__(self):
             return self
-
-        async def __aexit__(self, *_args):
+        async def __aexit__(self, *args):
             self.closed = True
-            return None
+        async def get(self, model, identity):
+            assert model is AutomationRun and identity == run.id
+            return run
+    session = Session()
+    original = automations.serialize_run
+    def serialize(row):
+        assert not session.closed
+        return original(row)
+    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(automations, "serialize_run", serialize)
+    result = await AutomationService().run_response(run.id)
+    assert result["run"]["id"] == str(run.id) and result["status"] == "skipped"
+    assert session.closed
 
-        async def get(self, model, _row_id):
-            if model is AutomationRule:
-                return rule
-            return None
 
-        def add(self, row):
-            self.added.append(row)
+def _policy_admin():
+    return automations.User(id=uuid.uuid4(), username="synthetic-policy-admin",
+                            full_name="Synthetic Policy Admin", password_hash="not-used",
+                            role=UserRole.ADMIN, is_active=True)
 
-        async def flush(self):
-            for row in self.added:
-                if isinstance(row, AutomationRun) and row.id is None:
-                    row.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
-        async def commit(self):
-            return None
-
-        async def refresh(self, _row):
-            return None
-
-    fake_session = FakeSession()
-    published = []
-    original_serialize_rule = automations.serialize_rule
-    original_serialize_run = automations.serialize_run
-
-    def guarded_serialize_rule(row):
-        assert fake_session.closed is False
-        return original_serialize_rule(row)
-
-    def guarded_serialize_run(row):
-        assert fake_session.closed is False
-        return original_serialize_run(row)
-
-    async def fake_write_audit_log(*_args, **_kwargs):
-        return None
-
-    async def fake_is_maintenance_mode_active():
-        return False
-
-    async def fake_publish(event_name, payload):
-        published.append((event_name, payload))
-
-    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: fake_session)
-    monkeypatch.setattr(automations, "serialize_rule", guarded_serialize_rule)
-    monkeypatch.setattr(automations, "serialize_run", guarded_serialize_run)
-    monkeypatch.setattr(automations, "write_audit_log", fake_write_audit_log)
-    monkeypatch.setattr(automations, "is_maintenance_mode_active", fake_is_maintenance_mode_active)
-    monkeypatch.setattr(automations.event_bus, "publish", fake_publish)
-    monkeypatch.setattr(automations.telemetry, "start_trace", lambda *_args, **_kwargs: FakeTrace())
-
-    result = await AutomationService().execute_rule(
-        str(rule.id),
-        trigger_key="time.every_x",
-        trigger_payload={"scheduled_for": "2026-05-03T12:00:00+00:00"},
-        actor="Automation Scheduler",
-        source="scheduler",
+def _policy_rule(trigger="vehicle.known_plate", action="gate.open", *, active=True):
+    return AutomationRule(
+        id=uuid.uuid4(), name="Synthetic policy workflow", is_active=active,
+        triggers=normalize_triggers([{"type": trigger, "config": {}}]), trigger_keys=[trigger],
+        actions=normalize_actions([{"id": "action-1", "type": action, "config": {}}]),
+        conditions=[], run_count=0,
     )
 
-    assert result["status"] == "skipped"
-    assert result["run"]["id"] == "22222222-2222-2222-2222-222222222222"
-    assert published[0][0] == "automation.run.skipped"
-    assert published[0][1]["rule"]["id"] == str(rule.id)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["gate.open", "garage_door.open", "garage_door.close"])
+async def test_unknown_hardware_rule_is_rejected_before_add_or_audit(monkeypatch, action):
+    audit = AsyncMock()
+    monkeypatch.setattr(automations, "write_audit_log", audit)
+    session = SimpleNamespace(add=lambda row: pytest.fail("Rejected rule was added"))
+    with pytest.raises(automations.AutomationError, match="Unknown plates"):
+        await AutomationService().create_rule(
+            session, name="Synthetic unsafe rule", created_by=_policy_admin(),
+            triggers=[{"type": "vehicle.unknown_plate", "config": {}}], conditions=[],
+            actions=[{"id": "hardware", "type": action, "config": {}}],
+        )
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["trigger", "action", "reenable", "rename"])
+async def test_unknown_hardware_update_validates_merged_rule_before_mutation(monkeypatch, change):
+    rule = _policy_rule()
+    if change == "trigger":
+        changes = {"triggers": [{"type": "vehicle.unknown_plate", "config": {}}]}
+    elif change == "action":
+        rule = _policy_rule("vehicle.unknown_plate", "notification.enable")
+        changes = {"actions": [{"id": "hardware", "type": "gate.open", "config": {}}]}
+    else:
+        rule = _policy_rule("vehicle.unknown_plate", active=change != "reenable")
+        changes = {"is_active": True} if change == "reenable" else {"name": "Changed name"}
+    before = automations.serialize_rule(rule)
+    audit = AsyncMock()
+    session = SimpleNamespace(refresh=AsyncMock())
+    monkeypatch.setattr(automations, "write_audit_log", audit)
+    with pytest.raises(automations.AutomationError, match="Unknown plates"):
+        await AutomationService().update_rule(session, rule, actor=_policy_admin(), **changes)
+    assert automations.serialize_rule(rule) == before
+    session.refresh.assert_awaited_once_with(rule, with_for_update=True)
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_existing_unsafe_rule_can_be_disabled_without_deleting_its_configuration(monkeypatch):
+    rule = _policy_rule("vehicle.unknown_plate")
+    triggers, actions = rule.triggers, rule.actions
+    audit = AsyncMock()
+    monkeypatch.setattr(automations, "write_audit_log", audit)
+    session = SimpleNamespace(refresh=AsyncMock(), flush=AsyncMock())
+    result = await AutomationService().update_rule(session, rule, actor=_policy_admin(), is_active=False)
+    assert result is rule and not rule.is_active
+    assert rule.triggers == triggers and rule.actions == actions
+    assert audit.await_args.kwargs["action"] == "automation_rule.update"
+
+
+@pytest.mark.asyncio
+async def test_context_captures_original_recognition_evidence_before_rendering():
+    payload = {"decision": "denied", "vehicle_id": None, "event_id": "synthetic-event"}
+    context = await AutomationService().context_for_trigger("vehicle.known_plate", payload)
+    payload.update(decision="granted", vehicle_id="synthetic-vehicle", confirmed=True, user_role="admin")
+    assert public_automation_context(context)["provenance"] == {
+        "trigger_key": "vehicle.known_plate", "decision": "denied", "vehicle_id": None,
+        "event_id": "synthetic-event", "historical": False,
+    }
+    result = await AutomationService()._execute_action(
+        SimpleNamespace(), {"id": "gate", "type": "gate.open"}, context, rule=_policy_rule()
+    )
+    assert result["status"] == "skipped" and not result["command_sent"]
+    assert result["reason_code"] == "unknown_plate_hardware_forbidden"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["standard", "admin"])
+async def test_phrase_observation_cannot_claim_hardware_confirmation_in_payload(role):
+    context = await AutomationService().context_for_trigger("ai.phrase_received", {
+        "phrase": "Synthetic open", "user_id": "synthetic-user", "user_role": role,
+        "confirmed": True, "confirmation_id": "untrusted-confirmation", "actor": "Automation Engine",
+    })
+    result = await AutomationService()._execute_action(
+        SimpleNamespace(), {"id": "gate", "type": "gate.open"}, context, rule=_policy_rule("ai.phrase_received")
+    )
+    assert result["status"] == "skipped" and not result["command_sent"]
+    assert result["requires_confirmation"] is True
+    assert result["reason_code"] == "requester_confirmation_required"
+
+
+def test_hardware_admission_covers_every_registered_gate_or_garage_action():
+    from app.services.automation_policy import HARDWARE_ACTION_TYPES
+
+    registered = {action["type"] for group in ACTION_CATALOG for action in group["actions"]
+                  if action["type"].startswith(("gate.", "garage_door."))}
+    assert registered == HARDWARE_ACTION_TYPES
+
+
+def test_runtime_integration_registry_matches_pure_action_schema():
+    assert registered_integration_action_types() == set(INTEGRATION_ACTION_KEYS)
+    assert {definition.type: (definition.provider, definition.action)
+            for definition in automation_integration_actions.INTEGRATION_ACTIONS} == INTEGRATION_ACTION_KEYS
+
+
+def test_automation_definition_and_intake_do_not_import_execution_facades():
+    import ast
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1] / "app/services"
+    definition = ast.parse((base / "workflows/automation_definition.py").read_text())
+    allowed = {"app.services.automation_policy", "app.services.type_helpers",
+               "app.services.workflows.catalog", "app.services.workflows.context"}
+    assert {node.module for node in ast.walk(definition) if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("app.")} <= allowed
+    intake = ast.parse((base / "automation_intake.py").read_text())
+    forbidden = {"app.services.automations", "app.services.automation_integration_actions", "app.services.access_devices",
+                 "app.services.whatsapp_messaging", "app.services.notifications"}
+    assert not {node.module for node in ast.walk(intake) if isinstance(node, ast.ImportFrom)} & forbidden
+    assert not {node.func.attr for node in ast.walk(intake) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)} & {"commit", "publish", "wake", "command_device", "execute_open"}

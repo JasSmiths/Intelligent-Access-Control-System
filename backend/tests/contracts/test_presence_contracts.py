@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.models import Presence
-from app.models.enums import AccessDirection, PresenceState
-from app.services.access_events import AccessEventService
+from app.models.enums import AccessDecision, AccessDirection, PresenceState
+from app.services.movement.presence import apply_eligible_event_in_session
 
 from .helpers import assert_contract_subset, load_contract_fixture
 
@@ -26,7 +26,15 @@ class _PresenceSession:
         self.presence = presence
         self.added: list[object] = []
 
-    async def get(self, model, key):
+    async def execute(self, statement, parameters):
+        assert "pg_advisory_xact_lock" in str(statement)
+        assert parameters == {"person": f"iacs:presence:{PERSON_ID}"}
+
+    async def flush(self):
+        pass
+
+    async def get(self, model, key, **kwargs):
+        assert kwargs == {"with_for_update": True, "populate_existing": True}
         assert model is Presence
         assert key == PERSON_ID
         return self.presence
@@ -42,14 +50,13 @@ async def test_presence_entry_contract_commits_current_presence_payload() -> Non
     session = _PresenceSession()
     event = SimpleNamespace(
         id=ENTRY_EVENT_ID,
+        person_id=PERSON_ID, decision=AccessDecision.GRANTED,
         direction=AccessDirection.ENTRY,
         occurred_at=_dt("2026-05-31T08:15:00+00:00"),
     )
-    person = SimpleNamespace(id=PERSON_ID)
+    result = await apply_eligible_event_in_session(session, event)
 
-    changed = await AccessEventService()._update_presence(session, person, event)
-
-    assert changed is True
+    assert result.changed is True
     assert session.presence is not None
     realtime_payload = {
         "person_id": str(session.presence.person_id),
@@ -69,13 +76,14 @@ async def test_presence_update_contract_ignores_stale_event_and_preserves_expect
     session = _PresenceSession(existing)
     stale_exit = SimpleNamespace(
         id=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        person_id=PERSON_ID, decision=AccessDecision.GRANTED,
         direction=AccessDirection.EXIT,
         occurred_at=existing.last_changed_at - timedelta(minutes=5),
     )
 
-    changed = await AccessEventService()._update_presence(session, SimpleNamespace(id=PERSON_ID), stale_exit)
+    result = await apply_eligible_event_in_session(session, stale_exit)
 
-    assert changed is False
+    assert result.changed is False
     assert session.presence.state == PresenceState.PRESENT
     assert session.presence.last_event_id == ENTRY_EVENT_ID
     assert session.presence.last_changed_at == _dt("2026-05-31T08:15:00+00:00")

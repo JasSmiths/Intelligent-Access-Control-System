@@ -7,7 +7,12 @@ import pytest
 
 from app.modules.messaging.base import MessagingBridgeResult
 from app.services import messaging_bridge as messaging_bridge_module
-from app.services.whatsapp_messaging import WhatsAppIntegrationConfig, WhatsAppMessagingService
+from app.modules.messaging.whatsapp import WhatsAppIntegrationConfig
+from app.services.messaging.identities import WhatsAppIdentityService
+from app.services.messaging.whatsapp_delivery import WhatsAppDeliveryService
+from app.services.messaging.visitor_conversation import WhatsAppVisitorConversationService
+from app.services.messaging.whatsapp_router import WhatsAppRouter
+from app.services.messaging.whatsapp_replies import WhatsAppSender
 
 from .helpers import assert_contract_subset, load_contract_fixture
 
@@ -28,8 +33,9 @@ def _whatsapp_config() -> WhatsAppIntegrationConfig:
 
 @pytest.mark.asyncio
 async def test_whatsapp_visitor_flow_contract_stays_inside_visitor_sandbox(monkeypatch) -> None:
-    service = WhatsAppMessagingService()
-    service._visitor_message_debounce_seconds = 0
+    delivery = WhatsAppDeliveryService()
+    visitor = WhatsAppVisitorConversationService(delivery=delivery)
+    service = WhatsAppRouter(delivery=delivery, visitor=visitor, identities=WhatsAppIdentityService())
     visitor_pass = SimpleNamespace(id=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
     acknowledgements: list[dict[str, object]] = []
     visitor_calls: list[dict[str, object]] = []
@@ -63,12 +69,10 @@ async def test_whatsapp_visitor_flow_contract_stays_inside_visitor_sandbox(monke
     async def fail_admin_bridge(*args, **kwargs):
         raise AssertionError("Visitor messages must not route to Alfred.")
 
-    monkeypatch.setattr(service, "_admin_for_phone", fake_admin_for_phone)
-    monkeypatch.setattr(service, "_visitor_pass_for_phone", fake_visitor_pass_for_phone)
-    monkeypatch.setattr(service, "_visitor_reply_is_muted", fake_visitor_reply_is_muted)
-    monkeypatch.setattr(service, "mark_incoming_message_read", fake_mark_read)
-    monkeypatch.setattr(service, "_record_inbound_visitor_message", fake_record_inbound)
-    monkeypatch.setattr(service, "_process_visitor_text", fake_process_visitor_text)
+    monkeypatch.setattr(visitor._state, "visitor_reply_is_muted", fake_visitor_reply_is_muted)
+    monkeypatch.setattr(delivery, "mark_incoming_message_read", fake_mark_read)
+    monkeypatch.setattr(visitor, "_record_inbound_visitor_message", fake_record_inbound)
+    monkeypatch.setattr(visitor, "_process_visitor_text", fake_process_visitor_text)
     monkeypatch.setattr(messaging_bridge_module.messaging_bridge_service, "handle_message", fail_admin_bridge)
 
     await service._handle_incoming_message(
@@ -83,6 +87,7 @@ async def test_whatsapp_visitor_flow_contract_stays_inside_visitor_sandbox(monke
         phone_number_id="phone-number-1",
         config=_whatsapp_config(),
         signature_verified=True,
+        sender_state=WhatsAppSender(_whatsapp_config(), visitor_pass=visitor_pass, visitor_state="active"),
     )
 
     route_payload = {
@@ -98,7 +103,9 @@ async def test_whatsapp_visitor_flow_contract_stays_inside_visitor_sandbox(monke
 
 @pytest.mark.asyncio
 async def test_whatsapp_admin_flow_contract_routes_active_admin_to_alfred_v3(monkeypatch) -> None:
-    service = WhatsAppMessagingService()
+    delivery = WhatsAppDeliveryService()
+    visitor = WhatsAppVisitorConversationService(delivery=delivery)
+    service = WhatsAppRouter(delivery=delivery, visitor=visitor, identities=WhatsAppIdentityService())
     admin = SimpleNamespace(
         id=uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
         full_name="Jas",
@@ -132,11 +139,11 @@ async def test_whatsapp_admin_flow_contract_routes_active_admin_to_alfred_v3(mon
                 pending_action=None,
             )
 
-    monkeypatch.setattr(service, "_admin_for_phone", fake_admin_for_phone)
-    monkeypatch.setattr(service, "_ensure_admin_identity", fake_ensure_admin_identity)
+    monkeypatch.setattr(service._identities, "ensure_admin_identity", fake_ensure_admin_identity)
+    monkeypatch.setattr(delivery, "mark_incoming_message_read", fake_ensure_admin_identity)
     monkeypatch.setattr(service, "_handle_admin_feedback_followup", fake_handle_feedback)
-    monkeypatch.setattr(service, "send_text_message", fake_send_text_message)
-    monkeypatch.setattr(service, "send_confirmation_message", fail_confirmation)
+    monkeypatch.setattr(delivery, "send_text_message", fake_send_text_message)
+    monkeypatch.setattr(delivery, "send_confirmation_message", fail_confirmation)
     monkeypatch.setattr(messaging_bridge_module, "messaging_bridge_service", FakeBridge())
 
     await service._handle_incoming_message(
@@ -151,6 +158,7 @@ async def test_whatsapp_admin_flow_contract_routes_active_admin_to_alfred_v3(mon
         phone_number_id="phone-number-1",
         config=_whatsapp_config(),
         signature_verified=True,
+        sender_state=WhatsAppSender(_whatsapp_config(), admin=admin),
     )
 
     incoming = captured["incoming"]

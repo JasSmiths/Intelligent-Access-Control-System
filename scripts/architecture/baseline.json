@@ -1,0 +1,60 @@
+{
+  "frontend_cycle_edges": [],
+  "frontend_modules": 83,
+  "provenance": {
+    "inventory_evidence": "architecture-inventory-321ykg9q",
+    "inventory_sha256": "86293b73ca48d70b8282309ff1be9e7a83f5ca06c7b25103089c198e98547041",
+    "original_capture": {
+      "capture_manifest_sha256": "0e1108fba22301621c05d51c2f6a6a09c4a0f030684b7fe867927a2aed8cfb46",
+      "commit": "69f9d8cfc1f77417a57105223f4e0772ae62de5d",
+      "source": "Captured dirty source before this task; 488 safe files"
+    },
+    "review": "IACS recovery implementation; permitted cycle edges only decrease"
+  },
+  "python_cycle_edges": [
+    [
+      "app.modules.gate.access_devices",
+      "app.services.access_devices"
+    ],
+    [
+      "app.modules.registry",
+      "app.modules.gate.access_devices"
+    ],
+    [
+      "app.services.access_devices",
+      "app.services.home_assistant"
+    ],
+    [
+      "app.services.actionable_notifications",
+      "app.services.gate_commands"
+    ],
+    [
+      "app.services.gate_commands",
+      "app.modules.registry"
+    ],
+    [
+      "app.services.home_assistant",
+      "app.services.actionable_notifications"
+    ],
+    [
+      "app.services.home_assistant",
+      "app.services.maintenance"
+    ],
+    [
+      "app.services.home_assistant",
+      "app.services.notifications"
+    ],
+    [
+      "app.services.maintenance",
+      "app.services.notifications"
+    ],
+    [
+      "app.services.notifications",
+      "app.services.actionable_notifications"
+    ]
+  ],
+  "python_modules": 244,
+  "violations": {
+    "backend/app/simulation/scenarios.py::presence_constructor": 1
+  }
+}

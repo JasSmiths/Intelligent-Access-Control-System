@@ -7,9 +7,9 @@ from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import User
 from app.modules.lpr.base import PlateRead, now_utc
-from app.services.maintenance import is_maintenance_mode_active
 from app.services.access_events import AccessEventService, get_access_event_service
-from app.simulation.scenarios import FullAccessFlowReport, FullAccessFlowRequest, run_full_access_flow
+from app.services.maintenance import is_maintenance_mode_active
+from app.simulation.scenarios import FullAccessFlowReport
 
 router = APIRouter()
 
@@ -97,21 +97,9 @@ async def simulate_misread_sequence(
 
 
 @router.post("/e2e/full-access-flow", response_model=FullAccessFlowReport)
-async def simulate_full_access_flow(
-    request: FullAccessFlowRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> FullAccessFlowReport:
-    """Run the hardware-free end-to-end access-flow simulation suite."""
-
-    try:
-        await require_confirmed_action(
-            session,
-            user=user,
-            action="simulation.full_access_flow",
-            payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
-            confirmation_token=request.confirmation_token,
-        )
-        return await run_full_access_flow(request)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+async def simulate_full_access_flow() -> FullAccessFlowReport:
+    """Retired: the complete simulator runs only inside the isolated test harness."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Full access-flow simulation is available only through the isolated test harness.",
+    )

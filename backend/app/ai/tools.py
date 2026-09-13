@@ -1,27 +1,28 @@
-"""Public Alfred tool contracts and registry facade.
-
-The concrete Alfred V3 tool handlers live in ``app.ai.tool_groups`` beside
-their domain catalogs. This module keeps the stable public imports used by
-ChatService, tests, and extension code.
-"""
+"""Alfred tool contracts. No registry, handler, provider, or service dependencies."""
 
 from __future__ import annotations
 
-import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from importlib import import_module
-from types import ModuleType
-from typing import Any
+from typing import Any, Literal, TypedDict
 
-from app.ai.tool_groups import _shared
-from app.ai.tool_groups._shared import (
-    ADMIN_PERMISSION,
-    SAFETY_ADMIN_ONLY,
-    SAFETY_CONFIRMATION_REQUIRED,
-    SAFETY_LEVELS,
-    SAFETY_READ_ONLY,
-    ToolHandler,
-)
+ToolSummary = Callable[[str, dict[str, Any]], str]
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+SAFETY_READ_ONLY = "read_only"
+SAFETY_CONFIRMATION_REQUIRED = "confirmation_required"
+SAFETY_ADMIN_ONLY = "admin_only"
+SAFETY_LEVELS = {SAFETY_READ_ONLY, SAFETY_CONFIRMATION_REQUIRED, SAFETY_ADMIN_ONLY}
+ADMIN_PERMISSION = "admin"
+
+
+class ToolError(TypedDict):
+    code: str
+    message: str
+
+
+class ToolOutcome(TypedDict):
+    status: Literal["succeeded", "failed", "requires_confirmation", "requires_details"]
+    error: ToolError | None
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,11 @@ class AgentTool:
     example_inputs: tuple[dict[str, Any], ...] = ()
     return_schema: dict[str, Any] | None = None
     default_limit: int | None = None
+    status_label: str = "Running system tool..."
+    success_fields: tuple[str, ...] = ()
+    finish_after_confirmation: bool = False
+    summary_handler: ToolSummary | None = None
+    button_handler: ToolSummary | None = None
 
     def __post_init__(self) -> None:
         categories = tuple(str(category).strip() for category in self.categories if str(category).strip())
@@ -75,70 +81,39 @@ class AgentTool:
         }
 
 
-def build_agent_tools() -> dict[str, AgentTool]:
-    from app.ai.tool_groups.registry import build_grouped_tool_map
+    def execution_metadata(self) -> dict[str, Any]:
+        return {"status_label": self.status_label, "success_fields": list(self.success_fields),
+                "finish_after_confirmation": self.finish_after_confirmation,
+                "summary_owner": f"{self.summary_handler.__module__}.{self.summary_handler.__name__}" if self.summary_handler else None,
+                "button_owner": f"{self.button_handler.__module__}.{self.button_handler.__name__}" if self.button_handler else None}
 
-    return build_grouped_tool_map()
+    def outcome(self, output: dict[str, Any]) -> ToolOutcome:
+        if output.get("error"):
+            return {"status": "failed", "error": {"code": str(output.get("error_code") or "operation_failed"),
+                                                    "message": str(output.get("detail") or output["error"])}}
+        if output.get("requires_confirmation"):
+            return {"status": "requires_confirmation", "error": None}
+        if output.get("requires_details"):
+            return {"status": "requires_details", "error": None}
+        failed = output.get("accepted") is False or output.get("status") in ("failed", "error")
+        declared = [output[key] for key in self.success_fields if key in output]
+        if self.success_fields and not any(value is True for value in declared):
+            failed = True
+        if failed:
+            return {"status": "failed", "error": {"code": "operation_failed",
+                    "message": str(output.get("detail") or "The operation did not succeed.")}}
+        return {"status": "succeeded", "error": None}
 
-
-_HANDLER_MODULE_NAMES = (
-    'access_diagnostics_handlers',
-    'access_incident_handlers',
-    'automations_handlers',
-    'compliance_cameras_files_handlers',
-    'gate_maintenance_handlers',
-    'general_handlers',
-    'notifications_handlers',
-    'schedules_handlers',
-    'system_operations_handlers',
-    'visitor_passes_handlers',
-)
-
-_FACADE_OVERRIDES: dict[str, Any] = {}
-
-
-def __getattr__(name: str) -> Any:
-    if hasattr(_shared, name):
-        value = getattr(_shared, name)
-        globals()[name] = value
-        return value
-    if name.startswith("_"):
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    for module_name in _HANDLER_MODULE_NAMES:
-        module = import_module(f"app.ai.tool_groups.{module_name}")
-        _apply_overrides_to_module(module)
-        if hasattr(module, name):
-            value = getattr(module, name)
-            globals()[name] = value
-            return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    def confirmation_text(self, output: dict[str, Any]) -> str:
+        outcome = self.outcome(output)
+        if outcome["error"] is not None:
+            return outcome["error"]["message"]
+        if outcome["status"] != "succeeded":
+            return str(output.get("detail") or "The operation needs more information or confirmation.")
+        if self.summary_handler:
+            return self.summary_handler(self.name, output)
+        return str(output.get("detail") or "Action completed.")
 
 
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(dir(_shared)))
-
-
-def _apply_overrides_to_module(module: ModuleType) -> None:
-    for override_name, override_value in _FACADE_OVERRIDES.items():
-        if hasattr(module, override_name):
-            setattr(module, override_name, override_value)
-
-
-def _propagate_facade_override(name: str, value: Any) -> None:
-    _FACADE_OVERRIDES[name] = value
-    if hasattr(_shared, name):
-        setattr(_shared, name, value)
-    for module_name in _HANDLER_MODULE_NAMES:
-        module = sys.modules.get(f"app.ai.tool_groups.{module_name}")
-        if module is not None and hasattr(module, name):
-            setattr(module, name, value)
-
-
-class _ToolFacadeModule(ModuleType):
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        if not name.startswith("__"):
-            _propagate_facade_override(name, value)
-
-
-sys.modules[__name__].__class__ = _ToolFacadeModule
+def failed_outcome(code: str, message: str) -> ToolOutcome:
+    return {"status": "failed", "error": {"code": code, "message": message}}

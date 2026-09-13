@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -15,6 +16,8 @@ from app.services.reports import (
     load_report_export,
     report_export_payload,
     report_pdf_path,
+    preview_person_movement_report,
+    report_preview_context,
 )
 
 router = APIRouter()
@@ -28,6 +31,57 @@ class PersonMovementReportExportRequest(BaseModel):
     include_denied: bool = False
     include_snapshots: bool = True
     include_confidence: bool = True
+
+
+class PersonMovementReportPreviewRequest(PersonMovementReportExportRequest):
+    period_start_fold: Literal[0, 1] | None = None
+    period_end_fold: Literal[0, 1] | None = None
+
+
+class ReportTimeOccurrence(BaseModel):
+    fold: Literal[0, 1]
+    utc_offset_minutes: int
+    label: str
+
+
+class ReportTimeChoice(BaseModel):
+    field: Literal["period_start", "period_end"]
+    local_time: str
+    choices: list[ReportTimeOccurrence]
+
+
+class ReportPreviewReady(BaseModel):
+    status: Literal["ready"]
+    complete: Literal[True]
+    report: dict[str, Any]
+
+
+class ReportPreviewTimeChoiceRequired(BaseModel):
+    status: Literal["time_choice_required"]
+    site_timezone: str
+    time_choices: list[ReportTimeChoice]
+
+
+class ReportPreviewContext(BaseModel):
+    site_timezone: str
+    now: datetime
+
+
+@router.get("/context", response_model=ReportPreviewContext)
+async def get_report_preview_context(actor: User = Depends(current_user)) -> dict:
+    return await report_preview_context()
+
+
+@router.post("/person-movements/preview", response_model=ReportPreviewReady | ReportPreviewTimeChoiceRequired)
+async def preview_movement_report(
+    request: PersonMovementReportPreviewRequest,
+    actor: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    try:
+        return await preview_person_movement_report(session, **request.model_dump())
+    except ReportExportError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/person-movements/export")

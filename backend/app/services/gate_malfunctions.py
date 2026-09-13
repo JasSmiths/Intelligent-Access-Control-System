@@ -32,9 +32,9 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.home_assistant import KEEP_GATE_OPEN_HA_ENTITY_ID
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.workflows.notification_payloads import GATE_MALFUNCTION_STAGE_LABELS
 from app.services.notifications import (
     GATE_MALFUNCTION_EVENT_TYPE,
-    GATE_MALFUNCTION_STAGE_LABELS,
     get_notification_service,
 )
 from app.services.telemetry import (
@@ -69,7 +69,7 @@ MALFUNCTION_STAGE_ORDER = {
 }
 UNSAFE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
 UNRESOLVED_STATUSES = {GateMalfunctionStatus.ACTIVE, GateMalfunctionStatus.FUBAR}
-NOTIFICATION_TERMINAL_STATUSES = {"sent", "skipped"}
+NOTIFICATION_TERMINAL_STATUSES = {"sent", "skipped", "review_required"}
 NOTIFICATION_RETRY_SECONDS = [60, 5 * 60, 15 * 60]
 NOTIFICATION_SENDING_STALE_SECONDS = 5 * 60
 ATTEMPT_CLAIM_STALE_SECONDS = 5 * 60
@@ -1088,10 +1088,11 @@ class GateMalfunctionService:
                     GateMalfunctionNotificationOutbox.stage == normalized_stage,
                 )
             )
-            if outbox and outbox.status in NOTIFICATION_TERMINAL_STATUSES:
+            if outbox and (outbox.recovery_version != 1 or outbox.status in NOTIFICATION_TERMINAL_STATUSES):
                 return
             if outbox is None:
                 outbox = GateMalfunctionNotificationOutbox(
+                    recovery_version=1,
                     malfunction_id=row.id,
                     trigger=GATE_MALFUNCTION_EVENT_TYPE,
                     stage=normalized_stage,
@@ -1144,6 +1145,7 @@ class GateMalfunctionService:
             rows = (
                 await session.scalars(
                     select(GateMalfunctionNotificationOutbox)
+                    .where(GateMalfunctionNotificationOutbox.recovery_version == 1)
                     .where(
                         or_(
                             and_(
@@ -1185,9 +1187,16 @@ class GateMalfunctionService:
                 .where(GateMalfunctionNotificationOutbox.id == outbox_id)
                 .with_for_update()
             )
-            if not outbox or outbox.status in NOTIFICATION_TERMINAL_STATUSES:
+            if not outbox or outbox.recovery_version != 1 or outbox.status in NOTIFICATION_TERMINAL_STATUSES:
                 return
             now = datetime.now(tz=UTC)
+            from app.services.notification_runs import MAX_DISPATCH_AGE_SECONDS
+            if (now - outbox.occurred_at).total_seconds() > MAX_DISPATCH_AGE_SECONDS:
+                outbox.status = "review_required"
+                outbox.last_error = "dispatch_age_exceeded"
+                outbox.next_retry_at = None
+                await session.commit()
+                return
             if outbox.status == "sending" and outbox.last_attempt_at and (
                 now - outbox.last_attempt_at
             ).total_seconds() < NOTIFICATION_SENDING_STALE_SECONDS:
@@ -1222,13 +1231,14 @@ class GateMalfunctionService:
             await session.commit()
 
         try:
-            result = await get_notification_service().process_context_with_result(
+            result = await get_notification_service().send_notification_now_with_result(
                 NotificationContext(
                     event_type=event_type,
                     subject=subject,
                     severity=severity,
                     facts=facts,
-                )
+                ),
+                dispatch_id=uuid.uuid5(uuid.NAMESPACE_URL, f"iacs:gate-notification:{outbox_id}"),
             )
             await self._finalize_outbox_result(outbox_id, result.status, "; ".join(result.failures))
         except Exception as exc:
@@ -1244,7 +1254,11 @@ class GateMalfunctionService:
             )
             if not outbox or outbox.status in NOTIFICATION_TERMINAL_STATUSES:
                 return
-            if status == "sent":
+            if status == "review_required":
+                outbox.status = "review_required"
+                outbox.next_retry_at = None
+                outbox.last_error = "Notification delivery requires review; automatic resend is disabled."
+            elif status == "sent":
                 outbox.status = "sent"
                 outbox.next_retry_at = None
                 outbox.last_error = None
@@ -1267,41 +1281,12 @@ class GateMalfunctionService:
         malfunction_id = self._coerce_uuid(payload.get("malfunction_id"))
         if malfunction_id is None:
             return
-        trigger = str(payload.get("event_type") or "")
         stage = self._normalize_notification_stage(payload.get("malfunction_stage"))
         async with AsyncSessionLocal() as session:
             row = await session.get(GateMalfunctionState, malfunction_id)
             if not row:
                 return
-            if trigger:
-                outbox = await session.scalar(
-                    select(GateMalfunctionNotificationOutbox)
-                    .where(
-                        GateMalfunctionNotificationOutbox.malfunction_id == row.id,
-                        GateMalfunctionNotificationOutbox.stage == stage,
-                    )
-                    .with_for_update()
-                )
-                if outbox:
-                    if event_type == "notification.sent":
-                        outbox.status = "sent"
-                        outbox.next_retry_at = None
-                        outbox.last_error = None
-                    elif event_type == "notification.skipped" and outbox.status != "sent":
-                        skip_reason = str(payload.get("reason") or "")
-                        if skip_reason != "conditions_not_met" and outbox.status != "failed":
-                            outbox.status = "skipped"
-                            outbox.next_retry_at = None
-                            outbox.last_error = skip_reason
-                    elif event_type == "notification.failed" and outbox.status not in NOTIFICATION_TERMINAL_STATUSES:
-                        outbox.status = "failed"
-                        outbox.last_error = str(payload.get("error") or "")
-                        retry_index = max(0, min(outbox.attempts_count - 1, len(NOTIFICATION_RETRY_SECONDS) - 1))
-                        outbox.next_retry_at = (
-                            datetime.now(tz=UTC) + timedelta(seconds=NOTIFICATION_RETRY_SECONDS[retry_index])
-                            if outbox.attempts_count < len(NOTIFICATION_RETRY_SECONDS)
-                            else None
-                        )
+            # Run checkpoints own delivery state. Realtime only enriches the timeline.
             channel = str(payload.get("channel") or payload.get("reason") or "workflow")
             title = {
                 "notification.sent": "Notification sent",

@@ -1,31 +1,24 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user
+from app.api.confirmations import send_confirmed_notification
 from app.db.session import get_db_session
-from app.models import NotificationRule, User
-from app.modules.notifications.base import NotificationDeliveryError
+from app.models import GateMalfunctionNotificationOutbox, NotificationRule, NotificationRun, User
+from app.services.notification_runs import review_filter, run_summary
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
+from app.services import notification_rules
+from app.services.mutation_context import MutationError
+from app.services.workflows.notification_payloads import (normalize_actions, normalize_conditions, normalize_rule_payload)
 from app.services.notifications import (
     get_notification_service,
-    normalize_actions,
-    normalize_conditions,
-    normalize_rule_payload,
-    normalize_trigger_event,
     notification_context_from_payload,
     sample_notification_context,
-)
-from app.services.telemetry import (
-    TELEMETRY_CATEGORY_CRUD,
-    TELEMETRY_CATEGORY_INTEGRATIONS,
-    actor_from_user,
-    audit_diff,
-    write_audit_log,
 )
 
 router = APIRouter()
@@ -68,6 +61,49 @@ class NotificationRuleDeleteRequest(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
+@router.get("/runs")
+async def list_notification_runs(
+    _: User = Depends(admin_user), session: AsyncSession = Depends(get_db_session),
+    review_only: bool = False, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=10000),
+) -> list[dict[str, Any]]:
+    query = select(NotificationRun)
+    if review_only:
+        query = query.where(review_filter())
+    rows = (await session.scalars(query.order_by(NotificationRun.queued_at.desc(), NotificationRun.id)
+                                  .offset(offset).limit(limit))).all()
+    return [run_summary(row) for row in rows]
+
+
+@router.get("/runs/{run_id}")
+async def get_notification_run(
+    run_id: uuid.UUID, _: User = Depends(admin_user), session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    row = await session.get(NotificationRun, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Notification run not found")
+    return run_summary(row)
+
+
+@router.get("/recovery/gate-outbox")
+async def gate_notification_review(
+    _: User = Depends(admin_user), session: AsyncSession = Depends(get_db_session),
+    limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=10000),
+) -> list[dict[str, Any]]:
+    from sqlalchemy import and_, or_
+    rows = (await session.scalars(select(GateMalfunctionNotificationOutbox).where(or_(
+        GateMalfunctionNotificationOutbox.status == "review_required",
+        and_(GateMalfunctionNotificationOutbox.recovery_version.is_(None),
+             GateMalfunctionNotificationOutbox.status.in_(("pending", "sending", "failed"))),
+    )).order_by(GateMalfunctionNotificationOutbox.occurred_at.desc(), GateMalfunctionNotificationOutbox.id)
+        .offset(offset).limit(limit))).all()
+    return [{"id": str(row.id), "status": "review_required", "stored_status": row.status,
+             "review_reason": "historical_unfinished" if row.recovery_version is None else
+             "dispatch_age_exceeded" if row.last_error == "dispatch_age_exceeded" else "provider_outcome_unknown",
+             "occurred_at": row.occurred_at,
+             "notification_run_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"iacs:gate-notification:{row.id}"))
+             if row.recovery_version == 1 else None} for row in rows]
+
+
 @router.get("/catalog")
 async def notification_catalog(_: User = Depends(admin_user)) -> dict[str, Any]:
     return await get_notification_service().catalog()
@@ -101,34 +137,10 @@ async def create_notification_rule(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    normalized = normalize_rule_payload(confirmation_payload)
-    actions = normalized["actions"]
-    if not actions:
-        raise HTTPException(status_code=400, detail="At least one notification action is required.")
-
-    rule = NotificationRule(
-        name=normalized["name"],
-        trigger_event=normalized["trigger_event"],
-        conditions=normalized["conditions"],
-        actions=actions,
-        is_active=normalized["is_active"],
-    )
-    session.add(rule)
-    if hasattr(session, "flush"):
-        await session.flush()
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_CRUD,
-        action="notification_rule.create",
-        actor=actor_from_user(user),
-        actor_user_id=getattr(user, "id", None),
-        target_entity="NotificationRule",
-        target_id=rule.id,
-        target_label=rule.name,
-        diff={"old": {}, "new": rule_audit_snapshot(rule)},
-    )
-    await session.commit()
-    await session.refresh(rule)
+    try:
+        rule = await notification_rules.create_rule(session, confirmation_payload, user=user, source="api")
+    except MutationError as exc:
+        raise rule_http_error(exc) from exc
     return serialize_rule(rule)
 
 
@@ -158,34 +170,10 @@ async def update_notification_rule(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    rule = await get_rule_or_404(session, rule_id)
-    before = rule_audit_snapshot(rule)
-    if request.name is not None:
-        rule.name = request.name.strip()
-    if request.trigger_event is not None:
-        rule.trigger_event = normalize_trigger_event(request.trigger_event)
-    if request.conditions is not None:
-        rule.conditions = normalize_conditions(request.conditions)
-    if request.actions is not None:
-        actions = normalize_actions(request.actions)
-        if not actions:
-            raise HTTPException(status_code=400, detail="At least one notification action is required.")
-        rule.actions = actions
-    if request.is_active is not None:
-        rule.is_active = request.is_active
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_CRUD,
-        action="notification_rule.update",
-        actor=actor_from_user(user),
-        actor_user_id=getattr(user, "id", None),
-        target_entity="NotificationRule",
-        target_id=rule.id,
-        target_label=rule.name,
-        diff=audit_diff(before, rule_audit_snapshot(rule)),
-    )
-    await session.commit()
-    await session.refresh(rule)
+    try:
+        rule = await notification_rules.update_rule(session, rule_id, confirmation_payload, user=user, source="api")
+    except MutationError as exc:
+        raise rule_http_error(exc) from exc
     return serialize_rule(rule)
 
 
@@ -204,20 +192,10 @@ async def delete_notification_rule(
         payload={"rule_id": str(rule_id)},
         confirmation_token=request.confirmation_token if request else None,
     )
-    rule = await get_rule_or_404(session, rule_id)
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_CRUD,
-        action="notification_rule.delete",
-        actor=actor_from_user(user),
-        actor_user_id=getattr(user, "id", None),
-        target_entity="NotificationRule",
-        target_id=rule.id,
-        target_label=rule.name,
-        diff={"old": rule_audit_snapshot(rule), "new": {}},
-    )
-    await session.delete(rule)
-    await session.commit()
+    try:
+        await notification_rules.delete_rule(session, rule_id, user=user, source="api")
+    except MutationError as exc:
+        raise rule_http_error(exc) from exc
 
 
 @router.post("/rules/preview")
@@ -246,42 +224,14 @@ async def test_notification_rule_payload(
     if not rule["actions"]:
         raise HTTPException(status_code=400, detail="At least one notification action is required before sending a test.")
 
-    confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
-    await require_confirmation(
-        session,
-        user=user,
-        action="notification_rule.test",
-        payload=confirmation_payload,
-        confirmation_token=request.confirmation_token,
-    )
-
     context = (
         notification_context_from_payload(request.context)
-        if request.context
-        else sample_notification_context(str(rule["trigger_event"]))
+        if request.context else sample_notification_context(str(rule["trigger_event"]))
     )
-    try:
-        result = await get_notification_service().send_notification_now_with_result(
-            context,
-            raise_on_failure=True,
-            rules_override=[rule],
-        )
-    except NotificationDeliveryError as exc:
-        await write_notification_test_audit(
-            session,
-            user=user,
-            rule=rule,
-            context_event_type=context.event_type,
-            outcome="failed",
-            level="error",
-            error=str(exc),
-        )
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    await write_notification_test_audit(
-        session,
-        user=user,
-        rule=rule,
-        context_event_type=context.event_type,
+    result = await send_confirmed_notification(
+        session, user=user, action="notification_rule.test",
+        payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
+        confirmation_token=request.confirmation_token, context=context, rules_override=[rule],
     )
     return {
         "status": "sent",
@@ -302,38 +252,11 @@ async def test_notification_rule(
 ) -> dict[str, Any]:
     rule = await get_rule_or_404(session, rule_id)
     serialized = serialize_rule(rule)
-    await require_confirmation(
-        session,
-        user=user,
-        action="notification_rule.test",
-        payload={"rule_id": str(rule_id)},
-        confirmation_token=request.confirmation_token if request else None,
-    )
     context = sample_notification_context(serialized["trigger_event"])
-    try:
-        result = await get_notification_service().send_notification_now_with_result(
-            context,
-            raise_on_failure=True,
-            rules_override=[serialized],
-        )
-    except NotificationDeliveryError as exc:
-        await write_notification_test_audit(
-            session,
-            user=user,
-            rule=serialized,
-            context_event_type=context.event_type,
-            rule_id=str(rule_id),
-            outcome="failed",
-            level="error",
-            error=str(exc),
-        )
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    await write_notification_test_audit(
-        session,
-        user=user,
-        rule=serialized,
-        context_event_type=context.event_type,
-        rule_id=str(rule_id),
+    result = await send_confirmed_notification(
+        session, user=user, action="notification_rule.test", payload={"rule_id": str(rule_id)},
+        confirmation_token=request.confirmation_token if request else None,
+        context=context, rules_override=[serialized],
     )
     return {
         "status": "sent",
@@ -363,38 +286,6 @@ async def require_confirmation(
         )
     except ActionConfirmationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-
-async def write_notification_test_audit(
-    session: AsyncSession,
-    *,
-    user: User,
-    rule: dict[str, Any],
-    context_event_type: str,
-    rule_id: str | None = None,
-    outcome: str = "success",
-    level: str = "info",
-    error: str | None = None,
-) -> None:
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="notification_rule.test",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="NotificationRule",
-        target_id=rule_id or rule.get("id"),
-        target_label=str(rule.get("name") or "Draft notification workflow"),
-        outcome=outcome,
-        level=level,
-        metadata={
-            "trigger_event": rule.get("trigger_event"),
-            "context_event_type": context_event_type,
-            "action_count": len(rule.get("actions") or []),
-            "error": error,
-        },
-    )
-    await session.commit()
 
 
 async def get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> NotificationRule:
@@ -429,12 +320,5 @@ def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
     }
 
 
-def rule_audit_snapshot(rule: NotificationRule) -> dict[str, Any]:
-    return {
-        "id": str(rule.id),
-        "name": rule.name,
-        "trigger_event": rule.trigger_event,
-        "conditions": normalize_conditions(rule.conditions),
-        "actions": normalize_actions(rule.actions),
-        "is_active": rule.is_active,
-    }
+def rule_http_error(exc: MutationError) -> HTTPException:
+    return HTTPException(status_code={"forbidden": 403, "not_found": 404}.get(exc.code, 400), detail=str(exc))

@@ -1,13 +1,32 @@
 """Gate and maintenance Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from app.ai.context import get_chat_tool_context
+from app.ai.tool_groups._shared import (
+    _cover_entities_by_kind,
+    _normalize,
+    _require_admin_user,
+    _resolve_cover_target,
+    logger,
+)
 from app.services.access_devices import get_access_device_service, normalize_access_device_key
+from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
+from app.services.gate_malfunctions import get_gate_malfunction_service
+from app.services.home_assistant import get_home_assistant_service
+from app.services.maintenance import (
+    get_status as get_maintenance_mode_status,
+)
+from app.services.maintenance import (
+    is_maintenance_mode_active,
+)
+from app.services.maintenance import (
+    set_mode as set_maintenance_mode,
+)
+from app.services.settings import get_runtime_config
 
 
 def _device_state_record(entity: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -114,48 +133,35 @@ async def _execute_agent_device_command(
     audit_reason: str,
     user_id: str,
     session_id: str,
+    target_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    entity = target["entity"]
-    entity_id = str(entity["entity_id"])
+    context = get_chat_tool_context()
+    entity_id = normalize_access_device_key(str(target["entity"]["entity_id"]))
     reason = f"Alfred agent: {audit_reason}"
+    identity = str(context["intent_id"])
+    idempotency_key = str(context["idempotency_key"])
     if target["kind"] == "gate":
         outcome = await get_gate_command_coordinator().execute_open(
             GateCommandIntent(
-                reason=reason,
-                source="alfred",
-                actor="Alfred_AI",
+                reason=reason, source="alfred", actor="Alfred_AI",
+                actor_user_id=user_id, auth_version=context["approval"]["requester_auth_session_version"],
+                target_device_key=entity_id, target_plan=target_plan, require_admission=False,
+                intent_id=identity, idempotency_key=idempotency_key,
                 metadata={
-                    "actor_user_id": user_id or None,
-                    "session_id": session_id or None,
+                    "actor_user_id": user_id, "session_id": session_id,
+                    "actor_auth_session_version": context["approval"]["requester_auth_session_version"],
                     "target_entity_id": entity_id,
-                    "target_name": str(entity.get("name") or entity_id),
                 },
             )
         )
-        return {
-            "accepted": outcome.accepted,
-            "state": outcome.state.value,
-            "detail": outcome.detail,
-            "intent_id": outcome.intent.intent_id,
-            "command_id": outcome.command_id,
-            "mechanically_confirmed": outcome.mechanically_confirmed,
-            "requires_reconciliation": outcome.requires_reconciliation,
-        }
-
+        return {key: value for key, value in outcome.as_payload().items()
+                if key not in {"metadata", "registration_number"}}
     outcome = await get_access_device_service().command_device(
-        normalize_access_device_key(entity_id),
-        action,
-        reason,
-        schedule_source=str(target["kind"]),
+        entity_id, action, reason, schedule_source=str(target["kind"]),
+        intent_id=identity, idempotency_key=idempotency_key, target_plan=target_plan,
+        actor_user_id=user_id, auth_version=context["approval"]["requester_auth_session_version"],
     )
-    return {
-        "accepted": outcome.accepted,
-        "state": _gate_state_value(outcome.state),
-        "detail": outcome.detail,
-        "verified": outcome.verified,
-        "used_provider": outcome.used_provider,
-        "failover_used": outcome.failover_used,
-    }
+    return outcome.as_payload()
 
 
 async def query_device_states(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -336,6 +342,16 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
             "detail": "Alfred can close configured garage doors. Gate close commands are not enabled.",
         }
 
+    admin = await _require_admin_user("hardware commands")
+    if isinstance(admin, dict):
+        return {"accepted": False, "action": action, "error": admin["error"]}
+    device_key = normalize_access_device_key(str(target["entity"]["entity_id"]))
+    try:
+        service = get_access_device_service()
+        target_plan = (await service.preview_gate_open(target_device_key=device_key)
+                       if target["kind"] == "gate" else await service.preview_device_command(device_key, action))
+    except ValueError as exc:
+        return {"accepted": False, "action": action, "error": str(exc)}
     if not bool(arguments.get("confirm")):
         device = _agent_device_payload(target)
         return {
@@ -347,11 +363,22 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
             "target": device["name"],
             "device": device,
             "confirmation_field": "confirm",
+            "target_plan": target_plan,
             "detail": (
                 f"{'Opening gates and garage doors' if action == 'open' else 'Closing garage doors'} "
                 "is a real-world action. Use the chat confirmation action before I continue."
             ),
         }
+
+    approval = context.get("approval") or {}
+    preview = approval.get("preview_output") or {}
+    if (not approval.get("confirmation_id") or not context.get("intent_id")
+            or not context.get("idempotency_key")
+            or approval.get("requester_user_id") != user_id
+            or approval.get("requester_auth_session_version") != admin.auth_session_version
+            or preview.get("target_plan") != target_plan):
+        return {"accepted": False, "action": action,
+                "error": "A fresh requester-bound confirmation for these hardware targets is required."}
 
     if action == "open" and await is_maintenance_mode_active():
         return {
@@ -364,43 +391,6 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
             "opened_by": "agent",
         }
 
-    config = await get_runtime_config()
-    now = datetime.now(tz=UTC)
-    if action == "open":
-        async with AsyncSessionLocal() as session:
-            schedule_evaluation = await evaluate_schedule_id(
-                session,
-                target["entity"].get("schedule_id"),
-                now,
-                timezone_name=config.site_timezone,
-                default_policy=config.schedule_default_policy,
-                source=str(target["kind"]),
-            )
-    else:
-        schedule_evaluation = None
-    if schedule_evaluation and not schedule_evaluation.allowed:
-        detail = schedule_evaluation.reason or "Device is outside its assigned schedule."
-        payload = _agent_device_audit_payload(
-            target,
-            action=action,
-            accepted=False,
-            state="schedule_denied",
-            detail=detail,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        await event_bus.publish("agent.device_open_failed", payload)
-        logger.warning("agent_device_open_schedule_denied", extra=_log_extra(payload))
-        return {
-            "opened": False,
-            "accepted": False,
-            "device": _agent_device_payload(target),
-            "action": action,
-            "state": "schedule_denied",
-            "detail": detail,
-            "opened_by": "agent",
-        }
-
     reason = str(arguments.get("reason") or "").strip()
     action_label = "opening" if action == "open" else "closing"
     audit_reason = reason or f"Alfred agent requested {action_label} {target['entity'].get('name') or target['entity']['entity_id']}"
@@ -408,6 +398,7 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
         target,
         action=action,
         audit_reason=audit_reason,
+        target_plan=target_plan,
         user_id=user_id,
         session_id=session_id,
     )
@@ -428,21 +419,27 @@ async def open_device(arguments: dict[str, Any]) -> dict[str, Any]:
             if key not in {"accepted", "state", "detail"} and value is not None
         }
     )
-    agent_event = f"agent.device_{action}_requested" if outcome["accepted"] else f"agent.device_{action}_failed"
-    device_event = f"{target['kind']}.{action}_requested" if outcome["accepted"] else f"{target['kind']}.{action}_failed"
-    await event_bus.publish(
-        agent_event,
-        audit_payload,
-    )
-    await event_bus.publish(
-        device_event,
-        {
-            **audit_payload,
-            "source": "alfred",
-        },
-    )
+    delivery_status = "uncertain" if outcome.get("delivery") == "unknown" else "requested" if outcome["accepted"] else "failed"
+    agent_event = f"agent.device_{action}_{delivery_status}"
+    device_event = f"{target['kind']}.{action}_{delivery_status}"
+    try:
+        await event_bus.publish(
+            agent_event,
+            audit_payload,
+        )
+        await event_bus.publish(
+            device_event,
+            {
+                **audit_payload,
+                "source": "alfred",
+            },
+        )
+    except Exception:  # noqa: BLE001 - optional publication must not invalidate the committed command
+        logger.warning("agent_device_realtime_publish_failed")
     if outcome["accepted"]:
         logger.info(f"agent_device_{action}_requested", extra=_log_extra(audit_payload))
+    elif delivery_status == "uncertain":
+        logger.warning(f"agent_device_{action}_uncertain", extra=_log_extra(audit_payload))
     else:
         logger.error(f"agent_device_{action}_failed", extra=_log_extra(audit_payload))
 

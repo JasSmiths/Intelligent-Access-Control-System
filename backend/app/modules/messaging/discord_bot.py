@@ -91,7 +91,7 @@ if discord is not None:
     class DiscordConfirmationView(discord.ui.View):  # type: ignore[name-defined]
         def __init__(
             self,
-            service: Any,
+            gateway: Any,
             *,
             session_id: str,
             confirmation_id: str,
@@ -100,7 +100,7 @@ if discord is not None:
             risk_level: str,
         ) -> None:
             super().__init__(timeout=600)
-            self.service = service
+            self.gateway = gateway
             self.session_id = session_id
             self.confirmation_id = confirmation_id
 
@@ -120,7 +120,7 @@ if discord is not None:
             self.add_item(cancel)
 
         async def _confirm(self, interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-            await self.service.handle_confirmation_interaction(
+            await self.gateway.handle_confirmation_interaction(
                 interaction,
                 session_id=self.session_id,
                 confirmation_id=self.confirmation_id,
@@ -128,7 +128,7 @@ if discord is not None:
             )
 
         async def _cancel(self, interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-            await self.service.handle_confirmation_interaction(
+            await self.gateway.handle_confirmation_interaction(
                 interaction,
                 session_id=self.session_id,
                 confirmation_id=self.confirmation_id,
@@ -137,15 +137,34 @@ if discord is not None:
 
 
     class IacsDiscordBot(discord.Client):  # type: ignore[name-defined]
-        def __init__(self, service: Any) -> None:
+        def __init__(self, gateway: Any) -> None:
             intents = discord.Intents.default()
             intents.guilds = True
             intents.messages = True
             intents.dm_messages = True
             intents.message_content = True
             super().__init__(intents=intents)
-            self.service = service
+            self.gateway = gateway
             self.tree = app_commands.CommandTree(self)  # type: ignore[union-attr]
+
+        def register_sent_view(self, view: Any, message_id: str | int) -> bool:
+            """Attach a timed confirmation view to the exact sent message.
+
+            ``Client.add_view`` is reserved for persistent views and rejects the
+            600-second confirmation view. discord.py's own send paths use the
+            connection-state store for this same post-send registration seam.
+            """
+            message = str(message_id or "")
+            if (
+                not message.isdecimal()
+                or int(message) <= 0
+                or view is None
+                or view.is_finished()
+                or not view.is_dispatchable()
+            ):
+                return False
+            self._connection.store_view(view, int(message))
+            return True
 
         async def setup_hook(self) -> None:
             self._register_slash_commands()
@@ -155,46 +174,46 @@ if discord is not None:
                 logger.warning("discord_slash_command_sync_failed", extra={"error": str(exc)})
 
         async def on_ready(self) -> None:
-            await self.service.handle_bot_ready()
+            await self.gateway.handle_bot_ready()
 
         async def on_message(self, message: discord.Message) -> None:  # type: ignore[name-defined]
             author = getattr(message, "author", None)
             if getattr(author, "bot", False):
                 return
             normalized = normalize_discord_message(message, self.user)
-            await self.service.handle_provider_message(normalized, message)
+            await self.gateway.handle_provider_message(normalized, message)
 
         def _register_slash_commands(self) -> None:
             group = app_commands.Group(name="alfred", description="IACS Alfred commands")  # type: ignore[union-attr]
 
             @group.command(name="status", description="Concise current IACS state.")
             async def status(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "status")
+                await self.gateway.handle_slash_command(interaction, "status")
 
             @group.command(name="last_event", description="Explain the most recent access event.")
             async def last_event(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "last_event")
+                await self.gateway.handle_slash_command(interaction, "last_event")
 
             @group.command(name="arrivals_today", description="Summarise today's known and unknown arrivals.")
             async def arrivals_today(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "arrivals_today")
+                await self.gateway.handle_slash_command(interaction, "arrivals_today")
 
             @group.command(name="presence", description="Show current home occupancy.")
             async def presence(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "presence")
+                await self.gateway.handle_slash_command(interaction, "presence")
 
             @group.command(name="help", description="List Alfred Discord commands.")
             async def help_command(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "help")
+                await self.gateway.handle_slash_command(interaction, "help")
 
             @group.command(name="ask", description="Ask Alfred a natural language question.")
             @app_commands.describe(message="Message to send to Alfred")  # type: ignore[union-attr]
             async def ask(interaction: discord.Interaction, message: str) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "ask", message=message)
+                await self.gateway.handle_slash_command(interaction, "ask", message=message)
 
             @group.command(name="notify_test", description="Send a test Discord notification.")
             async def notify_test(interaction: discord.Interaction) -> None:  # type: ignore[name-defined]
-                await self.service.handle_slash_command(interaction, "notify_test")
+                await self.gateway.handle_slash_command(interaction, "notify_test")
 
             self.tree.add_command(group)
 

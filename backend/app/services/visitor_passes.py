@@ -6,17 +6,18 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import inspect as sqlalchemy_inspect
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, User, VisitorPass
+from app.models import AccessEvent, User, VisitorPass, VisitorPassReservationRecord
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.services.domain_events import publish_visitor_pass_status_changed
-from app.services.event_bus import event_bus
+from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_ACCESS,
@@ -52,6 +53,10 @@ VISITOR_PASS_WHATSAPP_STATUS_LABELS = {
 
 class VisitorPassError(ValueError):
     """Raised when a requested Visitor Pass transition is not valid."""
+
+
+class VisitorPassReservationConflict(VisitorPassError):
+    """This observation cannot exclusively reserve the selected visitor pass."""
 
 
 class VisitorPassService:
@@ -136,7 +141,8 @@ class VisitorPassService:
             await session.scalars(
                 select(VisitorPass)
                 .where(VisitorPass.status.in_(VISITOR_PASS_ACTIVE_STATUSES))
-                .order_by(VisitorPass.expected_time, VisitorPass.created_at)
+                .order_by(VisitorPass.id)
+                .with_for_update().execution_options(populate_existing=True)
             )
         ).all()
         changed: list[VisitorPass] = []
@@ -253,6 +259,7 @@ class VisitorPassService:
         actor: str = "System",
         actor_user_id: uuid.UUID | str | None = None,
     ) -> VisitorPass:
+        visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=False)
         if visitor_pass.status in VISITOR_PASS_LOCKED_STATUSES:
             raise VisitorPassError(f"{visitor_pass.status.value.title()} visitor passes cannot be edited.")
         before = visitor_pass_audit_snapshot(visitor_pass)
@@ -322,6 +329,7 @@ class VisitorPassService:
         actor_user_id: uuid.UUID | str | None = None,
         reason: str | None = None,
     ) -> VisitorPass:
+        visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=True)
         if visitor_pass.status == VisitorPassStatus.USED:
             raise VisitorPassError("Used visitor passes cannot be cancelled.")
         if visitor_pass.status == VisitorPassStatus.CANCELLED:
@@ -349,6 +357,7 @@ class VisitorPassService:
         actor_user_id: uuid.UUID | str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=False)
         before = visitor_pass_audit_snapshot(visitor_pass)
         await write_audit_log(
             session,
@@ -410,12 +419,15 @@ class VisitorPassService:
         phone_number: str,
         *,
         now: datetime | None = None,
+        refresh_status: bool = True,
     ) -> tuple[VisitorPass | None, str]:
+        """Resolve the canonical phone binding; read-only callers never refresh lifecycle."""
         phone = _normalize_phone_number(phone_number)
         if not phone:
             return None, "not_found"
         checked_at = _ensure_aware(now or datetime.now(tz=UTC))
-        await self.refresh_statuses(session=session, now=checked_at, publish=False)
+        if refresh_status:
+            await self.refresh_statuses(session=session, now=checked_at, publish=False)
         rows = (
             await session.scalars(
                 select(VisitorPass)
@@ -427,13 +439,13 @@ class VisitorPassService:
                     VisitorPass.valid_from.asc().nulls_last(),
                     VisitorPass.expected_time.asc(),
                     VisitorPass.created_at.desc(),
-                )
+                ).execution_options(autoflush=False)
             )
         ).all()
         eligible = [
             visitor_pass
             for visitor_pass in rows
-            if visitor_pass.status in VISITOR_PASS_ACTIVE_STATUSES
+            if self.status_for(visitor_pass, checked_at) in VISITOR_PASS_ACTIVE_STATUSES
         ]
         active = [
             visitor_pass
@@ -459,6 +471,7 @@ class VisitorPassService:
         actor: str = "Visitor Concierge",
         metadata: dict[str, Any] | None = None,
     ) -> VisitorPass:
+        visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=False)
         if visitor_pass.status not in VISITOR_PASS_ACTIVE_STATUSES:
             raise VisitorPassError(f"{visitor_pass.status.value.title()} visitor passes cannot be updated.")
         plate = normalize_registration_number(new_plate)
@@ -489,49 +502,105 @@ class VisitorPassService:
         )
         return visitor_pass
 
-    async def claim_active_pass(
-        self,
-        session: AsyncSession,
-        *,
-        occurred_at: datetime,
-        registration_number: str,
-        actor: str = "System",
-    ) -> VisitorPass | None:
-        checked_at = _ensure_aware(occurred_at)
-        await self.refresh_statuses(session=session, now=checked_at, actor=actor, publish=False)
-        normalized_registration = normalize_registration_number(registration_number)
-        rows = (
-            await session.scalars(
-                select(VisitorPass)
-                .where(
-                    VisitorPass.status == VisitorPassStatus.ACTIVE,
-                    or_(
-                        VisitorPass.pass_type != VisitorPassType.DURATION,
-                        VisitorPass.number_plate == normalized_registration,
-                    ),
-                )
-                .order_by(VisitorPass.expected_time, VisitorPass.created_at)
-                .with_for_update(skip_locked=True)
-            )
-        ).all()
-        visitor_pass = self.select_best_active_match(rows, checked_at)
-        if not visitor_pass:
+    async def find_arrival_candidate(self, session: AsyncSession, *, occurred_at: datetime,
+                                     registration_number: str) -> VisitorPass | None:
+        plate = normalize_registration_number(registration_number)
+        if not plate:
             return None
+        rows = (await session.scalars(select(VisitorPass).where(
+            VisitorPass.status.in_(VISITOR_PASS_ACTIVE_STATUSES),
+            or_(VisitorPass.pass_type != VisitorPassType.DURATION, VisitorPass.number_plate == plate))
+            .order_by(VisitorPass.expected_time, VisitorPass.created_at)
+            .execution_options(populate_existing=True))).all()
+        return self.select_best_active_match(rows, occurred_at)
 
-        before = visitor_pass_audit_snapshot(visitor_pass)
-        self._apply_arrival_state(visitor_pass, checked_at)
-        if not visitor_pass.number_plate:
-            visitor_pass.number_plate = normalized_registration
-        await self._audit_change(
-            session,
-            visitor_pass,
-            action="visitor_pass.claim",
-            actor=actor,
-            before=before,
-            metadata={"registration_number": normalized_registration},
-            category=TELEMETRY_CATEGORY_ACCESS,
-        )
-        return visitor_pass
+    async def reserve_arrival_in_session(self, session: AsyncSession, *, visitor_pass_id: uuid.UUID,
+        event: AccessEvent, intent_id: uuid.UUID, dispatch_deadline: datetime,
+    ) -> VisitorPassReservationRecord:
+        if dispatch_deadline.tzinfo is None:
+            raise VisitorPassReservationConflict("Visitor dispatch deadline must include a timezone.")
+        expected_intent = uuid.uuid5(event.id, "automatic-gate-open")
+        if uuid.UUID(str(intent_id)) != expected_intent:
+            raise VisitorPassReservationConflict("Visitor reservation must retain the original gate intent.")
+        try:
+            async with session.begin_nested():
+                visitor = await session.scalar(select(VisitorPass).where(VisitorPass.id == visitor_pass_id)
+                    .with_for_update(nowait=True).execution_options(populate_existing=True))
+                if visitor is None:
+                    raise VisitorPassReservationConflict("The selected visitor pass no longer exists.")
+                existing = await session.scalar(select(VisitorPassReservationRecord).where(
+                    VisitorPassReservationRecord.access_event_id == event.id).with_for_update())
+                if existing:
+                    if (existing.visitor_pass_id != visitor.id or existing.intent_id != expected_intent
+                            or existing.normalized_plate != normalize_registration_number(event.registration_number)):
+                        raise VisitorPassReservationConflict("A visitor reservation cannot be rebound to another arrival.")
+                    return existing
+                now = await session.scalar(select(func.clock_timestamp()))
+                if (visitor.status not in VISITOR_PASS_ACTIVE_STATUSES or not self.is_within_window(visitor, now)
+                        or now > dispatch_deadline):
+                    raise VisitorPassReservationConflict("The selected visitor pass no longer permits this arrival.")
+                plate = normalize_registration_number(event.registration_number)
+                if not plate or (visitor.pass_type == VisitorPassType.DURATION and visitor.number_plate != plate):
+                    raise VisitorPassReservationConflict("Visitor plate no longer matches this arrival.")
+                active = await session.scalar(select(VisitorPassReservationRecord).where(
+                    VisitorPassReservationRecord.visitor_pass_id == visitor.id,
+                    or_(VisitorPassReservationRecord.state.in_(["reserved", "held"]),
+                        (VisitorPassReservationRecord.state == "consumed") &
+                        (VisitorPassReservationRecord.pass_type == "one-time"))).with_for_update())
+                if active:
+                    raise VisitorPassReservationConflict("The selected visitor pass belongs to another reserved or admitted arrival.")
+                row = VisitorPassReservationRecord(visitor_pass_id=visitor.id, access_event_id=event.id,
+                    intent_id=expected_intent, pass_type=visitor.pass_type.value, normalized_plate=plate,
+                    state="reserved", dispatch_deadline=dispatch_deadline)
+                session.add(row)
+                await session.flush()
+                await write_audit_log(session, category=TELEMETRY_CATEGORY_ACCESS, action="visitor_pass.reserved",
+                    actor="System", target_entity="VisitorPass", target_id=visitor.id,
+                    metadata={"reservation_id": str(row.id), "access_event_id": str(event.id), "intent_id": str(expected_intent)})
+                return row
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) in {"55P03", "23505"}:
+                raise VisitorPassReservationConflict("The selected visitor pass is already being changed or reserved.") from exc
+            raise
+
+    async def _lock_for_mutation(self, session: AsyncSession, visitor_pass: VisitorPass, *,
+                                 allow_reservation: bool = False) -> VisitorPass:
+        row = await session.scalar(select(VisitorPass).where(VisitorPass.id == visitor_pass.id)
+            .with_for_update().execution_options(populate_existing=True))
+        if row is None:
+            raise VisitorPassError("Visitor pass no longer exists.")
+        if not allow_reservation:
+            active = await session.scalar(select(VisitorPassReservationRecord.id).where(
+                VisitorPassReservationRecord.visitor_pass_id == row.id,
+                VisitorPassReservationRecord.state.in_(["reserved", "held"])).limit(1))
+            if active:
+                raise VisitorPassError("A reserved or uncertain visitor arrival must be resolved before editing or deleting this pass.")
+        return row
+
+    async def find_historical_match(
+        self, session: AsyncSession, *, occurred_at: datetime, registration_number: str,
+    ) -> tuple[VisitorPass | None, str | None]:
+        """Match restart history without consuming, refreshing or binding a pass.
+
+        Preserve departure-first and plate-independent one-time matching.
+        Current terminal states remain terminal; scheduled/active candidates
+        are evaluated at the observation's historical time without mutation.
+        """
+        checked_at = _ensure_aware(occurred_at)
+        plate = normalize_registration_number(registration_number)
+        if not plate:
+            return None, None
+        departure = await session.scalar(select(VisitorPass).where(
+            or_(VisitorPass.status == VisitorPassStatus.USED,
+                (VisitorPass.pass_type == VisitorPassType.DURATION) &
+                (VisitorPass.status == VisitorPassStatus.ACTIVE)),
+            VisitorPass.number_plate == plate, VisitorPass.departure_time.is_(None),
+            VisitorPass.arrival_time.is_not(None), VisitorPass.arrival_time <= checked_at,
+        ).order_by(VisitorPass.arrival_time.desc(), VisitorPass.created_at.desc()).limit(1))
+        if departure:
+            return departure, "departure"
+        match = await self.find_arrival_candidate(session, occurred_at=checked_at, registration_number=plate)
+        return (match, "arrival") if match else (None, None)
 
     async def find_departure_pass(
         self,
@@ -564,7 +633,120 @@ class VisitorPassService:
             .limit(1)
         )
 
-    async def record_arrival(
+    async def assert_dispatch_validity(self, session: AsyncSession, *, event: AccessEvent,
+        visitor_pass_id: str | uuid.UUID, checked_at: datetime,
+    ) -> uuid.UUID:
+        """Hold exact reservation/current pass authority through an attempt commit."""
+        identity = _coerce_uuid(visitor_pass_id)
+        if identity is None:
+            raise VisitorPassError("A durable visitor identity is required.")
+        row = await session.scalar(select(VisitorPass).where(VisitorPass.id == identity)
+            .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
+        reservation = await session.scalar(select(VisitorPassReservationRecord).where(
+            VisitorPassReservationRecord.access_event_id == event.id)
+            .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
+        expected_intent = uuid.uuid5(event.id, "automatic-gate-open")
+        if (row is None or row.status not in VISITOR_PASS_ACTIVE_STATUSES
+                or not self.is_within_window(row, checked_at)):
+            raise VisitorPassError("Visitor pass is no longer valid for dispatch.")
+        if (reservation is None or reservation.visitor_pass_id != row.id or reservation.intent_id != expected_intent
+                or reservation.state != "reserved" or checked_at > reservation.dispatch_deadline
+                or reservation.normalized_plate != normalize_registration_number(event.registration_number)
+                or reservation.pass_type != row.pass_type.value):
+            raise VisitorPassError("No current reserved visitor arrival owns this dispatch.")
+        if row.pass_type == VisitorPassType.DURATION and row.number_plate != reservation.normalized_plate:
+            raise VisitorPassError("Visitor plate no longer matches this arrival.")
+        return row.id
+
+    async def assert_arrival_notification_validity(self, session: AsyncSession, *, event: AccessEvent,
+        visitor_pass_id: str | uuid.UUID, checked_at: datetime,
+    ) -> uuid.UUID:
+        """Read admission for notification; this method grants no hardware authority."""
+        identity = _coerce_uuid(visitor_pass_id)
+        row = await session.scalar(select(VisitorPass).where(VisitorPass.id == identity)
+            .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
+        if (row is None or row.status in {VisitorPassStatus.CANCELLED, VisitorPassStatus.EXPIRED}
+                or not self.is_within_window(row, checked_at)):
+            raise VisitorPassError("Visitor pass is no longer valid for this notification.")
+        reservation = await session.scalar(select(VisitorPassReservationRecord).where(
+            VisitorPassReservationRecord.access_event_id == event.id)
+            .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
+        admitted = bool(reservation and reservation.visitor_pass_id == row.id
+                        and reservation.state == "consumed" and reservation.verification_evidence)
+        legacy_admitted = reservation is None and row.status == VisitorPassStatus.USED and row.arrival_event_id == event.id
+        if not (admitted or legacy_admitted):
+            raise VisitorPassError("This notification has no recorded visitor admission.")
+        return row.id
+
+    async def hold_reservation_for_review_in_session(
+        self, session: AsyncSession, *, reservation: VisitorPassReservationRecord, reason: str,
+    ) -> bool:
+        """Caller holds visitor (if retained) then reservation; no history is recreated.
+
+        A missing origin or journal link is uncertainty, not proof of no send.
+        Kept separately from settlement because the original event/pass may be gone.
+        """
+        if reservation.state != "reserved":
+            return False
+        reservation.state = "held"
+        reservation.completion_reason = "orphan_review:" + reason
+        await write_audit_log(session, category=TELEMETRY_CATEGORY_ACCESS,
+            action="visitor_pass.reservation_review_required", actor="System",
+            target_entity="VisitorPass", target_id=reservation.visitor_pass_id,
+            metadata={"reservation_id": str(reservation.id), "access_event_id": str(reservation.access_event_id),
+                "intent_id": str(reservation.intent_id), "reason": reason, "state": "held"})
+        await session.flush()
+        return True
+
+    async def settle_admission_in_session(self, session: AsyncSession, *, event: AccessEvent,
+        gate_command_id: uuid.UUID | None, admission_status: str,
+        verification_evidence: dict[str, Any] | None, entry_delivery: str | None,
+    ) -> VisitorPassReservationRecord | None:
+        identity = _coerce_uuid(((event.raw_payload or {}).get("visitor_pass") or {}).get("id"))
+        if identity is None:
+            return None
+        visitor = await session.scalar(select(VisitorPass).where(VisitorPass.id == identity)
+            .with_for_update().execution_options(populate_existing=True))
+        reservation = await session.scalar(select(VisitorPassReservationRecord).where(
+            VisitorPassReservationRecord.access_event_id == event.id)
+            .with_for_update().execution_options(populate_existing=True))
+        if reservation is None:
+            return None  # Legacy USED/history is never reinterpreted as a new reservation.
+        if reservation.visitor_pass_id != identity:
+            raise VisitorPassError("Visitor settlement identity does not match the reservation.")
+        if reservation.state in {"consumed", "released"}:
+            return reservation
+        if visitor is None:
+            raise VisitorPassError("An unresolved visitor reservation cannot lose its pass.")
+        before = reservation.state
+        now = await session.scalar(select(func.clock_timestamp()))
+        reservation.gate_command_id = gate_command_id or reservation.gate_command_id
+        if admission_status == "verified":
+            if not verification_evidence or verification_evidence.get("state") not in {"open", "opening"}:
+                raise VisitorPassError("Visitor consumption requires retained verified entry evidence.")
+            reservation.state = "consumed"
+            reservation.completed_at = now
+            reservation.completion_reason = "designated_entry_verified"
+            reservation.verification_evidence = verification_evidence
+            terminal_status = visitor.status if visitor.status in {VisitorPassStatus.CANCELLED, VisitorPassStatus.EXPIRED} else None
+            await self._record_verified_arrival(session, visitor, event=event,
+                trace_id=((event.raw_payload or {}).get("telemetry") or {}).get("trace_id"), terminal_status=terminal_status)
+        elif entry_delivery in {"not_sent", "rejected"} or event.decision.value != "granted":
+            reservation.state, reservation.completed_at = "released", now
+            reservation.completion_reason = "definitive_no_admission"
+        elif entry_delivery in {"accepted", "unknown", "partial"}:
+            reservation.state = "held"
+            reservation.completion_reason = "entry_delivery_requires_reconciliation"
+        if before != reservation.state:
+            await write_audit_log(session, category=TELEMETRY_CATEGORY_ACCESS, action="visitor_pass.reservation_settled",
+                actor="System", target_entity="VisitorPass", target_id=visitor.id,
+                metadata={"reservation_id": str(reservation.id), "access_event_id": str(event.id),
+                    "previous_state": before, "state": reservation.state, "reason": reservation.completion_reason,
+                    "verification_evidence": reservation.verification_evidence})
+        await session.flush()
+        return reservation
+
+    async def _record_verified_arrival(
         self,
         session: AsyncSession,
         visitor_pass: VisitorPass,
@@ -573,13 +755,33 @@ class VisitorPassService:
         dvla_enrichment: dict[str, Any] | None = None,
         visual_detection: dict[str, Any] | None = None,
         trace_id: str | None = None,
+        terminal_status: VisitorPassStatus | None = None,
     ) -> VisitorPass:
         before = visitor_pass_audit_snapshot(visitor_pass)
         arrival_linked = self._apply_arrival_state(visitor_pass, event.occurred_at, arrival_event_id=event.id)
+        if terminal_status is not None:
+            visitor_pass.status = terminal_status
         if not visitor_pass.number_plate:
             visitor_pass.number_plate = normalize_registration_number(event.registration_number)
         if arrival_linked:
             visitor_pass.telemetry_trace_id = trace_id or visitor_pass.telemetry_trace_id
+        self._apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection)
+        await self._audit_change(
+            session,
+            visitor_pass,
+            action="visitor_pass.arrival_linked",
+            actor="System",
+            before=before,
+            metadata={"access_event_id": str(event.id), "trace_id": trace_id},
+            automation_payload={"event_id": str(event.id), "access_event_id": str(event.id),
+                "decision": event.decision.value, "direction": event.direction.value,
+                "registration_number": event.registration_number, "occurred_at": event.occurred_at.isoformat()},
+            category=TELEMETRY_CATEGORY_ACCESS,
+        )
+        return visitor_pass
+
+    @staticmethod
+    def _apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection) -> None:
         vehicle_make = _optional_text((dvla_enrichment or {}).get("make"))
         vehicle_colour = _optional_text((dvla_enrichment or {}).get("colour"))
         if not vehicle_colour and visual_detection:
@@ -593,15 +795,22 @@ class VisitorPassService:
             visitor_pass.vehicle_make = vehicle_make
         if vehicle_colour:
             visitor_pass.vehicle_colour = vehicle_colour
-        await self._audit_change(
-            session,
-            visitor_pass,
-            action="visitor_pass.arrival_linked",
-            actor="System",
-            before=before,
-            metadata={"access_event_id": str(event.id), "trace_id": trace_id},
-            category=TELEMETRY_CATEGORY_ACCESS,
-        )
+
+    async def enrich_arrival(
+        self, session: AsyncSession, visitor_pass: VisitorPass, *, event_id: uuid.UUID,
+        dvla_enrichment: dict[str, Any] | None, visual_detection: dict[str, Any] | None,
+    ) -> VisitorPass:
+        """Enrich a linked arrival without replaying its state transition or audit."""
+        if visitor_pass.arrival_event_id != event_id:
+            return visitor_pass
+        before = visitor_pass_audit_snapshot(visitor_pass)
+        self._apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection)
+        if before != visitor_pass_audit_snapshot(visitor_pass):
+            await self._audit_change(
+                session, visitor_pass, action="visitor_pass.arrival_enriched", actor="System",
+                before=before, metadata={"access_event_id": str(event_id)},
+                category=TELEMETRY_CATEGORY_ACCESS,
+            )
         return visitor_pass
 
     def _apply_arrival_state(
@@ -641,8 +850,11 @@ class VisitorPassService:
         *,
         event: AccessEvent,
     ) -> VisitorPass:
+        visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=True)
         if visitor_pass.departure_time:
             return visitor_pass
+        if visitor_pass.arrival_time is None or _ensure_aware(event.occurred_at) < _ensure_aware(visitor_pass.arrival_time):
+            raise VisitorPassError("Departure evidence must follow the recorded arrival.")
         before = visitor_pass_audit_snapshot(visitor_pass)
         visitor_pass.departure_time = event.occurred_at
         visitor_pass.departure_event_id = event.id
@@ -685,7 +897,7 @@ class VisitorPassService:
         matches = [
             visitor_pass
             for visitor_pass in candidates
-            if visitor_pass.status == VisitorPassStatus.ACTIVE and self.is_within_window(visitor_pass, checked)
+            if visitor_pass.status in VISITOR_PASS_ACTIVE_STATUSES and self.is_within_window(visitor_pass, checked)
         ]
         if not matches:
             return None
@@ -719,8 +931,9 @@ class VisitorPassService:
         actor_user_id: uuid.UUID | str | None = None,
         metadata: dict[str, Any] | None = None,
         category: str,
+        automation_payload: dict[str, Any] | None = None,
     ) -> None:
-        await write_audit_log(
+        audit = await write_audit_log(
             session,
             category=category,
             action=action,
@@ -732,6 +945,42 @@ class VisitorPassService:
             diff=audit_diff(before, visitor_pass_audit_snapshot(visitor_pass)),
             metadata=metadata,
         )
+
+        trigger_keys = (["visitor_pass.created"] if action == "visitor_pass.create" else
+            ["visitor_pass.used", "visitor_pass.detected"] if action == "visitor_pass.arrival_linked" else
+            ["visitor_pass.expired"] if action == "visitor_pass.status_refresh" and visitor_pass.status == VisitorPassStatus.EXPIRED else [])
+        notification_event = {
+            "visitor_pass.create": "visitor_pass.created",
+            "visitor_pass.cancel": "visitor_pass.cancelled",
+            "visitor_pass.status_refresh": "visitor_pass.status_changed",
+            "visitor_pass.arrival_linked": "visitor_pass.used",
+            "visitor_pass.departure_linked": "visitor_pass.departure_recorded",
+        }.get(action)
+        if not trigger_keys and notification_event is None:
+            return
+        await session.flush()
+        # UPDATE expires the server-generated timestamp even with
+        # expire_on_commit=False. Fetch it explicitly before synchronous payload
+        # projection; required delivery capture must never perform lazy async I/O.
+        await session.refresh(visitor_pass, attribute_names=["updated_at"])
+        payload = {"visitor_pass": serialize_visitor_pass(visitor_pass),
+                   "occurred_at": audit.timestamp.isoformat(), **(automation_payload or {})}
+        if trigger_keys:
+            from app.services.automation_intake import reserve_trigger
+
+            for trigger in trigger_keys:
+                await reserve_trigger(session, trigger, payload, origin_kind="visitor_transition",
+                    origin_id=str(audit.id), actor=actor, source="visitor_pass", trace_id=audit.trace_id)
+        if notification_event:
+            from app.services.notification_runs import NotificationRunStore
+            from app.services.workflows.notification_payloads import notification_context_payload
+            from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
+
+            store = NotificationRunStore()
+            notification_origin = RealtimeEvent(notification_event, payload, audit.timestamp.isoformat())
+            for context in visitor_pass_notification_contexts_from_event(notification_origin):
+                await store.enqueue_in_session(session, notification_context_payload(context),
+                    run_id=uuid.uuid5(audit.id, "visitor.notification:" + context.event_type))
 
 
 def status_for_values(
@@ -1079,3 +1328,11 @@ def _user_label(user: User) -> str:
 @lru_cache
 def get_visitor_pass_service() -> VisitorPassService:
     return VisitorPassService()
+
+
+async def publish_pass_change(event_type: str, payload: dict[str, Any]) -> None:
+    """A realtime outage cannot roll back a committed pass or skip outreach."""
+    try:
+        await event_bus.publish(event_type, payload)
+    except Exception:
+        logger.exception("visitor_pass_realtime_publish_failed", extra={"event_type": event_type})

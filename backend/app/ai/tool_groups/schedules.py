@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from app.ai.tool_groups import schedules_handlers
 from app.ai.tool_groups.metadata import apply_group_metadata
-from app.ai.tool_groups.schedules_handlers import (
-    assign_schedule_to_entity,
-    create_schedule,
-    delete_schedule,
-    get_schedule,
-    override_schedule,
-    query_schedule_targets,
-    query_schedules,
-    update_schedule,
-    verify_schedule_access,
-)
-from app.ai.tools import (
-    SCHEDULE_LOOKUP_PROPERTIES,
-    SCHEDULE_TIME_BLOCKS_SCHEMA,
-    AgentTool,
-)
+from app.ai.tools import AgentTool
+from app.services.type_helpers import as_dict
+
+SCHEDULE_TIME_BLOCKS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "Monday-first schedule blocks keyed by day number 0-6, where 0 is Monday. Times must align to 30-minute increments.",
+    "additionalProperties": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "start": {"type": "string", "description": "HH:MM, for example 07:00."},
+                "end": {"type": "string", "description": "HH:MM or 24:00, for example 19:00."},
+            },
+            "required": ["start", "end"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SCHEDULE_LOOKUP_PROPERTIES: dict[str, Any] = {
+    "schedule_id": {"type": "string", "description": "Schedule UUID."},
+    "schedule_name": {"type": "string", "description": "Schedule name or partial name."},
+}
 
 TOOL_CATEGORIES = {
     "override_schedule": ("Schedules",),
@@ -64,7 +75,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["person_id", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=override_schedule,
+                    handler=schedules_handlers.override_schedule,
                 ),
         AgentTool(
                     name="query_schedules",
@@ -77,7 +88,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_schedules,
+                    handler=schedules_handlers.query_schedules,
                     example_inputs=(
                         {"search": "weekday", "include_dependencies": True},
                     ),
@@ -94,7 +105,7 @@ def build_tools() -> list[AgentTool]:
                         "properties": SCHEDULE_LOOKUP_PROPERTIES,
                         "additionalProperties": False,
                     },
-                    handler=get_schedule,
+                    handler=schedules_handlers.get_schedule,
                     example_inputs=(
                         {"schedule_name": "Weekdays"},
                     ),
@@ -124,7 +135,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["name", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=create_schedule,
+                    handler=schedules_handlers.create_schedule,
                 ),
         AgentTool(
                     name="update_schedule",
@@ -145,7 +156,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=update_schedule,
+                    handler=schedules_handlers.update_schedule,
                 ),
         AgentTool(
                     name="delete_schedule",
@@ -159,7 +170,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["confirm"],
                         "additionalProperties": False,
                     },
-                    handler=delete_schedule,
+                    handler=schedules_handlers.delete_schedule,
                 ),
         AgentTool(
                     name="query_schedule_targets",
@@ -176,7 +187,7 @@ def build_tools() -> list[AgentTool]:
                         },
                         "additionalProperties": False,
                     },
-                    handler=query_schedule_targets,
+                    handler=schedules_handlers.query_schedule_targets,
                     example_inputs=(
                         {"entity_type": "vehicle", "search": "Tesla", "limit": 25},
                     ),
@@ -206,7 +217,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["entity_type", "confirm"],
                         "additionalProperties": False,
                     },
-                    handler=assign_schedule_to_entity,
+                    handler=schedules_handlers.assign_schedule_to_entity,
                 ),
         AgentTool(
                     name="verify_schedule_access",
@@ -227,7 +238,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["entity_type"],
                         "additionalProperties": False,
                     },
-                    handler=verify_schedule_access,
+                    handler=schedules_handlers.verify_schedule_access,
                     example_inputs=(
                         {"entity_type": "person", "entity_name": "Steph", "at": "today 18:30"},
                         {"entity_type": "vehicle", "registration_number": "PE70DHX"},
@@ -240,6 +251,41 @@ def build_tools() -> list[AgentTool]:
                 ),
         ],
         categories=TOOL_CATEGORIES,
+        button_handler=confirmation_button,
+        summary_handler=confirmation_summary,
+        status_labels={'override_schedule': 'Preparing schedule override...', 'query_schedules': 'Checking schedules...', 'get_schedule': 'Checking schedule details...', 'create_schedule': 'Creating schedule...', 'update_schedule': 'Updating schedule...', 'delete_schedule': 'Deleting schedule...', 'query_schedule_targets': 'Checking schedule assignments...', 'assign_schedule_to_entity': 'Assigning schedule...', 'verify_schedule_access': 'Verifying schedule access...'},
+        success_fields={'override_schedule': ('created',), 'create_schedule': ('created',), 'update_schedule': ('updated',), 'delete_schedule': ('deleted',), 'assign_schedule_to_entity': ('assigned',)},
+        finish_after_confirmation=frozenset({'update_schedule', 'create_schedule', 'delete_schedule'}),
         confirmation_required=CONFIRMATION_REQUIRED_TOOLS,
         default_limits=DEFAULT_LIMITS,
     )
+
+
+def confirmation_summary(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name == 'override_schedule':
+        if output.get('created'):
+            return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
+        return str(output.get('detail') or 'I did not create the schedule override.')
+    if tool_name == 'create_schedule':
+        schedule = as_dict(output.get('schedule'))
+        name = schedule.get('name') or output.get('schedule_name') or 'the schedule'
+        summary = schedule.get('summary')
+        return f"Created {name}{(f' with {summary}' if summary else '')}." if output.get('created') else str(output.get('detail') or f'I did not create {name}.')
+    if tool_name == 'update_schedule':
+        schedule = as_dict(output.get('schedule'))
+        name = schedule.get('name') or output.get('schedule_name') or 'the schedule'
+        summary = schedule.get('summary')
+        return f"Updated {name}{(f' to {summary}' if summary else '')}."
+    if tool_name == 'delete_schedule':
+        schedule = as_dict(output.get('schedule'))
+        name = schedule.get('name') or output.get('schedule_name') or 'the schedule'
+        return f'Deleted {name}.' if output.get('deleted') else str(output.get('detail') or f'I did not delete {name}.')
+    return str(output.get("detail") or "Action completed.")
+
+
+def confirmation_button(tool_name: str, output: dict[str, Any]) -> str:
+    if tool_name == 'override_schedule':
+        return 'Create override'
+    if tool_name == 'create_schedule':
+        return 'Create schedule'
+    return "Confirm"

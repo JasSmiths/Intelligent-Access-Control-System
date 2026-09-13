@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +10,12 @@ from app.models import MaintenanceModeState
 from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
+from app.services.automation_intake import reserve_trigger
 from app.services.notifications import get_notification_service
+from app.services.mutation_context import load_active_admin
+from app.services.maintenance_state import (
+    MAINTENANCE_STATE_ID, get_maintenance_state, is_maintenance_mode_active,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_MAINTENANCE,
     audit_log_event_payload,
@@ -19,7 +25,6 @@ from app.services.telemetry import (
 
 logger = get_logger(__name__)
 
-MAINTENANCE_STATE_ID = 1
 MAINTENANCE_HA_ENTITY_ID = "input_boolean.top_gate_maintenance_mode"
 MAINTENANCE_ENABLED_TRIGGER = "maintenance_mode_enabled"
 MAINTENANCE_DISABLED_TRIGGER = "maintenance_mode_disabled"
@@ -27,15 +32,9 @@ MAINTENANCE_DISABLED_TRIGGER = "maintenance_mode_disabled"
 
 async def get_status() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
-        row = await _get_or_create_state(session)
+        row = await get_maintenance_state(session)
         await session.commit()
         return _status_payload(row)
-
-
-async def is_maintenance_mode_active() -> bool:
-    async with AsyncSessionLocal() as session:
-        row = await session.get(MaintenanceModeState, MAINTENANCE_STATE_ID)
-        return bool(row and row.is_active)
 
 
 async def set_mode(
@@ -50,7 +49,9 @@ async def set_mode(
     now = datetime.now(tz=UTC)
     reason_text = _clean_reason(reason) or _default_reason(active, actor=actor, source=source)
     async with AsyncSessionLocal() as session:
-        row = await _get_or_create_state(session)
+        if actor_user_id is not None:
+            await load_active_admin(session, actor_user_id, lock=True)
+        row = await get_maintenance_state(session, lock=True)
         previous = _status_payload(row, now=now)
         was_active = bool(row.is_active)
         previous_enabled_at = row.enabled_at
@@ -70,51 +71,52 @@ async def set_mode(
             row.source = source
             row.reason = None
 
-        await session.commit()
         next_status = _status_payload(row, now=now)
-
-    duration_seconds = (
-        max(0, int((now - previous_enabled_at).total_seconds()))
-        if previous_enabled_at and not active
-        else None
-    )
-    duration_label = format_duration(duration_seconds) if duration_seconds is not None else None
-    event_payload = {
-        **next_status,
-        "changed": True,
-        "actor": actor,
-        "source": source,
-        "reason": reason_text,
-        "maintenance_mode_reason": reason_text,
-        "duration_seconds": duration_seconds if duration_seconds is not None else next_status["duration_seconds"],
-        "duration_label": duration_label or next_status["duration_label"],
-    }
-    await _write_mode_audit(
-        active,
-        actor=actor,
-        actor_user_id=actor_user_id,
-        source=source,
-        reason=reason_text,
-        previous=previous,
-        current=next_status,
-        duration_seconds=duration_seconds,
-        duration_label=duration_label,
-    )
-    await event_bus.publish("maintenance_mode.changed", event_payload)
-    await _notify_maintenance_changed(active, event_payload)
+        duration_seconds = (
+            max(0, int((now - previous_enabled_at).total_seconds()))
+            if previous_enabled_at and not active
+            else None
+        )
+        duration_label = format_duration(duration_seconds) if duration_seconds is not None else None
+        event_payload = {
+            **next_status,
+            "changed": True,
+            "actor": actor,
+            "source": source,
+            "reason": reason_text,
+            "maintenance_mode_reason": reason_text,
+            "duration_seconds": duration_seconds if duration_seconds is not None else next_status["duration_seconds"],
+            "duration_label": duration_label or next_status["duration_label"],
+        }
+        audit = await _write_mode_audit(
+            session, active, actor=actor, actor_user_id=actor_user_id, source=source,
+            reason=reason_text, previous=previous, current=next_status,
+            duration_seconds=duration_seconds, duration_label=duration_label,
+        )
+        await session.flush()
+        await get_notification_service().enqueue_in_session(
+            session, _maintenance_notification(active, event_payload),
+            dispatch_id=uuid.uuid5(audit.id, "maintenance.notification"),
+        )
+        await reserve_trigger(session, "maintenance_mode.enabled" if active else "maintenance_mode.disabled",
+            {**event_payload, "occurred_at": now.isoformat()}, origin_kind="maintenance_mode",
+            origin_id=str(audit.id), actor=actor, source=source)
+        await session.commit()
+    try:
+        get_notification_service().dispatcher.wake()
+    except Exception:
+        logger.exception("maintenance_notification_wakeup_failed")
+    try:
+        await event_bus.publish("audit.log.created", audit_log_event_payload(audit))
+    except Exception:
+        logger.exception("maintenance_audit_realtime_failed")
+    try:
+        await event_bus.publish("maintenance_mode.changed", event_payload)
+    except Exception:
+        logger.exception("maintenance_status_realtime_failed")
     if sync_ha:
         await _sync_home_assistant(active, actor=actor, source=source, reason=reason_text)
     return event_payload
-
-
-async def _get_or_create_state(session: AsyncSession) -> MaintenanceModeState:
-    row = await session.get(MaintenanceModeState, MAINTENANCE_STATE_ID)
-    if row:
-        return row
-    row = MaintenanceModeState(id=MAINTENANCE_STATE_ID, is_active=False)
-    session.add(row)
-    await session.flush()
-    return row
 
 
 def _status_payload(row: MaintenanceModeState, *, now: datetime | None = None) -> dict[str, Any]:
@@ -181,7 +183,7 @@ def _source_label(source: str) -> str:
 
 
 async def _write_mode_audit(
-    active: bool,
+    session: AsyncSession, active: bool,
     *,
     actor: str,
     actor_user_id: str | None,
@@ -191,37 +193,35 @@ async def _write_mode_audit(
     current: dict[str, Any],
     duration_seconds: int | None,
     duration_label: str | None,
-) -> None:
+) -> Any:
     action = "maintenance_mode.enabled" if active else "maintenance_mode.disabled"
     summary = reason
     if not active and duration_label:
         summary = f"{reason}. System was in Maintenance Mode for {duration_label}"
-    async with AsyncSessionLocal() as session:
-        row = await write_audit_log(
-            session,
-            category=TELEMETRY_CATEGORY_MAINTENANCE,
-            action=action,
-            actor=actor,
-            actor_user_id=actor_user_id,
-            target_entity="MaintenanceMode",
-            target_id=str(MAINTENANCE_STATE_ID),
-            target_label="Global Maintenance Mode",
-            diff={"old": previous, "new": current},
-            metadata={
-                "source": source,
-                "reason": reason,
-                "summary": summary,
-                "duration_seconds": duration_seconds,
-                "duration_label": duration_label,
-                "ha_entity_id": MAINTENANCE_HA_ENTITY_ID,
-            },
-        )
-        await session.commit()
-        await session.refresh(row)
-        await event_bus.publish("audit.log.created", audit_log_event_payload(row))
+    row = await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_MAINTENANCE,
+        action=action,
+        actor=actor,
+        actor_user_id=actor_user_id,
+        target_entity="MaintenanceMode",
+        target_id=str(MAINTENANCE_STATE_ID),
+        target_label="Global Maintenance Mode",
+        diff={"old": previous, "new": current},
+        metadata={
+            "source": source,
+            "reason": reason,
+            "summary": summary,
+            "duration_seconds": duration_seconds,
+            "duration_label": duration_label,
+            "ha_entity_id": MAINTENANCE_HA_ENTITY_ID,
+        },
+    )
+    return row
 
 
-async def _notify_maintenance_changed(active: bool, payload: dict[str, Any]) -> None:
+
+def _maintenance_notification(active: bool, payload: dict[str, Any]) -> NotificationContext:
     trigger = MAINTENANCE_ENABLED_TRIGGER if active else MAINTENANCE_DISABLED_TRIGGER
     subject = "Maintenance Mode Enabled" if active else "Maintenance Mode Disabled"
     facts = {
@@ -232,13 +232,9 @@ async def _notify_maintenance_changed(active: bool, payload: dict[str, Any]) -> 
         "maintenance_mode_source": payload.get("source") or "",
         "occurred_at": datetime.now(tz=UTC).isoformat(),
     }
-    await get_notification_service().notify(
-        NotificationContext(
-            event_type=trigger,
-            subject=subject,
-            severity="warning" if active else "info",
-            facts=facts,
-        )
+    return NotificationContext(
+        event_type=trigger, subject=subject,
+        severity="warning" if active else "info", facts=facts,
     )
 
 

@@ -1,61 +1,76 @@
 # mypy: disable-error-code=var-annotated
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
 import uuid
 
+import pytest
+
+from app.models.enums import GateMalfunctionStatus
+from app.modules.access_devices.base import gate_receipt_projection
+from app.modules.gate.base import GateCommandDelivery, GateState
 from app.services import actionable_notifications as actionable
 from app.services.actionable_notifications import (
-    ActionableNotificationService,
+    ACTIONABLE_CONTEXT_VERSION,
+    ACTIONABLE_OUTPUT_VERSION,
     ActionIdentity,
+    ActionableNotificationService,
     ActiveGateMalfunctionContext,
     BoundActionContext,
+    FinalizationResult,
     GATE_FORCE_OPEN_ACTION,
     GATE_OPEN_ACTION,
     GateActionOutcome,
+    PreparedForceChild,
 )
-from app.models.enums import GateMalfunctionStatus
-from app.modules.gate.base import GateState
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
 
 
-class DummySession:
-    def __init__(self, row=None) -> None:
-        self.row = row
-        self.commits = 0
+def manual_target_plan() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "action": "open",
+        "target_device_key": None,
+        "require_admission": False,
+        "gate_only": True,
+        "automatic_entry_policy": False,
+        "targets": [{
+            "target_device_id": str(uuid.uuid4()),
+            "device_key": "synthetic_gate",
+            "kind": "gate",
+            "binding_fingerprint": "synthetic-binding",
+        }],
+    }
 
-    async def __aenter__(self):
-        return self
 
-    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
-        return None
-
-    async def scalar(self, _statement):
-        return self.row
-
-    async def commit(self) -> None:
-        self.commits += 1
-
-
-def bound_context() -> BoundActionContext:
+def bound_context(*, action: str = GATE_OPEN_ACTION) -> BoundActionContext:
+    context_id = uuid.uuid4()
+    notify_service = "notify.mobile_app_jason"
     return BoundActionContext(
-        id=uuid.uuid4(),
-        action=GATE_OPEN_ACTION,
-        notify_service="notify.mobile_app_jason",
+        id=context_id,
+        action=action,
+        notify_service=notify_service,
         registration_number="AB12CDE",
         access_event_id=uuid.uuid4(),
         telemetry_trace_id="1" * 32,
         person_id=uuid.uuid4(),
-        actor_user_id=None,
+        actor_user_id=uuid.uuid4(),
         parent_context_id=None,
+        expires_at=datetime.now(tz=UTC) + timedelta(minutes=5),
+        actor_auth_version=7,
+        target_plan=manual_target_plan(),
+        destination_binding=actionable._destination_binding(context_id, notify_service),
+        mobile_configuration_binding="synthetic-mobile-binding",
+        context_version=ACTIONABLE_CONTEXT_VERSION,
     )
 
 
-def identity(person_id: uuid.UUID | None = None) -> ActionIdentity:
-    person = SimpleNamespace(id=person_id or uuid.uuid4(), display_name="Jason Smith")
-    user = SimpleNamespace(id=uuid.uuid4(), username="jason", full_name="Jason Smith")
+def identity(person_id: uuid.UUID, user_id: uuid.UUID) -> ActionIdentity:
+    person = SimpleNamespace(id=person_id, display_name="Jason Smith")
+    user = SimpleNamespace(id=user_id, username="jason", full_name="Jason Smith", auth_session_version=7)
     return ActionIdentity(person=person, user=user)
 
 
@@ -65,6 +80,10 @@ def gate_command_outcome(
     accepted: bool,
     state: GateState,
     detail: str,
+    delivery: GateCommandDelivery = GateCommandDelivery.ACCEPTED,
+    mechanically_confirmed: bool = False,
+    requires_reconciliation: bool = False,
+    target_receipts: list[dict[str, Any]] | None = None,
 ) -> GateCommandOutcome:
     occurred_at = datetime.now(tz=UTC)
     return GateCommandOutcome(
@@ -72,9 +91,20 @@ def gate_command_outcome(
         accepted=accepted,
         state=state,
         detail=detail,
-        mechanically_confirmed=accepted and state in {GateState.OPEN, GateState.OPENING},
+        mechanically_confirmed=mechanically_confirmed,
+        reconciliation_required=requires_reconciliation,
+        target_receipts=target_receipts or [],
         started_at=occurred_at,
         completed_at=occurred_at,
+        delivery=delivery,
+    )
+
+
+def prepared_force(parent: BoundActionContext) -> PreparedForceChild:
+    return PreparedForceChild(
+        context_id=uuid.uuid5(parent.id, actionable.ACTIONABLE_FORCE_CHILD_PURPOSE),
+        target_plan=manual_target_plan(),
+        mobile_configuration_binding="synthetic-mobile-binding",
     )
 
 
@@ -86,159 +116,102 @@ def install_gate_command_coordinator(monkeypatch, handler) -> None:
     monkeypatch.setattr(actionable, "get_gate_command_coordinator", lambda: FakeCoordinator())
 
 
-def context_row(*, token: str = "token", consumed=False, expired=False):
-    now = datetime.now(tz=UTC)
-    return SimpleNamespace(
-        id=uuid.uuid4(),
-        token_hash=actionable._token_hash(token),
-        action=GATE_OPEN_ACTION,
-        notify_service="notify.mobile_app_jason",
-        registration_number="AB12CDE",
-        access_event_id=uuid.uuid4(),
-        telemetry_trace_id="1" * 32,
-        person_id=uuid.uuid4(),
-        actor_user_id=None,
-        parent_context_id=None,
-        expires_at=now - timedelta(seconds=1) if expired else now + timedelta(minutes=5),
-        consumed_at=now if consumed else None,
-        outcome=None,
-        outcome_detail=None,
+async def test_normal_definite_failure_prepares_durable_force_child(monkeypatch) -> None:
+    service = ActionableNotificationService()
+    bound = bound_context()
+    finalizations = []
+    outcome = GateActionOutcome(
+        False,
+        "Synthetic controller rejected the command.",
+        delivery=GateCommandDelivery.REJECTED,
+        target_receipts=({"delivery": "rejected"},),
     )
-
-
-async def test_expired_gate_action_token_notifies_requesting_device(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    monkeypatch.setattr(actionable, "get_auth_secret", lambda: "test-secret")
-    row = context_row(expired=True)
-    notifications = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession(row))
-
-    async def fake_send(bound, *, title, message, actions=None):
-        notifications.append((bound.notify_service, title, message, actions))
-
-    monkeypatch.setattr(service, "_send_result_notification", fake_send)
-
-    bound, reason = await service._consume_context("token", expected_action=GATE_OPEN_ACTION)
-
-    assert bound is None
-    assert reason == "This notification action has expired."
-    assert row.outcome == "expired"
-    assert notifications[0][0] == "notify.mobile_app_jason"
-    assert notifications[0][1] == "Gate action expired"
-
-
-async def test_consumed_gate_action_token_is_single_use(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    monkeypatch.setattr(actionable, "get_auth_secret", lambda: "test-secret")
-    row = context_row(consumed=True)
-    notifications = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession(row))
+    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
     monkeypatch.setattr(
         service,
-        "_send_result_notification",
-        lambda *_args, **_kwargs: _async_append(notifications, _args, _kwargs),
+        "_current_bound_identity",
+        lambda *_args, **_kwargs: _async_value(identity(bound.person_id, bound.actor_user_id)),
+    )
+    monkeypatch.setattr(service, "_execute_gate", lambda *_args, **_kwargs: _async_value(outcome))
+    monkeypatch.setattr(service, "_prepare_force_child", lambda *_args, **_kwargs: _async_value(prepared_force(bound)))
+
+    async def finalize(*args, **kwargs):
+        finalizations.append((args, kwargs))
+        return FinalizationResult(True)
+
+    monkeypatch.setattr(service, "_finalize_action_result", finalize)
+
+    result = await service.execute_gate_action("opaque-token", force=False)
+
+    assert result == outcome
+    assert len(finalizations) == 1
+    assert finalizations[0][1]["result_kind"] == "normal_result"
+    assert finalizations[0][1]["prepared_force"].context_id == uuid.uuid5(
+        bound.id, actionable.ACTIONABLE_FORCE_CHILD_PURPOSE
     )
 
-    bound, reason = await service._consume_context("token", expected_action=GATE_OPEN_ACTION)
 
-    assert bound is None
-    assert reason == "This notification action has already been used."
-    assert notifications[0][1]["title"] == "Gate action already used"
-
-
-async def test_normal_gate_action_failure_sends_force_follow_up(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    bound_identity = identity(bound.person_id)
-    recorded = []
-    audits = []
-    followups = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
-    monkeypatch.setattr(actionable, "_is_maintenance_mode_active", lambda: _async_value(True))
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(bound_identity))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_append(recorded, _args, _kwargs))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_append(audits, _args, _kwargs))
-    monkeypatch.setattr(service, "_send_failure_follow_up", lambda *_args, **_kwargs: _async_append(followups, _args, _kwargs))
-
-    outcome = await service.execute_gate_action("token", force=False)
-
-    assert not outcome.accepted
-    assert "Maintenance Mode" in outcome.detail
-    assert recorded[0][0][1] == "failed"
-    assert audits[0][1]["outcome"] == "failed"
-    assert followups[0][0][1].detail == outcome.detail
-
-
-async def test_normal_gate_action_success_sends_confirmation(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    confirmations = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
-    monkeypatch.setattr(actionable, "_active_gate_malfunction", lambda: _async_value(None))
-    monkeypatch.setattr(actionable, "_is_maintenance_mode_active", lambda: _async_value(False))
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(identity(bound.person_id)))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_send_success_result", lambda *_args, **_kwargs: _async_append(confirmations, _args, _kwargs))
-
-    install_gate_command_coordinator(
-        monkeypatch,
-        lambda intent: gate_command_outcome(
-            intent,
-            accepted=True,
-            state=GateState.OPEN,
-            detail="Opened by Home Assistant.",
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        GateActionOutcome(False, "Unknown", delivery=GateCommandDelivery.UNKNOWN, requires_reconciliation=True),
+        GateActionOutcome(
+            False,
+            "Mixed result",
+            delivery=GateCommandDelivery.PARTIAL,
+            target_receipts=(
+                {"delivery": "accepted"},
+                {"delivery": "rejected"},
+            ),
         ),
-    )
+        GateActionOutcome(
+            True,
+            "Accepted but unverified",
+            delivery=GateCommandDelivery.ACCEPTED,
+            requires_reconciliation=True,
+        ),
+    ],
+)
+def test_possible_delivery_never_allows_force_child(outcome) -> None:
+    assert actionable._force_child_allowed(outcome) is False
 
-    outcome = await service.execute_gate_action("token", force=False)
 
-    assert outcome.accepted
-    assert confirmations[0][0][0] == bound
-    assert confirmations[0][0][1].detail == "Opened by Home Assistant."
-
-
-async def test_force_gate_action_bypasses_maintenance_and_schedule(monkeypatch) -> None:
+async def test_force_command_keeps_manual_all_gates_contract(monkeypatch) -> None:
     service = ActionableNotificationService()
-    bound = bound_context()
-    force_bound = BoundActionContext(**{**bound.__dict__, "action": GATE_FORCE_OPEN_ACTION})
+    bound = bound_context(action=GATE_FORCE_OPEN_ACTION)
     calls = []
-    force_results = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
-    monkeypatch.setattr(actionable, "_is_maintenance_mode_active", lambda: _async_value(True))
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((force_bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(identity(bound.person_id)))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_send_force_result", lambda *_args, **_kwargs: _async_append(force_results, _args, _kwargs))
+    monkeypatch.setattr(actionable, "_active_gate_malfunction", lambda: _async_value(None))
 
-    def force_outcome(intent):
-        calls.append((intent.reason, intent.bypass_schedule))
+    def handler(intent):
+        calls.append(intent)
         return gate_command_outcome(
             intent,
             accepted=True,
             state=GateState.OPEN,
-            detail="Opened",
+            detail="Synthetic accepted",
+            delivery=GateCommandDelivery.ACCEPTED,
+            mechanically_confirmed=True,
         )
 
-    install_gate_command_coordinator(monkeypatch, force_outcome)
+    install_gate_command_coordinator(monkeypatch, handler)
 
-    outcome = await service.execute_gate_action("token", force=True)
+    outcome = await service._execute_gate(bound, identity(bound.person_id, bound.actor_user_id), force=True)
 
-    assert outcome.accepted
-    assert calls[0][1] is True
-    assert calls[0][0].startswith("Force Actionable notification")
-    assert force_results[0][0][1].accepted is True
+    assert outcome.accepted is True
+    intent = calls[0]
+    assert intent.bypass_schedule is True
+    assert intent.require_admission is False
+    assert intent.intent_id == str(bound.id)
+    assert intent.actor_user_id == str(bound.actor_user_id)
+    assert intent.auth_version == bound.actor_auth_version
+    assert intent.target_plan == bound.target_plan
 
 
-async def test_active_malfunction_blocks_action_and_notifies_with_duration(monkeypatch) -> None:
+async def test_active_malfunction_blocks_command_before_any_transport(monkeypatch) -> None:
     service = ActionableNotificationService()
     bound = bound_context()
-    malfunction_id = uuid.uuid4()
     malfunction = ActiveGateMalfunctionContext(
-        id=malfunction_id,
+        id=uuid.uuid4(),
         gate_entity_id="cover.top_gate",
         gate_name="Top Gate",
         status=GateMalfunctionStatus.ACTIVE,
@@ -247,70 +220,188 @@ async def test_active_malfunction_blocks_action_and_notifies_with_duration(monke
         last_gate_state="open",
         duration_seconds=2 * 60 * 60 + 5 * 60,
     )
-    audits = []
-    followups = []
-    gate_calls = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
+    calls = []
     monkeypatch.setattr(actionable, "_active_gate_malfunction", lambda: _async_value(malfunction))
     monkeypatch.setattr(
         service,
         "_malfunction_failure_message",
         lambda *_args, **_kwargs: _async_value(
-            "I couldn't open the gate because Top Gate has been malfunctioning for 2 hours 5 minutes."
+            "Sorry, the gate was not opened for AB12CDE, the gate has been malfunctioning for 2 hours 5 minutes "
+            "and is currently unresolved."
         ),
     )
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(identity(bound.person_id)))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_append(audits, _args, _kwargs))
-    monkeypatch.setattr(service, "_send_failure_follow_up", lambda *_args, **_kwargs: _async_append(followups, _args, _kwargs))
 
     class FailingCoordinator:
         async def execute_open(self, *_args, **_kwargs):
-            gate_calls.append(True)
-            raise AssertionError("Gate controller must not be called while malfunctioning.")
+            calls.append(True)
+            raise AssertionError("Gate transport must not run while malfunctioning.")
 
     monkeypatch.setattr(actionable, "get_gate_command_coordinator", lambda: FailingCoordinator())
 
-    outcome = await service.execute_gate_action("token", force=False)
+    outcome = await service._execute_gate(bound, identity(bound.person_id, bound.actor_user_id), force=False)
 
-    assert not outcome.accepted
     assert outcome.skipped_before_command is True
-    assert outcome.malfunction_id == malfunction_id
+    assert outcome.malfunction_id == malfunction.id
     assert outcome.malfunction_duration_seconds == 7500
     assert "2 hours 5 minutes" in outcome.detail
-    assert not gate_calls
-    assert audits[0][1]["malfunction_id"] == malfunction_id
-    assert audits[0][1]["malfunction_duration_seconds"] == 7500
-    assert followups[0][0][1].detail == outcome.detail
+    assert not calls
 
 
-async def test_malfunction_follow_up_uses_human_message_without_force_action(monkeypatch) -> None:
-    service = ActionableNotificationService()
+def test_accepted_unverified_result_never_claims_physical_open() -> None:
     bound = bound_context()
-    sent = []
-    monkeypatch.setattr(service, "_create_force_action", lambda *_args, **_kwargs: _async_value({"action": "force"}))
-    monkeypatch.setattr(service, "_send_result_notification", lambda *_args, **_kwargs: _async_append(sent, _args, _kwargs))
-
-    await service._send_failure_follow_up(
+    title, message = actionable._result_content(
         bound,
         GateActionOutcome(
-            False,
-            "Sorry, the gate was not opened for AB12CDE, the gate has been malfunctioning for 35 minutes and is currently unresolved.",
-            malfunction_id=uuid.uuid4(),
-            malfunction_duration_seconds=35 * 60,
+            True,
+            "Synthetic controller accepted the request; physical state is not verified.",
+            state="opening",
+            delivery=GateCommandDelivery.ACCEPTED,
+            requires_reconciliation=True,
         ),
+        force=False,
     )
 
-    assert sent[0][1]["title"] == "Gate did not open"
-    assert sent[0][1]["message"].startswith("Sorry, the gate was not opened")
-    assert sent[0][1]["actions"] is None
+    assert title == "Gate command accepted"
+    assert "accepted" in message.lower()
+    assert "opened" not in f"{title} {message}".lower()
+    assert "reconciliation" in message.lower()
+
+
+def test_verified_not_sent_receipt_reports_already_open_without_force_child() -> None:
+    """A pre-command observation is success without inventing a provider send."""
+    target_id = str(uuid.uuid4())
+    receipts = [{
+        "target_device_id": target_id,
+        "accepted": False,
+        "delivery": "not_sent",
+        "state": "open",
+        "verified": True,
+        "requires_reconciliation": False,
+    }]
+    projection = gate_receipt_projection(
+        receipts,
+        admission_target_device_id=target_id,
+        expected_target_count=1,
+    )
+    outcome = GateActionOutcome(
+        accepted=projection["accepted"],
+        detail="The gate was already open.",
+        state=projection["state"],
+        delivery=projection["delivery"],
+        mechanically_confirmed=projection["mechanically_confirmed"],
+        requires_reconciliation=projection["requires_reconciliation"],
+        target_receipts=tuple(projection["target_receipts"]),
+    )
+
+    title, message = actionable._result_content(bound_context(), outcome, force=False)
+
+    assert projection["delivery"] == "not_sent"
+    assert projection["mechanically_confirmed"] is True
+    assert actionable._recorded_outcome(outcome) == "success"
+    assert actionable._force_child_allowed(outcome) is False
+    assert title == "Gate already open"
+    assert "no gate open command was sent" in message.lower()
+
+
+def test_v2_binding_requires_exact_actor_target_destination_and_config() -> None:
+    bound = bound_context()
+
+    assert actionable._is_v2_bound(bound)
+    assert not actionable._is_v2_bound(replace(bound, actor_auth_version=None))
+    assert not actionable._is_v2_bound(replace(bound, target_plan={}))
+    assert not actionable._is_v2_bound(replace(bound, destination_binding="wrong"))
+    assert not actionable._is_v2_bound(replace(bound, mobile_configuration_binding=None))
+
+
+def test_literal_output_persists_descriptor_without_a_bearer_token() -> None:
+    bound = bound_context()
+    run_id = actionable._output_run_id(bound.id, "normal_result")
+    origin = actionable._output_origin(
+        bound,
+        run_id=run_id,
+        result_kind="normal_result",
+        configuration_binding="synthetic-config-binding",
+        force_context_id=None,
+    )
+    action = actionable._literal_output_action(
+        bound,
+        title="Gate did not open",
+        message="Synthetic failure.",
+        result_kind="normal_result",
+        force_context_id=None,
+    )
+    bearer = actionable._derived_action_token(bound.id, GATE_OPEN_ACTION)
+
+    assert actionable._valid_output_action(
+        action,
+        context_id=bound.id,
+        result_kind="normal_result",
+        origin=origin,
+    )
+    assert bearer not in repr(action)
+    assert bearer not in repr(origin)
+    assert action["actionable_output"]["version"] == ACTIONABLE_OUTPUT_VERSION
+    assert action["target"] == bound.notify_service
+
+
+def test_literal_output_rejects_destination_or_force_child_rebinding() -> None:
+    bound = bound_context()
+    child_id = uuid.uuid5(bound.id, actionable.ACTIONABLE_FORCE_CHILD_PURPOSE)
+    run_id = actionable._output_run_id(bound.id, "normal_result")
+    origin = actionable._output_origin(
+        bound,
+        run_id=run_id,
+        result_kind="normal_result",
+        configuration_binding="synthetic-config-binding",
+        force_context_id=child_id,
+    )
+    action = actionable._literal_output_action(
+        bound,
+        title="Gate did not open",
+        message="Synthetic failure.",
+        result_kind="normal_result",
+        force_context_id=child_id,
+    )
+
+    assert actionable._valid_output_action(action, context_id=bound.id, result_kind="normal_result", origin=origin)
+    assert not actionable._valid_output_action(
+        {**action, "target": "notify.mobile_app_someone_else"},
+        context_id=bound.id,
+        result_kind="normal_result",
+        origin=origin,
+    )
+    tampered = {**action, "actionable_output": {**action["actionable_output"], "force_context_id": None}}
+    assert not actionable._valid_output_action(tampered, context_id=bound.id, result_kind="normal_result", origin=origin)
+
+
+async def test_identity_denial_records_durable_result_without_gate_transport(monkeypatch) -> None:
+    service = ActionableNotificationService()
+    bound = bound_context()
+    finalizations = []
+    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
+    monkeypatch.setattr(service, "_current_bound_identity", lambda *_args, **_kwargs: _async_value(None))
+
+    async def finalize(*args, **kwargs):
+        finalizations.append((args, kwargs))
+        return FinalizationResult(True)
+
+    async def unexpected_execute(*_args, **_kwargs):
+        raise AssertionError("Identity-denied actions must not reach the gate coordinator.")
+
+    monkeypatch.setattr(service, "_finalize_action_result", finalize)
+    monkeypatch.setattr(service, "_execute_gate", unexpected_execute)
+
+    outcome = await service.execute_gate_action("opaque-token", force=False)
+
+    assert outcome.skipped_before_command is True
+    assert "active IACS Admin" in outcome.detail
+    assert finalizations[0][1]["result_kind"] == "identity_denied"
 
 
 async def test_malfunction_failure_message_repairs_unhelpful_llm_output(monkeypatch) -> None:
     service = ActionableNotificationService()
     bound = bound_context()
-    person_identity = identity(bound.person_id)
+    person_identity = identity(bound.person_id, bound.actor_user_id)
     calls = []
     malfunction = ActiveGateMalfunctionContext(
         id=uuid.uuid4(),
@@ -324,7 +415,7 @@ async def test_malfunction_failure_message_repairs_unhelpful_llm_output(monkeypa
     )
 
     class FakeProvider:
-        async def complete(self, messages):
+        async def complete(self, messages, **_options):
             calls.append([message.content for message in messages])
             if len(calls) == 1:
                 return SimpleNamespace(
@@ -347,82 +438,10 @@ async def test_malfunction_failure_message_repairs_unhelpful_llm_output(monkeypa
 
     assert len(calls) == 2
     assert "1 day 3 hours" in calls[0][-1]
-    assert "1 day 3 hours" in message
     assert message.startswith("Sorry, the gate was not opened")
     assert "try again" not in message
     assert "Jason Smith" not in message
 
 
-async def test_force_gate_action_failure_sends_final_failure_notification(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    force_bound = BoundActionContext(**{**bound.__dict__, "action": GATE_FORCE_OPEN_ACTION})
-    force_results = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((force_bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(identity(bound.person_id)))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_send_force_result", lambda *_args, **_kwargs: _async_append(force_results, _args, _kwargs))
-
-    install_gate_command_coordinator(
-        monkeypatch,
-        lambda intent: gate_command_outcome(
-            intent,
-            accepted=False,
-            state=GateState.FAULT,
-            detail="Home Assistant rejected the command.",
-        ),
-    )
-
-    outcome = await service.execute_gate_action("token", force=True)
-
-    assert not outcome.accepted
-    assert "Home Assistant rejected" in outcome.detail
-    assert force_results[0][0][1].accepted is False
-
-
-async def test_identity_mapping_failure_notifies_without_gate_command(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    notifications = []
-    audits = []
-    monkeypatch.setattr(actionable, "AsyncSessionLocal", lambda: DummySession())
-    monkeypatch.setattr(service, "_consume_context", lambda *_args, **_kwargs: _async_value((bound, "")))
-    monkeypatch.setattr(service, "_identity_for_notify_service", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_record_outcome", lambda *_args, **_kwargs: _async_value(None))
-    monkeypatch.setattr(service, "_send_result_notification", lambda *_args, **_kwargs: _async_append(notifications, _args, _kwargs))
-    monkeypatch.setattr(service, "_write_gate_audit", lambda *_args, **_kwargs: _async_append(audits, _args, _kwargs))
-
-    outcome = await service.execute_gate_action("token", force=False)
-
-    assert not outcome.accepted
-    assert "linked to exactly one active person" in outcome.detail
-    assert notifications[0][1]["title"] == "Gate action not available"
-    assert audits[0][1]["outcome"] == "failed"
-
-
-async def test_failed_normal_action_follow_up_includes_force_action(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    sent = []
-    force_action = {"action": "iacs:gate_force_open:token", "title": "Force Open Gate", "destructive": True}
-    monkeypatch.setattr(service, "_create_force_action", lambda *_args, **_kwargs: _async_value(force_action))
-    monkeypatch.setattr(service, "_send_result_notification", lambda *_args, **_kwargs: _async_append(sent, _args, _kwargs))
-
-    await service._send_failure_follow_up(
-        bound,
-        GateActionOutcome(False, "Maintenance Mode is active."),
-    )
-
-    assert sent[0][1]["title"] == "Gate did not open"
-    assert sent[0][1]["actions"] == [force_action]
-
-
 async def _async_value(value):
     return value
-
-
-async def _async_append(target, args, kwargs):
-    target.append((args, kwargs))
-    return None

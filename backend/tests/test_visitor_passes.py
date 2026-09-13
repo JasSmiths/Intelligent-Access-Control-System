@@ -2,15 +2,16 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.ai import tools as ai_tools
+from app.ai.tool_groups import visitor_passes_handlers as alfred_visitor_passes_handlers
 from app.ai.tool_groups import visitor_passes_handlers as visitor_pass_tools
 from app.models import VisitorPass
-from app.models.enums import VisitorPassStatus, VisitorPassType
-from app.services.access_events import AccessEventService
+from app.models.enums import AccessDecision, AccessDirection, VisitorPassStatus, VisitorPassType
+from app.services.access.execution import AccessExecution
 from app.services.domain_events import publish_visitor_pass_status_changed
 from app.services.visitor_passes import (
     VisitorPassService,
@@ -108,6 +109,7 @@ async def test_refresh_statuses_publishes_status_changed_event_payload(monkeypat
         published.append((event_type, payload))
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
     monkeypatch.setattr("app.services.visitor_passes.event_bus.publish", fake_publish)
 
     changed = await service.refresh_statuses(
@@ -191,6 +193,7 @@ async def test_update_one_time_visitor_pass_clears_explicit_window_when_nulls_ar
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
     await service.update_pass(
         SimpleNamespace(),
@@ -221,6 +224,7 @@ async def test_update_one_time_visitor_pass_keeps_explicit_window_when_fields_ar
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
     await service.update_pass(SimpleNamespace(), row, visitor_name="Sarah Updated")
 
@@ -246,6 +250,7 @@ async def test_update_duration_visitor_pass_to_one_time_clears_duration_window_b
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
     await service.update_pass(SimpleNamespace(), row, pass_type=VisitorPassType.ONE_TIME)
 
@@ -267,14 +272,15 @@ async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
     )
     row.valid_from = start
     row.valid_until = start + timedelta(hours=8)
-    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(hours=1), registration_number="AB12 CDE")
+    event = SimpleNamespace(decision=AccessDecision.GRANTED, direction=AccessDirection.ENTRY, id=uuid.uuid4(), occurred_at=start + timedelta(hours=1), registration_number="AB12 CDE")
 
     async def audit_noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
-    await service.record_arrival(SimpleNamespace(), row, event=event)
+    await service._record_verified_arrival(SimpleNamespace(), row, event=event)
 
     assert row.status == VisitorPassStatus.ACTIVE
     assert row.arrival_time == event.occurred_at
@@ -282,8 +288,9 @@ async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
     assert row.number_plate == "AB12CDE"
 
 
+
 @pytest.mark.asyncio
-async def test_duration_visitor_pass_claim_does_not_retime_open_visit(monkeypatch) -> None:
+async def test_duration_visitor_pass_candidate_selection_does_not_retime_open_visit(monkeypatch) -> None:
     service = VisitorPassService()
     start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     first_arrival = start + timedelta(minutes=10)
@@ -304,8 +311,9 @@ async def test_duration_visitor_pass_claim_does_not_retime_open_visit(monkeypatc
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
-    matched = await service.claim_active_pass(
+    matched = await service.find_arrival_candidate(
         FakeVisitorPassSession([row]),
         occurred_at=start + timedelta(minutes=25),
         registration_number="AB12 CDE",
@@ -332,18 +340,20 @@ async def test_duration_visitor_pass_arrival_links_open_claim_without_retiming(m
     row.valid_from = start
     row.valid_until = start + timedelta(hours=8)
     row.arrival_time = first_arrival
-    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(minutes=12), registration_number="AB12 CDE")
+    event = SimpleNamespace(decision=AccessDecision.GRANTED, direction=AccessDirection.ENTRY, id=uuid.uuid4(), occurred_at=start + timedelta(minutes=12), registration_number="AB12 CDE")
 
     async def audit_noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
-    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-1")
+    await service._record_verified_arrival(SimpleNamespace(), row, event=event, trace_id="trace-1")
 
     assert row.arrival_time == first_arrival
     assert row.arrival_event_id == event.id
     assert row.telemetry_trace_id == "trace-1"
+
 
 
 @pytest.mark.asyncio
@@ -364,19 +374,21 @@ async def test_duration_visitor_pass_repeated_arrival_does_not_overwrite_open_vi
     row.arrival_time = first_arrival
     row.arrival_event_id = first_event_id
     row.telemetry_trace_id = "trace-first"
-    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(minutes=25), registration_number="AB12 CDE")
+    event = SimpleNamespace(decision=AccessDecision.GRANTED, direction=AccessDirection.ENTRY, id=uuid.uuid4(), occurred_at=start + timedelta(minutes=25), registration_number="AB12 CDE")
 
     async def audit_noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
-    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-second")
+    await service._record_verified_arrival(SimpleNamespace(), row, event=event, trace_id="trace-second")
 
     assert row.arrival_time == first_arrival
     assert row.arrival_event_id == first_event_id
     assert row.telemetry_trace_id == "trace-first"
     assert row.departure_time is None
+
 
 
 @pytest.mark.asyncio
@@ -400,14 +412,15 @@ async def test_duration_visitor_pass_return_after_departure_starts_new_visit(mon
     row.departure_event_id = uuid.uuid4()
     row.duration_on_site_seconds = 3000
     row.telemetry_trace_id = "trace-first"
-    event = SimpleNamespace(id=uuid.uuid4(), occurred_at=start + timedelta(hours=2), registration_number="AB12 CDE")
+    event = SimpleNamespace(decision=AccessDecision.GRANTED, direction=AccessDirection.ENTRY, id=uuid.uuid4(), occurred_at=start + timedelta(hours=2), registration_number="AB12 CDE")
 
     async def audit_noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
-    await service.record_arrival(SimpleNamespace(), row, event=event, trace_id="trace-return")
+    await service._record_verified_arrival(SimpleNamespace(), row, event=event, trace_id="trace-return")
 
     assert row.arrival_time == event.occurred_at
     assert row.arrival_event_id == event.id
@@ -415,6 +428,7 @@ async def test_duration_visitor_pass_return_after_departure_starts_new_visit(mon
     assert row.departure_event_id is None
     assert row.duration_on_site_seconds is None
     assert row.telemetry_trace_id == "trace-return"
+
 
 
 @pytest.mark.asyncio
@@ -435,6 +449,7 @@ async def test_update_visitor_plate_saves_dvla_vehicle_details_and_clears_stale_
         return None
 
     monkeypatch.setattr(service, "_audit_change", audit_noop)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, row, **_kw: row))
 
     await service.update_visitor_plate(
         SimpleNamespace(),
@@ -611,7 +626,7 @@ def test_expired_and_cancelled_passes_do_not_match() -> None:
 
 @pytest.mark.asyncio
 async def test_lpr_visitor_pass_suppresses_unknown_plate_anomaly() -> None:
-    service = AccessEventService()
+    service = AccessExecution(None, None, None)
     event = SimpleNamespace(registration_number="PE70DHX")
     row = visitor_pass(
         expected_time=datetime(2026, 4, 29, 15, 0, tzinfo=UTC),
@@ -632,7 +647,7 @@ async def test_lpr_visitor_pass_suppresses_unknown_plate_anomaly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_departure_duration_is_recorded_for_same_plate() -> None:
+async def test_departure_duration_is_recorded_for_same_plate(monkeypatch) -> None:
     service = VisitorPassService()
     arrival = datetime(2026, 4, 29, 15, 0, tzinfo=UTC)
     departure = arrival + timedelta(hours=1, minutes=25)
@@ -640,6 +655,8 @@ async def test_departure_duration_is_recorded_for_same_plate() -> None:
     row.arrival_time = arrival
     event = SimpleNamespace(id=uuid.uuid4(), occurred_at=departure, registration_number="PE70DHX")
 
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(return_value=row))
+    monkeypatch.setattr(service, "_audit_change", AsyncMock())
     await service.record_departure(SimpleNamespace(), row, event=event)
 
     assert row.departure_time == departure
@@ -664,9 +681,9 @@ async def test_alfred_create_visitor_pass_requires_confirmation(monkeypatch) -> 
     async def fake_runtime_config():
         return SimpleNamespace(site_timezone="Europe/London")
 
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_visitor_passes_handlers, "get_runtime_config", fake_runtime_config)
 
-    result = await ai_tools.create_visitor_pass(
+    result = await alfred_visitor_passes_handlers.create_visitor_pass(
         {
             "visitor_name": "Sarah",
             "expected_time": "2027-04-29T15:00:00+01:00",
@@ -687,9 +704,9 @@ async def test_alfred_create_duration_visitor_pass_allows_missing_optional_conta
     async def fake_runtime_config():
         return SimpleNamespace(site_timezone="Europe/London")
 
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_visitor_passes_handlers, "get_runtime_config", fake_runtime_config)
 
-    result = await ai_tools.create_visitor_pass(
+    result = await alfred_visitor_passes_handlers.create_visitor_pass(
         {
             "visitor_name": "Dave",
             "pass_type": "duration",
@@ -705,3 +722,24 @@ async def test_alfred_create_duration_visitor_pass_allows_missing_optional_conta
     assert result["visitor_phone"] is None
     assert result["number_plate"] == "AB12CDE"
     assert "phone number" not in result["detail"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,offset,mode", [
+    (VisitorPassStatus.SCHEDULED, 0, "active"),
+    (VisitorPassStatus.ACTIVE, 60, "expired"),
+    (VisitorPassStatus.SCHEDULED, -60, "scheduled"),
+    (VisitorPassStatus.CANCELLED, 0, "expired"),
+    (VisitorPassStatus.USED, 0, "expired"),
+])
+async def test_read_only_phone_binding_evaluates_current_window_without_lifecycle_mutation(status, offset, mode):
+    expected = datetime(2026, 9, 12, 12, tzinfo=UTC)
+    row = visitor_pass(expected_time=expected, status=status, pass_type=VisitorPassType.DURATION,
+                       visitor_phone="447700900123")
+    service = VisitorPassService()
+    service.refresh_statuses = AsyncMock(side_effect=AssertionError("read-only binding must not refresh lifecycle"))
+    selected, actual = await service.messaging_pass_for_phone(FakeVisitorPassSession([row]), "447700900123",
+        now=expected + timedelta(minutes=offset), refresh_status=False)
+    assert selected is row and actual == mode
+    assert row.status == status
+    service.refresh_statuses.assert_not_awaited()

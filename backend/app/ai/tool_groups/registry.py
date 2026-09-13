@@ -4,17 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai.tool_groups import (
-    access_diagnostics,
-    automations,
-    compliance_cameras_files,
-    gate_maintenance,
-    general,
-    notifications,
-    schedules,
-    system_operations,
-    visitor_passes,
-)
+from app.ai.tool_inputs import validate_tool_schema
 from app.ai.tools import (
     ADMIN_PERMISSION,
     SAFETY_ADMIN_ONLY,
@@ -28,37 +18,48 @@ class ToolRegistryError(RuntimeError):
     """Raised when Alfred tool metadata is unsafe or malformed."""
 
 
-_TOOL_GROUP_BUILDERS = (
-    general.build_tools,
-    gate_maintenance.build_tools,
-    visitor_passes.build_tools,
-    access_diagnostics.build_tools,
-    compliance_cameras_files.build_tools,
-    notifications.build_tools,
-    automations.build_tools,
-    schedules.build_tools,
-    system_operations.build_tools,
-)
+def build_agent_tools() -> dict[str, AgentTool]:
+    """Build the current catalog once all callers have installed their dependencies."""
+    from app.ai.tool_groups import (
+        access_diagnostics,
+        automations,
+        compliance_cameras_files,
+        gate_maintenance,
+        general,
+        notifications,
+        schedules,
+        system_operations,
+        visitor_passes,
+    )
 
+    group_builders = (
+        general.build_tools,
+        gate_maintenance.build_tools,
+        visitor_passes.build_tools,
+        access_diagnostics.build_tools,
+        compliance_cameras_files.build_tools,
+        notifications.build_tools,
+        automations.build_tools,
+        schedules.build_tools,
+        system_operations.build_tools,
+    )
 
-def build_grouped_tools() -> list[AgentTool]:
     tools: list[AgentTool] = []
     seen: set[str] = set()
-    for build_tools in _TOOL_GROUP_BUILDERS:
+    for build_tools in group_builders:
         for tool in build_tools():
             if tool.name in seen:
                 raise ToolRegistryError(f"Duplicate Alfred tool name: {tool.name}")
             seen.add(tool.name)
             _validate_tool(tool)
             tools.append(tool)
-    return tools
-
-
-def build_grouped_tool_map() -> dict[str, AgentTool]:
-    return {tool.name: tool for tool in build_grouped_tools()}
+    return {tool.name: tool for tool in tools}
 
 
 def _validate_tool(tool: AgentTool) -> None:
+    schema_error = validate_tool_schema(tool.parameters)
+    if schema_error:
+        raise ToolRegistryError(f"{tool.name}: {schema_error}")
     if not tool.name or not tool.name.strip():
         raise ToolRegistryError("Alfred tool name is required.")
     if not tool.description.strip():

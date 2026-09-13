@@ -5,18 +5,21 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.v1 import discord as discord_api
 from app.modules.messaging.base import IncomingChatMessage
 from app.modules.messaging.discord_bot import normalize_discord_message
-from app.modules.notifications.base import NotificationContext
+from app.modules.messaging.discord_transport import DiscordSentMessage
+from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.discord_formatter import format_discord_notification
+from app.services.messaging.discord_incoming import DISCORD_HELP_TEXT, incoming_from_interaction, notify_test_command_text
 from app.services.discord_messaging import (
-    DISCORD_HELP_TEXT,
     DiscordIntegrationConfig,
     DiscordMessagingService,
+    DiscordNotificationDeliveryError,
     _discord_channel_id_from_identifier,
-    discord_typing,
-    incoming_from_interaction,
-    notify_test_command_text,
+    discord_config_from_runtime,
+    discord_configuration_binding,
+    discord_sender_binding,
 )
 from app.services.messaging_bridge import deterministic_session_id, naturalize_messaging_response
 
@@ -133,7 +136,7 @@ async def test_discord_allowlists_deny_empty_paths_and_require_mentions(monkeypa
             require_mention=True,
         )
 
-    monkeypatch.setattr("app.services.discord_messaging.load_discord_config", fake_config)
+    monkeypatch.setattr("app.services.discord_messaging.load_current_discord_config", fake_config)
     service = DiscordMessagingService()
     base = IncomingChatMessage(
         provider="discord",
@@ -217,17 +220,6 @@ def test_discord_channel_identifier_extracts_mentions_and_urls() -> None:
     assert _discord_channel_id_from_identifier("alerts") == "alerts"
 
 
-def test_slash_followup_omits_none_view_for_plain_answers() -> None:
-    service = DiscordMessagingService()
-    result = SimpleNamespace(response_text="Alfred says hello.", pending_action=None)
-
-    kwargs = service._slash_followup_kwargs(result, "Jason")
-
-    assert kwargs["content"] == "Alfred says hello."
-    assert "view" not in kwargs
-    assert "embeds" not in kwargs
-
-
 def test_notify_test_prompt_routes_through_notification_tool() -> None:
     text = notify_test_command_text("123")
 
@@ -254,122 +246,423 @@ async def test_provider_admin_requires_linked_iacs_admin(monkeypatch) -> None:
     assert await service.author_is_admin("user-1", [], provider_admin=False) is True
 
 
-@pytest.mark.asyncio
-async def test_provider_message_shows_typing_while_alfred_works(monkeypatch) -> None:
-    service = DiscordMessagingService()
-    events: list[str] = []
-
-    class FakeTyping:
-        async def __aenter__(self):
-            events.append("typing_enter")
-
-        async def __aexit__(self, _exc_type, exc, _tb):
-            events.append("typing_exit")
-
-    class FakeChannel:
-        def typing(self):
-            return FakeTyping()
-
-        async def send(self, **kwargs):
-            events.append("send")
-
-    message = IncomingChatMessage(
-        provider="discord",
-        provider_message_id="m1",
-        provider_channel_id="channel-1",
-        provider_guild_id="guild-1",
-        author_provider_id="user-1",
-        author_display_name="Jason",
-        text="status",
-        is_direct_message=False,
-        mentioned_bot=True,
-        raw_payload={},
-        received_at=datetime.now(tz=UTC),
+def _config(*, token: str = "synthetic-token", default_channel: str = "111111111111111111") -> DiscordIntegrationConfig:
+    return DiscordIntegrationConfig(
+        bot_token=token,
+        guild_allowlist={"inbound-guild"},
+        channel_allowlist={"inbound-channel"},
+        user_allowlist={"inbound-user"},
+        role_allowlist={"inbound-role"},
+        admin_role_ids={"inbound-admin-role"},
+        default_notification_channel_id=default_channel,
+        allow_direct_messages=False,
+        require_mention=True,
     )
 
-    async def allowed(_incoming, *, slash_command=False):
-        return True, "allowed"
 
-    async def is_admin(_provider_user_id, _role_ids, **_kwargs):
-        return False
-
-    class FakeBridge:
-        async def handle_message(self, incoming, *, is_admin_hint=False):
-            events.append("bridge")
-            return SimpleNamespace(response_text="Alfred says hello.", pending_action=None)
-
-    monkeypatch.setattr(service, "message_is_allowed", allowed)
-    monkeypatch.setattr(service, "author_is_admin", is_admin)
-    monkeypatch.setattr("app.services.messaging_bridge.messaging_bridge_service", FakeBridge())
-
-    await service.handle_provider_message(message, SimpleNamespace(channel=FakeChannel()))
-
-    assert events == ["typing_enter", "bridge", "send", "typing_exit"]
-
-
-@pytest.mark.asyncio
-async def test_typing_context_falls_back_when_channel_has_no_typing() -> None:
-    events: list[str] = []
-
-    async with discord_typing(SimpleNamespace()):
-        events.append("inside")
-
-    assert events == ["inside"]
-
-
-@pytest.mark.asyncio
-async def test_discord_notify_test_routes_through_messaging_bridge(monkeypatch) -> None:
+async def test_membership_refresh_uses_fetched_roles_without_mutating_captured_message():
     service = DiscordMessagingService()
-    captured: dict[str, object] = {}
+    message = normalize_discord_message(FakeMessage(), SimpleNamespace(id=999))
+    fetched = []
 
-    class FakeResponse:
-        async def defer(self, **kwargs):
-            captured["defer"] = kwargs
+    async def fetch_member(member_id):
+        fetched.append(member_id)
+        return SimpleNamespace(roles=[SimpleNamespace(id=333)])
 
-        async def send_message(self, *args, **kwargs):
-            captured["send_message"] = (args, kwargs)
+    service._client = SimpleNamespace(
+        get_guild=lambda guild_id: SimpleNamespace(fetch_member=fetch_member)
+        if guild_id == 456 else None
+    )
+    refreshed = await service.refresh_incoming_membership(message, config=_config())
+    assert fetched == [111]
+    assert refreshed.author_role_ids == ["333"]
+    assert message.author_role_ids == ["222"]
+    assert refreshed.author_provider_id == message.author_provider_id
+    assert refreshed.provider_message_id == message.provider_message_id
 
-    class FakeFollowup:
-        async def send(self, **kwargs):
-            captured["followup"] = kwargs
 
-    interaction = SimpleNamespace(
-        id=999,
-        user=SimpleNamespace(id=111, name="jason", display_name="Jason", roles=[SimpleNamespace(id=222)]),
-        channel=SimpleNamespace(id=123),
-        guild=SimpleNamespace(id=456),
-        response=FakeResponse(),
-        followup=FakeFollowup(),
+def test_discord_config_from_runtime_copies_only_runtime_values() -> None:
+    runtime = SimpleNamespace(
+        discord_bot_token="synthetic-token",
+        discord_guild_allowlist=["guild-1"],
+        discord_channel_allowlist=["channel-1"],
+        discord_user_allowlist=["user-1"],
+        discord_role_allowlist=["role-1"],
+        discord_admin_role_ids=["role-admin"],
+        discord_default_notification_channel_id="123456789012345678",
+        discord_allow_direct_messages=True,
+        discord_require_mention=False,
     )
 
-    async def allowed(_incoming, *, slash_command=False):
-        return True, "allowed"
+    config = discord_config_from_runtime(runtime)
+    runtime.discord_guild_allowlist.append("changed-after-read")
 
-    async def is_admin(_provider_user_id, _role_ids, **_kwargs):
+    assert config.guild_allowlist == {"guild-1"}
+    assert config.default_notification_channel_id == "123456789012345678"
+    assert config.allow_direct_messages is True
+    assert config.require_mention is False
+
+
+@pytest.mark.asyncio
+async def test_discord_notification_action_freezes_explicit_outbound_channel_outside_inbound_allowlist(monkeypatch) -> None:
+    config = _config()
+
+    async def current_config():
+        return config
+
+    monkeypatch.setattr("app.services.discord_messaging.load_current_discord_config", current_config)
+    service = DiscordMessagingService()
+    action = {
+        "type": "discord",
+        "target_mode": "selected",
+        "target_ids": ["discord:987654321012345678"],
+        "title": "Synthetic title",
+        "message": "Synthetic body",
+    }
+
+    prepared = await service.prepare_notification_action(
+        action,
+        NotificationContext("synthetic", "Synthetic title", "info", {}),
+    )
+
+    assert action.get("frozen_discord_channel_ids") is None
+    assert prepared["frozen_discord_channel_ids"] == ["987654321012345678"]
+    assert prepared["frozen_discord_configuration_binding"] == discord_configuration_binding(config)
+
+
+@pytest.mark.asyncio
+async def test_discord_notification_action_denies_changed_configuration_before_delivery(monkeypatch) -> None:
+    prepared_config = _config(token="synthetic-token-a")
+    current_config = _config(token="synthetic-token-b")
+
+    async def load_prepared():
+        return prepared_config
+
+    service = DiscordMessagingService()
+    monkeypatch.setattr("app.services.discord_messaging.load_current_discord_config", load_prepared)
+    action = await service.prepare_notification_action(
+        {"type": "discord", "target_mode": "all", "target_ids": []},
+        NotificationContext("synthetic", "Synthetic title", "info", {}),
+    )
+
+    assert await service.authorize_notification_action_in_session(
+        object(),
+        action,
+        config=current_config,
+    ) == "discord_configuration_changed"
+
+
+@pytest.mark.asyncio
+async def test_discord_sender_refuses_a_bot_bound_to_a_previous_token(monkeypatch) -> None:
+    current_config = _config(token="synthetic-token-a")
+    service = DiscordMessagingService()
+    service._client = SimpleNamespace(is_closed=lambda: False, user=object())
+    service._sender_token_binding = discord_sender_binding("synthetic-token-b")
+
+    async def load_current():
+        return current_config
+
+    monkeypatch.setattr("app.services.discord_messaging.load_current_discord_config", load_current)
+
+    with pytest.raises(NotificationDeliveryError, match="reconnect") as caught:
+        await service.assert_current_sender(current_config)
+
+    assert caught.value.delivery == "not_sent"
+
+
+@pytest.mark.asyncio
+async def test_discord_notification_fanout_retains_order_and_known_partial_truth(monkeypatch) -> None:
+    service = DiscordMessagingService()
+    config = _config()
+    sent: list[str] = []
+
+    async def send(channel_id, *_args, **kwargs):
+        sent.append(channel_id)
+        assert kwargs["config"] is config
+        if channel_id == "222222222222222222":
+            raise NotificationDeliveryError("Synthetic forbidden channel", delivery="rejected")
+        return SimpleNamespace(id="synthetic-message")
+
+    monkeypatch.setattr(service, "send_message", send)
+    receipt = await service.send_notification_to_channels(
+        ["111111111111111111", "222222222222222222", "333333333333333333"],
+        "Synthetic title",
+        "Synthetic body",
+        NotificationContext("synthetic", "Synthetic title", "info", {}),
+        config=config,
+    )
+
+    assert sent == ["111111111111111111", "222222222222222222", "333333333333333333"]
+    assert receipt == {
+        "destination_outcomes": [
+            {"target": "111111111111111111", "delivery": "accepted"},
+            {"target": "222222222222222222", "delivery": "rejected"},
+            {"target": "333333333333333333", "delivery": "accepted"},
+        ],
+        "partial_failure": True,
+        "failure_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_discord_notification_unknown_outcome_stops_fanout_for_review(monkeypatch) -> None:
+    service = DiscordMessagingService()
+    config = _config()
+    sent: list[str] = []
+
+    async def send(channel_id, *_args, **_kwargs):
+        sent.append(channel_id)
+        if channel_id == "222222222222222222":
+            raise NotificationDeliveryError("Synthetic response lost", delivery="unknown")
+        return SimpleNamespace(id="synthetic-message")
+
+    monkeypatch.setattr(service, "send_message", send)
+
+    with pytest.raises(DiscordNotificationDeliveryError, match="review") as caught:
+        await service.send_notification_to_channels(
+            ["111111111111111111", "222222222222222222", "333333333333333333"],
+            "Synthetic title",
+            "Synthetic body",
+            NotificationContext("synthetic", "Synthetic title", "info", {}),
+            config=config,
+        )
+
+    assert sent == ["111111111111111111", "222222222222222222"]
+    assert caught.value.destination_outcomes == [
+        {"target": "111111111111111111", "delivery": "accepted"},
+        {"target": "222222222222222222", "delivery": "unknown"},
+        {"target": "333333333333333333", "delivery": "not_sent"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discord_send_never_retries_a_failed_embed_as_plaintext(monkeypatch) -> None:
+    import app.services.discord_messaging as discord_messaging
+
+    service = DiscordMessagingService()
+    config = _config()
+    attempts: list[dict[str, object]] = []
+
+    async def resolve(_channel_id):
+        return SimpleNamespace(id="111111111111111111")
+
+    async def current_sender(_config=None):
+        return config
+
+    async def send_once(channel_id, token, payload, **kwargs):
+        attempts.append({"channel_id": channel_id, "token": token, "payload": payload, **kwargs})
+        raise NotificationDeliveryError("Synthetic transport lost", delivery="unknown")
+
+    monkeypatch.setattr(service, "_resolve_channel", resolve)
+    monkeypatch.setattr(service, "assert_current_sender", current_sender)
+    monkeypatch.setattr(discord_messaging, "send_channel_message", send_once)
+
+    with pytest.raises(NotificationDeliveryError) as caught:
+        await service.send_message(
+            "111111111111111111",
+            "Exact formatted body",
+            embeds=[{"title": "Synthetic title", "description": "Synthetic description"}],
+            config=config,
+        )
+
+    assert caught.value.delivery == "unknown"
+    assert len(attempts) == 1
+    assert attempts[0]["payload"]["content"] == "Exact formatted body"
+    assert attempts[0]["payload"]["embeds"]
+    assert attempts[0]["payload"]["allowed_mentions"] == {"parse": []}
+
+
+@pytest.mark.asyncio
+async def test_discord_multi_batch_config_change_preserves_partial_unknown_truth(
+    monkeypatch,
+) -> None:
+    import app.services.discord_messaging as discord_messaging
+
+    service = DiscordMessagingService()
+    config = _config()
+    preflights = 0
+    attempts: list[dict[str, object]] = []
+
+    async def resolve(_channel_id):
+        return SimpleNamespace(id="111111111111111111")
+
+    async def current_sender(_config=None):
+        nonlocal preflights
+        preflights += 1
+        if preflights == 2:
+            raise NotificationDeliveryError("Discord configuration changed", delivery="not_sent")
+        return config
+
+    async def send_once(_channel_id, _token, payload, **_kwargs):
+        attempts.append(payload)
+        return DiscordSentMessage("987654321012345678")
+
+    monkeypatch.setattr(service, "_resolve_channel", resolve)
+    monkeypatch.setattr(service, "assert_current_sender", current_sender)
+    monkeypatch.setattr(discord_messaging, "send_channel_message", send_once)
+
+    with pytest.raises(NotificationDeliveryError) as caught:
+        await service.send_message(
+            "111111111111111111",
+            "Exact formatted body",
+            embeds=[
+                {"title": "First", "description": "a" * 4000},
+                {"title": "Second", "description": "b" * 4000},
+            ],
+            config=config,
+        )
+
+    assert caught.value.delivery == "unknown"
+    assert preflights == 2
+    assert len(attempts) == 1
+    assert attempts[0]["content"] == "Exact formatted body"
+
+
+@pytest.mark.asyncio
+async def test_discord_embed_batches_respect_aggregate_character_limit(monkeypatch) -> None:
+    import app.services.discord_messaging as discord_messaging
+
+    service = DiscordMessagingService()
+    config = _config()
+    attempts: list[dict[str, object]] = []
+
+    async def resolve(_channel_id):
+        return SimpleNamespace(id="111111111111111111")
+
+    async def current_sender(_config=None):
+        return config
+
+    async def send_once(_channel_id, _token, payload, **_kwargs):
+        attempts.append(payload)
+        return DiscordSentMessage(str(987654321012345678 + len(attempts)))
+
+    monkeypatch.setattr(service, "_resolve_channel", resolve)
+    monkeypatch.setattr(service, "assert_current_sender", current_sender)
+    monkeypatch.setattr(discord_messaging, "send_channel_message", send_once)
+
+    embeds = [
+        {"title": "First", "description": "a" * 3500},
+        {"title": "Second", "description": "b" * 3500},
+        {"title": "Third", "description": "c" * 1000},
+    ]
+    await service.send_message(
+        "111111111111111111",
+        "Exact formatted body",
+        embeds=embeds,
+        config=config,
+    )
+
+    assert len(attempts) == 2
+    assert attempts[0]["content"] == "Exact formatted body"
+    assert attempts[1]["content"] == ""
+    delivered_embeds = [embed for attempt in attempts for embed in attempt["embeds"]]
+    assert delivered_embeds == embeds
+    assert all(
+        len(attempt["embeds"]) <= 10
+        and sum(
+            len(str(embed.get("title", ""))) + len(str(embed.get("description", "")))
+            for embed in attempt["embeds"]
+        ) <= 6000
+        for attempt in attempts
+    )
+
+
+@pytest.mark.asyncio
+async def test_discord_interaction_reply_registers_returned_confirmation_view(monkeypatch) -> None:
+    import app.services.discord_messaging as discord_messaging
+
+    service = DiscordMessagingService()
+    config = _config()
+    sent: dict[str, object] = {}
+    registered: list[tuple[object, str]] = []
+    view = SimpleNamespace(
+        to_components=lambda: [{"type": 1, "components": [{"custom_id": "confirm"}]}]
+    )
+
+    async def current_sender(_config=None):
+        return config
+
+    async def send_once(application_id, token, payload):
+        sent.update({"application_id": application_id, "token": token, "payload": payload})
+        return DiscordSentMessage("987654321012345678")
+
+    def register_sent_view(registered_view, message_id):
+        registered.append((registered_view, message_id))
         return True
 
-    async def forbidden_direct_send(*_args, **_kwargs):
-        raise AssertionError("notify_test should route through Alfred, not direct Discord sending")
+    monkeypatch.setattr(service, "assert_current_sender", current_sender)
+    monkeypatch.setattr(service, "_confirmation_view", lambda _pending: view)
+    monkeypatch.setattr(discord_messaging, "send_interaction_followup", send_once)
+    service._client = SimpleNamespace(register_sent_view=register_sent_view)
 
-    class FakeBridge:
-        async def handle_message(self, incoming, *, is_admin_hint=False):
-            captured["incoming_text"] = incoming.text
-            captured["is_admin_hint"] = is_admin_hint
-            return SimpleNamespace(response_text="Prepared test notification.", pending_action=None)
+    result = await service.send_incoming_interaction_reply(
+        SimpleNamespace(application_id=123, token="synthetic-interaction-token"),
+        {
+            "content": "Confirmation is ready.",
+            "pending_action": {
+                "session_id": "session",
+                "confirmation_id": "confirmation",
+                "title": "Open gate?",
+            },
+            "requester": "Synthetic Admin",
+            "mode": "confirmation",
+        },
+    )
 
-    monkeypatch.setattr(service, "message_is_allowed", allowed)
-    monkeypatch.setattr(service, "author_is_admin", is_admin)
-    monkeypatch.setattr(service, "send_notification_to_channels", forbidden_direct_send)
-    monkeypatch.setattr("app.services.messaging_bridge.messaging_bridge_service", FakeBridge())
+    assert result.id == "987654321012345678"
+    assert sent["application_id"] == 123
+    assert sent["payload"]["allowed_mentions"] == {"parse": []}
+    assert sent["payload"]["flags"] == 64
+    assert sent["payload"]["components"] == view.to_components()
+    assert registered == [(view, "987654321012345678")]
 
-    await service.handle_slash_command(interaction, "notify_test")
 
-    assert captured["is_admin_hint"] is True
-    assert "test_notification_workflow" in str(captured["incoming_text"])
-    assert "discord:123" in str(captured["incoming_text"])
-    followup = captured["followup"]
-    assert isinstance(followup, dict)
-    assert followup["content"] == "Prepared test notification."
+@pytest.mark.asyncio
+async def test_discord_test_endpoint_reserves_one_normal_discord_rule(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def current_config():
+        return _config(default_channel="111111111111111111")
+
+    async def confirmed(session, **kwargs):
+        captured["session"] = session
+        captured.update(kwargs)
+        return SimpleNamespace(status="sent")
+
+    monkeypatch.setattr(discord_api, "load_current_discord_config", current_config)
+    monkeypatch.setattr(discord_api, "send_confirmed_notification", confirmed)
+    monkeypatch.setattr(
+        discord_api,
+        "get_discord_messaging_service",
+        lambda: (_ for _ in ()).throw(AssertionError("The endpoint must not send directly.")),
+    )
+
+    response = await discord_api.send_discord_test(
+        discord_api.DiscordTestRequest(
+            channel_id="222222222222222222",
+            message="Synthetic {{ subject }} template",
+            confirmation_token="synthetic-confirmation",
+        ),
+        user=SimpleNamespace(),
+        session=object(),
+    )
+
+    assert response == {"ok": True}
+    assert captured["action"] == "discord.test_notification"
+    assert captured["payload"] == {
+        "channel_id": "222222222222222222",
+        "message": "Synthetic {{ subject }} template",
+    }
+    rule, = captured["rules_override"]
+    action, = rule["actions"]
+    assert action == {
+        "id": "discord-integration-test-action",
+        "type": "discord",
+        "target_mode": "selected",
+        "target_ids": ["discord:222222222222222222"],
+        "title_template": "IACS Discord integration test",
+        "message_template": "Synthetic {{ subject }} template",
+    }
 
 
 def test_messaging_bridge_naturalizes_raw_status_json() -> None:

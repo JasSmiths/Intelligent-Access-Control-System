@@ -1,21 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
+import re
+import sys
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.db.session import AsyncSessionLocal
 from app.models import (
+    AccessDeviceCommandRecord,
     AccessEvent,
     Anomaly,
     AuditLog,
+    GateCommandRecord,
+    GateStateObservation,
+    MovementSagaRecord,
+    MovementSessionRecord,
+    NotificationRun,
     Person,
     Presence,
     Schedule,
@@ -28,21 +41,29 @@ from app.models.enums import (
     AccessDecision,
     AccessDirection,
     AnomalyType,
+    GateCommandState,
     PresenceState,
 )
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
-from app.services.access import hardware as access_hardware_module
 from app.services import access_events as access_events_module
-from app.services.access_events import (
+from app.services.access import enrichment as access_enrichment_module
+from app.services.access import evidence as access_evidence_module
+from app.services.access import execution as access_execution_module
+from app.services.access import hardware as access_hardware_module
+from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
+    KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
-    AccessEventService,
 )
+from app.services.access_device_commands import (
+    AccessDeviceCommandJournal,
+    target_idempotency_key,
+)
+from app.services.access_events import AccessEventService
 from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.telemetry import telemetry
-
 
 SIMULATION_SOURCE = "simulation_e2e"
 SCENARIO_IDS = (
@@ -56,6 +77,141 @@ SCENARIO_IDS = (
 )
 
 _RUN_LOCK = asyncio.Lock()
+_FULL_ACCESS_FLOW_CAPABILITY_SEAL = object()
+
+
+class FullAccessFlowIsolationError(RuntimeError):
+    """The full access-flow runner is restricted to the isolated phase1 harness."""
+
+
+@dataclass(frozen=True)
+class FullAccessFlowIsolationCapability:
+    """A simulator-only capability issued after the harness isolation checks."""
+
+    _seal: object
+
+
+@dataclass(frozen=True)
+class _FullAccessFlowIsolationSnapshot:
+    platform: str
+    network_interfaces: frozenset[str]
+    docker_socket_present: bool
+    runtime_credential_source_present: bool
+    environment: Mapping[str, str]
+
+
+def issue_isolated_full_access_flow_capability() -> FullAccessFlowIsolationCapability:
+    """Issue the simulator-only capability after proving the phase1 boundary."""
+    _assert_full_access_flow_isolation()
+    return FullAccessFlowIsolationCapability(_FULL_ACCESS_FLOW_CAPABILITY_SEAL)
+
+
+def _require_isolated_full_access_flow_capability(
+    capability: FullAccessFlowIsolationCapability | None,
+) -> None:
+    if (
+        not isinstance(capability, FullAccessFlowIsolationCapability)
+        or capability._seal is not _FULL_ACCESS_FLOW_CAPABILITY_SEAL
+    ):
+        raise FullAccessFlowIsolationError(
+            "Full access-flow simulation requires an isolated phase1 capability."
+        )
+    _assert_full_access_flow_isolation()
+
+
+def _assert_full_access_flow_isolation() -> None:
+    error = _full_access_flow_isolation_error(_full_access_flow_isolation_snapshot())
+    if error:
+        raise FullAccessFlowIsolationError(error)
+
+
+def _full_access_flow_isolation_snapshot() -> _FullAccessFlowIsolationSnapshot:
+    interfaces = Path("/sys/class/net")
+    try:
+        network_interfaces = (
+            frozenset(path.name for path in interfaces.iterdir())
+            if interfaces.is_dir()
+            else frozenset()
+        )
+    except OSError:
+        network_interfaces = frozenset()
+    workspace = Path("/workspace")
+    runtime_paths = (
+        workspace / ".env",
+        workspace / "backend/.env",
+        workspace / "data",
+        workspace / "logs",
+        Path.cwd() / ".env",
+    )
+    return _FullAccessFlowIsolationSnapshot(
+        platform=sys.platform,
+        network_interfaces=network_interfaces,
+        docker_socket_present=any(
+            path.exists() or path.is_symlink()
+            for path in (Path("/var/run/docker.sock"), Path("/run/docker.sock"))
+        ),
+        runtime_credential_source_present=any(path.exists() or path.is_symlink() for path in runtime_paths),
+        environment={key: value for key, value in os.environ.items() if key.startswith("IACS_")},
+    )
+
+
+def _full_access_flow_isolation_error(snapshot: _FullAccessFlowIsolationSnapshot) -> str | None:
+    """Mirror the phase1 proof without importing its test or harness code."""
+    if snapshot.platform != "linux" or snapshot.network_interfaces != frozenset({"lo"}):
+        return "Full access-flow simulation requires a loopback-only Linux namespace."
+    if snapshot.docker_socket_present:
+        return "Full access-flow simulation refuses a Docker socket."
+    if snapshot.runtime_credential_source_present:
+        return "Full access-flow simulation refuses workspace runtime credential sources."
+
+    environment = snapshot.environment
+    required = {
+        "IACS_ENVIRONMENT": "testing",
+        "IACS_PHASE1_MODE": "persistence",
+        "IACS_RECOVERY_PROBES": "synthetic-only",
+        "IACS_AUTO_CREATE_SCHEMA": "false",
+        "IACS_SEED_DEMO_DATA": "false",
+        "IACS_AUTH_SECRET_KEY": "phase1-synthetic-auth-root-never-production",
+        "IACS_DATA_DIR": "/isolated/runtime",
+        "IACS_LOG_DIR": "/isolated/logs",
+        "IACS_WORKSPACE_DIR": "/workspace",
+    }
+    if any(environment.get(key) != value for key, value in required.items()):
+        return "Full access-flow simulation requires the explicit phase1 testing namespace."
+    if any(
+        value
+        for key, value in environment.items()
+        if key != "IACS_AUTH_SECRET_KEY"
+        and any(fragment in key for fragment in ("TOKEN", "PASSWORD", "API_KEY"))
+    ):
+        return "Full access-flow simulation refuses integration credential environment."
+    try:
+        database = urlsplit(environment.get("IACS_DATABASE_URL", ""))
+        redis = urlsplit(environment.get("IACS_REDIS_URL", ""))
+        database_valid = (
+            database.scheme == "postgresql+asyncpg"
+            and database.hostname == "127.0.0.1"
+            and database.port == 5432
+            and database.username == "phase1"
+            and database.password == "synthetic-phase1-only"
+            and bool(re.fullmatch(r"/iacs_p1_[a-z0-9_]+", database.path))
+            and not database.query
+            and not database.fragment
+        )
+        redis_valid = (
+            redis.scheme == "redis"
+            and redis.hostname == "127.0.0.1"
+            and redis.port == 6379
+            and redis.username is None
+            and redis.password is None
+            and not redis.query
+            and not redis.fragment
+        )
+    except ValueError:
+        database_valid = redis_valid = False
+    if not database_valid or not redis_valid:
+        return "Full access-flow simulation requires the isolated loopback PostgreSQL and Redis namespace."
+    return None
 
 
 class FullAccessFlowRequest(BaseModel):
@@ -149,6 +305,23 @@ class HardwareFreeAccessEventService(AccessEventService):
         super().__init__()
         self._recorder = recorder
 
+    async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
+        simulation = _read_simulation_payload(read)
+        match = (read.raw_payload or {}).get(KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY) or {}
+        await event_bus.publish(
+            "plate_read.suppressed",
+            {
+                "registration_number": read.registration_number,
+                "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
+                "source": read.source,
+                "reason": reason,
+                "scenario_id": simulation.get("scenario_id"),
+                "step_id": simulation.get("step_id"),
+            },
+        )
+
+
+class HardwareFreeEnrichment(access_enrichment_module.AccessEnrichment):
     async def _dvla_enrichment_for_event(self, **_kwargs: Any) -> dict[str, str | None] | None:
         return None
 
@@ -161,6 +334,8 @@ class HardwareFreeAccessEventService(AccessEventService):
     ) -> dict[str, Any] | None:
         return None
 
+
+class HardwareFreeEvidence(access_evidence_module.AccessEvidenceResolver):
     async def _resolve_duplicate_arrival_with_camera(
         self,
         read: PlateRead,
@@ -175,21 +350,6 @@ class HardwareFreeAccessEventService(AccessEventService):
             "confidence": 0.0,
             "reason": "Hardware-free simulation does not call camera vision.",
         }
-
-    async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
-        simulation = _read_simulation_payload(read)
-        match = (read.raw_payload or {}).get(access_events_module.KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY) or {}
-        await event_bus.publish(
-            "plate_read.suppressed",
-            {
-                "registration_number": read.registration_number,
-                "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
-                "source": read.source,
-                "reason": reason,
-                "scenario_id": simulation.get("scenario_id"),
-                "step_id": simulation.get("step_id"),
-            },
-        )
 
 
 class _FakeNotificationService:
@@ -212,18 +372,161 @@ class _FakeLeaderboardService:
         return None
 
 
+async def _persist_synthetic_verified_gate_receipt(
+    event: AccessEvent,
+    *,
+    movement_saga_id: str | None,
+    reason: str,
+) -> tuple[str, dict[str, Any], GateCommandIntent]:
+    """Write simulator provenance through the real receipt/admission schema only."""
+    target_device_id = uuid.uuid5(event.id, "simulation-e2e-entry-gate")
+    target_key = "simulation-e2e-entry-gate"
+    intent_id = str(uuid.uuid5(event.id, "simulation-e2e-gate-open"))
+    operation_key = f"simulation-gate:open:event:{event.id}"
+    binding_snapshot = {
+        "providers": [
+            {
+                "provider": "simulation",
+                "external_id": target_key,
+                "config_fingerprint": hashlib.sha256(b"simulation-e2e-provider").hexdigest(),
+            }
+        ],
+        "schedule_id": None,
+        "enabled": True,
+        "open_for_access": True,
+    }
+    binding_fingerprint = hashlib.sha256(
+        f"simulation-e2e:{event.id}:{target_device_id}".encode()
+    ).hexdigest()
+    target = {
+        "target_device_id": str(target_device_id),
+        "device_key": target_key,
+        "kind": "gate",
+        "binding_snapshot": binding_snapshot,
+        "binding_fingerprint": binding_fingerprint,
+    }
+    target_plan = {
+        "version": 1,
+        "action": "open",
+        "target_device_key": target_key,
+        "require_admission": True,
+        "gate_only": True,
+        "automatic_entry_policy": True,
+        "admission_device_key": target_key,
+        "admission_target_device_id": str(target_device_id),
+        "targets": [target],
+    }
+    saga_id = uuid.UUID(movement_saga_id) if movement_saga_id else None
+    started_at = datetime.now(tz=UTC)
+    intent = GateCommandIntent(
+        reason=reason,
+        source=SIMULATION_SOURCE,
+        controller_name="simulation",
+        event_id=str(event.id),
+        movement_saga_id=str(saga_id) if saga_id else None,
+        registration_number=event.registration_number,
+        actor="Simulation",
+        idempotency_key=operation_key,
+        intent_id=intent_id,
+        target_device_key=target_key,
+        target_plan=target_plan,
+        require_admission=True,
+        automatic_entry_policy=True,
+        metadata={"simulation": {"synthetic_receipt": True}},
+    )
+    async with AsyncSessionLocal() as session:
+        parent = GateCommandRecord(
+            idempotency_key=operation_key,
+            movement_saga_id=saga_id,
+            access_event_id=event.id,
+            state=GateCommandState.ACCEPTED,
+            action="open",
+            source=SIMULATION_SOURCE,
+            gate_key="simulation",
+            controller="simulation",
+            reason=reason,
+            actor="Simulation",
+            registration_number=event.registration_number,
+            started_at=started_at,
+            completed_at=started_at,
+            accepted=True,
+            gate_state=GateState.OPENING.value,
+            detail=reason,
+            command_metadata={
+                "recovery_version": 2,
+                "intent_id": intent_id,
+                "target_plan": target_plan,
+                "delivery": "accepted",
+                "automatic_entry_precondition": {"mode": "fanout", "synthetic": True},
+                "simulation": {"synthetic_receipt": True},
+            },
+        )
+        session.add(parent)
+        await session.flush()
+        target_command = AccessDeviceCommandRecord(
+            gate_command_id=parent.id,
+            target_device_id=target_device_id,
+            device_key=target_key,
+            action="open",
+            intent_id=intent_id,
+            idempotency_key=target_idempotency_key(operation_key, str(target_device_id), "open"),
+            recovery_version=1,
+            state="accepted",
+            binding_snapshot=binding_snapshot,
+            binding_fingerprint=binding_fingerprint,
+            attempted_at=started_at,
+            completed_at=started_at,
+            accepted=True,
+            gate_state=GateState.OPENING.value,
+            provider_receipts=[
+                {
+                    "provider": "simulation",
+                    "external_id": target_key,
+                    "delivery": "accepted",
+                    "status": "accepted",
+                    "attempted_at": started_at.isoformat(),
+                    "completed_at": started_at.isoformat(),
+                    "state": GateState.OPENING.value,
+                    "acceptance_basis": "synthetic_simulation",
+                }
+            ],
+            detail=reason,
+        )
+        session.add(target_command)
+        await session.flush()
+        await AccessDeviceCommandJournal._verify(
+            session,
+            target_command,
+            {
+                "provider": "simulation",
+                "state": GateState.OPENING.value,
+                "observed_at": started_at,
+            },
+            started_at,
+        )
+        projection = await AccessDeviceCommandJournal().reconcile_parent_in_session(session, parent)
+        if not projection or not projection["admission_verified"]:
+            raise RuntimeError("Synthetic gate receipt did not retain verified admission evidence.")
+        command_id = str(parent.id)
+        await session.commit()
+    return command_id, projection, intent
+
+
 class HardwareFreePatchScope:
     def __init__(self, recorder: SimulationRecorder) -> None:
         self._recorder = recorder
         self._had_publish_attr = "publish" in event_bus.__dict__
         self._original_publish_attr = event_bus.__dict__.get("publish")
         self._original_notification_service = access_events_module.get_notification_service
-        self._original_leaderboard_service = access_events_module.get_leaderboard_service
-        self._original_snapshot_capture = access_events_module.capture_access_event_snapshot
-        self._original_gate_open = access_events_module.open_gate_for_access_event
-        self._original_gate_skip = access_events_module.publish_gate_open_skipped
+        self._original_enrichment_notifications = access_enrichment_module.get_notification_service
+        self._original_enrichment = access_events_module.AccessEnrichment
+        self._original_evidence = access_execution_module.AccessEvidenceResolver
+        self._original_leaderboard_service = access_enrichment_module.get_leaderboard_service
+        self._original_snapshot_capture = access_enrichment_module.capture_access_event_snapshot
+        self._original_gate_open = access_execution_module.open_gate_for_access_event
+        self._original_gate_skip = access_execution_module.publish_gate_open_skipped
 
-    async def __aenter__(self) -> "HardwareFreePatchScope":
+    async def __aenter__(self) -> Self:
         async def capture_publish(event_type: str, payload: dict[str, Any]) -> None:
             self._recorder.realtime_events.append(
                 {
@@ -250,6 +553,11 @@ class HardwareFreePatchScope:
                 f"Simulated automatic LPR grant for {event.registration_number}"
                 f"{f' ({person.display_name})' if person else ''}"
             )
+            command_id, projection, intent = await _persist_synthetic_verified_gate_receipt(
+                event,
+                movement_saga_id=movement_saga_id,
+                reason=reason,
+            )
             action = {
                 "action": "gate.open",
                 "event_id": str(event.id),
@@ -257,6 +565,10 @@ class HardwareFreePatchScope:
                 "accepted": True,
                 "state": GateState.OPENING.value,
                 "detail": reason,
+                "command_id": command_id,
+                "target_command_id": projection["target_receipts"][0]["command_id"],
+                "admission_verified": True,
+                "synthetic": True,
             }
             self._recorder.gate_actions.append(action)
             await access_hardware_module.audit_automatic_hardware_command(
@@ -287,21 +599,22 @@ class HardwareFreePatchScope:
                     }
                 )
             return GateCommandOutcome(
-                intent=GateCommandIntent(
-                    reason=reason,
-                    source="simulation",
-                    event_id=str(event.id),
-                    movement_saga_id=movement_saga_id,
-                    registration_number=event.registration_number,
-                    actor="Simulation",
-                ),
-                accepted=True,
-                state=GateState.OPENING,
+                intent=intent,
+                accepted=projection["accepted"],
+                state=GateState(projection["state"]),
                 detail=reason,
                 started_at=started_at,
                 completed_at=datetime.now(tz=UTC),
-                mechanically_confirmed=True,
-                reconciliation_required=False,
+                mechanically_confirmed=projection["mechanically_confirmed"],
+                admission_verified=projection["admission_verified"],
+                target_receipts=projection["target_receipts"],
+                command_id=command_id,
+                reconciliation_required=projection["requires_reconciliation"],
+                metadata={
+                    **projection,
+                    "automatic_entry_precondition": {"mode": "fanout", "synthetic": True},
+                    "simulation": {"synthetic_receipt": True},
+                },
             )
 
         async def capture_gate_skip(
@@ -322,19 +635,30 @@ class HardwareFreePatchScope:
             )
             await access_hardware_module.publish_gate_open_skipped(event, direction_resolution, person)
 
+        access_events_module.AccessEnrichment = HardwareFreeEnrichment
+        access_execution_module.AccessEvidenceResolver = HardwareFreeEvidence
+        access_enrichment_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)
         event_bus.publish = capture_publish  # type: ignore[method-assign]
         access_events_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)  # type: ignore[assignment]
-        access_events_module.get_leaderboard_service = lambda: _FakeLeaderboardService()  # type: ignore[assignment]
-        access_events_module.capture_access_event_snapshot = capture_snapshot
-        access_events_module.open_gate_for_access_event = capture_gate_open
-        access_events_module.publish_gate_open_skipped = capture_gate_skip
+        access_enrichment_module.get_leaderboard_service = lambda: _FakeLeaderboardService()  # type: ignore[assignment]
+        access_enrichment_module.capture_access_event_snapshot = capture_snapshot
+        access_execution_module.open_gate_for_access_event = capture_gate_open
+        access_execution_module.publish_gate_open_skipped = capture_gate_skip
         return self
 
-    async def __aexit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
-        access_events_module.publish_gate_open_skipped = self._original_gate_skip
-        access_events_module.open_gate_for_access_event = self._original_gate_open
-        access_events_module.capture_access_event_snapshot = self._original_snapshot_capture
-        access_events_module.get_leaderboard_service = self._original_leaderboard_service  # type: ignore[assignment]
+    async def __aexit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        access_events_module.AccessEnrichment = self._original_enrichment
+        access_execution_module.AccessEvidenceResolver = self._original_evidence
+        access_enrichment_module.get_notification_service = self._original_enrichment_notifications
+        access_execution_module.publish_gate_open_skipped = self._original_gate_skip
+        access_execution_module.open_gate_for_access_event = self._original_gate_open
+        access_enrichment_module.capture_access_event_snapshot = self._original_snapshot_capture
+        access_enrichment_module.get_leaderboard_service = self._original_leaderboard_service  # type: ignore[assignment]
         access_events_module.get_notification_service = self._original_notification_service  # type: ignore[assignment]
         if self._had_publish_attr:
             event_bus.publish = self._original_publish_attr  # type: ignore[assignment,method-assign]
@@ -481,7 +805,12 @@ class SimulationRunContext:
 ScenarioHandler = Callable[[SimulationRunContext], Awaitable[dict[str, Any]]]
 
 
-async def run_full_access_flow(request: FullAccessFlowRequest) -> FullAccessFlowReport:
+async def run_full_access_flow(
+    request: FullAccessFlowRequest,
+    *,
+    capability: FullAccessFlowIsolationCapability | None = None,
+) -> FullAccessFlowReport:
+    _require_isolated_full_access_flow_capability(capability)
     selected_scenarios = _selected_scenario_ids(request.scenario_ids)
     run_started_at = datetime.now(tz=UTC)
     run_id = uuid.uuid4().hex
@@ -492,52 +821,53 @@ async def run_full_access_flow(request: FullAccessFlowRequest) -> FullAccessFlow
     data: SyntheticDataSet | None = None
     scenario_results: list[SimulationScenarioResult] = []
 
-    async with _RUN_LOCK:
-        async with HardwareFreePatchScope(recorder):
-            try:
-                data = await create_synthetic_data(run_id, marker)
-                context = SimulationRunContext(
-                    run_id=run_id,
-                    marker=marker,
-                    start_at=start_at,
-                    include_debug=request.include_debug,
-                    data=data,
-                    service=service,
-                    recorder=recorder,
-                )
-                for scenario_id in selected_scenarios:
-                    scenario_results.append(await _run_scenario(context, scenario_id))
+    async with _RUN_LOCK, HardwareFreePatchScope(recorder):
+        try:
+            data = await create_synthetic_data(run_id, marker)
+            context = SimulationRunContext(
+                run_id=run_id,
+                marker=marker,
+                start_at=start_at,
+                include_debug=request.include_debug,
+                data=data,
+                service=service,
+                recorder=recorder,
+            )
+            for scenario_id in selected_scenarios:
+                scenario_results.append(await _run_scenario(context, scenario_id))
 
-                await telemetry.flush()
-                all_events = await context.all_events()
-                if request.cleanup:
-                    try:
-                        await cleanup_synthetic_data(data, all_events)
-                    except Exception as exc:
-                        context.add_issue(
-                            "cleanup_failed",
-                            severity="critical",
-                            scenario_id="cleanup",
-                            step_id="cleanup",
-                            expected="Synthetic rows are removed without touching unrelated data.",
-                            observed=str(exc),
-                        )
-                issues = context.issues
-            except Exception as exc:
-                issues = [
-                    SimulationIssue(
-                        code="scenario_runner_failed",
-                        severity="critical",
-                        scenario_id="runner",
-                        step_id="runner",
-                        expected="Full access-flow simulation completes.",
-                        observed=str(exc),
-                        recommended_fix=recommended_fix_for_issue("scenario_runner_failed"),
-                    )
-                ]
-                all_events = []
-                if data and request.cleanup:
+            await telemetry.flush()
+            all_events = await context.all_events()
+            if request.cleanup:
+                try:
                     await cleanup_synthetic_data(data, all_events)
+                except Exception as exc:  # noqa: BLE001
+                    # Preserve every owned cleanup failure in the simulator result for review.
+                    context.add_issue(
+                        "cleanup_failed",
+                        severity="critical",
+                        scenario_id="cleanup",
+                        step_id="cleanup",
+                        expected="Synthetic rows are removed without touching unrelated data.",
+                        observed=str(exc),
+                    )
+            issues = context.issues
+        except Exception as exc:  # noqa: BLE001
+            # Return unexpected scenario failures as isolated-test evidence and still clean owned rows.
+            issues = [
+                SimulationIssue(
+                    code="scenario_runner_failed",
+                    severity="critical",
+                    scenario_id="runner",
+                    step_id="runner",
+                    expected="Full access-flow simulation completes.",
+                    observed=str(exc),
+                    recommended_fix=recommended_fix_for_issue("scenario_runner_failed"),
+                )
+            ]
+            all_events = []
+            if data and request.cleanup:
+                await cleanup_synthetic_data(data, all_events)
 
     finished_at = datetime.now(tz=UTC)
     summary = SimulationSummary(
@@ -568,7 +898,7 @@ def available_scenario_ids() -> tuple[str, ...]:
 def recommended_fix_for_issue(code: str) -> str:
     recommendations = {
         "wrong_direction": (
-            "Update AccessEventService._resolve_direction so a known vehicle whose person is not present can "
+            "Update AccessEvidenceResolver._resolve_direction so a known vehicle whose person is not present can "
             "resolve as an entry during an active open-gate convoy, instead of treating every open/opening/"
             "closing gate read as an exit."
         ),
@@ -664,6 +994,80 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
                 event for event in rows if _event_simulation_payload(event).get("marker") == data.marker
             ]
         event_ids = [event.id for event in selected_events]
+        anomaly_ids = (
+            list(
+                (
+                    await session.scalars(
+                        select(Anomaly.id).where(Anomaly.event_id.in_(event_ids))
+                    )
+                ).all()
+            )
+            if event_ids
+            else []
+        )
+        saga_ids = list(
+            (
+                await session.scalars(
+                    select(MovementSagaRecord.id).where(
+                        MovementSagaRecord.source == SIMULATION_SOURCE,
+                        or_(
+                            MovementSagaRecord.access_event_id.in_(event_ids),
+                            MovementSagaRecord.person_id.in_(person_ids),
+                            MovementSagaRecord.vehicle_id.in_(vehicle_ids),
+                        ),
+                    )
+                )
+            ).all()
+        )
+        movement_session_ids: list[uuid.UUID] = []
+        if event_ids or saga_ids:
+            movement_session_ids = list(
+                (
+                    await session.scalars(
+                        select(MovementSessionRecord.id).where(
+                            MovementSessionRecord.source == SIMULATION_SOURCE,
+                            or_(
+                                MovementSessionRecord.access_event_id.in_(event_ids),
+                                MovementSessionRecord.movement_saga_id.in_(saga_ids),
+                            ),
+                        )
+                    )
+                ).all()
+            )
+        command_ids: list[uuid.UUID] = []
+        if event_ids or saga_ids:
+            command_ids = list(
+                (
+                    await session.scalars(
+                        select(GateCommandRecord.id).where(
+                            GateCommandRecord.source == SIMULATION_SOURCE,
+                            or_(
+                                GateCommandRecord.access_event_id.in_(event_ids),
+                                GateCommandRecord.movement_saga_id.in_(saga_ids),
+                            ),
+                        )
+                    )
+                ).all()
+            )
+        observation_ids = (
+            list(
+                (
+                    await session.scalars(
+                        select(AccessDeviceCommandRecord.verification_observation_id).where(
+                            AccessDeviceCommandRecord.gate_command_id.in_(command_ids),
+                            AccessDeviceCommandRecord.verification_observation_id.is_not(None),
+                        )
+                    )
+                ).all()
+            )
+            if command_ids
+            else []
+        )
+        notification_run_ids = [
+            uuid.uuid5(event_id, "access.authorized_entry.notification") for event_id in event_ids
+        ] + [
+            uuid.uuid5(anomaly_id, "access.anomaly.notification") for anomaly_id in anomaly_ids
+        ]
         trace_ids = [
             str(((event.raw_payload or {}).get("telemetry") or {}).get("trace_id"))
             for event in selected_events
@@ -685,11 +1089,28 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
 
         if person_ids:
             await session.execute(delete(Presence).where(Presence.person_id.in_(person_ids)))
+        if notification_run_ids:
+            await session.execute(delete(NotificationRun).where(NotificationRun.id.in_(notification_run_ids)))
+        if command_ids:
+            await session.execute(
+                delete(AccessDeviceCommandRecord).where(
+                    AccessDeviceCommandRecord.gate_command_id.in_(command_ids)
+                )
+            )
+            await session.execute(delete(GateCommandRecord).where(GateCommandRecord.id.in_(command_ids)))
+        if movement_session_ids:
+            await session.execute(
+                delete(MovementSessionRecord).where(MovementSessionRecord.id.in_(movement_session_ids))
+            )
+        if observation_ids:
+            await session.execute(delete(GateStateObservation).where(GateStateObservation.id.in_(observation_ids)))
         if event_ids:
             await session.execute(delete(Anomaly).where(Anomaly.event_id.in_(event_ids)))
         if trace_ids:
             await session.execute(delete(TelemetrySpan).where(TelemetrySpan.trace_id.in_(trace_ids)))
             await session.execute(delete(TelemetryTrace).where(TelemetryTrace.trace_id.in_(trace_ids)))
+        if saga_ids:
+            await session.execute(delete(MovementSagaRecord).where(MovementSagaRecord.id.in_(saga_ids)))
         if event_ids:
             await session.execute(delete(AccessEvent).where(AccessEvent.id.in_(event_ids)))
         if vehicle_ids:

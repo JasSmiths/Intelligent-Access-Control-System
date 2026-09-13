@@ -1,5 +1,80 @@
-import { api, createActionConfirmation } from "./client";
-import type { ActionConfirmationOptions, HomeAssistantDiscovery, IntegrationStatus, UnifiProtectCamera, UserAccount } from "./types";
+import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
+import type { AccessDevice, ActionConfirmationOptions, HomeAssistantDiscovery, IntegrationStatus, UnifiProtectCamera, UserAccount } from "./types";
+export type AccessDeviceEligibility = AccessDevice & { commandable: boolean; admission_eligible: boolean };
+// These describe persisted command receipts, not live device state.
+export type CommandDelivery = "accepted" | "rejected" | "not_sent" | "unknown";
+export type GateCommandDelivery = CommandDelivery | "partial";
+export type DeviceCommandReceipt = {
+  command_id: string;
+  target_device_id: string;
+  device_key: string;
+  action: string;
+  status: string;
+  accepted: boolean;
+  delivery: CommandDelivery;
+  state: string;
+  verified: boolean;
+  requires_reconciliation: boolean;
+  detail: string | null;
+  verification_observation_id?: string | null;
+  provider_receipts?: Array<{ provider: string; delivery: CommandDelivery; acceptance_basis?: string | null }>;
+};
+export type GateCommandReceipt = {
+  command_id?: string | null;
+  intent_id?: string | null;
+  accepted: boolean;
+  delivery: GateCommandDelivery;
+  state: string;
+  mechanically_confirmed: boolean;
+  admission_verified: boolean;
+  requires_reconciliation: boolean;
+  target_receipts: DeviceCommandReceipt[];
+  detail?: string | null;
+  command_status?: string;
+};
+// Historical gate rows may predate per-target receipts. Keep their identity available
+// for inspection, without manufacturing a delivery or physical-state conclusion.
+export type GateCommandHistoryRecord = Partial<GateCommandReceipt> & { command_id: string; started_at?: string | null };
+export type GateCommandPage = { items: GateCommandHistoryRecord[]; next_cursor: string | null };
+export type CoverCommandPage = { items: DeviceCommandReceipt[]; next_cursor: string | null };
+export type CoverCommandResponse = {
+  accepted: boolean;
+  delivery: CommandDelivery;
+  state: string;
+  verified: boolean;
+  requires_reconciliation: boolean;
+  command_id: string | null;
+  target_receipt: DeviceCommandReceipt | null;
+  detail: string;
+};
+export type GateOpenPayload = { reason: string; target_device_key?: string };
+export type CoverCommandPayload = { entity_id: string; action: "open" | "close"; reason: string };
+export const gateCommandReceiptUrl = (intentId: string) => `/api/v1/integrations/gate/commands?intent_id=${encodeURIComponent(intentId)}`;
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function commandDelivery(value: unknown): value is CommandDelivery {
+  return value === "accepted" || value === "rejected" || value === "not_sent" || value === "unknown";
+}
+export function isDeviceCommandReceipt(value: unknown): value is DeviceCommandReceipt {
+  return record(value) && typeof value.command_id === "string" && typeof value.target_device_id === "string"
+    && typeof value.device_key === "string" && typeof value.action === "string" && typeof value.status === "string"
+    && typeof value.accepted === "boolean" && commandDelivery(value.delivery) && typeof value.state === "string"
+    && typeof value.verified === "boolean" && typeof value.requires_reconciliation === "boolean"
+    && (value.detail === null || typeof value.detail === "string")
+    && (value.provider_receipts === undefined || (Array.isArray(value.provider_receipts) && value.provider_receipts.every((provider) =>
+      record(provider) && typeof provider.provider === "string" && commandDelivery(provider.delivery)
+      && (provider.acceptance_basis == null || typeof provider.acceptance_basis === "string"))));
+}
+export function isGateCommandReceipt(value: unknown): value is GateCommandReceipt {
+  return record(value) && typeof value.accepted === "boolean" && (commandDelivery(value.delivery) || value.delivery === "partial")
+    && typeof value.state === "string" && typeof value.mechanically_confirmed === "boolean"
+    && typeof value.admission_verified === "boolean" && typeof value.requires_reconciliation === "boolean"
+    && Array.isArray(value.target_receipts) && value.target_receipts.every(isDeviceCommandReceipt);
+}
+export function coverTargetReceipt(value: unknown): DeviceCommandReceipt | null {
+  return record(value) && isDeviceCommandReceipt(value.target_receipt) ? value.target_receipt : null;
+}
 export type ICloudCalendarAccount = {
   id: string; apple_id: string; display_name: string; status: string; is_active: boolean;
   last_auth_at: string | null; last_sync_at: string | null; last_sync_status: string | null;
@@ -124,6 +199,36 @@ export type DependencyConfirmAction = { kind: "apply" } | { kind: "restore"; bac
 export type DiscordBundle = { status: DiscordStatus; channels: DiscordChannel[]; identities: DiscordIdentity[] };
 export type DependencyBundle = { packages: DependencyPackage[]; storage: DependencyStorageStatus };
 export const integrationsApi = {
+  getAccessDevices: (kind: AccessDevice["kind"], options: ApiRequestOptions = {}) =>
+    api.get<AccessDeviceEligibility[]>(`/api/v1/access-devices?kind=${kind}`, options),
+  confirmGateOpen: (payload: GateOpenPayload, label: string) => createActionConfirmation("gate.open", payload, {
+    target_entity: "Gate", target_id: payload.target_device_key, target_label: label, reason: payload.reason
+  }),
+  openGate: (payload: GateOpenPayload, confirmationToken: string, options: ApiRequestOptions = {}) =>
+    api.post<GateCommandReceipt>("/api/v1/integrations/gate/open", { ...payload, confirmation_token: confirmationToken }, options),
+  confirmCoverCommand: (payload: CoverCommandPayload, label: string) => createActionConfirmation(`cover.${payload.action}`, payload, {
+    target_entity: "Cover", target_id: payload.entity_id, target_label: label, reason: payload.reason
+  }),
+  commandCover: (payload: CoverCommandPayload, confirmationToken: string, options: ApiRequestOptions = {}) =>
+    api.post<CoverCommandResponse>("/api/v1/integrations/cover/command", { ...payload, confirmation_token: confirmationToken }, options),
+  getGateCommandByIntent: (intentId: string, options: ApiRequestOptions = {}) =>
+    api.get<GateCommandReceipt>(gateCommandReceiptUrl(intentId), options),
+  getCoverCommandByIntent: (intentId: string, options: ApiRequestOptions = {}) =>
+    api.get<DeviceCommandReceipt>(`/api/v1/integrations/cover/commands?intent_id=${encodeURIComponent(intentId)}`, options),
+  getGateCommands: (beforeId?: string, options: ApiRequestOptions = {}) => {
+    const query = new URLSearchParams({ limit: "25" });
+    if (beforeId) query.set("before_id", beforeId);
+    return api.get<GateCommandPage>(`/api/v1/integrations/gate/commands?${query}`, options);
+  },
+  getCoverCommands: (beforeId?: string, options: ApiRequestOptions = {}) => {
+    const query = new URLSearchParams({ limit: "25" });
+    if (beforeId) query.set("before_id", beforeId);
+    return api.get<CoverCommandPage>(`/api/v1/integrations/cover/commands?${query}`, options);
+  },
+  getGateCommand: (commandId: string, options: ApiRequestOptions = {}) =>
+    api.get<GateCommandHistoryRecord>(`/api/v1/integrations/gate/commands/${encodeURIComponent(commandId)}`, options),
+  getCoverCommand: (commandId: string, options: ApiRequestOptions = {}) =>
+    api.get<DeviceCommandReceipt>(`/api/v1/integrations/cover/commands/${encodeURIComponent(commandId)}`, options),
   getHomeAssistantStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"),
   getHomeAssistantDiscovery: () => api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities"),
   getAccessDeviceStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/gate/status"),

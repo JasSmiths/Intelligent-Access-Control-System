@@ -33,7 +33,8 @@ from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
     get_vehicle_visual_detection_recorder,
 )
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service, load_whatsapp_config
+from app.services.messaging.whatsapp_webhook import get_whatsapp_webhook_service
+from app.services.messaging.whatsapp_configuration import load_whatsapp_config
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -127,7 +128,7 @@ async def receive_whatsapp_webhook(
             detail="WhatsApp app secret is required before incoming webhooks can be accepted.",
         )
 
-    service = get_whatsapp_messaging_service()
+    service = get_whatsapp_webhook_service()
     signature_verified = service.validate_signature(raw_body, signature_header, config.app_secret)
     unsigned_allowed = False
     if not signature_verified:
@@ -187,12 +188,11 @@ async def receive_whatsapp_webhook(
             "unsigned_allowed": unsigned_allowed,
         },
     )
-    background_tasks.add_task(
-        service.handle_webhook_payload,
-        payload,
-        signature_verified=signature_verified,
-        unsigned_allowed=unsigned_allowed,
-    )
+    try:
+        await service.handle_webhook_payload(payload, signature_verified=signature_verified,
+            unsigned_allowed=unsigned_allowed, config=config)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid WhatsApp incoming message envelope.") from exc
     return {"status": "accepted"}
 
 

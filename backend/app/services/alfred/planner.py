@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from app.ai.providers import ChatMessageInput
+from app.ai.providers import ChatMessageInput, complete_with_provider_options
 from app.ai.tool_groups.metadata import domain_summary
 from app.ai.tools import AgentTool
 from app.services.chat_contracts import SUPPORTED_INTENTS
@@ -215,7 +215,7 @@ async def plan_with_llm(
             ),
         ),
     ]
-    result = await _provider_complete(
+    result = await complete_with_provider_options(
         provider,
         messages,
         response_schema=PLANNER_RESPONSE_SCHEMA,
@@ -233,20 +233,6 @@ async def plan_with_llm(
     if result.usage_summary:
         return replace(selection, llm_usage_summary=result.usage_summary)
     return selection
-
-
-async def _provider_complete(
-    provider: Any,
-    messages: list[ChatMessageInput],
-    **options: Any,
-):
-    clean_options = {key: value for key, value in options.items() if value is not None and value != ""}
-    try:
-        return await provider.complete(messages, **clean_options)
-    except TypeError as exc:
-        if "unexpected keyword" not in str(exc):
-            raise
-        return await provider.complete(messages)
 
 
 def parse_planner_selection(payload: dict[str, Any], tools: Iterable[AgentTool]) -> PlannerSelection:

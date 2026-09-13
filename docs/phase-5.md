@@ -1,5 +1,9 @@
 # Phase 5: Frontend UI
 
+This records the original frontend phase. Current ownership and refactoring
+validation are documented in [the frontend agent guide](agent/frontend.md) and
+[architecture recovery milestone 6](validation/milestone6-frontend.md).
+
 ## Delivered
 
 - Dockerized React + TypeScript frontend.
@@ -84,7 +88,7 @@ Implemented design inventory:
 - `npm run test`
 - `npm run build`
 - `python3 -m compileall -q backend/app`
-- `docker compose exec -T backend sh -lc 'cd /workspace/backend && alembic upgrade head && alembic current'`
+- For refactoring, use `python3 scripts/phase1/validate.py` for isolated application, persistence and migration checks; live migrations require a separate release.
 - `docker compose config --quiet`
 - `GET http://localhost:8089/api/v1/health`
 - `GET http://localhost:8089/api/v1/auth/status`

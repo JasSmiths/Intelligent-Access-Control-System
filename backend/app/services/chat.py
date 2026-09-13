@@ -2,13 +2,15 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.ai.context import get_chat_tool_context, set_chat_tool_context
 from app.ai.providers import (
     ChatMessageInput,
     LlmResult,
@@ -17,7 +19,9 @@ from app.ai.providers import (
     complete_with_provider_options,
     get_llm_provider,
 )
-from app.ai.tools import AgentTool, build_agent_tools, get_chat_tool_context, set_chat_tool_context
+from app.ai.tool_groups.registry import build_agent_tools
+from app.ai.tool_inputs import validate_tool_arguments
+from app.ai.tools import AgentTool, failed_outcome
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -33,6 +37,7 @@ from app.services.alfred.answer_contracts import (
     select_answer_artifacts,
     verify_answer_draft,
 )
+from app.services.alfred.approvals import Approval, ApprovalDecision, alfred_approval_store
 from app.services.alfred.executor import can_execute_parallel
 from app.services.alfred.feedback import alfred_feedback_service
 from app.services.alfred.memory import alfred_memory_service
@@ -82,6 +87,8 @@ SECRET_ARGUMENT_NAME_PARTS = ("secret", "token", "password", "api_key", "mount_o
 class ChatService:
     def __init__(self) -> None:
         self._tools: dict[str, AgentTool] = build_agent_tools()
+        self._approvals = alfred_approval_store
+        self._approval_tasks: set[asyncio.Task] = set()
 
     async def handle_message(
         self,
@@ -166,21 +173,17 @@ class ChatService:
         client_context: dict[str, Any] | None = None,
         status_callback: StatusCallback | None = None,
     ) -> ChatTurnResult:
-        session_uuid = await self._ensure_session(session_id)
-        if confirmation_id:
-            return await self._handle_pending_action_decision(
-                session_uuid,
-                confirmation_id=confirmation_id,
-                decision=decision,
-                user_id=user_id,
-                user_role=user_role,
-                client_context=client_context or {},
-                status_callback=status_callback,
-            )
-
-        return await self._direct_response(
-            session_uuid,
-            "That confirmation is no longer available. Ask me to prepare the action again and I'll lay out a fresh button.",
+        # Confirmations never create a conversation or execute caller arguments.
+        try:
+            session_uuid = uuid.UUID(str(session_id))
+        except (TypeError, ValueError):
+            return self._approval_response(None, str(session_id or ""))
+        if not confirmation_id:
+            return self._approval_response(None, str(session_uuid))
+        return await self._handle_pending_action_decision(
+            session_uuid, confirmation_id=confirmation_id, decision=decision,
+            user_id=user_id, user_role=user_role, client_context=client_context or {},
+            status_callback=status_callback,
         )
 
     async def _handle_pending_action_decision(
@@ -194,39 +197,110 @@ class ChatService:
         client_context: dict[str, Any],
         status_callback: StatusCallback | None,
     ) -> ChatTurnResult:
-        pending = await self._load_pending_agent_action(
-            session_uuid,
-            confirmation_id=confirmation_id,
-            user_id=user_id,
+        choice = await self._approvals.decide(
+            session_uuid, confirmation_id, user_id,
+            confirm=decision.strip().lower() == "confirm",
         )
-        if not pending:
-            return await self._direct_response(
-                session_uuid,
-                "That confirmation has expired or was already handled. Sensible safety paperwork; ask me to prepare it again.",
-            )
+        if choice.status != "claimed" or not choice.approval:
+            return self._approval_response(choice, str(session_uuid))
+        task = asyncio.create_task(
+            self._run_claimed_approval(choice.approval, client_context=client_context),
+            name=f"alfred-approval-{choice.approval.id}",
+        )
+        self._approval_tasks.add(task)
+        task.add_done_callback(self._approval_task_finished)
+        # Once claimed, losing an HTTP/WS client cannot erase the result or
+        # cancel the side-effect owner midway through an accepted request.
+        return await asyncio.shield(task)
 
+    async def list_tool_confirmations(
+        self, *, user_id: str, session_id: str | None = None,
+        before_id: str | None = None, limit: int = 25,
+    ) -> dict[str, Any]:
+        return await self._approvals.list_for_requester(user_id,
+            session_id=uuid.UUID(session_id) if session_id else None, before_id=before_id, limit=limit)
+
+    async def inspect_tool_confirmation(
+        self, *, session_id: str, confirmation_id: str, user_id: str | None,
+    ) -> dict[str, Any]:
+        try:
+            session_uuid = uuid.UUID(session_id)
+        except (TypeError, ValueError):
+            return {"status": "unavailable", "pending_action": None, "result": None}
+        choice = await self._approvals.inspect(session_uuid, confirmation_id, user_id)
+        approval = choice.approval
+        return {
+            "status": choice.status,
+            "pending_action": (
+                self._pending_action_public_payload(approval.pending_payload())
+                if approval and choice.status == "pending" else None
+            ),
+            "result": (
+                asdict(self._approval_response(choice, session_id))
+                if approval and approval.result and choice.status in {"completed", "unknown"} else None
+            ),
+        }
+
+    def _approval_task_finished(self, task: asyncio.Task) -> None:
+        self._approval_tasks.discard(task)
+        if not task.cancelled() and task.exception():
+            logger.warning("alfred_approval_task_failed", extra={"error_class": type(task.exception()).__name__})
+
+    async def stop(self) -> None:
+        """Give owned approvals a bounded drain, then retain interrupted claims."""
+        tasks = list(self._approval_tasks)
+        if not tasks:
+            return
+        _, pending = await asyncio.wait(tasks, timeout=5)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _approval_response(self, choice: ApprovalDecision | None, session_id: str) -> ChatTurnResult:
+        approval = choice.approval if choice else None
+        if approval and approval.result:
+            retained = self._restore_pending_arguments(approval.result)
+            turn = retained.get("turn")
+            if isinstance(turn, dict):
+                return ChatTurnResult(**turn)
+            tool_result = retained.get("tool_result")
+            if isinstance(tool_result, dict):
+                return ChatTurnResult(
+                    session_id, str(approval.payload.get("provider") or "local"),
+                    self._confirmation_result_text(str(tool_result.get("name") or ""), as_dict(tool_result.get("output"))),
+                    [tool_result], self._attachments_from_tool_results([tool_result]),
+                )
+        state = choice.status if choice else "unavailable"
+        text = {
+            "cancelled": "Okay, I cancelled that action. Nothing changed.",
+            "in_progress": "That action was already claimed. Its result is not yet available; I have not sent another request.",
+            "unknown": "That action has an uncertain result and needs review. I have not sent another request.",
+        }.get(state, "That confirmation has expired or is no longer available. Ask me to prepare the action again for a fresh confirmation.")
+        return ChatTurnResult(session_id, "local", text, [], [])
+
+    async def _run_claimed_approval(self, approval: Approval, *, client_context: dict[str, Any]) -> ChatTurnResult:
+        try:
+            return await self._execute_claimed_approval(approval, client_context=client_context)
+        except BaseException:
+            # A crash/cancellation after the committed claim never makes it
+            # executable again. finish is conditional and cannot overwrite a
+            # definitive result already persisted before presentation failed.
+            await self._approvals.finish(approval, {"error_code": "approval_interrupted"}, unknown=True)
+            raise
+
+    async def _execute_claimed_approval(self, approval: Approval, *, client_context: dict[str, Any]) -> ChatTurnResult:
+        pending = self._restore_pending_arguments(approval.pending_payload())
+        session_uuid = approval.session_id
+        confirmation_id = approval.id
+        user_id = str(approval.requester_user_id)
         tool_name = str(pending.get("tool_name") or "")
-        if decision.strip().lower() != "confirm":
-            await self._clear_pending_agent_action(session_uuid)
-            user_message_id = await self._append_message(session_uuid, "user", f"Cancelled action {confirmation_id}")
-            return await self._direct_response(
-                session_uuid,
-                "Okay, I cancelled that action. Nothing changed.",
-                user_message_id=user_message_id,
-            )
-
         runtime = await get_runtime_config()
         provider = get_llm_provider(str(pending.get("provider") or runtime.llm_provider))
-        pending_actor_context = pending.get("actor_context")
-        actor_context: dict[str, Any]
-        if isinstance(pending_actor_context, dict):
-            actor_context = pending_actor_context
-        else:
-            actor_context = await self._build_actor_context(
-                user_id=user_id,
-                user_role=user_role,
-                client_context=client_context,
-            )
+        actor_context = await self._build_actor_context(
+            user_id=user_id, user_role=None, client_context=client_context,
+        )
+        user_role = as_dict(actor_context.get("user")).get("role")
+        status_callback = None  # Client transport is not part of execution ownership.
         tool_results: list[dict[str, Any]] = []
         context_token = set_chat_tool_context(
             {
@@ -237,13 +311,22 @@ class ChatService:
                 "provider": provider.name,
                 "model": self._model_for_provider(runtime, provider.name),
                 "trigger": "user_confirmed",
+                "intent_id": str(approval.operation_id),
+                "idempotency_key": str(pending.get("idempotency_key") or approval.operation_id),
+                "approval": {
+                    "confirmation_id": approval.id, "operation_id": str(approval.operation_id),
+                    "requester_user_id": user_id,
+                    "requester_auth_session_version": approval.requester_auth_session_version,
+                    "tool_name": tool_name, "arguments": pending.get("arguments"),
+                    "preview_output": pending.get("preview_output"),
+                },
             }
         )
         try:
             result_text = ""
             arguments = self._confirmed_arguments_for_pending(pending)
             call = ToolCall(
-                id=f"confirmed-{tool_name}-{uuid.uuid4().hex[:8]}",
+                id=f"confirmed-{approval.operation_id}",
                 name=tool_name,
                 arguments=arguments,
             )
@@ -252,28 +335,44 @@ class ChatService:
                 "user",
                 self._confirmation_user_message(tool_name, {"confirmation_id": confirmation_id}),
             )
-            await self._clear_pending_agent_action(session_uuid)
+            uncertain = False
             try:
-                tool_result = await self._execute_tool_call(
-                    session_uuid,
-                    call,
-                    status_callback=status_callback,
+                blocked = validate_tool_call(
+                    tool_name, selected_tool_names=set(pending.get("selected_tools") or []),
+                    tools_by_name=self._tools, actor_context=actor_context,
+                )
+                if pending.get("tool_contract") != self._approval_tool_contract(tool_name):
+                    blocked = "approval_contract_changed"
+                if as_dict(actor_context.get("user")).get("auth_session_version") != approval.requester_auth_session_version:
+                    blocked = "approval_actor_changed"
+                tool_result = (
+                    {"call_id": call.id, "name": call.name, "arguments": call.arguments,
+                     "output": {"error": "This action changed or is no longer permitted. Ask for a fresh preview.", "error_code": blocked}}
+                    if blocked else await self._invoke_tool_call(call)
                 )
             except Exception as exc:  # noqa: BLE001 - Confirmed tool failures must produce a failed result, never success.
                 logger.warning(
                     "agent_confirmation_execution_failed",
-                    extra={"tool": tool_name, "error": str(exc)[:240]},
+                    extra={"tool": tool_name, "error_class": type(exc).__name__},
                 )
+                uncertain = True
                 tool_result = {
-                    "call_id": call.id,
-                    "name": call.name,
-                    "arguments": call.arguments,
-                    "output": {"error": str(exc)[:500], "status": "failed"},
+                    "call_id": call.id, "name": call.name, "arguments": call.arguments,
+                    "output": {"error": "The action result is uncertain and needs review.",
+                               "error_code": "approval_execution_unknown", "status": "unknown", "requires_review": True},
                 }
+            persisted = await self._approvals.finish(
+                approval, {"tool_result": self._protect_pending_value(tool_result, key="result", tool_name=tool_name)},
+                unknown=uncertain,
+            )
+            if not persisted:
+                raise RuntimeError("Approval result could not be retained.")
+            await self._append_tool_message(session_uuid, call, tool_result["output"])
+            self._audit_agent_tool_call(call, tool_result["output"])
 
             tool_results = [item for item in as_list(pending.get("tool_results")) if isinstance(item, dict)]
             tool_results.append(tool_result)
-            if self._confirmed_tool_finishes_without_resume(tool_name):
+            if uncertain or self._confirmed_tool_finishes_without_resume(tool_name):
                 tool_results = [tool_result]
                 result_text = self._confirmation_result_text(tool_name, tool_result.get("output", {}))
             else:
@@ -344,7 +443,7 @@ class ChatService:
                 "attachments": attachments,
             },
         )
-        return ChatTurnResult(
+        turn = ChatTurnResult(
             str(session_uuid),
             provider.name,
             text,
@@ -354,21 +453,14 @@ class ChatService:
             str(user_message_id),
             str(assistant_message_id),
         )
+        await self._approvals.record_turn(
+            approval, self._protect_pending_value(asdict(turn), key="turn", tool_name=tool_name),
+        )
+        return turn
 
     def _confirmed_tool_finishes_without_resume(self, tool_name: str) -> bool:
-        return tool_name in {
-            "open_device",
-            "command_device",
-            "open_gate",
-            "create_schedule",
-            "update_schedule",
-            "delete_schedule",
-            "create_visitor_pass",
-            "update_visitor_pass",
-            "cancel_visitor_pass",
-            "test_notification_workflow",
-            "trigger_icloud_sync",
-        }
+        tool = self._tools.get(tool_name)
+        return bool(tool and tool.finish_after_confirmation)
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return [tool.as_llm_tool() for tool in self._tools.values()]
@@ -415,7 +507,7 @@ class ChatService:
             },
             "user": {
                 "id": user_id,
-                "role": user_role,
+                "role": "standard",
             },
             "person": None,
             "vehicles": [],
@@ -440,7 +532,7 @@ class ChatService:
 
         async with AsyncSessionLocal() as session:
             user = await session.get(User, parsed_user_id)
-            if not user:
+            if not user or not user.is_active:
                 return context
             first_name = user.first_name or ""
             last_name = user.last_name or ""
@@ -448,6 +540,7 @@ class ChatService:
             context["user"] = {
                 "id": str(user.id),
                 "role": user.role.value,
+                "auth_session_version": user.auth_session_version,
                 "username": user.username,
                 "display_name": display_name,
                 "person_id": str(user.person_id) if user.person_id else None,
@@ -1451,6 +1544,11 @@ class ChatService:
                 "name": result.get("name"),
                 "arguments": self._compact_prompt_value(result.get("arguments") if isinstance(result.get("arguments"), dict) else {}),
                 "output": self._compact_prompt_value(result.get("output")),
+                "outcome": result.get("outcome") or (
+                    self._tools[str(result.get("name"))].outcome(as_dict(result.get("output")))
+                    if str(result.get("name")) in self._tools
+                    else failed_outcome("unknown_tool", "Unknown tool.")
+                ),
             }
             for result in tool_results
         ]
@@ -1964,94 +2062,8 @@ class ChatService:
         return f"Confirmed {tool_name.replace('_', ' ')} for {target}."
 
     def _confirmation_result_text(self, tool_name: str, output: dict[str, Any]) -> str:
-        if output.get("error"):
-            return str(output.get("detail") or output.get("error") or "I could not complete that action.")
-        if tool_name in {"open_device", "command_device", "open_gate"}:
-            device = as_dict(output.get("device"))
-            name = device.get("name") or output.get("target") or "the gate"
-            action = "open" if tool_name == "open_gate" else str(output.get("action") or "open")
-            past = "Opened" if action == "open" else "Closed"
-            success = bool(output.get("opened") if action == "open" else output.get("closed"))
-            return f"{past} {name}. Logged, tidy, and pleasingly uneventful." if success else f"I could not {action} {name}."
-        if tool_name == "override_schedule":
-            if output.get("created"):
-                return f"Created the temporary access override for {output.get('person') or 'that person'} until {output.get('ends_at_display') or output.get('ends_at')}."
-            return str(output.get("detail") or "I did not create the schedule override.")
-        if tool_name == "create_schedule":
-            schedule = as_dict(output.get("schedule"))
-            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
-            summary = schedule.get("summary")
-            return f"Created {name}{f' with {summary}' if summary else ''}." if output.get("created") else str(output.get("detail") or f"I did not create {name}.")
-        if tool_name == "create_visitor_pass":
-            if output.get("created"):
-                visitor_pass = as_dict(output.get("visitor_pass"))
-                return f"Created the Visitor Pass for {visitor_pass.get('visitor_name') or output.get('visitor_name') or 'that visitor'}."
-            return str(output.get("detail") or output.get("error") or "I did not create the Visitor Pass.")
-        if tool_name == "update_visitor_pass":
-            if output.get("updated"):
-                visitor_pass = as_dict(output.get("visitor_pass"))
-                return f"Updated the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
-            return str(output.get("detail") or output.get("error") or "I did not update the Visitor Pass.")
-        if tool_name == "cancel_visitor_pass":
-            if output.get("cancelled"):
-                visitor_pass = as_dict(output.get("visitor_pass"))
-                return f"Cancelled the Visitor Pass for {visitor_pass.get('visitor_name') or 'that visitor'}."
-            return str(output.get("detail") or output.get("error") or "I did not cancel the Visitor Pass.")
-        if tool_name == "trigger_icloud_sync":
-            if output.get("synced"):
-                return (
-                    "iCloud Calendar sync finished: "
-                    f"{output.get('events_matched', 0)} Open Gate events matched, "
-                    f"{output.get('passes_created', 0)} passes created, "
-                    f"{output.get('passes_updated', 0)} updated, "
-                    f"{output.get('passes_cancelled', 0)} cancelled."
-                )
-            return str(output.get("detail") or output.get("error") or "I did not sync iCloud Calendar.")
-        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
-            if output.get("changed") or output.get("enabled") or output.get("disabled"):
-                state = output.get("state") or ("enabled" if output.get("enabled") else "disabled")
-                return f"Maintenance Mode is now {state}."
-            return str(output.get("detail") or output.get("error") or "I did not change Maintenance Mode.")
-        if tool_name == "update_schedule":
-            schedule = as_dict(output.get("schedule"))
-            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
-            summary = schedule.get("summary")
-            return f"Updated {name}{f' to {summary}' if summary else ''}."
-        if tool_name == "delete_schedule":
-            schedule = as_dict(output.get("schedule"))
-            name = schedule.get("name") or output.get("schedule_name") or "the schedule"
-            return f"Deleted {name}." if output.get("deleted") else str(output.get("detail") or f"I did not delete {name}.")
-        if tool_name == "create_notification_workflow":
-            workflow = as_dict(output.get("workflow"))
-            return f"Created notification workflow {workflow.get('name') or output.get('workflow_name') or ''}. Neatly filed.".strip()
-        if tool_name == "update_notification_workflow":
-            workflow = as_dict(output.get("workflow"))
-            return f"Updated notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
-        if tool_name == "delete_notification_workflow":
-            workflow = as_dict(output.get("workflow"))
-            return f"Deleted notification workflow {workflow.get('name') or output.get('workflow_name') or ''}.".strip()
-        if tool_name == "test_notification_workflow":
-            if output.get("sent"):
-                return "Sent the notification workflow test. Tiny paper plane launched."
-            return str(output.get("detail") or "I did not send the notification workflow test.")
-        if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
-            if output.get("backfilled"):
-                return (
-                    f"Backfilled the {output.get('direction') or 'access'} event for "
-                    f"{output.get('registration_number') or 'that plate'} at "
-                    f"{output.get('occurred_at_display') or output.get('occurred_at')}. "
-                    f"Presence {'was' if output.get('presence_updated') else 'was not'} updated."
-                )
-            return str(output.get("detail") or output.get("error") or "I did not backfill the access event.")
-        if tool_name == "test_unifi_alarm_webhook":
-            if output.get("sent"):
-                return "Sent the UniFi Protect Alarm Manager webhook test and checked for a matching IACS webhook trace."
-            return str(output.get("detail") or output.get("error") or "I did not send the UniFi Protect webhook test.")
-        if tool_name == "trigger_anomaly_alert":
-            if output.get("sent"):
-                return f"Sent the anomaly alert: {output.get('title') or 'Alert'}."
-            return str(output.get("detail") or output.get("error") or "I did not send the anomaly alert.")
-        return str(output.get("detail") or "Action completed.")
+        tool = self._tools.get(tool_name)
+        return tool.confirmation_text(output) if tool else str(output.get("error") or "Unknown tool.")
 
     async def _ensure_session(self, session_id: str | None) -> uuid.UUID:
         async with AsyncSessionLocal() as session:
@@ -2212,13 +2224,14 @@ class ChatService:
     async def _load_memory(self, session_id: uuid.UUID) -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
             chat_session = await session.get(ChatSession, session_id)
-            return chat_session.context if chat_session and chat_session.context else {}
+            memory = chat_session.context if chat_session and chat_session.context else {}
+            return {key: value for key, value in memory.items() if key != "pending_agent_action"}
 
     async def _save_memory(self, session_id: uuid.UUID, memory: dict[str, Any]) -> None:
         async with AsyncSessionLocal() as session:
             chat_session = await session.get(ChatSession, session_id)
             if chat_session:
-                chat_session.context = memory
+                chat_session.context = {key: value for key, value in memory.items() if key != "pending_agent_action"}
                 await session.commit()
 
     async def _update_memory(
@@ -2400,7 +2413,8 @@ class ChatService:
                     "call_id": call.id,
                     "name": call.name,
                     "arguments": call.arguments,
-                    "output": {"error": message},
+                    "output": {"error": message, "error_code": "timeout"},
+                    "outcome": failed_outcome("timeout", message),
                 }
             except Exception as exc:  # noqa: BLE001 - All tool failures must become explicit failed batch results.
                 logger.warning("agent_tool_failed", extra={"tool": call.name, "error": str(exc)[:240]})
@@ -2421,7 +2435,8 @@ class ChatService:
                     "call_id": call.id,
                     "name": call.name,
                     "arguments": call.arguments,
-                    "output": {"error": str(exc)[:500]},
+                    "output": {"error": str(exc)[:500], "error_code": "tool_exception"},
+                    "outcome": failed_outcome("tool_exception", str(exc)[:500]),
                 }
 
         if parallel:
@@ -2460,7 +2475,8 @@ class ChatService:
             return {
                 "call_id": call.id,
                 "name": call.name,
-                "output": {"error": f"Unknown tool: {call.name}"},
+                "output": {"error": f"Unknown tool: {call.name}", "error_code": "unknown_tool"},
+                "outcome": failed_outcome("unknown_tool", f"Unknown tool: {call.name}"),
             }
         if status_callback:
             await status_callback(
@@ -2473,7 +2489,8 @@ class ChatService:
                     "agents_running": 1,
                 }
             )
-        output = await tool.handler(call.arguments)
+        result = await self._invoke_tool_call(call)
+        output, outcome = result["output"], result["outcome"]
         await self._append_tool_message(session_id, call, output)
         self._audit_agent_tool_call(call, output)
         if status_callback:
@@ -2482,12 +2499,21 @@ class ChatService:
                     **self._tool_status(call.name),
                     "batch_id": batch_id,
                     "call_id": call.id,
-                    "status": "requires_confirmation" if output.get("requires_confirmation") else "succeeded",
+                    "status": outcome["status"],
                     "phase": "awaiting_confirmation" if output.get("requires_confirmation") else "using_tools",
                     "agents_running": 0 if output.get("requires_confirmation") else 1,
                 }
             )
-        return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output}
+        return result
+
+    async def _invoke_tool_call(self, call: ToolCall) -> dict[str, Any]:
+        tool = self._tools[call.name]
+        error = validate_tool_arguments(call.arguments, tool.parameters)
+        output = {"error": error, "error_code": "invalid_arguments"} if error else await tool.handler(call.arguments)
+        if not isinstance(output, dict):
+            output = {"error": "Tool returned an invalid result.", "error_code": "invalid_result"}
+        outcome = tool.outcome(output)
+        return {"call_id": call.id, "name": call.name, "arguments": call.arguments, "output": output, "outcome": outcome}
 
     async def _store_pending_agent_action(
         self,
@@ -2503,18 +2529,17 @@ class ChatService:
         actor_context: dict[str, Any],
         iteration: int,
     ) -> dict[str, Any]:
-        confirmation_id = f"confirm-{uuid.uuid4().hex}"
-        now = datetime.now(tz=UTC)
         pending = {
-            "id": confirmation_id,
-            "session_id": str(session_id),
             "tool_name": str(pending_result.get("name") or ""),
             "arguments": self._protect_pending_arguments(
                 str(pending_result.get("name") or ""),
                 pending_result.get("arguments") if isinstance(pending_result.get("arguments"), dict) else {},
             ),
             "preview_output": pending_result.get("output") if isinstance(pending_result.get("output"), dict) else {},
-            "tool_results": self._tool_results_for_prompt(tool_results),
+            "tool_results": self._protect_pending_value(
+                self._tool_results_for_prompt(tool_results), key="tool_results",
+                tool_name=str(pending_result.get("name") or ""),
+            ),
             "route": {
                 "intents": list(route.intents),
                 "confidence": route.confidence,
@@ -2525,68 +2550,32 @@ class ChatService:
             "selected_tools": [tool.name for tool in selected_tools],
             "provider": provider_name,
             "user_message": user_message,
-            "user_id": user_id or None,
-            "actor_context": actor_context,
             "iteration": iteration,
-            "created_at": now.isoformat(),
-            "expires_at": (now + timedelta(minutes=10)).isoformat(),
+            "tool_contract": self._approval_tool_contract(str(pending_result.get("name") or "")),
         }
-        memory = await self._load_memory(session_id)
-        memory["pending_agent_action"] = pending
-        await self._save_memory(session_id, memory)
-        return self._pending_action_public_payload(pending)
+        preview = as_dict(pending.get("preview_output"))
+        try:
+            operation_id = uuid.UUID(str(preview.get("intent_id"))) if preview.get("intent_id") else None
+        except (TypeError, ValueError):
+            operation_id = None
+        if preview.get("idempotency_key"):
+            pending["idempotency_key"] = str(preview["idempotency_key"])
+        approval = await self._approvals.create(session_id, user_id, pending, operation_id=operation_id)
+        return self._pending_action_public_payload(approval.pending_payload())
+
+    def _approval_tool_contract(self, tool_name: str) -> dict[str, Any] | None:
+        tool = self._tools.get(tool_name)
+        if not tool:
+            return None
+        return {"name": tool.name, "parameters": tool.parameters,
+                "required_permissions": list(tool.required_permissions),
+                "read_only": tool.read_only, "requires_confirmation": tool.requires_confirmation}
 
     async def _pending_action_for_response(
-        self,
-        session_id: uuid.UUID,
-        *,
-        user_id: str | None,
+        self, session_id: uuid.UUID, *, user_id: str | None,
     ) -> dict[str, Any] | None:
-        memory = await self._load_memory(session_id)
-        pending = memory.get("pending_agent_action")
-        if not isinstance(pending, dict):
-            return None
-        if user_id and pending.get("user_id") and str(pending.get("user_id")) != str(user_id):
-            return None
-        if self._pending_action_expired(pending):
-            memory.pop("pending_agent_action", None)
-            await self._save_memory(session_id, memory)
-            return None
-        return self._pending_action_public_payload(pending)
-
-    async def _load_pending_agent_action(
-        self,
-        session_id: uuid.UUID,
-        *,
-        confirmation_id: str,
-        user_id: str | None,
-    ) -> dict[str, Any] | None:
-        memory = await self._load_memory(session_id)
-        pending = memory.get("pending_agent_action")
-        if not isinstance(pending, dict) or pending.get("id") != confirmation_id:
-            return None
-        if user_id and pending.get("user_id") and str(pending.get("user_id")) != str(user_id):
-            return None
-        if self._pending_action_expired(pending):
-            memory.pop("pending_agent_action", None)
-            await self._save_memory(session_id, memory)
-            return None
-        return pending
-
-    async def _clear_pending_agent_action(self, session_id: uuid.UUID) -> None:
-        memory = await self._load_memory(session_id)
-        if "pending_agent_action" in memory:
-            memory.pop("pending_agent_action", None)
-            await self._save_memory(session_id, memory)
-
-    def _pending_action_expired(self, pending: dict[str, Any]) -> bool:
-        try:
-            expires_at = datetime.fromisoformat(str(pending.get("expires_at")))
-        except (TypeError, ValueError):
-            return True
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        return expires_at <= datetime.now(tz=UTC)
+        pending = await self._approvals.pending(session_id, user_id)
+        return self._pending_action_public_payload(pending.pending_payload()) if pending else None
 
     def _pending_action_public_payload(self, pending: dict[str, Any]) -> dict[str, Any]:
         output = as_dict(pending.get("preview_output"))
@@ -2637,28 +2626,8 @@ class ChatService:
         return f"Confirm {target or tool_name.replace('_', ' ')}?"
 
     def _confirmation_button_label(self, tool_name: str, output: dict[str, Any] | None = None) -> str:
-        if tool_name in {"open_device", "command_device", "open_gate"}:
-            action = "open" if tool_name == "open_gate" else str((output or {}).get("action") or "open")
-            return "Close" if action == "close" else "Open"
-        if tool_name == "override_schedule":
-            return "Create override"
-        if tool_name == "create_schedule":
-            return "Create schedule"
-        if tool_name == "create_visitor_pass":
-            return "Create pass"
-        if tool_name == "update_visitor_pass":
-            return "Update pass"
-        if tool_name == "cancel_visitor_pass":
-            return "Cancel pass"
-        if tool_name == "trigger_icloud_sync":
-            return "Sync calendars"
-        if tool_name in {"backfill_access_event_from_protect", "investigate_access_incident"}:
-            return "Backfill event"
-        if tool_name == "test_unifi_alarm_webhook":
-            return "Send test"
-        if tool_name in {"toggle_maintenance_mode", "enable_maintenance_mode", "disable_maintenance_mode"}:
-            return "Confirm"
-        return "Confirm"
+        tool = self._tools.get(tool_name)
+        return tool.button_handler(tool_name, output or {}) if tool and tool.button_handler else "Confirm"
 
     def _confirmed_arguments_for_pending(self, pending: dict[str, Any]) -> dict[str, Any]:
         arguments = self._restore_pending_arguments(as_dict(pending.get("arguments")))
@@ -2731,11 +2700,10 @@ class ChatService:
 
     def _audit_agent_tool_call(self, call: ToolCall, output: dict[str, Any]) -> None:
         context = get_chat_tool_context()
-        failed = bool(output.get("error")) or output.get("accepted") is False or (
-            output.get("opened") is False and not output.get("requires_confirmation")
-        )
-        requires_confirmation = bool(output.get("requires_confirmation"))
         tool = self._tools.get(call.name)
+        outcome = tool.outcome(output) if tool else {"status": "failed"}
+        failed = outcome["status"] == "failed"
+        requires_confirmation = outcome["status"] == "requires_confirmation"
         state_changing = bool(tool and tool.requires_confirmation)
         emit_audit_log(
             category=TELEMETRY_CATEGORY_ALFRED,
@@ -2745,7 +2713,7 @@ class ChatService:
             target_entity="AgentTool",
             target_id=call.name,
             target_label=call.name.replace("_", " ").title(),
-            outcome="pending_confirmation" if requires_confirmation else "failed" if failed else "success",
+            outcome="pending_confirmation" if requires_confirmation else "failed" if failed else "requires_details" if outcome["status"] == "requires_details" else "success",
             level="purple" if not failed else "error",
             metadata={
                 "trigger": context.get("trigger") or "user_requested",
@@ -2787,82 +2755,8 @@ class ChatService:
             )
 
     def _tool_status(self, tool_name: str) -> dict[str, Any]:
-        labels = {
-            "resolve_human_entity": "Resolving system entity...",
-            "query_presence": "Checking presence logs...",
-            "query_device_states": "Checking device states...",
-            "open_device": "Preparing device command...",
-            "command_device": "Preparing device command...",
-            "open_gate": "Preparing gate open command...",
-            "get_maintenance_status": "Checking Maintenance Mode...",
-            "enable_maintenance_mode": "Preparing Maintenance Mode...",
-            "disable_maintenance_mode": "Preparing Maintenance Mode...",
-            "toggle_maintenance_mode": "Preparing Maintenance Mode...",
-            "get_active_malfunctions": "Checking gate malfunction state...",
-            "get_malfunction_history": "Reviewing gate malfunction history...",
-            "trigger_manual_malfunction_override": "Preparing gate malfunction override...",
-            "query_access_events": "Reviewing access events...",
-            "diagnose_access_event": "Diagnosing access event...",
-            "investigate_access_incident": "Investigating access incident...",
-            "query_unifi_protect_events": "Checking UniFi Protect history...",
-            "backfill_access_event_from_protect": "Preparing access event backfill...",
-            "test_unifi_alarm_webhook": "Preparing Protect webhook test...",
-            "query_lpr_timing": "Checking LPR timing...",
-            "query_vehicle_detection_history": "Counting vehicle detections...",
-            "get_telemetry_trace": "Reading telemetry trace...",
-            "query_anomalies": "Checking anomaly records...",
-            "summarize_access_rhythm": "Summarizing site rhythm...",
-            "calculate_visit_duration": "Calculating visit duration...",
-            "calculate_absence_duration": "Calculating absence duration...",
-            "query_leaderboard": "Checking Top Charts...",
-            "trigger_anomaly_alert": "Preparing alert notification...",
-            "get_system_users": "Checking user directory...",
-            "query_integration_health": "Checking integration health...",
-            "test_integration_connection": "Preparing integration test...",
-            "query_system_settings": "Reading redacted settings...",
-            "update_system_settings": "Preparing settings update...",
-            "query_auth_secret_status": "Checking auth-secret status...",
-            "rotate_auth_secret": "Preparing auth-secret rotation...",
-            "query_dependency_updates": "Checking dependency update state...",
-            "check_dependency_updates": "Preparing dependency update check...",
-            "analyze_dependency_update": "Preparing dependency analysis...",
-            "apply_dependency_update": "Preparing dependency apply job...",
-            "query_dependency_backups": "Checking dependency backups...",
-            "restore_dependency_backup": "Preparing dependency restore job...",
-            "query_dependency_update_job": "Checking dependency job...",
-            "configure_dependency_backup_storage": "Preparing backup storage update...",
-            "validate_dependency_backup_storage": "Preparing backup storage validation...",
-            "lookup_dvla_vehicle": "Looking up vehicle details...",
-            "analyze_camera_snapshot": "Analyzing camera snapshot...",
-            "read_chat_attachment": "Reading attachment...",
-            "export_presence_report_csv": "Generating CSV report...",
-            "generate_contractor_invoice_pdf": "Generating PDF invoice...",
-            "get_camera_snapshot": "Fetching camera snapshot...",
-            "query_schedules": "Checking schedules...",
-            "get_schedule": "Checking schedule details...",
-            "create_schedule": "Creating schedule...",
-            "update_schedule": "Updating schedule...",
-            "delete_schedule": "Deleting schedule...",
-            "query_schedule_targets": "Checking schedule assignments...",
-            "assign_schedule_to_entity": "Assigning schedule...",
-            "override_schedule": "Preparing schedule override...",
-            "verify_schedule_access": "Verifying schedule access...",
-            "query_notification_catalog": "Checking notification options...",
-            "query_notification_workflows": "Checking notification workflows...",
-            "get_notification_workflow": "Checking notification workflow...",
-            "create_notification_workflow": "Preparing notification workflow...",
-            "update_notification_workflow": "Preparing notification workflow update...",
-            "delete_notification_workflow": "Preparing notification workflow deletion...",
-            "preview_notification_workflow": "Previewing notification workflow...",
-            "test_notification_workflow": "Preparing notification test...",
-            "query_visitor_passes": "Checking Visitor Passes...",
-            "get_visitor_pass": "Checking Visitor Pass...",
-            "create_visitor_pass": "Preparing Visitor Pass...",
-            "update_visitor_pass": "Preparing Visitor Pass update...",
-            "cancel_visitor_pass": "Preparing Visitor Pass cancellation...",
-            "trigger_icloud_sync": "Preparing iCloud Calendar sync...",
-        }
-        return {"tool": tool_name, "label": labels.get(tool_name, "Running system tool...")}
+        tool = self._tools.get(tool_name)
+        return {"tool": tool_name, "label": tool.status_label if tool else "Running system tool..."}
 
 
 

@@ -61,6 +61,7 @@ import {
 import { IntegrationDefinition, IntegrationFeedback, integrationInitialValues, ProtectIntegrationTab } from "./catalog";
 import { DependencyUpdatePanel, dependencyIsActionableUpdate } from "./dependencyUpdates";
 import { UnifiProtectExposesPanel, UnifiProtectUpdatesPanel } from "./unifiProtect";
+import { IncomingMessageRecovery } from "./IncomingMessageRecovery";
 function streamStatusForDevice(
   device: ESPHomeDeviceSummary,
   streamDevices: AccessDeviceStreamDeviceStatus[]
@@ -609,6 +610,7 @@ export function IntegrationModal({
             ) : undefined}
           />
         )}
+        {isDiscord || isWhatsApp ? <IncomingMessageRecovery currentUser={currentUser} provider={isDiscord ? "discord" : "whatsapp"} /> : null}
         {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
         <div className="modal-actions">
           {isApprise || isDiscord || isWhatsApp ? (

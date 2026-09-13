@@ -248,8 +248,16 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
     async def inactive_maintenance() -> bool:
         return False
 
-    async def consume(_session, **kwargs) -> None:
+    async def consume(_session, **kwargs):
         consumed.update(kwargs)
+        return SimpleNamespace(id=uuid.uuid4(), expires_at=datetime.now(tz=UTC) + timedelta(minutes=1))
+
+    class FakeDevices:
+        async def preview_gate_open(self, *, target_device_key):
+            return {"targets": ["synthetic"], "selected_device_key": target_device_key}
+
+    async def audit(_session, **kwargs):
+        assert kwargs["action"] == "gate.open" and kwargs["outcome"] == "success"
 
     class FakeCoordinator:
         async def execute_open(self, intent):
@@ -258,7 +266,8 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
     monkeypatch.setattr(integrations, "is_maintenance_mode_active", inactive_maintenance)
     monkeypatch.setattr(integrations, "require_confirmed_action", consume)
     monkeypatch.setattr(integrations, "get_gate_command_coordinator", lambda: FakeCoordinator())
-    monkeypatch.setattr(integrations, "emit_audit_log", lambda **_kwargs: None)
+    monkeypatch.setattr(integrations, "get_access_device_service", lambda: FakeDevices())
+    monkeypatch.setattr(integrations, "write_audit_log", audit)
     transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(

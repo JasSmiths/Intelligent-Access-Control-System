@@ -1,11 +1,34 @@
 """Automation Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from sqlalchemy import (
+    func,
+    or_,
+    select,
+)
+from sqlalchemy.exc import IntegrityError
+
+from app.ai.tool_groups._shared import (
+    _bounded_int,
+    _chat_context_user,
+    _normalize,
+    _optional_text,
+    _uuid_from_value,
+    logger,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import AutomationRule
+from app.services.automations import (
+    AutomationError,
+    get_automation_service,
+)
+from app.services.automations import (
+    serialize_rule as serialize_automation_rule,
+)
+from app.services.mutation_context import MutationError
 
 
 async def _resolve_automation_rule(session, arguments: dict[str, Any]) -> AutomationRule | None:
@@ -111,39 +134,29 @@ async def create_automation(arguments: dict[str, Any]) -> dict[str, Any]:
             "automation_name": str(arguments.get("name") or "automation").strip(),
             "detail": "Create this automation? Active rules may later perform real system actions.",
         }
-    name = str(arguments.get("name") or "").strip()
-    triggers = normalize_automation_triggers(arguments.get("triggers"))
-    actions = normalize_automation_actions(arguments.get("actions"))
-    if not name:
-        return {"created": False, "error": "Automation name is required."}
-    if not triggers:
-        return {"created": False, "error": "At least one automation trigger is required."}
-    if not actions:
-        return {"created": False, "error": "At least one automation action is required."}
-
     user = await _chat_context_user()
     async with AsyncSessionLocal() as session:
         try:
             rule = await get_automation_service().create_rule(
                 session,
-                name=name,
+                name=arguments.get("name", ""),
                 description=_optional_text(arguments.get("description")),
-                triggers=triggers,
-                conditions=normalize_automation_conditions(arguments.get("conditions")),
-                actions=actions,
+                triggers=arguments.get("triggers"),
+                conditions=arguments.get("conditions"),
+                actions=arguments.get("actions"),
                 is_active=arguments.get("is_active", True) is not False,
                 created_by=user,
             )
             await session.commit()
             await session.refresh(rule)
-        except (AutomationError, IntegrityError) as exc:
+        except (AutomationError, MutationError, IntegrityError) as exc:
             await session.rollback()
             return {"created": False, "error": str(exc)}
         serialized = serialize_automation_rule(rule)
     return {
         "created": True,
         "automation": serialized,
-        "dry_run": await get_automation_service().dry_run_rule(serialized),
+        **await _optional_dry_run(serialized),
     }
 
 
@@ -168,21 +181,21 @@ async def edit_automation(arguments: dict[str, Any]) -> dict[str, Any]:
                 actor=user,
                 name=str(arguments["name"]).strip() if "name" in arguments else None,
                 description=str(arguments.get("description") or "").strip() if "description" in arguments else None,
-                triggers=normalize_automation_triggers(arguments.get("triggers")) if "triggers" in arguments else None,
-                conditions=normalize_automation_conditions(arguments.get("conditions")) if "conditions" in arguments else None,
-                actions=normalize_automation_actions(arguments.get("actions")) if "actions" in arguments else None,
+                triggers=arguments.get("triggers") if "triggers" in arguments else None,
+                conditions=arguments.get("conditions") if "conditions" in arguments else None,
+                actions=arguments.get("actions") if "actions" in arguments else None,
                 is_active=bool(arguments.get("is_active")) if "is_active" in arguments else None,
             )
             await session.commit()
             await session.refresh(rule)
-        except (AutomationError, IntegrityError) as exc:
+        except (AutomationError, MutationError, IntegrityError) as exc:
             await session.rollback()
             return {"updated": False, "error": str(exc)}
         serialized = serialize_automation_rule(rule)
     return {
         "updated": True,
         "automation": serialized,
-        "dry_run": await get_automation_service().dry_run_rule(serialized),
+        **await _optional_dry_run(serialized),
     }
 
 
@@ -232,3 +245,11 @@ async def _set_automation_active(arguments: dict[str, Any], *, active: bool) -> 
         await session.commit()
         await session.refresh(rule)
         return {"updated": True, "automation": serialize_automation_rule(rule)}
+
+
+async def _optional_dry_run(rule: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return {"dry_run": await get_automation_service().dry_run_rule(rule)}
+    except Exception:  # noqa: BLE001 - Preview cannot undo a committed automation.
+        logger.exception("automation_saved_preview_failed")
+        return {"warnings": ["The automation was saved, but its preview is unavailable."]}

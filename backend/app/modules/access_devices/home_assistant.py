@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 
 from app.modules.access_devices.base import (
@@ -7,11 +8,13 @@ from app.modules.access_devices.base import (
     ACCESS_DEVICE_KIND_GATE,
     AccessDeviceBinding,
     AccessDeviceCommandResult,
+    AccessDeviceCommandUncertain,
     AccessDeviceDiscoveryItem,
     AccessDeviceProviderStatus,
     AccessDeviceProviderUnavailable,
+    AccessDeviceStateObservation,
 )
-from app.modules.gate.base import GateState
+from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
 from app.modules.home_assistant.covers import (
     DEFAULT_CLOSE_SERVICE,
@@ -20,7 +23,7 @@ from app.modules.home_assistant.covers import (
     normalize_cover_state,
     title_from_entity_id,
 )
-from app.services.settings import get_runtime_config
+from app.services.settings import RuntimeConfig, get_runtime_config
 
 
 class HomeAssistantAccessDeviceProvider:
@@ -98,11 +101,25 @@ class HomeAssistantAccessDeviceProvider:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
         return gate_state_from_cover_state(str(state.state))
 
+    async def observe_state(self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None) -> AccessDeviceStateObservation:
+        # This adapter performs a fresh GET; it does not refresh the timestamp of
+        # a locally cached value as if it were new physical evidence.
+        if runtime_config is None:
+            state = await self.current_state(binding)
+        else:
+            try:
+                observed = await self._client.get_state(binding.external_id, runtime_config=runtime_config)
+            except Exception as exc:
+                raise AccessDeviceProviderUnavailable(str(exc)) from exc
+            state = gate_state_from_cover_state(str(observed.state))
+        return AccessDeviceStateObservation(state, datetime.now(tz=UTC))
+
     async def command_cover(
         self,
         binding: AccessDeviceBinding,
         action: str,
         reason: str,
+        *, runtime_config: RuntimeConfig | None = None,
     ) -> AccessDeviceCommandResult:
         if action not in {"open", "close"}:
             return AccessDeviceCommandResult(
@@ -111,19 +128,33 @@ class HomeAssistantAccessDeviceProvider:
                 detail=f"Unsupported cover action: {action}",
                 provider=self.provider_key,
                 external_id=binding.external_id,
+                delivery=CommandDelivery.NOT_SENT,
             )
         service_name = str(
             binding.config.get("open_service" if action == "open" else "close_service")
             or (DEFAULT_OPEN_SERVICE if action == "open" else DEFAULT_CLOSE_SERVICE)
         )
         try:
-            await self._client.call_service(service_name, {"entity_id": binding.external_id})
+            if runtime_config is None:
+                await self._client.call_service(service_name, {"entity_id": binding.external_id})
+            else:
+                await self._client.call_service(service_name, {"entity_id": binding.external_id}, runtime_config=runtime_config)
         except HomeAssistantError as exc:
-            raise AccessDeviceProviderUnavailable(str(exc)) from exc
+            if exc.delivery == "not_sent":
+                raise AccessDeviceProviderUnavailable(str(exc)) from exc
+            if exc.delivery == "rejected":
+                return AccessDeviceCommandResult(
+                    accepted=False, state=GateState.UNKNOWN, detail=str(exc),
+                    provider=self.provider_key, external_id=binding.external_id,
+                    delivery=CommandDelivery.REJECTED,
+                )
+            if exc.delivery != "accepted":
+                raise AccessDeviceCommandUncertain(str(exc)) from exc
         except Exception as exc:
-            raise AccessDeviceProviderUnavailable(str(exc)) from exc
+            raise AccessDeviceCommandUncertain(str(exc)) from exc
         try:
-            state = await self._client.get_state(binding.external_id)
+            state = (await self._client.get_state(binding.external_id, runtime_config=runtime_config)
+                     if runtime_config is not None else await self._client.get_state(binding.external_id))
         except Exception:
             # The service call has already returned successfully. Treating a
             # subsequent read failure as a rejected command could trigger an
@@ -138,7 +169,7 @@ class HomeAssistantAccessDeviceProvider:
                 external_id=binding.external_id,
                 metadata={
                     "service": service_name,
-                    "immediate_state_read": "unavailable",
+                    "immediate_state_read": "unavailable", "acceptance_basis": "home_assistant_http_2xx",
                     "state_verification_pending": True,
                 },
             )
@@ -148,7 +179,8 @@ class HomeAssistantAccessDeviceProvider:
             detail=reason,
             provider=self.provider_key,
             external_id=binding.external_id,
-            metadata={"service": service_name},
+            metadata={"service": service_name, "acceptance_basis": "home_assistant_http_2xx"},
+            observation=AccessDeviceStateObservation(gate_state_from_cover_state(str(state.state)), datetime.now(tz=UTC)),
         )
 
     async def subscribe_state_changes(self) -> AsyncIterator[dict[str, Any]]:

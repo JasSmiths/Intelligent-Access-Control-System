@@ -11,9 +11,20 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.ai.tool_groups import _shared as tools_facade
+from app.ai.tool_groups._shared import (
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _compact_observation,
+    _entity_match_key,
+    _entity_match_score,
+    _normalize,
+)
 from app.ai.tool_groups.visitor_passes_handlers import _visitor_pass_agent_payload
+from app.db.session import AsyncSessionLocal
 from app.models import Group, Person, Presence, User, Vehicle
+from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.services.settings import get_runtime_config
+from app.services.visitor_passes import get_visitor_pass_service
 
 
 async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -31,10 +42,10 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
     else:
         entity_types = {"person", "vehicle", "group", "device", "visitor_pass"}
     include_inactive = bool(arguments.get("include_inactive"))
-    query_key = tools_facade._entity_match_key(query_text)
+    query_key = _entity_match_key(query_text)
     matches: list[dict[str, Any]] = []
 
-    async with tools_facade.AsyncSessionLocal() as session:
+    async with AsyncSessionLocal() as session:
         if "person" in entity_types:
             people = (
                 await session.scalars(
@@ -60,10 +71,10 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                         " ".join(str(vehicle.color or "") for vehicle in person.vehicles),
                     ]
                 )
-                score = tools_facade._entity_match_score(query_key, haystack, exact_value=person.display_name)
+                score = _entity_match_score(query_key, haystack, exact_value=person.display_name)
                 if score:
                     matches.append(
-                        tools_facade._compact_observation(
+                        _compact_observation(
                             {
                                 "type": "person",
                                 "score": score,
@@ -85,7 +96,7 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                     .order_by(Vehicle.registration_number)
                 )
             ).all()
-            plate_query = tools_facade.normalize_registration_number(query_text)
+            plate_query = normalize_registration_number(query_text)
             for vehicle in vehicles:
                 if not include_inactive and not vehicle.is_active:
                     continue
@@ -100,14 +111,14 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                         vehicle.owner.display_name if vehicle.owner else "",
                     ]
                 )
-                score = tools_facade._entity_match_score(query_key, haystack, exact_value=vehicle.registration_number)
+                score = _entity_match_score(query_key, haystack, exact_value=vehicle.registration_number)
                 if plate_query and plate_query == vehicle.registration_number:
                     score = max(score, 100)
                 elif plate_query and plate_query in vehicle.registration_number:
                     score = max(score, 90)
                 if score:
                     matches.append(
-                        tools_facade._compact_observation(
+                        _compact_observation(
                             {
                                 "type": "vehicle",
                                 "score": score,
@@ -129,10 +140,10 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
             groups = (await session.scalars(select(Group).order_by(Group.name))).all()
             for group in groups:
                 haystack = " ".join(str(value or "") for value in [group.name, group.category.value, group.subtype, group.description])
-                score = tools_facade._entity_match_score(query_key, haystack, exact_value=group.name)
+                score = _entity_match_score(query_key, haystack, exact_value=group.name)
                 if score:
                     matches.append(
-                        tools_facade._compact_observation(
+                        _compact_observation(
                             {
                                 "type": "group",
                                 "score": score,
@@ -145,8 +156,8 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                     )
 
         if "visitor_pass" in entity_types:
-            config = await tools_facade.get_runtime_config()
-            service = tools_facade.get_visitor_pass_service()
+            config = await get_runtime_config()
+            service = get_visitor_pass_service()
             changed = await service.refresh_statuses(session=session, publish=False)
             if changed:
                 await session.commit()
@@ -162,7 +173,7 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                         visitor_pass.status.value,
                     ]
                 )
-                score = tools_facade._entity_match_score(query_key, haystack, exact_value=visitor_pass.visitor_name)
+                score = _entity_match_score(query_key, haystack, exact_value=visitor_pass.visitor_name)
                 if visitor_pass.status.value in {"cancelled", "expired"}:
                     score = max(0, score - 25)
                 if score:
@@ -175,10 +186,10 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                             "visitor_pass_id": str(visitor_pass.id),
                         }
                     )
-                    matches.append(tools_facade._compact_observation(payload))
+                    matches.append(_compact_observation(payload))
 
     if "device" in entity_types:
-        config = await tools_facade.get_runtime_config()
+        config = await get_runtime_config()
         device_rows = [
             ("gate", entity)
             for entity in list(getattr(config, "home_assistant_gate_entities", None) or [])
@@ -193,10 +204,10 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
                 continue
             name = str(entity.get("name") or entity.get("entity_id") or "")
             haystack = f"{name} {entity.get('entity_id') or ''} {kind.replace('_', ' ')}"
-            score = tools_facade._entity_match_score(query_key, haystack, exact_value=name)
+            score = _entity_match_score(query_key, haystack, exact_value=name)
             if score:
                 matches.append(
-                    tools_facade._compact_observation(
+                    _compact_observation(
                         {
                             "type": "device",
                             "score": score,
@@ -233,9 +244,9 @@ async def resolve_human_entity(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
-    person_filter = tools_facade._normalize(arguments.get("person"))
-    config = await tools_facade.get_runtime_config()
-    async with tools_facade.AsyncSessionLocal() as session:
+    person_filter = _normalize(arguments.get("person"))
+    config = await get_runtime_config()
+    async with AsyncSessionLocal() as session:
         query = select(Presence).options(selectinload(Presence.person)).order_by(Presence.updated_at.desc())
         rows = (await session.scalars(query)).all()
 
@@ -243,8 +254,8 @@ async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
         {
             "person": row.person.display_name,
             "state": row.state.value,
-            "last_changed_at": tools_facade._agent_datetime_iso(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
-            "last_changed_at_display": tools_facade._agent_datetime_display(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
+            "last_changed_at": _agent_datetime_iso(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
+            "last_changed_at_display": _agent_datetime_display(row.last_changed_at, config.site_timezone) if row.last_changed_at else None,
         }
         for row in rows
         if not person_filter or person_filter in row.person.display_name.lower()
@@ -254,7 +265,7 @@ async def query_presence(arguments: dict[str, Any]) -> dict[str, Any]:
 
 async def get_system_users(arguments: dict[str, Any]) -> dict[str, Any]:
     include_inactive = bool(arguments.get("include_inactive"))
-    async with tools_facade.AsyncSessionLocal() as session:
+    async with AsyncSessionLocal() as session:
         query = select(User).order_by(User.first_name, User.last_name)
         users = (await session.scalars(query)).all()
 

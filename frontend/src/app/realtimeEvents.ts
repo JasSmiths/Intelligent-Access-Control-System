@@ -3,37 +3,10 @@ import type { AccessEvent, HomeAssistantManagedCover, IntegrationStatus, Mainten
 import { isRecord, nullableString, numberPayload, stringPayload, titleCase } from "../lib/format";
 export const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
 export const REALTIME_RECONNECT_DELAY_MS = 1500;
-export const REALTIME_RESUME_REFRESH_MIN_INTERVAL_MS = 1000;
 export const REALTIME_RESUME_RECONNECT_AFTER_MS = 30000;
 export const REALTIME_CLIENT_PING_INTERVAL_MS = 25000;
 export const REALTIME_PROBE_TIMEOUT_MS = 5000;
 export const REALTIME_DEFER_PARSE_BYTES = 256 * 1024;
-const REALTIME_DATA_REFRESH_EVENTS = new Set([
-  "access_event.finalize_failed",
-  "automation.run.failed",
-  "automation.run.skipped",
-  "automation.run.succeeded",
-  "alerts.updated",
-  "visitor_pass.created",
-  "visitor_pass.updated",
-  "visitor_pass.cancelled",
-  "visitor_pass.deleted",
-  "visitor_pass.status_changed",
-  "visitor_pass.used",
-  "visitor_pass.departure_recorded"
-]);
-const REALTIME_AUDIT_REFRESH_ACTION_PREFIXES = [
-  "automation_rule.",
-  "dependency_updates.",
-  "group.",
-  "notification_rule.",
-  "person.",
-  "schedule.",
-  "settings.",
-  "user.",
-  "vehicle.",
-  "visitor_pass."
-];
 export type NotificationToast = {
   id: string;
   title: string;
@@ -248,15 +221,6 @@ function notificationToastActions(value: unknown): NotificationToastAction[] {
     };
     return action.id && action.label && action.method && action.path ? [action as NotificationToastAction] : [];
   });
-}
-export function shouldRefreshDataForRealtimeEvent(event: RealtimeMessage) {
-  if (REALTIME_DATA_REFRESH_EVENTS.has(event.type) || event.type.startsWith("automation.run.")) {
-    return true;
-  }
-  if (event.type !== "audit.log.created") return false;
-  const payload = isRecord(event.payload.log) ? event.payload.log : event.payload;
-  const action = stringPayload(payload.action);
-  return REALTIME_AUDIT_REFRESH_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix));
 }
 export function realtimeMessageForRouteConsumers(event: RealtimeMessage): RealtimeMessage | null {
   if (event.type.startsWith("visitor_pass.")) {

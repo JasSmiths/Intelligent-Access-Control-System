@@ -22,12 +22,14 @@ from app.modules.access_devices.base import (
     ACCESS_DEVICE_KIND_GATE,
     AccessDeviceBinding,
     AccessDeviceCommandResult,
+    AccessDeviceCommandUncertain,
     AccessDeviceDiscoveryItem,
     AccessDeviceProviderStatus,
     AccessDeviceProviderUnavailable,
+    AccessDeviceStateObservation,
 )
-from app.modules.gate.base import GateState
-from app.services.settings import get_runtime_config
+from app.modules.gate.base import CommandDelivery, GateState
+from app.services.settings import RuntimeConfig, get_runtime_config
 
 
 CONNECT_TIMEOUT_SECONDS = 30.0
@@ -59,6 +61,11 @@ class _ESPHomeStateRecord:
     raw_state: str
     updated_at: datetime
     updated_monotonic: float
+
+
+def _connection_identity(device: dict[str, Any]) -> tuple[str, int, str]:
+    return (str(device.get("host") or ""), int(device.get("port") or 6053),
+            str(device.get("encryption_key") or ""))
 
 
 class ESPHomeAccessDeviceProvider:
@@ -158,11 +165,22 @@ class ESPHomeAccessDeviceProvider:
             raise AccessDeviceProviderUnavailable(f"ESPHome cover is not available: {binding.external_id}")
         return session.current_state(int(cover.key))
 
+    async def observe_state(self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None) -> AccessDeviceStateObservation:
+        device = (await self._device_for_binding(binding, runtime_config=runtime_config)
+                  if runtime_config is not None else await self._device_for_binding(binding))
+        session = await self._session_for_device(device)
+        cover = self._cover_from_binding_config(binding) or session.resolve_cover(binding)
+        record = session.states.get(int(cover.key)) if cover is not None and session.connected else None
+        if record is None:
+            raise AccessDeviceProviderUnavailable("No connected ESPHome state observation is available.")
+        return AccessDeviceStateObservation(record.state, record.updated_at)
+
     async def command_cover(
         self,
         binding: AccessDeviceBinding,
         action: str,
         reason: str,
+        *, runtime_config: RuntimeConfig | None = None,
     ) -> AccessDeviceCommandResult:
         if action not in {"open", "close"}:
             return AccessDeviceCommandResult(
@@ -171,10 +189,12 @@ class ESPHomeAccessDeviceProvider:
                 detail=f"Unsupported cover action: {action}",
                 provider=self.provider_key,
                 external_id=binding.external_id,
+                delivery=CommandDelivery.NOT_SENT,
             )
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        device = await self._device_for_binding(binding)
+        device = (await self._device_for_binding(binding, runtime_config=runtime_config)
+                  if runtime_config is not None else await self._device_for_binding(binding))
         device_resolved_at = loop.time()
         session = await self._session_for_device(device)
         configured_cover = self._cover_from_binding_config(binding)
@@ -214,8 +234,8 @@ class ESPHomeAccessDeviceProvider:
         finally:
             await self.close()
 
-    async def _configured_devices(self) -> list[dict[str, Any]]:
-        config = await get_runtime_config()
+    async def _configured_devices(self, *, runtime_config: RuntimeConfig | None = None) -> list[dict[str, Any]]:
+        config = runtime_config if runtime_config is not None else await get_runtime_config()
         return [
             device
             for device in config.esphome_devices
@@ -234,6 +254,9 @@ class ESPHomeAccessDeviceProvider:
             for device in devices:
                 device_id = str(device["id"])
                 session = self._sessions.get(device_id)
+                if session is not None and _connection_identity(session.device) != _connection_identity(device):
+                    sessions_to_stop.append(session)
+                    session = None
                 if session is None:
                     session = _ESPHomeDeviceSession(self, device, self._events)
                     self._sessions[device_id] = session
@@ -244,16 +267,21 @@ class ESPHomeAccessDeviceProvider:
             await session.stop()
 
     async def _session_for_device(self, device: dict[str, Any]) -> "_ESPHomeDeviceSession":
+        previous = None
         async with self._sessions_lock:
             device_id = str(device["id"])
             session = self._sessions.get(device_id)
+            if session is not None and _connection_identity(session.device) != _connection_identity(device):
+                previous, session = session, None
             if session is None:
                 session = _ESPHomeDeviceSession(self, device, self._events)
                 self._sessions[device_id] = session
             else:
                 session.update_device(device)
-            session.start()
-            return session
+        if previous is not None:
+            await previous.stop()
+        session.start()
+        return session
 
     async def close(self) -> None:
         async with self._sessions_lock:
@@ -262,8 +290,9 @@ class ESPHomeAccessDeviceProvider:
         if sessions:
             await asyncio.gather(*(session.stop() for session in sessions), return_exceptions=True)
 
-    async def _device_for_binding(self, binding: AccessDeviceBinding) -> dict[str, Any]:
-        devices = await self._configured_devices()
+    async def _device_for_binding(self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None) -> dict[str, Any]:
+        devices = (await self._configured_devices(runtime_config=runtime_config)
+                   if runtime_config is not None else await self._configured_devices())
         device_id = str(binding.config.get("device_id") or "").strip()
         if not device_id:
             device_id, _external_id = _split_device_external_id(binding.external_id)
@@ -345,6 +374,8 @@ class ESPHomeAccessDeviceProvider:
             detail = f"{fallback_reason}; cold reconnect failed: {exc}"
             raise AccessDeviceProviderUnavailable(detail) from exc
         connected_at = loop.time()
+        dispatch_started = False
+        command_sent = False
         try:
             if configured_cover is not None:
                 cover = configured_cover
@@ -356,7 +387,9 @@ class ESPHomeAccessDeviceProvider:
                     )
                 cover = await asyncio.wait_for(self._resolve_cover(aio, client, binding), timeout=remaining)
             cover_resolved_at = loop.time()
+            dispatch_started = True
             client.cover_command(key=int(cover.key), position=1.0 if action == "open" else 0.0)
+            command_sent = True
             command_sent_at = loop.time()
             state = await self._sample_cover_state(
                 aio,
@@ -381,7 +414,7 @@ class ESPHomeAccessDeviceProvider:
                 "key": int(cover.key),
                 "object_id": str(getattr(cover, "object_id", "") or ""),
                 "cover_resolution": "binding_config" if configured_cover is not None else "discovery",
-                "command_transport": "cold_connect",
+                "command_transport": "cold_connect", "acceptance_basis": "native_api_write",
                 "live_stream_connected": False,
                 "fallback_reason": fallback_reason,
                 "timing_ms": timing_ms,
@@ -408,10 +441,17 @@ class ESPHomeAccessDeviceProvider:
                 provider=self.provider_key,
                 external_id=binding.external_id,
                 metadata=metadata,
+                observation=(AccessDeviceStateObservation(state, datetime.now(tz=UTC)) if state != GateState.UNKNOWN else None),
             )
-        except AccessDeviceProviderUnavailable:
-            raise
         except Exception as exc:
+            if command_sent:
+                return AccessDeviceCommandResult(
+                    accepted=True, state=GateState.UNKNOWN, detail=str(exc),
+                    provider=self.provider_key, external_id=binding.external_id,
+                    metadata={"state_verification_pending": True, "command_transport": "cold_connect", "acceptance_basis": "native_api_write"},
+                )
+            if dispatch_started:
+                raise AccessDeviceCommandUncertain(str(exc)) from exc
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
         finally:
             await _disconnect(client)
@@ -665,7 +705,7 @@ class _ESPHomeDeviceSession:
             except Exception as exc:
                 detail = _connect_error_detail(exc)
                 await self._force_disconnect(detail)
-                raise AccessDeviceProviderUnavailable(detail) from exc
+                raise AccessDeviceCommandUncertain(detail) from exc
             command_sent_at = loop.time()
             timing_ms = {
                 "device_lookup": _elapsed_ms(started_at, device_resolved_at),
@@ -689,11 +729,12 @@ class _ESPHomeDeviceSession:
                     "timing_ms": timing_ms,
                 },
             )
-            state = await self.wait_state_after(
-                key,
-                after=command_sent_at,
-                timeout=COMMAND_LIVE_STATE_WAIT_SECONDS,
-            )
+            try:
+                state = await self.wait_state_after(
+                    key, after=command_sent_at, timeout=COMMAND_LIVE_STATE_WAIT_SECONDS,
+                )
+            except Exception:
+                state = GateState.UNKNOWN
             sampled_at = loop.time()
             timing_ms = {
                 **timing_ms,
@@ -707,7 +748,7 @@ class _ESPHomeDeviceSession:
                 "key": key,
                 "object_id": str(getattr(cover, "object_id", "") or ""),
                 "cover_resolution": cover_resolution,
-                "command_transport": "live_stream",
+                "command_transport": "live_stream", "acceptance_basis": "native_api_write",
                 "live_stream_connected": True,
                 "timing_ms": timing_ms,
             }
@@ -732,6 +773,7 @@ class _ESPHomeDeviceSession:
                 provider=self.provider.provider_key,
                 external_id=binding.external_id,
                 metadata=metadata,
+                observation=(AccessDeviceStateObservation(state, datetime.now(tz=UTC)) if state != GateState.UNKNOWN else None),
             )
 
     async def wait_state_after(self, key: int, *, after: float, timeout: float) -> GateState:
@@ -748,7 +790,7 @@ class _ESPHomeDeviceSession:
         except asyncio.TimeoutError:
             pass
         record = self.states.get(key)
-        return record.state if record else GateState.UNKNOWN
+        return record.state if record and record.updated_monotonic >= after else GateState.UNKNOWN
 
     async def _run(self) -> None:
         reconnect_delay = STATE_STREAM_INITIAL_RECONNECT_SECONDS

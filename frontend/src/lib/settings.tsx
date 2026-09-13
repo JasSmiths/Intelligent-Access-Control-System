@@ -96,7 +96,7 @@ export function SettingField({
     </label>
   );
 }
-export function useSettings(category?: string) {
+export function useSettings(category?: string, refreshToken = 0) {
   const [settingsRows, setSettingsRows] = React.useState<SystemSetting[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
@@ -136,7 +136,7 @@ export function useSettings(category?: string) {
   React.useEffect(() => {
     load().catch(() => undefined);
     return () => loadAbortRef.current?.abort();
-  }, [load]);
+  }, [load, refreshToken]);
   const save = React.useCallback(async (updates: Record<string, unknown>, options: { confirmationToken?: string } = {}) => {
     await api.patch<SystemSetting[]>("/api/v1/settings", {
       values: updates,

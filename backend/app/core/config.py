@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     root_path: str = ""
     auto_create_schema: bool = True
     seed_demo_data: bool = False
+    # Deployment-only recovery posture; never a mutable database setting.
+    recovery_hold: bool = False
 
     auth_secret_key: str = ""
     auth_secret_file: Path = Path("/app/data/auth-secret.key")

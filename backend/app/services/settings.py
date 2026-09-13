@@ -3,14 +3,19 @@ import json
 from time import monotonic
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.session import AsyncSessionLocal
-from app.models import SystemSetting
+from app.models import AccessDevice, AccessDeviceProviderBinding, SystemSetting, User
+from app.modules.access_devices.base import AccessDeviceBinding, binding_is_commandable, validate_gate_admission_device_key
 from app.modules.home_assistant.covers import normalize_cover_entities
+from app.services.access_device_commands import AccessDeviceCommandJournal
+from app.services.mutation_context import load_active_admin
+from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, actor_from_user, audit_diff, write_audit_log
 
 
 SECRET_KEYS = {
@@ -99,6 +104,11 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "access",
         "none",
         "Optional failover provider for gate and garage-door cover commands.",
+    ),
+    "gate_admission_device_key": (
+        "access",
+        "",
+        "Explicit entry gate for automatic admission; must be enabled, commandable and an automatic-access target. Unset blocks activation.",
     ),
     "home_assistant_url": ("integrations", str(settings.home_assistant_url) if settings.home_assistant_url else "", "Home Assistant base URL."),
     "home_assistant_token": ("integrations", settings.home_assistant_token or "", "Home Assistant long-lived access token."),
@@ -295,6 +305,7 @@ class RuntimeConfig:
     schedule_default_policy: str
     gate_control_provider: str
     gate_failover_provider: str
+    gate_admission_device_key: str | None
     home_assistant_url: str
     home_assistant_token: str
     home_assistant_gate_entities: list[dict[str, Any]]
@@ -525,9 +536,22 @@ async def get_runtime_config() -> RuntimeConfig:
         return _RUNTIME_CONFIG_CACHE
 
     async with AsyncSessionLocal() as session:
-        records = (
-            await session.scalars(select(SystemSetting).where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS))))
-        ).all()
+        config = await get_runtime_config_for_session(session)
+    _RUNTIME_CONFIG_CACHE = config
+    _RUNTIME_CONFIG_CACHE_LOADED_AT = now
+    return config
+
+
+async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig:
+    """Read current configuration under the caller's transaction and locks.
+
+    Hardware validation must use this read, then pass the returned snapshot to
+    the provider. The process cache is only suitable for non-authoritative reads.
+    """
+    records = (await session.scalars(
+        select(SystemSetting).where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS)))
+        .execution_options(populate_existing=True)
+    )).all()
 
     values = {
         key: default
@@ -568,6 +592,7 @@ async def get_runtime_config() -> RuntimeConfig:
             if str(values["gate_failover_provider"]).strip().lower() in {"none", "home_assistant", "esphome"}
             else "none"
         ),
+        gate_admission_device_key=str(values["gate_admission_device_key"] or "").strip() or None,
         home_assistant_url=str(values["home_assistant_url"] or ""),
         home_assistant_token=str(values["home_assistant_token"] or ""),
         home_assistant_gate_entities=normalize_cover_entities(
@@ -674,8 +699,6 @@ async def get_runtime_config() -> RuntimeConfig:
             else "active"
         ),
     )
-    _RUNTIME_CONFIG_CACHE = config
-    _RUNTIME_CONFIG_CACHE_LOADED_AT = now
     return config
 
 
@@ -699,19 +722,60 @@ async def list_settings(category: str | None = None, *, reveal: bool = False) ->
     ]
 
 
-async def update_settings(updates: dict[str, Any]) -> list[dict[str, Any]]:
+async def update_settings(
+    updates: dict[str, Any], *, user: User | None = None, source: str = "system",
+) -> list[dict[str, Any]]:
+    """Own setting writes and their mandatory audit in one transaction."""
     validate_dynamic_setting_keys(updates)
 
     async with AsyncSessionLocal() as session:
+        current_actor = (await load_active_admin(session, user.id,
+                         auth_version=user.auth_session_version, lock=True) if user else None)
+        target_config_keys = {"gate_admission_device_key", "gate_control_provider", "gate_failover_provider",
+                              "home_assistant_url", "home_assistant_token", "home_assistant_gate_open_service", "esphome_devices",
+                              "schedule_default_policy", "site_timezone"}
+        if set(updates) & target_config_keys:
+            query = select(AccessDevice.id)
+            if set(updates) & {"gate_control_provider", "gate_failover_provider", "schedule_default_policy", "site_timezone"}:
+                pass  # Provider order applies to every gate and garage.
+            else:
+                providers = []
+                if "esphome_devices" in updates:
+                    providers.append("esphome")
+                if any(key.startswith("home_assistant_") for key in updates):
+                    providers.append("home_assistant")
+                affected = [AccessDevice.provider_bindings.any(AccessDeviceProviderBinding.provider.in_(providers))]
+                if "gate_admission_device_key" in updates:
+                    affected.append(AccessDevice.kind == "gate")
+                query = query.where(or_(*affected))
+            target_ids = (await session.scalars(query.distinct().order_by(AccessDevice.id))).all()
+            for target_id in target_ids:
+                await AccessDeviceCommandJournal.assert_configurable(session, target_id)
+        for key in sorted(updates):
+            # Also serialize creation of a newly introduced setting with no row yet.
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:setting))"),
+                                  {"setting": f"iacs:setting:{key}"})
         records = {
             record.key: record
-            for record in (await session.scalars(select(SystemSetting))).all()
+            for record in (await session.scalars(select(SystemSetting).order_by(SystemSetting.key)
+                           .with_for_update().execution_options(populate_existing=True))).all()
         }
+        before = {key: public_value(row) for key, row in records.items() if key in updates}
+        changed_keys = []
+        if set(updates) & {"gate_admission_device_key", "home_assistant_url", "home_assistant_token", "esphome_devices"}:
+            candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+            candidate.update({key: decrypted_value(row) for key, row in records.items()})
+            candidate.update({key: value for key, value in updates.items()
+                              if not (key in records and records[key].is_secret and value in (None, "")
+                                      and key not in CLEARABLE_SECRET_KEYS)})
+            await _validate_admission_setting(session, candidate)
         for key, value in updates.items():
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)
             if record:
                 if record.is_secret and (value is None or value == "") and key not in CLEARABLE_SECRET_KEYS:
+                    continue
+                if decrypted_value(record) == value:
                     continue
                 record.value = setting_payload(key, value)
                 record.is_secret = key in SECRET_KEYS
@@ -724,6 +788,39 @@ async def update_settings(updates: dict[str, Any]) -> list[dict[str, Any]]:
                     description=description,
                 )
                 session.add(record)
+                records[key] = record
+            changed_keys.append(key)
+        if changed_keys:
+            await write_audit_log(
+                session, category=TELEMETRY_CATEGORY_CRUD, action="settings.update",
+                actor=actor_from_user(current_actor) if current_actor else "System",
+                actor_user_id=current_actor.id if current_actor else None,
+                target_entity="SystemSetting", target_label=", ".join(sorted(changed_keys)[:8]),
+                diff=audit_diff({key: before.get(key) for key in changed_keys},
+                                {key: public_value(records[key]) for key in changed_keys}),
+                metadata={"keys": sorted(changed_keys), "source": source},
+            )
         await session.commit()
     invalidate_runtime_config_cache()
     return await list_settings()
+
+
+async def _validate_admission_setting(session: AsyncSession, candidate: dict[str, Any]) -> None:
+    key = str(candidate["gate_admission_device_key"] or "").strip() or None
+    if key is None:
+        return  # Explicitly unset is valid configuration but blocks automatic admission.
+    device = await session.scalar(select(AccessDevice).where(AccessDevice.key == key)
+                                  .options(selectinload(AccessDevice.provider_bindings)).with_for_update())
+    facts = []
+    if device is not None:
+        facts.append({
+            "key": device.key, "kind": device.kind, "enabled": device.enabled,
+            "open_for_access": device.open_for_access,
+            "commandable": any(binding_is_commandable(
+                AccessDeviceBinding(binding.provider, binding.external_id, binding.enabled, binding.config or {}),
+                home_assistant_url=str(candidate["home_assistant_url"] or ""),
+                home_assistant_token=str(candidate["home_assistant_token"] or ""),
+                esphome_devices=normalize_esphome_devices(candidate["esphome_devices"]),
+            ) for binding in device.provider_bindings),
+        })
+    validate_gate_admission_device_key(key, device_facts=facts, allow_unset=False)

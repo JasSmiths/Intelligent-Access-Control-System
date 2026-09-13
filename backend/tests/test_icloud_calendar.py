@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 import app.services.icloud_calendar as icloud_calendar_module
-from app.ai import tools as ai_tools
+from app.ai.tool_groups import visitor_passes_handlers as alfred_visitor_passes_handlers
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus
 from app.modules.icloud_calendar.client import (
@@ -74,7 +74,7 @@ async def test_calendar_visitor_name_uses_llm_json_response(monkeypatch) -> None
     class FakeProvider:
         name = "fake"
 
-        async def complete(self, messages, tools=None, tool_results=None):
+        async def complete(self, messages, tools=None, tool_results=None, **_options):
             assert "Memory Clinic: Vicky Thompson" in messages[-1].content
             return SimpleNamespace(text='{"visitor_name":"Vicky Thompson"}')
 
@@ -333,11 +333,13 @@ async def test_bad_icloud_verification_code_keeps_handshake_for_retry() -> None:
 
 @pytest.mark.asyncio
 async def test_alfred_icloud_sync_requires_confirmation(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(site_timezone="Europe/London")
+    from app.ai.tool_groups import visitor_passes_handlers
 
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    result = await ai_tools.trigger_icloud_sync({"confirm": False})
+    def forbidden_calendar_service():
+        raise AssertionError("Unconfirmed sync must not contact iCloud.")
+
+    monkeypatch.setattr(visitor_passes_handlers, "get_icloud_calendar_service", forbidden_calendar_service)
+    result = await alfred_visitor_passes_handlers.trigger_icloud_sync({"confirm": False})
 
     assert result["requires_confirmation"] is True
     assert result["confirmation_field"] == "confirm"

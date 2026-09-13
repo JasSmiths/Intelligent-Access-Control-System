@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
+from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models.enums import AnomalySeverity
+from app.models import Person, Vehicle
 from app.modules.gate.base import GateState
-from app.modules.notifications.base import NotificationContext
-from app.services.access.payloads import notification_facts
+from app.services.access.authorization import (
+    RecognitionAuthorizationDenied,
+    assert_current_recognition_authorization,
+    recognition_deadline_for_event,
+)
+from app.services.access.delivery import reserve_garage_outcome_outputs
 from app.services.access_devices import get_access_device_service
 from app.services.event_bus import event_bus
-from app.services.gate_commands import GateCommandIntent, GateCommandOutcome, get_gate_command_coordinator
-from app.services.notifications import get_notification_service
+from app.services.gate_commands import (
+    GateCommandIntent,
+    GateCommandOutcome,
+    get_gate_command_coordinator,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     audit_log_event_payload,
@@ -38,6 +48,11 @@ async def open_gate_for_access_event(
         if trace
         else None
     )
+    expires_at = await _recognition_expiry(event)
+
+    async def authorize_dispatch(session):
+        await assert_current_recognition_authorization(session, event_id=event.id)
+
     outcome = await get_gate_command_coordinator().execute_open(
         GateCommandIntent(
             reason=reason,
@@ -47,6 +62,10 @@ async def open_gate_for_access_event(
             registration_number=event.registration_number,
             actor="Access Event Automation",
             idempotency_key=f"gate-command:open:default:event:{event.id}",
+            intent_id=str(uuid.uuid5(uuid.UUID(str(event.id)), "automatic-gate-open")),
+            expires_at=expires_at,
+            automatic_entry_policy=True,
+            authorize_dispatch=authorize_dispatch,
             metadata={
                 "movement_saga_id": movement_saga_id,
                 "person_id": str(getattr(person, "id", "")) if person else None,
@@ -55,13 +74,17 @@ async def open_gate_for_access_event(
         )
     )
     if gate_span:
+        completed_without_failure = outcome.accepted or (
+            outcome.delivery == "not_sent" and outcome.admission_verified
+        )
         gate_span.finish(
-            status="ok" if outcome.accepted else "error",
+            status="ok" if completed_without_failure else "error",
             output_payload=outcome.as_payload(),
-            error=None if outcome.accepted else outcome.detail,
+            error=None if completed_without_failure else outcome.detail,
         )
     await _record_gate_outcome(event, person, reason, outcome, dvla_enrichment)
-    if outcome.accepted and open_garage_doors:
+    precondition = outcome.metadata.get("automatic_entry_precondition") or {}
+    if outcome.admission_verified and open_garage_doors and precondition.get("mode") == "fanout":
         await open_garage_doors_for_access_event(
             event,
             person,
@@ -72,9 +95,23 @@ async def open_gate_for_access_event(
     return outcome
 
 
+async def _recognition_expiry(event: Any) -> datetime:
+    """Capture the same durable cutoff for every target, including fallbacks.
+
+    Missing intake provenance produces an expired intent, retaining a refusal
+    without reaching hardware. Current mutable authority is checked separately
+    inside each target's attempt transaction.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            return await recognition_deadline_for_event(session, event)
+        except RecognitionAuthorizationDenied:
+            return datetime.min.replace(tzinfo=UTC)
+
+
 async def publish_gate_open_skipped(event: Any, direction_resolution: dict[str, Any], person: Any | None = None) -> None:
     gate_observation = direction_resolution.get("gate_observation") or {}
-    detail = "Automatic gate and garage-door commands require the top gate to be closed at plate-read time."
+    detail = "External admission was recorded without an IACS hardware command."
     await audit_automatic_hardware_command(
         action="gate.open.automatic",
         event=event,
@@ -85,7 +122,7 @@ async def publish_gate_open_skipped(event: Any, direction_resolution: dict[str, 
         level="warning",
         metadata={
             "controller": "configured",
-            "reason": "gate_state_not_closed_at_plate_read_time",
+            "reason": "external_admission_hardware_suppressed",
             "state": gate_observation.get("state") or GateState.UNKNOWN.value,
             "gate_observation": gate_observation,
             "direction_resolution": direction_resolution,
@@ -93,7 +130,7 @@ async def publish_gate_open_skipped(event: Any, direction_resolution: dict[str, 
             "garage_doors_skipped": True,
         },
     )
-    await event_bus.publish(
+    await _publish(
         "gate.open_skipped",
         {
             "event_id": str(event.id),
@@ -132,12 +169,28 @@ async def open_garage_doors_for_access_event(
             if trace
             else None
         )
-        outcome = await service.command_device(device.key, "open", reason, schedule_source="garage_door")
+        async def authorize_dispatch(session, selected_key=device.key):
+            await assert_current_recognition_authorization(session, event_id=event.id)
+            current_person = await session.get(Person, event.person_id, populate_existing=True)
+            if current_person is None or selected_key not in (current_person.garage_door_entity_ids or []):
+                raise ValueError("The garage is no longer assigned to the recognized person.")
+
+        operation_id = str(uuid.uuid5(uuid.UUID(str(event.id)), f"automatic-garage-open:{device.device_id}"))
+        outcome = await service.command_device(
+            device.key, "open", reason, schedule_source="garage_door", intent_id=operation_id,
+            idempotency_key=f"garage-command:open:{device.device_id}:event:{event.id}",
+            expires_at=await _recognition_expiry(event), authorize_dispatch=authorize_dispatch,
+            origin_context={"kind": "automatic_access_garage", "access_event_id": str(event.id),
+                            "target_label": device.name},
+        )
         if span:
+            completed_without_failure = outcome.accepted or (
+                outcome.delivery == "not_sent" and outcome.verified
+            )
             span.finish(
-                status="ok" if outcome.accepted else "error",
+                status="ok" if completed_without_failure else "error",
                 output_payload=outcome.as_payload(),
-                error=None if outcome.accepted else outcome.detail,
+                error=None if completed_without_failure else outcome.detail,
             )
         await _record_garage_outcome(event, person, device, outcome, reason, dvla_enrichment)
 
@@ -154,10 +207,10 @@ async def audit_automatic_hardware_command(
     target_label: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    vehicle = getattr(event, "vehicle", None)
-    vehicle_id = getattr(event, "vehicle_id", None) or getattr(vehicle, "id", None)
+    vehicle_id = getattr(event, "vehicle_id", None)
     person_id = getattr(person, "id", None) or getattr(event, "person_id", None)
     async with AsyncSessionLocal() as session:
+        vehicle = await session.get(Vehicle, vehicle_id) if vehicle_id else None
         row = await write_audit_log(
             session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -185,7 +238,7 @@ async def audit_automatic_hardware_command(
         )
         await session.commit()
         await session.refresh(row)
-    await event_bus.publish("audit.log.created", audit_log_event_payload(row))
+    await _publish("audit.log.created", audit_log_event_payload(row))
 
 
 async def _record_gate_outcome(
@@ -195,49 +248,13 @@ async def _record_gate_outcome(
     outcome: GateCommandOutcome,
     dvla_enrichment: dict[str, str | None] | None,
 ) -> None:
-    audit_outcome = "accepted" if outcome.accepted else "rejected"
-    audit_level = "info" if outcome.accepted else "warning"
-    if outcome.exception_class == "UnsupportedModuleError":
-        audit_outcome = "failed"
-        audit_level = "error"
-    await audit_automatic_hardware_command(
-        action="gate.open.automatic",
-        event=event,
-        person=person,
-        target_entity="Gate",
-        target_label="Automatic Gate",
-        outcome=audit_outcome,
-        level=audit_level,
-        metadata={"controller": "configured", "reason": reason, **outcome.as_payload()},
+    # Required audit/notice is recovered by the admission transaction participant.
+    # Realtime is a projection of the receipt and cannot reinterpret its boolean.
+    await _publish(
+        "gate.open_requested" if outcome.accepted or outcome.admission_verified else "gate.open_failed",
+        {"event_id": str(event.id), "registration_number": event.registration_number,
+         **outcome.as_payload()},
     )
-    await event_bus.publish(
-        "gate.open_requested" if outcome.accepted else "gate.open_failed",
-        {
-            "event_id": str(event.id),
-            "registration_number": event.registration_number,
-            "accepted": outcome.accepted,
-            "state": outcome.state.value,
-            "detail": outcome.detail,
-            "intent_id": outcome.intent.intent_id,
-            "mechanically_confirmed": outcome.mechanically_confirmed,
-            "requires_reconciliation": outcome.requires_reconciliation,
-        },
-    )
-    if not outcome.accepted:
-        await get_notification_service().notify(
-            NotificationContext(
-                event_type="gate_open_failed",
-                subject=event.registration_number,
-                severity=AnomalySeverity.CRITICAL.value,
-                facts=notification_facts(
-                    event,
-                    person,
-                    getattr(event, "vehicle", None),
-                    outcome.detail or "Automatic gate open command failed.",
-                    dvla_enrichment=dvla_enrichment,
-                ),
-            )
-        )
 
 
 async def _record_garage_outcome(
@@ -248,29 +265,14 @@ async def _record_garage_outcome(
     reason: str,
     dvla_enrichment: dict[str, str | None] | None,
 ) -> None:
-    schedule_denied = bool(outcome.metadata.get("schedule_denied")) if hasattr(outcome, "metadata") else False
-    await audit_automatic_hardware_command(
-        action="garage_door.open.automatic",
-        event=event,
-        person=person,
-        target_entity="GarageDoor",
-        target_id=device.key,
-        target_label=device.name,
-        outcome="accepted" if outcome.accepted else "rejected" if schedule_denied else "failed",
-        level="info" if outcome.accepted else "warning" if schedule_denied else "error",
-        metadata={
-            "controller": outcome.used_provider or outcome.primary_provider or "configured",
-            "reason": reason,
-            "accepted": outcome.accepted,
-            "state": "schedule_denied" if schedule_denied else outcome.state.value,
-            "detail": outcome.detail,
-            "failover_used": outcome.failover_used,
-            "attempts": [attempt.__dict__ for attempt in outcome.attempts],
-            **({"schedule_denied": True} if schedule_denied else {}),
-        },
-    )
-    await event_bus.publish(
-        "garage_door.open_requested" if outcome.accepted else "garage_door.open_failed",
+    delivery = str(outcome.delivery)
+    verified = bool(getattr(outcome, "verified", False) or outcome.metadata.get("verified"))
+    command_id = uuid.UUID(str(outcome.metadata["command_id"]))
+    async with AsyncSessionLocal() as session:
+        await reserve_garage_outcome_outputs(session, command_id=command_id)
+        await session.commit()
+    await _publish(
+        "garage_door.open_requested" if outcome.accepted or verified else "garage_door.open_failed",
         {
             "event_id": str(event.id),
             "registration_number": event.registration_number,
@@ -281,22 +283,18 @@ async def _record_garage_outcome(
             "accepted": outcome.accepted,
             "state": outcome.state.value,
             "detail": outcome.detail,
+            "delivery": delivery,
+            "requires_reconciliation": outcome.requires_reconciliation,
+            "receipt": outcome.as_payload(),
         },
     )
-    if not outcome.accepted:
-        await get_notification_service().notify(
-            NotificationContext(
-                event_type="garage_door_open_failed",
-                subject=event.registration_number,
-                severity=AnomalySeverity.CRITICAL.value,
-                facts=notification_facts(
-                    event,
-                    person,
-                    getattr(event, "vehicle", None),
-                    outcome.detail or f"Automatic garage door open command failed for {device.name}.",
-                    dvla_enrichment=dvla_enrichment,
-                    garage_door=device.name,
-                    entity_id=device.key,
-                ),
-            )
-        )
+
+
+logger = get_logger(__name__)
+
+
+async def _publish(name: str, payload: dict[str, Any]) -> None:
+    try:
+        await event_bus.publish(name, payload)
+    except Exception as exc:  # noqa: BLE001 - isolate provider/reporting failure; cancellation propagates
+        logger.warning("access_hardware_publication_failed", extra={"event_type": name, "exception_class": type(exc).__name__})

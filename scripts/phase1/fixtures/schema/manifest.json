@@ -1,0 +1,118 @@
+{
+  "format_version": 1,
+  "historical_sources": [
+    {
+      "commit": "4bdce566db9bfb1801a0bb393eb447db73eed674",
+      "meaning": "Code-defined schema reconstructed with exact historical model sources and current locked SQLAlchemy/PostgreSQL; not a database dump.",
+      "migration_sha256": {
+        "backend/alembic/versions/20260509_0001_add_alfred_semantic_embeddings.py": "d1d979246d08d2a5a9bb76b91815db837e84851212b08ce3a356f9e7eaa69fde",
+        "backend/alembic/versions/20260531_0000_current_schema_baseline.py": "4212b8cae55bcd90e8b51840f9f9b1a87abcbf0dc5af3a07081fe3d33d286891",
+        "backend/alembic/versions/20260531_0002_automation_webhook_hardening.py": "d0240b344e0cfcb29538c8afc9ad35f7633a9a89967be5322a72b8bd1176cae8",
+        "backend/alembic/versions/20260531_0003_notification_runs.py": "c49d6032db648ce129c826d56a976133125d79a5b5a27f39037592f52bf10ee8"
+      },
+      "name": "initial",
+      "source_sha256": {
+        "backend/alembic/env.py": "3fe398422f31b4910fb0c38705d602a02860c394dbbabddb8162b941ace7f7c2",
+        "backend/alembic/versions/20260509_0001_add_alfred_semantic_embeddings.py": "d1d979246d08d2a5a9bb76b91815db837e84851212b08ce3a356f9e7eaa69fde",
+        "backend/alembic/versions/20260531_0000_current_schema_baseline.py": "4212b8cae55bcd90e8b51840f9f9b1a87abcbf0dc5af3a07081fe3d33d286891",
+        "backend/alembic/versions/20260531_0002_automation_webhook_hardening.py": "d0240b344e0cfcb29538c8afc9ad35f7633a9a89967be5322a72b8bd1176cae8",
+        "backend/alembic/versions/20260531_0003_notification_runs.py": "c49d6032db648ce129c826d56a976133125d79a5b5a27f39037592f52bf10ee8",
+        "backend/app/db/base.py": "78c8f1599d8c28ef64a3e5b74a0729b669f776c79ff90b49d58d809ca90b79f6",
+        "backend/app/models/__init__.py": "f657f3b56d952e8c6db22c2a5bc57bc2de5a08fd1fb2c69a27cc58c23791c1c5",
+        "backend/app/models/core.py": "9bf785085169c429da929493091102caa4f8fd34aea4845deb131c2836134634",
+        "backend/app/models/enums.py": "437589a2904dce7a5bc2f54fd0e27bd7d555b47955787cbc8519ebf36e04e9f7"
+      },
+      "target_revision": "20260531_0000"
+    },
+    {
+      "commit": "69f9d8cfc1f77417a57105223f4e0772ae62de5d",
+      "meaning": "Code-defined schema reconstructed with exact historical model sources and current locked SQLAlchemy/PostgreSQL; not a database dump.",
+      "migration_sha256": {
+        "backend/alembic/versions/20260509_0001_add_alfred_semantic_embeddings.py": "d1d979246d08d2a5a9bb76b91815db837e84851212b08ce3a356f9e7eaa69fde",
+        "backend/alembic/versions/20260531_0000_current_schema_baseline.py": "4212b8cae55bcd90e8b51840f9f9b1a87abcbf0dc5af3a07081fe3d33d286891",
+        "backend/alembic/versions/20260531_0002_automation_webhook_hardening.py": "d0240b344e0cfcb29538c8afc9ad35f7633a9a89967be5322a72b8bd1176cae8",
+        "backend/alembic/versions/20260531_0003_notification_runs.py": "c49d6032db648ce129c826d56a976133125d79a5b5a27f39037592f52bf10ee8",
+        "backend/alembic/versions/20260624_0001_security_review_hardening.py": "2c273404d28ea45dd52f204730a06057416ba122db77033ea8e83b204e526625",
+        "backend/alembic/versions/20260713_0001_keep_open_duration_departures_indexed.py": "4c92a3a599980d305b42205e85dc00c4a12e0dfbe7111c223f4c4e416ffe7c45",
+        "backend/alembic/versions/20260713_0002_reconcile_historical_metadata_indexes.py": "f450292cc105b8551069de2081b0d04af6ab69a812b0873568bb450898041c7e"
+      },
+      "name": "pre_recovery",
+      "source_sha256": {
+        "backend/alembic/env.py": "6a29f8b7aa678b348840c461d63cf652fa13f0d37583048f8d089c699c6dcff8",
+        "backend/alembic/versions/20260509_0001_add_alfred_semantic_embeddings.py": "d1d979246d08d2a5a9bb76b91815db837e84851212b08ce3a356f9e7eaa69fde",
+        "backend/alembic/versions/20260531_0000_current_schema_baseline.py": "4212b8cae55bcd90e8b51840f9f9b1a87abcbf0dc5af3a07081fe3d33d286891",
+        "backend/alembic/versions/20260531_0002_automation_webhook_hardening.py": "d0240b344e0cfcb29538c8afc9ad35f7633a9a89967be5322a72b8bd1176cae8",
+        "backend/alembic/versions/20260531_0003_notification_runs.py": "c49d6032db648ce129c826d56a976133125d79a5b5a27f39037592f52bf10ee8",
+        "backend/alembic/versions/20260624_0001_security_review_hardening.py": "2c273404d28ea45dd52f204730a06057416ba122db77033ea8e83b204e526625",
+        "backend/alembic/versions/20260713_0001_keep_open_duration_departures_indexed.py": "4c92a3a599980d305b42205e85dc00c4a12e0dfbe7111c223f4c4e416ffe7c45",
+        "backend/alembic/versions/20260713_0002_reconcile_historical_metadata_indexes.py": "f450292cc105b8551069de2081b0d04af6ab69a812b0873568bb450898041c7e",
+        "backend/app/db/base.py": "78c8f1599d8c28ef64a3e5b74a0729b669f776c79ff90b49d58d809ca90b79f6",
+        "backend/app/models/__init__.py": "04d724678f37c03618110cbd297338ab1c31dd4b765dd962e4a6967716454b6e",
+        "backend/app/models/core.py": "1325d95841edef00fdd952d6fa50145e5c4fd818942bc04b78116a0821a73089",
+        "backend/app/models/enums.py": "437589a2904dce7a5bc2f54fd0e27bd7d555b47955787cbc8519ebf36e04e9f7"
+      },
+      "target_revision": "20260713_0002"
+    }
+  ],
+  "limitations": [
+    "No production database or historical dump was inspected.",
+    "Historical fixtures preserve source bytes, not historical dependency/runtime versions.",
+    "Fresh versus staged current-source equivalence alone cannot prove historical compatibility."
+  ],
+  "migrations": [
+    {
+      "down_revision": "20260531_0000",
+      "path": "backend/alembic/versions/20260509_0001_add_alfred_semantic_embeddings.py",
+      "revision": "20260509_0001",
+      "sha256": "d1d979246d08d2a5a9bb76b91815db837e84851212b08ce3a356f9e7eaa69fde"
+    },
+    {
+      "down_revision": null,
+      "path": "backend/alembic/versions/20260531_0000_current_schema_baseline.py",
+      "revision": "20260531_0000",
+      "sha256": "4212b8cae55bcd90e8b51840f9f9b1a87abcbf0dc5af3a07081fe3d33d286891"
+    },
+    {
+      "down_revision": "20260509_0001",
+      "path": "backend/alembic/versions/20260531_0002_automation_webhook_hardening.py",
+      "revision": "20260531_0002",
+      "sha256": "d0240b344e0cfcb29538c8afc9ad35f7633a9a89967be5322a72b8bd1176cae8"
+    },
+    {
+      "down_revision": "20260531_0002",
+      "path": "backend/alembic/versions/20260531_0003_notification_runs.py",
+      "revision": "20260531_0003",
+      "sha256": "c49d6032db648ce129c826d56a976133125d79a5b5a27f39037592f52bf10ee8"
+    },
+    {
+      "down_revision": "20260531_0003",
+      "path": "backend/alembic/versions/20260624_0001_security_review_hardening.py",
+      "revision": "20260624_0001",
+      "sha256": "2c273404d28ea45dd52f204730a06057416ba122db77033ea8e83b204e526625"
+    },
+    {
+      "down_revision": "20260624_0001",
+      "path": "backend/alembic/versions/20260713_0001_keep_open_duration_departures_indexed.py",
+      "revision": "20260713_0001",
+      "sha256": "4c92a3a599980d305b42205e85dc00c4a12e0dfbe7111c223f4c4e416ffe7c45"
+    },
+    {
+      "down_revision": "20260713_0001",
+      "path": "backend/alembic/versions/20260713_0002_reconcile_historical_metadata_indexes.py",
+      "revision": "20260713_0002",
+      "sha256": "f450292cc105b8551069de2081b0d04af6ab69a812b0873568bb450898041c7e"
+    },
+    {
+      "down_revision": "20260713_0002",
+      "path": "backend/alembic/versions/20260912_0001_notification_recovery.py",
+      "revision": "20260912_0001",
+      "sha256": "51696b8825b3c1a2510cd83675c6a2ee2d70990fcc912d7d3f04040da6eb8b99"
+    }
+  ],
+  "source_baseline": {
+    "branch": "main",
+    "commit": "69f9d8cfc1f77417a57105223f4e0772ae62de5d",
+    "dirty": true,
+    "model_sha256": "f19de68006d3179aca0375ac02f70e18e9a4c504561acdc0db370105b328c81d"
+  }
+}

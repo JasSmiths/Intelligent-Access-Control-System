@@ -1,14 +1,26 @@
 import asyncio
 import json
-from datetime import UTC, datetime
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 import time
 import uuid
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.ai import tools as ai_tools
+from app.ai import context as alfred_context
+from app.ai.tool_groups import _shared as alfred_shared
+from app.ai.tool_groups import access_diagnostics_handlers as alfred_access_diagnostics_handlers
+from app.ai.tool_groups import gate_maintenance_handlers as alfred_gate_maintenance_handlers
+from app.ai.tool_groups import general_handlers as alfred_general_handlers
+from app.ai.tool_groups import registry as alfred_registry
+from app.ai.tool_groups import schedules_handlers as alfred_schedules_handlers
+from app.ai.tool_groups import system_operations_handlers as alfred_system_operations_handlers
+from app.models import enums as model_enums
 from app.ai import providers as providers_module
 from app.ai.tool_groups import access_diagnostics_handlers as access_diagnostics_tools
 from app.ai.tool_groups import access_incident_handlers as access_incident_tools
@@ -57,6 +69,7 @@ from app.ai.tool_groups.registry import ToolRegistryError, _validate_tool
 from app.services.alfred.runtime import provider_agent_capability
 from app.services.chat import ChatService, IntentRoute, PENDING_SECRET_MARKER, SYSTEM_PROMPT
 from app.services.chat_contracts import ChatTurnResult
+from app.services.alfred.approvals import Approval, ApprovalDecision
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
 
@@ -69,13 +82,27 @@ def runtime_config_stub(monkeypatch):
     monkeypatch.setattr("app.services.chat.get_runtime_config", fake_runtime_config)
 
 
+class CapturedApprovalStore:
+    """Persistence seam for planner-only tests; real claims are covered in PostgreSQL."""
+
+    def __init__(self):
+        self.payloads = []
+
+    async def create(self, session_id, requester_id, payload, *, operation_id=None):
+        self.payloads.append(payload)
+        return Approval(
+            "confirm-test", operation_id or uuid.uuid4(), session_id, uuid.uuid4(), 0,
+            "pending", payload, None, datetime.now(tz=UTC) + timedelta(minutes=10),
+        )
+
+
 class ProtocolProvider:
     name = "protocol-test"
 
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         self.calls += 1
         if self.calls == 1:
             return LlmResult(
@@ -90,7 +117,7 @@ class ProtocolProvider:
 class JsonFinalProvider:
     name = "json-final-test"
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         return LlmResult(text='{"final":"Done."}')
 
 
@@ -100,7 +127,7 @@ class RawJsonAfterToolProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         self.calls += 1
         if self.calls == 1:
             return LlmResult(
@@ -124,7 +151,7 @@ class RawJsonAfterToolProvider:
 class UnknownToolProvider:
     name = "unknown-tool-test"
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         return LlmResult(text='{"thought":"check","tool_name":"delete_everything","arguments":{}}')
 
 
@@ -134,7 +161,7 @@ class CountingToolProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         self.calls += 1
         return LlmResult(
             text=(
@@ -262,7 +289,7 @@ def test_planner_catalog_payload_stays_compact() -> None:
         "relevant_past_lessons": [],
         "session_memory": {},
         "has_attachments": False,
-        "domains": domain_cards(ai_tools.build_agent_tools().values()),
+        "domains": domain_cards(alfred_registry.build_agent_tools().values()),
     }
     payload_text = json.dumps(payload, separators=(",", ":"), default=str)
 
@@ -1051,7 +1078,9 @@ async def test_alfred_v3_simple_planned_read_uses_interactive_model(monkeypatch)
     )
 
     assert [(call.name, call.arguments) for call in executed] == [("query_presence", {"person": "Jas"})]
-    assert provider.agent_tool_catalogs == [[]]
+    assert provider.agent_tool_catalogs == [["query_presence"]]
+    assert provider.agent_options[0]["model"] == "semantic-test"
+    assert provider.agent_options[0]["request_purpose"] == "alfred.react"
     assert selected_tool_history == [["query_presence"]]
     assert result.text == "Jas is present"
 
@@ -1098,7 +1127,9 @@ async def test_alfred_v3_multi_planned_read_uses_interactive_model(monkeypatch) 
         ("query_presence", {}),
         ("query_device_states", {"target": "Top Gate", "kind": "gate"}),
     ]
-    assert provider.agent_tool_catalogs == [[]]
+    assert provider.agent_tool_catalogs == [["query_presence", "query_device_states"]]
+    assert provider.agent_options[0]["model"] == "semantic-test"
+    assert provider.agent_options[0]["request_purpose"] == "alfred.react"
     assert selected_tool_history == [["query_presence", "query_device_states"]]
     assert "2 people are on site: Jas, Steph" in result.text
     assert "Top Gate is closed" in result.text
@@ -1136,7 +1167,7 @@ class ParallelToolProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         self.calls += 1
         if self.calls == 1:
             return LlmResult(
@@ -1157,7 +1188,7 @@ class V3PlannerProvider:
         self.messages: list[list[ChatMessageInput]] = []
         self.calls = 0
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         self.calls += 1
         self.messages.append(messages)
         if self.calls == 1:
@@ -1187,14 +1218,16 @@ class V3SimulatedSemanticProvider:
         self.agent_steps = list(agent_steps)
         self.planner_requests: list[dict[str, object]] = []
         self.agent_tool_catalogs: list[list[str]] = []
+        self.agent_options: list[dict[str, object]] = []
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         if tools is None and messages and messages[0].content.startswith("You are Alfred's v3 planning brain"):
             user_message = next(message for message in messages if message.role == "user")
             self.planner_requests.append(json.loads(user_message.content))
             return LlmResult(text=self.planner_json)
 
         self.agent_tool_catalogs.append([tool["name"] for tool in tools or []])
+        self.agent_options.append(_options)
         if not self.agent_steps:
             raise AssertionError("Simulated provider received more agent calls than expected.")
         step = self.agent_steps.pop(0)
@@ -1206,7 +1239,7 @@ class V3SimulatedSemanticProvider:
 class DualActionPreviewProvider:
     name = "action-preview-test"
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         return LlmResult(
             text=(
                 '{"tool_calls":['
@@ -1316,7 +1349,7 @@ async def _run_simulated_v3_turn(
 class ActionToolProvider:
     name = "action-tool-test"
 
-    async def complete(self, messages, tools=None, tool_results=None):
+    async def complete(self, messages, tools=None, tool_results=None, **_options):
         return LlmResult(
             text='{"thought":"open","tool_name":"open_gate","arguments":{"target":"Top Gate","confirm":true}}'
         )
@@ -1551,7 +1584,7 @@ def test_confirmed_terminal_actions_do_not_resume_original_request() -> None:
 
 @pytest.mark.asyncio
 async def test_create_schedule_tool_requires_confirmation() -> None:
-    result = await ai_tools.create_schedule(
+    result = await alfred_schedules_handlers.create_schedule(
         {
             "name": "Gardeners",
             "time_description": "weekdays 8am to 5pm",
@@ -1634,9 +1667,9 @@ async def test_calculate_absence_duration_pairs_exit_to_next_entry(monkeypatch) 
             ],
         }
 
-    monkeypatch.setattr(ai_tools, "query_access_events", fake_query_access_events)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "query_access_events", fake_query_access_events)
 
-    result = await ai_tools.calculate_absence_duration({"person": "Sylv", "day": "today"})
+    result = await alfred_access_diagnostics_handlers.calculate_absence_duration({"person": "Sylv", "day": "today"})
 
     assert result["subject"] == "Sylvia Smith"
     assert result["absence_seconds"] == 820
@@ -1694,9 +1727,9 @@ async def test_calculate_absence_duration_defaults_to_latest_interval_not_recent
             ],
         }
 
-    monkeypatch.setattr(ai_tools, "query_access_events", fake_query_access_events)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "query_access_events", fake_query_access_events)
 
-    latest = await ai_tools.calculate_absence_duration({"person": "Sylv", "day": "recent"})
+    latest = await alfred_access_diagnostics_handlers.calculate_absence_duration({"person": "Sylv", "day": "recent"})
 
     assert latest["absence_seconds"] == 2970
     assert latest["absence_human"] == "49m"
@@ -1707,7 +1740,7 @@ async def test_calculate_absence_duration_defaults_to_latest_interval_not_recent
     assert "Sylvia Smith was out for 49m, from 09 May 2026, 15:54 to 09 May 2026, 16:44" in latest["answer_hints"][0]
     assert "1h 49m" not in latest["answer_hints"][0]
 
-    total = await ai_tools.calculate_absence_duration({"person": "Sylv", "day": "recent", "mode": "total"})
+    total = await alfred_access_diagnostics_handlers.calculate_absence_duration({"person": "Sylv", "day": "recent", "mode": "total"})
 
     assert total["absence_seconds"] == 6570
     assert total["absence_human"] == "1h 49m"
@@ -1749,9 +1782,9 @@ async def test_absence_duration_artifact_uses_latest_interval_and_requested_name
             ],
         }
 
-    monkeypatch.setattr(ai_tools, "query_access_events", fake_query_access_events)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "query_access_events", fake_query_access_events)
 
-    result = await ai_tools.calculate_absence_duration({"person": "Sylv", "day": "recent"})
+    result = await alfred_access_diagnostics_handlers.calculate_absence_duration({"person": "Sylv", "day": "recent"})
     artifacts = extract_answer_artifacts([{"name": "calculate_absence_duration", "output": result}])
 
     assert len(artifacts) == 1
@@ -1879,14 +1912,14 @@ async def test_calculate_absence_duration_ongoing_includes_human_answer_hint(mon
             ],
         }
 
-    monkeypatch.setattr(ai_tools, "query_access_events", fake_query_access_events)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "query_access_events", fake_query_access_events)
     monkeypatch.setattr(
-        ai_tools,
+        alfred_access_diagnostics_handlers,
         "_agent_now",
         lambda _timezone_name=None: datetime.fromisoformat("2026-05-09T17:40:00+01:00"),
     )
 
-    result = await ai_tools.calculate_absence_duration({"person": "Ash", "day": "today"})
+    result = await alfred_access_diagnostics_handlers.calculate_absence_duration({"person": "Ash", "day": "today"})
 
     assert result["subject"] == "Ash"
     assert result["absence_human"] == "1h 50m"
@@ -2218,7 +2251,7 @@ async def test_reflection_lessons_follow_learning_mode(monkeypatch) -> None:
 
 
 def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     assert tools["open_gate"].requires_confirmation is True
     assert tools["command_device"].requires_confirmation is True
@@ -2228,7 +2261,7 @@ def test_superpower_tools_are_registered_with_confirmation_metadata() -> None:
 
 
 def test_resolve_human_entity_schema_includes_visitor_passes() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
     schema = tools["resolve_human_entity"].parameters
 
     enum = schema["properties"]["entity_types"]["items"]["enum"]
@@ -2237,7 +2270,7 @@ def test_resolve_human_entity_schema_includes_visitor_passes() -> None:
 
 
 def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     expected_tool_names = {
         "analyze_alert_snapshot",
@@ -2380,7 +2413,7 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
 
 
 def test_alfred_registry_metadata_drives_permissions_and_planner_cards() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     standard_visible = filter_tools_for_actor(
         tools.values(),
@@ -2439,9 +2472,9 @@ async def test_query_integration_health_includes_access_event_worker_status(monk
         async def storage_status(self):
             return {"status": "ok"}
 
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_runtime_config", fake_runtime_config)
     monkeypatch.setattr(
-        ai_tools,
+        alfred_system_operations_handlers,
         "get_access_event_service",
         lambda: SimpleNamespace(
             status=lambda: {
@@ -2453,13 +2486,13 @@ async def test_query_integration_health_includes_access_event_worker_status(monk
             }
         ),
     )
-    monkeypatch.setattr(ai_tools, "get_home_assistant_service", lambda: AsyncStatusService({"configured": False}))
-    monkeypatch.setattr(ai_tools, "get_unifi_protect_service", lambda: AsyncStatusService({"configured": False}))
-    monkeypatch.setattr(ai_tools, "get_discord_messaging_service", lambda: AsyncStatusService({"configured": False}))
-    monkeypatch.setattr(ai_tools, "get_whatsapp_messaging_service", lambda: AsyncStatusService({"enabled": False}))
-    monkeypatch.setattr(ai_tools, "get_dependency_update_service", lambda: FakeDependencyUpdateService())
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_home_assistant_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_unifi_protect_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_discord_messaging_service", lambda: AsyncStatusService({"configured": False}))
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_whatsapp_delivery_service", lambda: AsyncStatusService({"enabled": False}))
+    monkeypatch.setattr(alfred_system_operations_handlers, "get_dependency_update_service", lambda: FakeDependencyUpdateService())
 
-    result = await ai_tools.query_integration_health({"integration": "access_events"})
+    result = await alfred_system_operations_handlers.query_integration_health({"integration": "access_events"})
 
     assert result["integration"] == "access_events"
     assert result["health"]["status"] == "degraded"
@@ -2468,7 +2501,7 @@ async def test_query_integration_health_includes_access_event_worker_status(monk
 
 
 def test_planner_selection_parses_direct_read_tool_calls() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
     payload = {
         "selected_domains": ["Access_Logs"],
         "selected_tool_names": ["calculate_absence_duration"],
@@ -2496,7 +2529,7 @@ def test_planner_selection_parses_direct_read_tool_calls() -> None:
 
 
 def test_tools_for_selection_uses_planned_calls_when_selected_names_are_missing() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
     selection = parse_planner_selection(
         {
             "selected_domains": ["Access_Logs"],
@@ -2523,7 +2556,7 @@ def test_tools_for_selection_uses_planned_calls_when_selected_names_are_missing(
 
 
 def test_tools_for_selection_uses_domain_selection_when_tool_names_are_missing() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
     access_selection = parse_planner_selection(
         {
             "selected_domains": ["Access_Logs"],
@@ -2770,6 +2803,8 @@ async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monke
     started: list[float] = []
     statuses: list[dict] = []
     memory: dict[str, Any] = {}
+    approvals = CapturedApprovalStore()
+    monkeypatch.setattr(service, "_approvals", approvals)
 
     async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
         started.append(time.perf_counter())
@@ -2821,7 +2856,7 @@ async def test_react_loop_executes_unconfirmed_action_previews_in_parallel(monke
     assert len(started) == 2
     assert abs(started[0] - started[1]) < 0.03
     assert elapsed < 0.09
-    assert memory["pending_agent_action"]["tool_name"] in {"create_schedule", "create_visitor_pass"}
+    assert approvals.payloads[-1]["tool_name"] in {"create_schedule", "create_visitor_pass"}
     assert "Confirm" in result.text
     assert any(status.get("event") == "chat.tool_batch" and status.get("parallel") for status in statuses)
     assert any(
@@ -2870,6 +2905,8 @@ async def test_react_tool_batch_returns_timeout_result(monkeypatch) -> None:
 async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
     service = ChatService()
     memory: dict[str, Any] = {}
+    approvals = CapturedApprovalStore()
+    monkeypatch.setattr(service, "_approvals", approvals)
     executed: list[Any] = []
 
     async def fake_execute_tool_call(session_id, call, *, status_callback=None, batch_id=None):
@@ -2913,7 +2950,8 @@ async def test_action_tool_pauses_with_stored_confirmation(monkeypatch) -> None:
         status_callback=None,
     )
 
-    pending = memory["pending_agent_action"]
+    pending = approvals.payloads[-1]
+    assert "pending_agent_action" not in memory
     assert executed[0].arguments["confirm"] is False
     assert pending["tool_name"] == "open_gate"
     assert pending["arguments"]["confirm"] is False
@@ -2949,34 +2987,40 @@ async def test_confirmed_open_gate_finishes_without_reprompt(monkeypatch) -> Non
         "actor_context": {"user": {"id": "admin-1", "role": "admin"}},
     }
     executed: list[ToolCall] = []
-    cleared = False
+    claimed = False
+    stored = None
+    pending["tool_contract"] = service._approval_tool_contract("open_gate")
+    approval = Approval(
+        "confirm-open-gate", uuid.uuid4(), session_id, uuid.uuid4(), 0,
+        "claimed", pending, None, datetime.now(tz=UTC) + timedelta(minutes=10),
+    )
 
     async def fake_runtime_config():
         return SimpleNamespace(llm_provider="local", llm_timeout_seconds=30)
 
-    async def fake_load_pending_agent_action(_session_id, *, confirmation_id, user_id):
-        assert confirmation_id == "confirm-open-gate"
-        return pending
+    async def claim(_session_id, confirmation_id, user_id, *, confirm):
+        nonlocal claimed
+        assert confirmation_id == "confirm-open-gate" and confirm
+        claimed = True
+        return ApprovalDecision("claimed", approval)
 
-    async def fake_clear_pending_agent_action(_session_id):
-        nonlocal cleared
-        cleared = True
+    async def finish(_approval, result, *, unknown=False):
+        nonlocal stored
+        assert claimed and not unknown
+        stored = result
+        return True
 
-    async def fake_execute_tool_call(_session_id, call, *, status_callback=None, batch_id=None):
-        assert cleared is True
+    async def fake_invoke_tool_call(call):
+        assert claimed is True
         executed.append(call)
         return {
-            "call_id": call.id,
-            "name": call.name,
-            "arguments": call.arguments,
-            "output": {
-                "opened": True,
-                "accepted": True,
-                "action": "open",
-                "target": "Top Gate",
-                "device": {"name": "Top Gate", "kind": "gate"},
-            },
+            "call_id": call.id, "name": call.name, "arguments": call.arguments,
+            "output": {"opened": True, "accepted": True, "action": "open", "target": "Top Gate",
+                       "device": {"name": "Top Gate", "kind": "gate"}},
         }
+
+    async def current_actor(**_kwargs):
+        return {"user": {"id": str(approval.requester_user_id), "role": "admin", "auth_session_version": 0}}
 
     async def fail_resume(*_args, **_kwargs):
         raise AssertionError("confirmed gate commands must not resume the ReAct loop")
@@ -2988,9 +3032,10 @@ async def test_confirmed_open_gate_finishes_without_reprompt(monkeypatch) -> Non
         return None
 
     monkeypatch.setattr("app.services.chat.get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(service, "_load_pending_agent_action", fake_load_pending_agent_action)
-    monkeypatch.setattr(service, "_clear_pending_agent_action", fake_clear_pending_agent_action)
-    monkeypatch.setattr(service, "_execute_tool_call", fake_execute_tool_call)
+    monkeypatch.setattr(service, "_approvals", SimpleNamespace(decide=claim, finish=finish, record_turn=noop_async))
+    monkeypatch.setattr(service, "_build_actor_context", current_actor)
+    monkeypatch.setattr(service, "_invoke_tool_call", fake_invoke_tool_call)
+    monkeypatch.setattr(service, "_audit_agent_tool_call", lambda *_args: None)
     monkeypatch.setattr(service, "_run_provider_agent_loop", fail_resume)
     monkeypatch.setattr(service, "_append_message", fake_append_message)
     monkeypatch.setattr(service, "_update_memory", noop_async)
@@ -3006,7 +3051,8 @@ async def test_confirmed_open_gate_finishes_without_reprompt(monkeypatch) -> Non
         status_callback=None,
     )
 
-    assert cleared is True
+    assert claimed is True
+    assert stored["tool_result"]["output"]["accepted"] is True
     assert [(call.name, call.arguments) for call in executed] == [
         ("open_gate", {"target": "Top Gate", "confirm": True})
     ]
@@ -3054,7 +3100,7 @@ def test_assistant_text_cleanup_hides_file_urls_and_markdown() -> None:
 
 
 def test_gate_malfunction_tools_are_registered() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     assert "get_active_malfunctions" in tools
     assert "get_malfunction_history" in tools
@@ -3063,9 +3109,9 @@ def test_gate_malfunction_tools_are_registered() -> None:
 
 @pytest.mark.asyncio
 async def test_gate_malfunction_override_tool_requires_admin_context() -> None:
-    token = ai_tools.set_chat_tool_context({"user_role": "standard"})
+    token = alfred_context.set_chat_tool_context({"user_role": "standard"})
     try:
-        result = await ai_tools.trigger_manual_malfunction_override(
+        result = await alfred_gate_maintenance_handlers.trigger_manual_malfunction_override(
             {
                 "malfunction_id": str(uuid.uuid4()),
                 "action": "mark_resolved",
@@ -3074,20 +3120,20 @@ async def test_gate_malfunction_override_tool_requires_admin_context() -> None:
             }
         )
     finally:
-        ai_tools.set_chat_tool_context({}, token=token)
+        alfred_context.set_chat_tool_context({}, token=token)
 
     assert result["changed"] is False
     assert "Admin access" in result["error"]
 
 
 def test_leaderboard_tool_is_registered() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     assert "query_leaderboard" in tools
 
 
 def test_access_diagnostic_tools_are_registered() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     assert "diagnose_access_event" in tools
     assert "query_lpr_timing" in tools
@@ -3099,8 +3145,8 @@ def test_access_diagnostic_tools_are_registered() -> None:
     assert tools["test_unifi_alarm_webhook"].requires_confirmation is True
 
 
-def test_tool_facade_does_not_export_private_handler_helpers() -> None:
-    assert callable(ai_tools.diagnose_access_event)
+def test_tool_contract_module_does_not_export_handler_helpers() -> None:
+    assert not hasattr(ai_tools, "diagnose_access_event")
 
     with pytest.raises(AttributeError):
         getattr(ai_tools, "_incident_root_cause")
@@ -3115,8 +3161,8 @@ def test_suppressed_read_extraction_and_root_cause_chain() -> None:
         person_id=person_id,
         vehicle_id=vehicle_id,
         registration_number="AGS7X",
-        direction=ai_tools.AccessDirection.EXIT,
-        decision=ai_tools.AccessDecision.GRANTED,
+        direction=model_enums.AccessDirection.EXIT,
+        decision=model_enums.AccessDecision.GRANTED,
         occurred_at=datetime(2026, 5, 8, 18, 5, tzinfo=UTC),
         vehicle=SimpleNamespace(
             registration_number="AGS7X",
@@ -3279,10 +3325,10 @@ async def test_query_anomalies_can_search_resolved_delivery_alert_notes_and_visu
         return SimpleNamespace(site_timezone="Europe/London")
 
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "get_runtime_config", fake_runtime_config)
 
-    result = await ai_tools.query_anomalies(
+    result = await alfred_access_diagnostics_handlers.query_anomalies(
         {
             "status": "all",
             "search": "oil delivery",
@@ -3336,10 +3382,10 @@ async def test_query_anomalies_matches_compacted_hello_fresh_supplier_search(mon
     async def fake_runtime_config():
         return SimpleNamespace(site_timezone="Europe/London")
 
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "get_runtime_config", fake_runtime_config)
 
-    result = await ai_tools.query_anomalies(
+    result = await alfred_access_diagnostics_handlers.query_anomalies(
         {
             "status": "all",
             "search": "hellofresh",
@@ -3401,9 +3447,9 @@ async def test_query_leaderboard_filters_rows(monkeypatch) -> None:
                 ],
             }
 
-    monkeypatch.setattr(ai_tools, "get_leaderboard_service", lambda: FakeLeaderboardService())
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "get_leaderboard_service", lambda: FakeLeaderboardService())
 
-    result = await ai_tools.query_leaderboard({"scope": "all", "limit": 10, "search": "Steph", "enrich_unknowns": True})
+    result = await alfred_access_diagnostics_handlers.query_leaderboard({"scope": "all", "limit": 10, "search": "Steph", "enrich_unknowns": True})
 
     assert result["top_known"]["display_name"] == "Steph Smith"
     assert result["known_count"] == 1
@@ -3412,7 +3458,7 @@ async def test_query_leaderboard_filters_rows(monkeypatch) -> None:
 
 
 def test_person_record_match_accepts_first_name_and_punctuation() -> None:
-    assert ai_tools._person_record_matches({"display_name": "Steph Smith", "group": "Family"}, "steph?")
+    assert alfred_shared._person_record_matches({"display_name": "Steph Smith", "group": "Family"}, "steph?")
 
 
 @pytest.mark.asyncio
@@ -3449,9 +3495,9 @@ async def test_resolve_human_entity_resolves_fuzzy_vehicle(monkeypatch) -> None:
         async def scalars(self, _query):
             return ScalarResult([vehicle])
 
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(alfred_general_handlers, "AsyncSessionLocal", lambda: Session())
 
-    result = await ai_tools.resolve_human_entity({"query": "the Tesla", "entity_types": ["vehicle"]})
+    result = await alfred_general_handlers.resolve_human_entity({"query": "the Tesla", "entity_types": ["vehicle"]})
 
     assert result["status"] == "unique"
     assert result["match"]["type"] == "vehicle"
@@ -3487,9 +3533,9 @@ async def test_resolve_human_entity_resolves_visitor_pass(monkeypatch) -> None:
     async def fake_runtime_config():
         return SimpleNamespace(site_timezone="Europe/London")
 
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(ai_tools, "get_visitor_pass_service", lambda: VisitorPassService())
+    monkeypatch.setattr(alfred_general_handlers, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(alfred_general_handlers, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_general_handlers, "get_visitor_pass_service", lambda: VisitorPassService())
     monkeypatch.setattr(
         general_tools,
         "_visitor_pass_agent_payload",
@@ -3500,7 +3546,7 @@ async def test_resolve_human_entity_resolves_visitor_pass(monkeypatch) -> None:
         },
     )
 
-    result = await ai_tools.resolve_human_entity({"query": "Stu", "entity_types": ["visitor_pass"]})
+    result = await alfred_general_handlers.resolve_human_entity({"query": "Stu", "entity_types": ["visitor_pass"]})
 
     assert result["status"] == "unique"
     assert result["match"]["type"] == "visitor_pass"
@@ -3532,10 +3578,10 @@ async def test_resolve_human_entity_resolves_friendly_device(monkeypatch) -> Non
             ],
         )
 
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(alfred_general_handlers, "AsyncSessionLocal", lambda: Session())
+    monkeypatch.setattr(alfred_general_handlers, "get_runtime_config", fake_runtime_config)
 
-    result = await ai_tools.resolve_human_entity({"query": "main garage", "entity_types": ["device"]})
+    result = await alfred_general_handlers.resolve_human_entity({"query": "main garage", "entity_types": ["device"]})
 
     assert result["status"] == "unique"
     assert result["match"]["type"] == "device"
@@ -3543,7 +3589,7 @@ async def test_resolve_human_entity_resolves_friendly_device(monkeypatch) -> Non
 
 
 def test_compact_observation_redacts_and_summarizes_payloads() -> None:
-    compacted = ai_tools._compact_observation(
+    compacted = alfred_shared._compact_observation(
         {
             "token": "secret-token",
             "snapshot_image": "x" * 1000,
@@ -3563,169 +3609,192 @@ def test_compact_observation_redacts_and_summarizes_payloads() -> None:
 def test_agent_datetime_formats_europe_london() -> None:
     value = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
-    assert ai_tools._agent_datetime_iso(value, "Europe/London") == "2026-04-27T13:00:00+01:00"
-    assert ai_tools._agent_datetime_display(value, "Europe/London") == "27 Apr 2026, 13:00"
+    assert alfred_shared._agent_datetime_iso(value, "Europe/London") == "2026-04-27T13:00:00+01:00"
+    assert alfred_shared._agent_datetime_display(value, "Europe/London") == "27 Apr 2026, 13:00"
 
 
-@pytest.mark.asyncio
-async def test_open_device_resolves_friendly_garage_name_before_confirmation(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_gate_entities=[],
-            home_assistant_garage_door_entities=[
-                {
-                    "entity_id": "cover.internal_main_garage",
-                    "name": "Main Garage",
-                    "enabled": True,
-                }
-            ],
-        )
+@contextmanager
+def _authorized_hardware_handler_case(monkeypatch, *, kind: str, action: str):
+    """Unit seams replace DB/provider access; real Admin checks and plan policy run."""
+    from app.models import User
+    from app.modules.access_devices.base import AccessDeviceBinding, AccessDeviceEntity
+    from app.modules.gate.base import GateState
+    from app.services.access_device_configuration import AccessDeviceConfiguration
+    from app.services.access_devices import AccessDeviceOperationResult
+    from app.services.gate_commands import GateCommandOutcome
 
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-
-    result = await ai_tools.open_device({"target": "main garage door", "kind": "all", "confirm": False})
-
-    assert result["requires_confirmation"] is True
-    assert result["target"] == "Main Garage"
-    assert result["device"]["name"] == "Main Garage"
-    assert "entity" not in result["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_close_device_preview_uses_close_action(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_gate_entities=[],
-            home_assistant_garage_door_entities=[
-                {
-                    "entity_id": "cover.internal_main_garage",
-                    "name": "Main Garage",
-                    "enabled": True,
-                }
-            ],
-        )
-
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-
-    result = await ai_tools.open_device(
-        {"target": "main garage door", "kind": "all", "action": "close", "confirm": False}
-    )
-
-    assert result["requires_confirmation"] is True
-    assert result["action"] == "close"
-    assert result["target"] == "Main Garage"
-    assert "Closing garage doors" in result["detail"]
-
-
-@pytest.mark.asyncio
-async def test_close_device_executes_through_access_device_service(monkeypatch) -> None:
-    calls: list[tuple[str, str, str, dict[str, Any]]] = []
-
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_gate_entities=[],
-            home_assistant_garage_door_entities=[
-                {
-                    "entity_id": "cover.internal_main_garage",
-                    "name": "Main Garage",
-                    "enabled": True,
-                }
-            ],
-        )
-
-    class FakeAccessDeviceService:
-        async def command_device(self, device_key, action, reason, **kwargs):
-            calls.append((device_key, action, reason, kwargs))
-            return SimpleNamespace(
-                accepted=True,
-                state=SimpleNamespace(value="closed"),
-                detail=reason,
-                verified=True,
-                used_provider="home_assistant",
-                failover_used=False,
-            )
-
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(ai_tools, "get_access_device_service", lambda: FakeAccessDeviceService())
-
-    result = await ai_tools.open_device(
-        {"target": "main garage door", "kind": "all", "action": "close", "confirm": True}
-    )
-
-    assert calls == [
-        (
-            "cover.internal_main_garage",
-            "close",
-            "Alfred agent: Alfred agent requested closing Main Garage",
-            {"schedule_source": "garage_door"},
-        )
-    ]
-    assert result["closed"] is True
-    assert result["opened"] is False
-    assert result["audit_event"] == "agent.device_close_requested"
-    assert result["verified"] is True
-
-
-@pytest.mark.asyncio
-async def test_open_gate_executes_through_gate_command_coordinator(monkeypatch) -> None:
-    calls = []
+    device_key = "cover.top_gate" if kind == "gate" else "cover.internal_main_garage"
+    name = "Top Gate" if kind == "gate" else "Main Garage"
+    device = AccessDeviceEntity(key=device_key, kind=kind, name=name, device_id=str(uuid.uuid4()),
+        bindings={"home_assistant": AccessDeviceBinding("home_assistant", device_key)})
+    admin = User(id=uuid.uuid4(), username="synthetic-admin", password_hash="unused",
+                 role=model_enums.UserRole.ADMIN, is_active=True, auth_session_version=7)
+    entity = {"entity_id": device_key, "name": name, "enabled": True}
+    config = SimpleNamespace(home_assistant_gate_entities=[entity] if kind == "gate" else [],
+        home_assistant_garage_door_entities=[entity] if kind == "garage_door" else [],
+        home_assistant_url="http://synthetic.invalid", home_assistant_token="synthetic-unused",
+        esphome_devices=[], gate_control_provider="home_assistant", gate_failover_provider="none",
+        gate_admission_device_key=None)
+    planner = AccessDeviceConfiguration()
+    calls, previews, published = [], [], []
+    operation_id, command_id = str(uuid.uuid4()), str(uuid.uuid4())
+    context = {"user_id": str(admin.id), "user_role": "admin", "session_id": str(uuid.uuid4()),
+               "intent_id": operation_id, "idempotency_key": operation_id}
 
     class Session:
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, _exc_type, exc, _traceback):
+        async def __aexit__(self, *_args):
             return None
 
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            home_assistant_gate_entities=[
-                {
-                    "entity_id": "cover.top_gate",
-                    "name": "Top Gate",
-                    "enabled": True,
-                }
-            ],
-            home_assistant_garage_door_entities=[],
-            site_timezone="Europe/London",
-            schedule_default_policy="allow",
-        )
+        async def get(self, model, identity):
+            assert model is User and identity == admin.id
+            return admin
 
-    async def fake_maintenance_mode():
-        return False
+    def receipt(state):
+        observed_at = datetime.now(tz=UTC).isoformat()
+        return {"command_id": command_id, "target_device_id": device.device_id, "device_key": device.key,
+            "action": action, "status": "verified", "accepted": True, "delivery": "accepted",
+            "state": state, "verified": True, "requires_reconciliation": False,
+            "verification_evidence": {"observation_id": str(uuid.uuid4()), "observed_at": observed_at,
+                "state": state, "target_device_id": device.device_id, "provider": "home_assistant"}}
 
-    async def fake_evaluate_schedule_id(*_args, **_kwargs):
-        return SimpleNamespace(allowed=True, reason=None)
+    class Devices:
+        async def preview_gate_open(self, *, target_device_key=None):
+            assert action == "open" and target_device_key == device.key
+            previews.append((target_device_key, "open"))
+            return planner.target_plan([device], config, action="open", target_device_key=target_device_key,
+                                       require_admission=False, gate_only=True)
 
-    class FakeGateCommandCoordinator:
+        async def preview_device_command(self, selected_key, selected_action):
+            assert selected_action == action and selected_key == device.key
+            previews.append((selected_key, selected_action))
+            return planner.target_plan([device], config, action=selected_action, target_device_key=selected_key,
+                                       require_admission=False, gate_only=False)
+
+        async def command_device(self, selected_key, selected_action, reason, **kwargs):
+            assert kind == "garage_door", "Gate actions must use the coordinator"
+            calls.append((selected_key, selected_action, reason, kwargs))
+            return AccessDeviceOperationResult(device=device, action=selected_action, accepted=True,
+                state=GateState.CLOSED if selected_action == "close" else GateState.OPEN, detail=reason,
+                used_provider="home_assistant", metadata={"verified": True, "command_id": command_id,
+                    "target_receipt": receipt("closed" if selected_action == "close" else "open"),
+                    "requires_reconciliation": False})
+
+    class Gates:
         async def execute_open(self, intent):
+            assert kind == "gate", "Garage actions must use the access-device service"
             calls.append(intent)
-            return SimpleNamespace(
-                accepted=True,
-                state=SimpleNamespace(value="open"),
-                detail="accepted",
-                intent=SimpleNamespace(intent_id="intent-1"),
-                command_id="command-1",
-                mechanically_confirmed=True,
-                requires_reconciliation=False,
-            )
+            now = datetime.now(tz=UTC)
+            return GateCommandOutcome(intent=intent, accepted=True, state=GateState.OPEN, detail="accepted",
+                started_at=now, completed_at=now, command_id=command_id, mechanically_confirmed=True,
+                target_receipts=[receipt("open")], reconciliation_required=False)
 
-    monkeypatch.setattr(ai_tools, "AsyncSessionLocal", lambda: Session())
-    monkeypatch.setattr(ai_tools, "evaluate_schedule_id", fake_evaluate_schedule_id)
-    monkeypatch.setattr(ai_tools, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(ai_tools, "is_maintenance_mode_active", fake_maintenance_mode)
-    monkeypatch.setattr(ai_tools, "get_gate_command_coordinator", lambda: FakeGateCommandCoordinator())
+    async def publish(event_type, payload):
+        published.append((event_type, payload))
 
-    result = await ai_tools.open_gate({"target": "Top Gate", "reason": "operator test", "confirm": True})
+    monkeypatch.setattr(alfred_shared, "AsyncSessionLocal", Session)
+    monkeypatch.setattr(alfred_shared, "get_runtime_config", AsyncMock(return_value=config))
+    monkeypatch.setattr(alfred_gate_maintenance_handlers, "get_runtime_config", AsyncMock(return_value=config))
+    monkeypatch.setattr(alfred_gate_maintenance_handlers, "get_access_device_service", lambda: Devices())
+    monkeypatch.setattr(alfred_gate_maintenance_handlers, "get_gate_command_coordinator", lambda: Gates())
+    monkeypatch.setattr(alfred_gate_maintenance_handlers, "is_maintenance_mode_active", AsyncMock(return_value=False))
+    monkeypatch.setattr(alfred_gate_maintenance_handlers.event_bus, "publish", publish)
+    token = alfred_context.set_chat_tool_context(context)
+    try:
+        yield SimpleNamespace(admin=admin, device=device, context=context, calls=calls, previews=previews,
+                              published=published, operation_id=operation_id, command_id=command_id)
+    finally:
+        alfred_context.set_chat_tool_context({}, token=token)
 
-    assert len(calls) == 1
-    assert calls[0].source == "alfred"
-    assert calls[0].actor == "Alfred_AI"
-    assert calls[0].reason == "Alfred agent: operator test"
-    assert calls[0].metadata["target_entity_id"] == "cover.top_gate"
-    assert result["opened"] is True
-    assert result["command_id"] == "command-1"
+
+@pytest.mark.asyncio
+async def test_open_device_resolves_friendly_garage_name_before_confirmation(monkeypatch) -> None:
+    with _authorized_hardware_handler_case(monkeypatch, kind="garage_door", action="open") as case:
+        result = await alfred_gate_maintenance_handlers.open_device(
+            {"target": "main garage door", "kind": "all", "confirm": False})
+
+    assert result["requires_confirmation"] is True
+    assert result["target"] == "Main Garage"
+    assert result["device"]["name"] == "Main Garage"
+    assert "entity" not in result["detail"].lower()
+    assert case.previews == [(case.device.key, "open")] and not case.calls
+    plan = result["target_plan"]
+    assert plan["action"] == "open" and plan["target_device_key"] == case.device.key
+    assert [target["target_device_id"] for target in plan["targets"]] == [case.device.device_id]
+
+
+@pytest.mark.asyncio
+async def test_close_device_preview_uses_close_action(monkeypatch) -> None:
+    with _authorized_hardware_handler_case(monkeypatch, kind="garage_door", action="close") as case:
+        result = await alfred_gate_maintenance_handlers.open_device(
+            {"target": "main garage door", "kind": "all", "action": "close", "confirm": False})
+
+    assert result["requires_confirmation"] is True
+    assert result["action"] == "close"
+    assert result["target"] == "Main Garage"
+    assert "Closing garage doors" in result["detail"]
+    assert case.previews == [(case.device.key, "close")] and not case.calls
+    assert result["target_plan"]["action"] == "close"
+    assert result["target_plan"]["targets"][0]["target_device_id"] == case.device.device_id
+
+
+@pytest.mark.asyncio
+async def test_close_device_executes_through_access_device_service(monkeypatch) -> None:
+    arguments = {"target": "main garage door", "kind": "all", "action": "close"}
+    with _authorized_hardware_handler_case(monkeypatch, kind="garage_door", action="close") as case:
+        preview = await alfred_gate_maintenance_handlers.open_device({**arguments, "confirm": False})
+        # A caller-controlled confirm flag is not a requester-bound approval.
+        denied = await alfred_gate_maintenance_handlers.open_device({**arguments, "confirm": True})
+        assert denied["accepted"] is False and "requester-bound" in denied["error"] and not case.calls
+        case.context["approval"] = {"confirmation_id": "confirm-synthetic", "requester_user_id": str(case.admin.id),
+            "requester_auth_session_version": case.admin.auth_session_version, "preview_output": deepcopy(preview)}
+        case.context["approval"]["preview_output"]["target_plan"]["targets"][0]["binding_fingerprint"] = "0" * 64
+        changed = await alfred_gate_maintenance_handlers.open_device({**arguments, "confirm": True})
+        assert changed["accepted"] is False and "fresh" in changed["error"] and not case.calls
+        case.context["approval"]["preview_output"] = deepcopy(preview)
+        result = await alfred_gate_maintenance_handlers.open_device({**arguments, "confirm": True})
+
+    assert case.calls == [("cover.internal_main_garage", "close",
+        "Alfred agent: Alfred agent requested closing Main Garage", {
+            "schedule_source": "garage_door", "intent_id": case.operation_id,
+            "idempotency_key": case.operation_id, "target_plan": preview["target_plan"],
+            "actor_user_id": str(case.admin.id), "auth_version": case.admin.auth_session_version})]
+    assert result["closed"] is True and result["opened"] is False
+    assert result["audit_event"] == "agent.device_close_requested" and result["verified"] is True
+    assert result["metadata"]["command_id"] == case.command_id
+    assert result["metadata"]["target_receipt"]["target_device_id"] == case.device.device_id
     assert result["requires_reconciliation"] is False
+    assert [event for event, _payload in case.published] == ["agent.device_close_requested", "garage_door.close_requested"]
+
+
+@pytest.mark.asyncio
+async def test_open_gate_executes_through_gate_command_coordinator(monkeypatch) -> None:
+    arguments = {"target": "Top Gate", "reason": "operator test"}
+    with _authorized_hardware_handler_case(monkeypatch, kind="gate", action="open") as case:
+        preview = await alfred_gate_maintenance_handlers.open_gate({**arguments, "confirm": False})
+        case.context["approval"] = {"confirmation_id": "confirm-synthetic", "requester_user_id": str(uuid.uuid4()),
+            "requester_auth_session_version": case.admin.auth_session_version, "preview_output": deepcopy(preview)}
+        denied = await alfred_gate_maintenance_handlers.open_gate({**arguments, "confirm": True})
+        assert denied["accepted"] is False and "requester-bound" in denied["error"] and not case.calls
+        case.context["approval"]["requester_user_id"] = str(case.admin.id)
+        result = await alfred_gate_maintenance_handlers.open_gate({**arguments, "confirm": True})
+
+    assert len(case.calls) == 1
+    command = case.calls[0]
+    assert command.source == "alfred" and command.actor == "Alfred_AI"
+    assert command.reason == "Alfred agent: operator test"
+    assert command.metadata["target_entity_id"] == "cover.top_gate"
+    assert command.target_device_key == case.device.key and command.target_plan == preview["target_plan"]
+    assert command.target_plan["targets"][0]["target_device_id"] == case.device.device_id
+    assert command.intent_id == command.idempotency_key == case.operation_id
+    assert command.actor_user_id == str(case.admin.id) and command.auth_version == case.admin.auth_session_version
+    assert command.require_admission is False and command.automatic_entry_policy is False
+    assert result["opened"] is True and result["command_id"] == case.command_id
+    assert result["requires_reconciliation"] is False
+    assert result["target_receipts"][0]["target_device_id"] == case.device.device_id
+    assert [event for event, _payload in case.published] == ["agent.device_open_requested", "gate.open_requested"]
 
 
 def test_close_device_confirmation_card_uses_close_language() -> None:

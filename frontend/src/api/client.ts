@@ -87,13 +87,20 @@ export async function createActionConfirmation(
     ...options
   });
 }
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 export async function apiError(response: Response) {
   const statusLabel = `${response.status} ${response.statusText || "Request failed"}`;
   let detail: string | null = null;
+  let payload: unknown = null;
   const body = await response.text().catch(() => "");
   if (body.trim()) {
     try {
-      const payload = JSON.parse(body) as unknown;
+      payload = JSON.parse(body) as unknown;
       if (payload && typeof payload === "object" && !Array.isArray(payload)) {
         const record = payload as Record<string, unknown>;
         detail =
@@ -107,7 +114,7 @@ export async function apiError(response: Response) {
       detail = body.trim();
     }
   }
-  return new Error(detail && detail !== statusLabel ? `${statusLabel}: ${detail}` : statusLabel);
+  return new ApiError(detail && detail !== statusLabel ? `${statusLabel}: ${detail}` : statusLabel, response.status, payload);
 }
 function describeApiErrorDetail(value: unknown): string | null {
   if (value == null) return null;

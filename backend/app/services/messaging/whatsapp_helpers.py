@@ -4,7 +4,6 @@ import json
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
@@ -16,32 +15,42 @@ from app.models import Vehicle, VisitorPass
 from app.models.enums import VisitorPassStatus
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.notifications.base import NotificationContext
-from app.services.settings import get_runtime_config
 from app.services.type_helpers import as_dict
+from app.services.workflows.visitor_notifications import (
+    visitor_window_label_from_values, parse_datetime_value, _ensure_aware_utc, safe_zoneinfo,
+)
 from app.services.visitor_passes import get_visitor_pass_service, visitor_pass_whatsapp_history
+from app.services.visitor_conversations import visitor_pass_conversation_is_complete
+from app.services.workflows.visitor_conversations import (
+    coerce_uuid,
+    masked_contact_phone as masked_phone_number,
+    visitor_plate_pending_status_detail,
+    visitor_vehicle_label,
+    VISITOR_ABUSE_MUTE_SECONDS,
+    VISITOR_ABUSE_WINDOW_SECONDS,
+    VISITOR_PLATE_CHANGE_LIMIT,
+    VISITOR_POST_COMPLETE_REPLY_LIMIT,
+    VISITOR_TIMEFRAME_AUTO_LIMIT_SECONDS,
+    _visitor_pending_timeframe,
+    normalize_llm_timeframe_change_payload,
+    parse_llm_datetime_value,
+    recent_iso_timestamps,
+    timeframe_change_within_auto_limit,
+    truthy_value,
+    visitor_abuse_status_detail,
+    visitor_pending_plate_metadata,
+    visitor_pending_timeframe_request,
+    visitor_status_metadata,
+    visitor_timeframe_original_window,
+    visitor_timeframe_request_payload,
+    visitor_timeframe_window_payload,
+    visitor_vehicle_metadata_text,
+    normalize_contact_phone as normalize_whatsapp_phone_number,
+)
 
 AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
 
 
-@dataclass(frozen=True)
-class WhatsAppIntegrationConfig:
-    enabled: bool
-    access_token: str
-    phone_number_id: str
-    business_account_id: str
-    webhook_verify_token: str
-    app_secret: str
-    graph_api_version: str
-    visitor_pass_template_name: str
-    visitor_pass_template_language: str
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.enabled and self.access_token and self.phone_number_id)
-
-    @property
-    def webhook_configured(self) -> bool:
-        return bool(self.webhook_verify_token)
 
 
 WhatsAppConfirmation = NamedTuple("WhatsAppConfirmation", [("session_id", str), ("confirmation_id", str), ("decision", str)])
@@ -64,14 +73,8 @@ VISITOR_PENDING_TIMEFRAME_REPLY = (
     "I've already sent your timeframe change for approval, so I can't take another time change "
     "until that has been reviewed. I'll come back to you as soon as there's a decision."
 )
-VISITOR_TIMEFRAME_AUTO_LIMIT_SECONDS = 60 * 60
 VISITOR_TEXT_DEBOUNCE_SECONDS = 2.5
-VISITOR_TEXT_BUFFER_KEY = "whatsapp_text_buffer"
 VISITOR_CONVERSATION_CONTEXT_LIMIT = 12
-VISITOR_ABUSE_WINDOW_SECONDS = 10 * 60
-VISITOR_ABUSE_MUTE_SECONDS = 30 * 60
-VISITOR_POST_COMPLETE_REPLY_LIMIT = 4
-VISITOR_PLATE_CHANGE_LIMIT = 3
 ADMIN_ALFRED_FEEDBACK_STATE_KEY = "whatsapp_admin_alfred_feedback"
 ADMIN_ALFRED_FEEDBACK_PROMPT = (
     "What was wrong with that answer? Send me a quick note, and if you know what I should have said, "
@@ -106,53 +109,16 @@ Return only compact JSON in one of these shapes:
 """
 
 
-async def load_whatsapp_config(values: dict[str, Any] | None = None) -> WhatsAppIntegrationConfig:
-    runtime = await get_runtime_config()
-    overrides = values or {}
-
-    def text(key: str, default: str) -> str:
-        value = overrides.get(key, default)
-        if isinstance(value, bool):
-            return default
-        return str(value or "").strip()
-
-    def bool_setting(key: str, default: bool) -> bool:
-        value = overrides.get(key, default)
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-    return WhatsAppIntegrationConfig(
-        enabled=bool_setting("whatsapp_enabled", runtime.whatsapp_enabled),
-        access_token=text("whatsapp_access_token", runtime.whatsapp_access_token),
-        phone_number_id=text("whatsapp_phone_number_id", runtime.whatsapp_phone_number_id),
-        business_account_id=text("whatsapp_business_account_id", runtime.whatsapp_business_account_id),
-        webhook_verify_token=text("whatsapp_webhook_verify_token", runtime.whatsapp_webhook_verify_token),
-        app_secret=text("whatsapp_app_secret", runtime.whatsapp_app_secret),
-        graph_api_version=normalize_graph_api_version(text("whatsapp_graph_api_version", runtime.whatsapp_graph_api_version)),
-        visitor_pass_template_name=text("whatsapp_visitor_pass_template_name", runtime.whatsapp_visitor_pass_template_name),
-        visitor_pass_template_language=text("whatsapp_visitor_pass_template_language", runtime.whatsapp_visitor_pass_template_language),
-    )
 
 
-def normalize_whatsapp_phone_number(value: Any) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
-def masked_phone_number(value: Any) -> str:
-    digits = normalize_whatsapp_phone_number(value)
-    if not digits:
-        return ""
-    return f"+...{digits[-4:]}" if len(digits) > 4 else "+..." + digits
 
 
 def unique_phone_numbers(values: Any) -> list[str]:
     return list(dict.fromkeys(phone for value in values if (phone := normalize_whatsapp_phone_number(value))))
 
 
-def normalize_graph_api_version(value: str) -> str:
-    version = str(value or "v25.0").strip()
-    return "v25.0" if not version else version if version.startswith("v") else f"v{version}"
 
 
 def render_token_template(template: str, variables: dict[str, str]) -> str:
@@ -164,40 +130,8 @@ def render_token_template(template: str, variables: dict[str, str]) -> str:
     return AT_TOKEN_PATTERN.sub(replace_token, str(template or "")).strip()
 
 
-def visitor_status_metadata(
-    current: dict[str, Any],
-    status: str,
-    *,
-    detail: str | None = None,
-    error: str | None = None,
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    metadata = {
-        **current,
-        "whatsapp_concierge_status": status,
-        "whatsapp_status_updated_at": datetime.now(tz=UTC).isoformat(),
-    }
-    if detail is not None:
-        metadata["whatsapp_concierge_status_detail"] = detail
-    if error is not None:
-        metadata["whatsapp_last_error"] = error
-    if extra:
-        metadata.update(extra)
-    return metadata
 
 
-def visitor_pending_plate_metadata(current: dict[str, Any], **updates: Any) -> dict[str, Any]:
-    metadata = {
-        **current,
-        "whatsapp_pending_plate": None,
-        "whatsapp_pending_nonce": None,
-        "whatsapp_pending_vehicle_make": None,
-        "whatsapp_pending_vehicle_colour": None,
-        "whatsapp_pending_vehicle_lookup_error": None,
-        "whatsapp_status_updated_at": datetime.now(tz=UTC).isoformat(),
-        **updates,
-    }
-    return {key: value for key, value in metadata.items() if value is not None}
 
 
 def whatsapp_confirmation_button_id(decision: str, session_id: str, confirmation_id: str) -> str:
@@ -325,7 +259,8 @@ def visitor_pass_timeframe_llm_context(visitor_pass: VisitorPass, timezone_name:
 
 
 def visitor_pass_whatsapp_llm_context(visitor_pass: VisitorPass) -> dict[str, Any]:
-    history = visitor_pass_whatsapp_history(visitor_pass)[-VISITOR_CONVERSATION_CONTEXT_LIMIT:]
+    history = [entry for entry in visitor_pass_whatsapp_history(visitor_pass)
+        if as_dict(entry.get("metadata")).get("delivery") in {None, "accepted"}][-VISITOR_CONVERSATION_CONTEXT_LIMIT:]
     messages = [visitor_pass_whatsapp_context_entry(entry) for entry in history]
     latest_custom = next(
         (
@@ -355,108 +290,18 @@ def visitor_pass_whatsapp_context_entry(entry: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def normalize_llm_timeframe_change_payload(payload: dict[str, Any], timezone_name: str | None = None) -> dict[str, Any] | None:
-    requested_from = parse_llm_datetime_value(payload.get("valid_from"), timezone_name)
-    requested_until = parse_llm_datetime_value(payload.get("valid_until"), timezone_name)
-    if not requested_from or not requested_until or requested_until <= requested_from:
-        return None
-    normalized: dict[str, Any] = {
-        "action": "timeframe_change",
-        "valid_from": requested_from.isoformat(),
-        "valid_until": requested_until.isoformat(),
-        "summary": str(payload.get("summary") or "Visitor requested a timeframe change.")[:500],
-    }
-    source = str(payload.get("source") or "").strip()
-    if source:
-        normalized["source"] = source[:80]
-    if truthy_value(payload.get("direct_apply")) or source == "dashboard_custom_proposal":
-        normalized["direct_apply"] = True
-    return normalized
 
 
-def truthy_value(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def parse_llm_datetime_value(value: Any, timezone_name: str | None = None) -> datetime | None:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=safe_zoneinfo(timezone_name)).astimezone(UTC)
-        return _ensure_aware_utc(value)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=safe_zoneinfo(timezone_name))
-    return _ensure_aware_utc(parsed)
 
 
-def visitor_timeframe_original_window(
-    metadata: dict[str, Any],
-    current_start: datetime,
-    current_end: datetime,
-) -> tuple[datetime, datetime]:
-    candidates = (
-        ("whatsapp_timeframe_original_window", "valid_from", "valid_until"),
-        ("whatsapp_timeframe_confirmation", "original_valid_from", "original_valid_until"),
-        ("whatsapp_timeframe_request", "original_valid_from", "original_valid_until"),
-        ("whatsapp_timeframe_confirmation", "current_valid_from", "current_valid_until"),
-        ("whatsapp_timeframe_request", "current_valid_from", "current_valid_until"),
-    )
-    for key, start_key, end_key in candidates:
-        payload = metadata.get(key)
-        if not isinstance(payload, dict):
-            continue
-        original_start = parse_datetime_value(payload.get(start_key))
-        original_end = parse_datetime_value(payload.get(end_key))
-        if original_start and original_end and original_end > original_start:
-            return original_start, original_end
-    return _ensure_aware_utc(current_start), _ensure_aware_utc(current_end)
 
 
-def visitor_timeframe_window_payload(start: datetime, end: datetime) -> dict[str, str]:
-    return {"valid_from": start.isoformat(), "valid_until": end.isoformat()}
 
 
-def visitor_timeframe_request_payload(
-    request_id: str,
-    text: str,
-    summary: Any,
-    current: tuple[datetime, datetime],
-    original: tuple[datetime, datetime],
-    requested: tuple[datetime, datetime],
-) -> dict[str, str]:
-    payload = {
-        "id": request_id,
-        "status": "pending",
-        "requested_at": datetime.now(tz=UTC).isoformat(),
-        "visitor_message": text[:500],
-        "summary": str(summary or "Visitor requested a timeframe change.")[:500],
-    }
-    for prefix, (start, end) in {"current": current, "original": original, "requested": requested}.items():
-        payload[f"{prefix}_valid_from"] = start.isoformat()
-        payload[f"{prefix}_valid_until"] = end.isoformat()
-    return payload
 
 
-def timeframe_change_within_auto_limit(
-    current_start: datetime,
-    current_end: datetime,
-    requested_start: datetime,
-    requested_end: datetime,
-) -> bool:
-    return (
-        abs((_ensure_aware_utc(requested_start) - _ensure_aware_utc(current_start)).total_seconds()) <= VISITOR_TIMEFRAME_AUTO_LIMIT_SECONDS
-        and abs((_ensure_aware_utc(requested_end) - _ensure_aware_utc(current_end)).total_seconds()) <= VISITOR_TIMEFRAME_AUTO_LIMIT_SECONDS
-    )
 
 
 def visitor_concierge_start_message(visitor_pass: VisitorPass) -> str:
@@ -571,40 +416,14 @@ def visitor_registration_not_found_message(plate: Any) -> str:
     )
 
 
-def visitor_pending_timeframe_request(metadata: dict[str, Any]) -> bool:
-    return _visitor_pending_timeframe(metadata, "whatsapp_timeframe_request")
 
 
-def _visitor_pending_timeframe(metadata: dict[str, Any], key: str) -> bool:
-    request = metadata.get(key)
-    return isinstance(request, dict) and str(request.get("status") or "").strip().lower() == "pending"
 
 
-def visitor_pass_conversation_is_complete(visitor_pass: VisitorPass) -> bool:
-    if not normalize_registration_number(visitor_pass.number_plate):
-        return False
-    metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
-    if metadata.get("whatsapp_pending_plate") or visitor_pending_timeframe_request(metadata) or _visitor_pending_timeframe(metadata, "whatsapp_timeframe_confirmation"):
-        return False
-    return True
 
 
-def recent_iso_timestamps(value: Any, *, now: datetime, window_seconds: int = VISITOR_ABUSE_WINDOW_SECONDS) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    threshold = now - timedelta(seconds=window_seconds)
-    timestamps: list[str] = []
-    for item in value:
-        parsed = parse_datetime_value(item)
-        if parsed and parsed >= threshold:
-            timestamps.append(parsed.isoformat())
-    return timestamps
 
 
-def visitor_abuse_status_detail(reason: str) -> str:
-    if reason == "plate_changes":
-        return "Visitor sent repeated registration changes; replies are paused for 30 minutes."
-    return "Visitor sent repeated post-confirmation replies; replies are paused for 30 minutes."
 
 
 def visitor_abuse_fallback_reply(reason: str) -> str:
@@ -689,10 +508,6 @@ def strip_visitor_alfred_name_sentences(value: Any) -> str:
     sentences = re.split(r"(?<=[.!?])\s+", text)
     kept = [sentence for sentence in sentences if not visitor_message_mentions_alfred(sentence)]
     return " ".join(sentence.strip() for sentence in kept if sentence.strip()).strip()
-
-
-def visitor_text_task_key(pass_id: uuid.UUID, sender: str) -> str:
-    return f"{pass_id}:{normalize_whatsapp_phone_number(sender)}"
 
 
 def masked_plate_value(value: Any) -> str:
@@ -800,28 +615,10 @@ def visitor_plate_saved_message(
     )[:1024]
 
 
-def visitor_plate_pending_status_detail(vehicle_make: Any = None, vehicle_colour: Any = None) -> str:
-    vehicle = visitor_vehicle_label(vehicle_make, vehicle_colour)
-    if vehicle:
-        return f"Visitor replied with a vehicle registration; identified {vehicle}; awaiting confirmation."
-    return "Visitor replied with a vehicle registration; awaiting confirmation."
 
 
-def visitor_vehicle_label(vehicle_make: Any = None, vehicle_colour: Any = None) -> str:
-    make = visitor_vehicle_metadata_text(vehicle_make)
-    colour = visitor_vehicle_metadata_text(vehicle_colour)
-    if make and colour:
-        return f"{colour} {make}"
-    if make:
-        return make
-    if colour:
-        return f"{colour} vehicle"
-    return ""
 
 
-def visitor_vehicle_metadata_text(value: Any) -> str | None:
-    text = " ".join(str(value or "").split())
-    return text[:80] or None
 
 
 def visitor_first_name(value: Any) -> str:
@@ -837,44 +634,6 @@ def visitor_pass_window_label(visitor_pass: VisitorPass) -> str:
 
 def visitor_pass_window_label_from_payload(payload: dict[str, Any]) -> str:
     return visitor_window_label_from_values(payload.get("valid_from") or payload.get("window_start"), payload.get("valid_until") or payload.get("window_end"))
-
-
-def visitor_window_label_from_values(start_value: Any, end_value: Any, timezone_name: str | None = "Europe/London") -> str:
-    timezone = safe_zoneinfo(timezone_name)
-    start = parse_datetime_value(start_value)
-    end = parse_datetime_value(end_value)
-    if not start:
-        return ""
-    start_text = start.astimezone(timezone).strftime("%d %b %Y, %H:%M")
-    if not end:
-        return start_text
-    end_text = end.astimezone(timezone).strftime("%d %b %Y, %H:%M")
-    return f"{start_text} to {end_text}"
-
-
-def parse_datetime_value(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return _ensure_aware_utc(value)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return _ensure_aware_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
-    except ValueError:
-        return None
-
-
-def _ensure_aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def safe_zoneinfo(timezone_name: str | None) -> ZoneInfo:
-    try:
-        return ZoneInfo(str(timezone_name or "Europe/London"))
-    except Exception:
-        return ZoneInfo("Europe/London")
 
 
 def whatsapp_send_failure_status(exc: Exception) -> str:
@@ -940,10 +699,3 @@ def whatsapp_response_message_id(payload: Any) -> str:
         return ""
     first_message = messages[0]
     return str(first_message.get("id") or "").strip() if isinstance(first_message, dict) else ""
-
-
-def coerce_uuid(value: Any) -> uuid.UUID | None:
-    try:
-        return uuid.UUID(str(value))
-    except (TypeError, ValueError):
-        return None

@@ -6,7 +6,7 @@ const Dashboard = React.lazy(() => import("../views/DashboardView").then((module
 const GroupsView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.GroupsView })));
 const PeopleView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.PeopleView })));
 const VehiclesView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.VehiclesView })));
-const SchedulesView = React.lazy(() => import("../views/SchedulesView").then((module) => ({ default: module.SchedulesView })));
+const SchedulesView = React.lazy(() => import("../features/schedules/SchedulesView").then((module) => ({ default: module.SchedulesView })));
 const PassesView = React.lazy(() => import("../views/PassesView").then((module) => ({ default: module.PassesView })));
 const TopChartsView = React.lazy(() => import("../views/TopChartsView").then((module) => ({ default: module.TopChartsView })));
 const EventsView = React.lazy(() => import("../views/EventsView").then((module) => ({ default: module.EventsView })));
@@ -16,8 +16,8 @@ const ReportsView = React.lazy(() => import("../views/ReportsView").then((module
 const IntegrationsView = React.lazy(() => import("../views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
 const LogsView = React.lazy(() => import("../views/LogsView").then((module) => ({ default: module.LogsView })));
 const AlfredTrainingView = React.lazy(() => import("../views/AlfredTrainingView").then((module) => ({ default: module.AlfredTrainingView })));
-const AutomationsView = React.lazy(() => import("../views/WorkflowViews").then((module) => ({ default: module.AutomationsView })));
-const NotificationsView = React.lazy(() => import("../views/WorkflowViews").then((module) => ({ default: module.NotificationsView })));
+const AutomationsView = React.lazy(() => import("../features/workflows/AutomationsView").then((module) => ({ default: module.AutomationsView })));
+const NotificationsView = React.lazy(() => import("../features/workflows/NotificationsView").then((module) => ({ default: module.NotificationsView })));
 const SettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.SettingsView })));
 const DynamicSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.DynamicSettingsView })));
 const AccessDevicesSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
@@ -55,7 +55,7 @@ function RouteLoading() {
       content = <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
       break;
     case "schedules":
-      content = <SchedulesView schedules={props.schedules} query={props.search} refresh={props.refresh} />;
+      content = <SchedulesView schedules={props.schedules} query={props.search} refreshToken={props.dataRefreshToken} refresh={props.refresh} />;
       break;
     case "passes":
       content = <PassesView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
@@ -102,7 +102,7 @@ function RouteLoading() {
         : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "settings_automations":
-      content = <AutomationsView people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
+      content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
       break;
     case "settings_notifications":
       content = <NotificationsView currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;

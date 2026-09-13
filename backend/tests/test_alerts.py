@@ -24,7 +24,7 @@ from app.models.enums import (
     AnomalyType,
     TimingClassification,
 )
-from app.services.access_events import AccessEventService
+from app.services.access.execution import AccessExecution
 from app.services.snapshots import access_event_snapshot_relative_path, get_snapshot_manager
 
 
@@ -69,7 +69,7 @@ class FakeAlertSession:
 @pytest.mark.asyncio
 async def test_unknown_plate_anomaly_is_warning(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    service = AccessEventService()
+    service = AccessExecution(None, None, None)
     event_id = uuid4()
     event = AccessEvent(
         id=event_id,

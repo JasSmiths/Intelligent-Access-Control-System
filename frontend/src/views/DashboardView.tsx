@@ -16,7 +16,9 @@ Warehouse
 } from "lucide-react";
 import React from "react";
 
-import { api, createActionConfirmation } from "../api/client";
+import { CommandReceiptHistory } from "../features/integrations/CommandReceiptHistory";
+import { api, ApiError, createActionConfirmation } from "../api/client";
+import { integrationsApi, coverTargetReceipt, isDeviceCommandReceipt, isGateCommandReceipt, type DeviceCommandReceipt, type GateCommandReceipt } from "../api/integrations";
 import { activeManagedCovers, displayUserName, isActionableAlert, titleCase, visitorEventDisplayName } from "../lib/format";
 import { mediaSource } from "../lib/media";
 import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
@@ -40,7 +42,29 @@ function isInlineEventSnapshotLayout() {
   return typeof window !== "undefined" && window.matchMedia(INLINE_EVENT_SNAPSHOT_QUERY).matches;
 }
 
-export function Dashboard({
+type SavedDashboardCommand = { intentId: string; kind: DashboardCommand["kind"]; deviceKey?: string; action: DoorCommandAction };
+type DashboardReceipt = GateCommandReceipt | DeviceCommandReceipt;
+type ReceiptRead = { receipt?: DashboardReceipt; error?: string; loading?: boolean };
+
+function loadSavedCommands(key: string): SavedDashboardCommand[] {
+  try {
+    const value: unknown = JSON.parse(window.sessionStorage.getItem(key) || "[]");
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item: unknown) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as Record<string, unknown>;
+      if (typeof row.intentId !== "string" || !row.intentId || (row.kind !== "gate" && row.kind !== "garage_door")
+        || (row.action !== "open" && row.action !== "close") || (row.deviceKey !== undefined && typeof row.deviceKey !== "string")) return [];
+      return [{ intentId: row.intentId, kind: row.kind, action: row.action, ...(row.deviceKey ? { deviceKey: row.deviceKey } : {}) }];
+    });
+  } catch { return []; }
+}
+
+export function Dashboard(props: Parameters<typeof DashboardSession>[0]) {
+  return <DashboardSession key={`${props.currentUser.id}:${props.currentUser.role}`} {...props} />;
+}
+
+function DashboardSession({
   presence,
   expectedPresence,
   events,
@@ -74,6 +98,30 @@ export function Dashboard({
   const [maintenanceError, setMaintenanceError] = React.useState("");
   const [commandLoading, setCommandLoading] = React.useState(false);
   const [commandError, setCommandError] = React.useState("");
+  const storageKey = `iacs-dashboard-commands:${currentUser.id}:${currentUser.role}`;
+  const [savedCommands, setSavedCommands] = React.useState(() => loadSavedCommands(storageKey));
+  const [receiptReads, setReceiptReads] = React.useState<Record<string, ReceiptRead>>({});
+  const [showCommandHistory, setShowCommandHistory] = React.useState(false);
+  const [receiptRefresh, setReceiptRefresh] = React.useState(0);
+  const [receiptStorageError, setReceiptStorageError] = React.useState("");
+  const commandAttemptRef = React.useRef(false);
+  const commandAbortRef = React.useRef<AbortController | null>(null);
+  const refreshTimerRef = React.useRef<number | null>(null);
+  const lifetimeRef = React.useRef(0);
+  React.useLayoutEffect(() => {
+    lifetimeRef.current += 1;
+    return () => {
+      lifetimeRef.current += 1;
+      commandAbortRef.current?.abort();
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+    };
+  }, []);
+  const persistCommands = (commands: SavedDashboardCommand[]) => {
+    // Advisory browser index; the durable backend receipt owns the outcome.
+    try { window.sessionStorage.setItem(storageKey, JSON.stringify(commands)); }
+    catch { setReceiptStorageError("This browser cannot retain action IDs across reloads. Use Command history to find saved server receipts."); }
+    setSavedCommands(commands);
+  };
   const [openSnapshotEventId, setOpenSnapshotEventId] = React.useState<string | null>(null);
   const [inlineEventSnapshotLayout, setInlineEventSnapshotLayout] = React.useState(isInlineEventSnapshotLayout);
   const maintenanceActive = maintenanceStatus?.is_active === true;
@@ -150,46 +198,93 @@ export function Dashboard({
     return () => window.clearInterval(timer);
   }, []);
 
+  React.useEffect(() => {
+    if (!isAdmin || commandLoading || !savedCommands.length) return;
+    const controller = new AbortController();
+    for (const command of savedCommands) {
+      setReceiptReads((reads) => ({ ...reads, [command.intentId]: { ...reads[command.intentId], loading: true } }));
+      const request = command.kind === "gate"
+        ? integrationsApi.getGateCommandByIntent(command.intentId, { signal: controller.signal })
+        : integrationsApi.getCoverCommandByIntent(command.intentId, { signal: controller.signal });
+      request.then((receipt) => {
+        if (controller.signal.aborted) return;
+        if (!(command.kind === "gate" ? isGateCommandReceipt(receipt) : isDeviceCommandReceipt(receipt))) {
+          throw new Error("The saved action result was incomplete.");
+        }
+        setReceiptReads((reads) => ({ ...reads, [command.intentId]: { receipt } }));
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const message = error instanceof ApiError && error.status === 404
+          ? "No recorded attempt is available yet. The request may still be processing; this does not establish that it was not sent."
+          : error instanceof Error ? error.message : "Unable to read the saved action result.";
+        setReceiptReads((reads) => ({ ...reads, [command.intentId]: { receipt: reads[command.intentId]?.receipt, error: message } }));
+      });
+    }
+    return () => controller.abort();
+  }, [commandLoading, isAdmin, receiptRefresh, savedCommands]);
+
+  const awaitingResult = (kind: DashboardCommand["kind"], deviceKey?: string) => savedCommands.some((command) => {
+    if (command.kind !== kind || (command.deviceKey && deviceKey && command.deviceKey !== deviceKey)) return false;
+    const receipt = receiptReads[command.intentId]?.receipt;
+    return !receipt || receipt.requires_reconciliation;
+  });
+
   const runDashboardCommand = async () => {
-    if (!pendingCommand || commandLoading) return;
+    if (!pendingCommand || commandAttemptRef.current || !isAdmin || maintenanceActive) return;
+    const command = pendingCommand;
+    commandAttemptRef.current = true;
     setCommandLoading(true);
     setCommandError("");
+    const lifetime = lifetimeRef.current;
+    const active = () => lifetimeRef.current === lifetime;
+    const controller = new AbortController();
+    commandAbortRef.current = controller;
+    let saved: SavedDashboardCommand | null = null;
     try {
-      if (pendingCommand.kind === "gate") {
-        const payload = { reason: "Dashboard Top Gate status command" };
-        const confirmation = await createActionConfirmation("gate.open", payload, {
-          target_entity: "Gate",
-          target_label: pendingCommand.label,
-          reason: payload.reason
-        });
-        await api.post("/api/v1/integrations/gate/open", {
-          ...payload,
-          confirmation_token: confirmation.confirmation_token
-        });
-      } else {
-        const payload = {
-          entity_id: pendingCommand.entity_id,
-          action: pendingCommand.action,
-          reason: `Dashboard ${pendingCommand.label} ${pendingCommand.action} command`
-        };
-        const confirmation = await createActionConfirmation(`cover.${pendingCommand.action}`, payload, {
-          target_entity: "Cover",
-          target_id: pendingCommand.entity_id,
-          target_label: pendingCommand.label,
-          reason: payload.reason
-        });
-        await api.post("/api/v1/integrations/cover/command", {
-          ...payload,
-          confirmation_token: confirmation.confirmation_token
-        });
-      }
-      setPendingCommand(null);
-      await refresh();
-      window.setTimeout(() => refresh().catch(() => undefined), 2500);
+      const reason = `Dashboard ${command.label} ${command.action} command`;
+      const gatePayload = { reason, ...(command.entity_id ? { target_device_key: command.entity_id } : {}) };
+      const coverPayload = { entity_id: command.entity_id || "", action: command.action, reason };
+      const confirmation = command.kind === "gate"
+        ? await integrationsApi.confirmGateOpen(gatePayload, command.label)
+        : await integrationsApi.confirmCoverCommand(coverPayload, command.label);
+      if (!active()) return;
+      if (!confirmation.confirmation_id) throw new Error("The action confirmation did not include a recovery ID. No command was requested.");
+      saved = { intentId: confirmation.confirmation_id, kind: command.kind, action: command.action, ...(command.entity_id ? { deviceKey: command.entity_id } : {}) };
+      persistCommands([...savedCommands.filter((item) => item.intentId !== saved!.intentId), saved]);
+      const result = command.kind === "gate"
+        ? await integrationsApi.openGate(gatePayload, confirmation.confirmation_token, { signal: controller.signal })
+        : await integrationsApi.commandCover(coverPayload, confirmation.confirmation_token, { signal: controller.signal });
+      if (!active()) return;
+      const receipt = command.kind === "gate" && isGateCommandReceipt(result) ? result : coverTargetReceipt(result);
+      setReceiptReads((reads) => ({ ...reads, [saved!.intentId]: receipt
+        ? { receipt } : { error: "The response did not include a complete receipt. Check the saved action result before another command." } }));
     } catch (error) {
-      setCommandError(error instanceof Error ? error.message : `Unable to ${pendingCommand.action} ${pendingCommand.label}.`);
+      if (!active()) return;
+      if (saved) {
+        const payload: unknown = error instanceof ApiError ? error.payload : null;
+        const receipt = command.kind === "gate" && isGateCommandReceipt(payload) ? payload : coverTargetReceipt(payload);
+        setReceiptReads((reads) => ({ ...reads, [saved!.intentId]: {
+          ...(receipt ? { receipt } : {}),
+          error: receipt ? undefined : "The command response was not received. Its delivery is unknown. Check the saved result; do not repeat the command."
+        } }));
+      } else {
+        setCommandError(error instanceof Error ? error.message : "Unable to confirm the action.");
+      }
     } finally {
-      setCommandLoading(false);
+      if (active()) {
+        commandAttemptRef.current = false;
+        commandAbortRef.current = null;
+        setCommandLoading(false);
+        if (saved) {
+          setPendingCommand(null);
+          refresh().catch(() => undefined);
+          if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+          refreshTimerRef.current = window.setTimeout(() => {
+            refreshTimerRef.current = null;
+            refresh().catch(() => undefined);
+          }, 2500);
+        }
+      }
     }
   };
 
@@ -275,23 +370,23 @@ export function Dashboard({
                 icon={Car}
                 key={gate.entity_id}
                 label={gate.name || "Gate"}
-                state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : gate.state ?? topGateState}
-                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGate(gate.name || "Gate", gate.state ?? topGateState, setPendingCommand, setCommandError)}
+                state={gate.state ?? "unknown"}
+                onActionClick={maintenanceActive || !isAdmin || commandLoading || awaitingResult("gate", gate.entity_id) ? undefined : commandForGate(gate.name || "Gate", gate.state ?? "unknown", setPendingCommand, setCommandError, gate.entity_id)}
               />
             )) : (
               <GateRow
                 icon={Car}
-                label="Top Gate"
-                state={commandLoading && pendingCommand?.kind === "gate" ? "opening" : topGateState}
-                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGate("Top Gate", topGateState, setPendingCommand, setCommandError)}
+                label="All configured access gates"
+                state={topGateState}
+                onActionClick={maintenanceActive || !isAdmin || commandLoading || awaitingResult("gate") ? undefined : commandForGate("All configured access gates", topGateState, setPendingCommand, setCommandError)}
               />
             )}
             {garageDoorEntities.map((door) => (
               <GarageDoorRow
                 key={door.entity_id}
                 label={door.name || door.entity_id}
-                state={commandLoading && pendingCommand?.kind === "garage_door" && pendingCommand.entity_id === door.entity_id ? inProgressState(pendingCommand.action) : door.state ?? "unknown"}
-                onActionClick={maintenanceActive || !isAdmin ? undefined : commandForGarageDoor(door, setPendingCommand, setCommandError)}
+                state={door.state ?? "unknown"}
+                onActionClick={maintenanceActive || !isAdmin || commandLoading || awaitingResult("garage_door", door.entity_id) ? undefined : commandForGarageDoor(door, setPendingCommand, setCommandError)}
               />
             ))}
             <DoorRow label="Back Door" state={integrationStatus?.back_door_state ?? "unknown"} />
@@ -416,6 +511,29 @@ export function Dashboard({
         </div>
       </div>
 
+      {isAdmin ? <div>
+        <button type="button" className="secondary-button" aria-expanded={showCommandHistory} onClick={() => setShowCommandHistory((value) => !value)}>{showCommandHistory ? "Hide command history" : "Command history"}</button>
+        {showCommandHistory ? <CommandReceiptHistory currentUser={currentUser} renderReceipt={(receipt) => <CommandReceiptDetails receipt={receipt} />} /> : null}
+      </div> : null}
+      {isAdmin && savedCommands.length ? (
+        <section className="card" aria-label="Saved gate and garage actions">
+          <PanelHeader title="Gate and garage action results" />
+          {receiptStorageError ? <p role="alert">{receiptStorageError}</p> : null}
+          {savedCommands.map((command) => {
+            const read = receiptReads[command.intentId];
+            const label = [...gateEntities, ...garageDoorEntities].find((device) => device.entity_id === command.deviceKey)?.name
+              || command.deviceKey || "All configured access gates";
+            return <section key={command.intentId} aria-label={`${titleCase(command.action)} ${label} result`}>
+              <h3>{titleCase(command.action)} {label}</h3>
+              {read?.receipt ? <CommandReceiptDetails receipt={read.receipt} /> : <p>Delivery unknown — awaiting a saved action result. Do not repeat the command.</p>}
+              {read?.error ? <p role="alert">{read.error}</p> : null}
+              <button className="secondary-button" type="button" disabled={commandLoading || read?.loading} onClick={() => setReceiptRefresh((value) => value + 1)}>{read?.loading ? "Checking result…" : "Check action result"}</button>
+              {read?.receipt && !read.receipt.requires_reconciliation ? <button className="secondary-button" type="button" onClick={() => persistCommands(savedCommands.filter((item) => item.intentId !== command.intentId))}>Dismiss result</button> : null}
+            </section>;
+          })}
+        </section>
+      ) : null}
+
       {pendingCommand ? (
         <GateConfirmModal
           action={pendingCommand.action}
@@ -484,6 +602,22 @@ export function MaintenanceDisableModal({
       </div>
     </div>
   );
+}
+
+export function CommandReceiptDetails({ receipt }: { receipt: DashboardReceipt }) {
+  const targets = "target_receipts" in receipt ? receipt.target_receipts : [receipt];
+  return <div>
+    {receipt.delivery === "partial" ? <p role="status">Partial command delivery. Results differ between targets; see each result below.</p> : null}
+    {"admission_verified" in receipt && receipt.admission_verified ? <p>Entry admission verified. Vehicle passage is not established by this result.</p> : null}
+    {!targets.length ? <p>No target result is available yet.</p> : null}
+    {targets.map((target) => <div className="settings-list" key={target.command_id}>
+      <strong>{target.device_key}</strong>
+      <p>{target.delivery === "accepted" ? "Request accepted" : target.delivery === "rejected" ? "Request rejected" : target.delivery === "not_sent" ? "Request not sent" : "Delivery unknown"} · {target.verified ? `Physical ${target.state} verified` : "Physical state not verified"}</p>
+      {target.provider_receipts?.map((provider, index) => <p key={`${provider.provider}:${index}`}>{provider.provider === "esphome" ? "ESPHome" : provider.provider === "home_assistant" ? "Home Assistant" : provider.provider}: {provider.acceptance_basis === "home_assistant_http_2xx" ? "service request accepted" : provider.acceptance_basis === "native_api_write" ? "controller SDK write completed" : provider.delivery}</p>)}
+      {target.detail ? <p>{target.detail}</p> : null}
+      {target.requires_reconciliation ? <p>Awaiting reconciliation. Do not repeat this command.</p> : null}
+    </div>)}
+  </div>;
 }
 
 export function GateConfirmModal({
@@ -590,13 +724,14 @@ export function commandForGate(
   label: string,
   state: string,
   setPendingCommand: React.Dispatch<React.SetStateAction<DashboardCommand | null>>,
-  setCommandError: React.Dispatch<React.SetStateAction<string>>
+  setCommandError: React.Dispatch<React.SetStateAction<string>>,
+  deviceKey?: string
 ) {
   const normalized = normalizeGateState(state);
   if (normalized !== "closed") return undefined;
   return () => {
     setCommandError("");
-    setPendingCommand({ kind: "gate", label, action: "open" });
+    setPendingCommand({ kind: "gate", label, action: "open", ...(deviceKey ? { entity_id: deviceKey } : {}) });
   };
 }
 

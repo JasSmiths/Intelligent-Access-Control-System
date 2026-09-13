@@ -1,11 +1,52 @@
 """Visitor Pass Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+import re
+from datetime import (
+    datetime,
+    timedelta,
+)
+from difflib import SequenceMatcher
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from app.ai.context import get_chat_tool_context
+from app.ai.tool_groups._shared import (
+    DEFAULT_AGENT_TIMEZONE,
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _agent_now,
+    _bounded_int,
+    _chat_context_user,
+    _compact_observation,
+    _compact_time_label,
+    _parse_agent_datetime,
+    _preferred_subject_label,
+    _uuid_from_value,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import VisitorPass
+from app.models.enums import (
+    VisitorPassStatus,
+    VisitorPassType,
+)
+from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+from app.services.alfred.answer_contracts import artifact_payload
+from app.services.icloud_calendar import (
+    ICloudCalendarError,
+    get_icloud_calendar_service,
+)
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
+from app.services.mutation_context import MutationError, require_active_admin
+from app.services.settings import get_runtime_config
+from app.services.telemetry import actor_from_user
+from app.services.visitor_passes import (
+    DEFAULT_WINDOW_MINUTES,
+    VisitorPassError,
+    get_visitor_pass_service,
+    publish_pass_change,
+    serialize_visitor_pass,
+)
 
 
 def _normalize_name_for_similarity(value: Any) -> str:
@@ -368,9 +409,9 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
         }
 
     service = get_visitor_pass_service()
-    context = get_chat_tool_context()
     async with AsyncSessionLocal() as session:
         try:
+            user = require_active_admin(await _chat_context_user())
             visitor_pass = await service.create_pass(
                 session,
                 visitor_name=visitor_name,
@@ -382,25 +423,20 @@ async def create_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 valid_from=valid_from,
                 valid_until=valid_until,
                 source="alfred",
-                created_by_user_id=_uuid_from_value(context.get("user_id")),
-                actor="Alfred_AI",
+                created_by_user_id=user.id,
+                actor=actor_from_user(user),
+            )
+            await get_whatsapp_delivery_service().reserve_outreach_in_session(
+                session, visitor_pass, actor_user_id=user.id, auth_version=user.auth_session_version, source="alfred",
             )
             await session.commit()
             await session.refresh(visitor_pass)
-        except VisitorPassError as exc:
+        except (VisitorPassError, MutationError) as exc:
             await session.rollback()
             return {"created": False, "error": str(exc)}
         payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
 
-    await event_bus.publish("visitor_pass.created", {"visitor_pass": payload, "source": "alfred"})
-    if pass_type == VisitorPassType.DURATION and payload.get("visitor_phone"):
-        try:
-            await get_whatsapp_messaging_service().send_visitor_pass_outreach(visitor_pass)
-        except Exception as exc:  # noqa: BLE001 - Optional outreach must not undo an already-created visitor pass.
-            logger.warning(
-                "alfred_visitor_pass_whatsapp_outreach_failed",
-                extra={"visitor_pass_id": payload["id"], "error": str(exc)[:240]},
-            )
+    await publish_pass_change("visitor_pass.created", {"visitor_pass": payload, "source": "alfred"})
     return {
         "created": True,
         "visitor_pass": payload,
@@ -440,7 +476,7 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     replacement_name = str(arguments.get("new_visitor_name") or arguments.get("replacement_visitor_name") or "").strip() or None
     if arguments.get("pass_id") and arguments.get("visitor_name"):
         replacement_name = str(arguments.get("visitor_name") or "").strip()
-    if not any([replacement_name, expected_time, window_minutes is not None, pass_type, visitor_phone, valid_from, valid_until]):
+    if not any([replacement_name, expected_time, window_minutes is not None, pass_type, "visitor_phone" in arguments, valid_from, valid_until]):
         return {
             "updated": False,
             "requires_details": True,
@@ -448,7 +484,6 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
         }
 
     service = get_visitor_pass_service()
-    context = get_chat_tool_context()
     async with AsyncSessionLocal() as session:
         resolved = await _resolve_visitor_pass_for_agent(session, arguments, editable_only=True)
         if isinstance(resolved, dict):
@@ -463,7 +498,7 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 "visitor_pass_id": str(visitor_pass.id),
                 "visitor_name": replacement_name or visitor_pass.visitor_name,
                 "pass_type": (pass_type or visitor_pass.pass_type).value,
-                "visitor_phone": visitor_phone or visitor_pass.visitor_phone,
+                "visitor_phone": visitor_phone if "visitor_phone" in arguments else visitor_pass.visitor_phone,
                 "expected_time": (
                     _agent_datetime_iso(expected_time, config.site_timezone)
                     if expected_time
@@ -478,6 +513,7 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 "detail": f"Update the Visitor Pass for {visitor_pass.visitor_name}?",
             }
         try:
+            user = require_active_admin(await _chat_context_user())
             await service.update_pass(
                 session,
                 visitor_pass,
@@ -486,26 +522,26 @@ async def update_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 window_minutes=window_minutes,
                 pass_type=pass_type,
                 visitor_phone=visitor_phone,
+                visitor_phone_provided="visitor_phone" in arguments,
                 valid_from=valid_from,
                 valid_until=valid_until,
-                actor="Alfred_AI",
-                actor_user_id=_uuid_from_value(context.get("user_id")),
+                actor=actor_from_user(user),
+                actor_user_id=user.id,
             )
             await session.commit()
             await session.refresh(visitor_pass)
-        except VisitorPassError as exc:
+        except (VisitorPassError, MutationError) as exc:
             await session.rollback()
             return {"updated": False, "error": str(exc)}
         payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
 
-    await event_bus.publish("visitor_pass.updated", {"visitor_pass": payload, "source": "alfred"})
+    await publish_pass_change("visitor_pass.updated", {"visitor_pass": payload, "source": "alfred"})
     return {"updated": True, "visitor_pass": payload, "visitor_pass_id": payload["id"]}
 
 
 async def cancel_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
     config = await get_runtime_config()
     service = get_visitor_pass_service()
-    context = get_chat_tool_context()
     async with AsyncSessionLocal() as session:
         resolved = await _resolve_visitor_pass_for_agent(session, arguments, editable_only=True)
         if isinstance(resolved, dict):
@@ -523,21 +559,22 @@ async def cancel_visitor_pass(arguments: dict[str, Any]) -> dict[str, Any]:
                 "detail": f"Cancel the Visitor Pass for {visitor_pass.visitor_name}?",
             }
         try:
+            user = require_active_admin(await _chat_context_user())
             await service.cancel_pass(
                 session,
                 visitor_pass,
-                actor="Alfred_AI",
-                actor_user_id=_uuid_from_value(context.get("user_id")),
+                actor=actor_from_user(user),
+                actor_user_id=user.id,
                 reason=str(arguments.get("reason") or "Cancelled by Alfred").strip(),
             )
             await session.commit()
             await session.refresh(visitor_pass)
-        except VisitorPassError as exc:
+        except (VisitorPassError, MutationError) as exc:
             await session.rollback()
             return {"cancelled": False, "error": str(exc)}
         payload = _visitor_pass_agent_payload(visitor_pass, config.site_timezone)
 
-    await event_bus.publish("visitor_pass.cancelled", {"visitor_pass": payload, "source": "alfred"})
+    await publish_pass_change("visitor_pass.cancelled", {"visitor_pass": payload, "source": "alfred"})
     return {"cancelled": True, "visitor_pass": payload, "visitor_pass_id": payload["id"]}
 
 

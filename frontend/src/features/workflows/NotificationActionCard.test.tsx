@@ -1,8 +1,8 @@
-import React from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import React from "react";
 import { afterEach, beforeAll, expect, it } from "vitest";
 import type { NotificationAction, NotificationIntegration } from "../../api/workflows";
-import { NotificationActionCard } from "./WorkflowFeature";
+import { NotificationActionCard } from "./NotificationActionCard";
 
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };

@@ -20,12 +20,13 @@ from urllib.parse import quote
 import httpx
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.ai.providers import ChatMessageInput, ProviderNotConfiguredError, complete_with_provider_options, get_llm_provider
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, engine
 from app.models import (
     DependencyUpdateAnalysis,
     DependencyUpdateBackup,
@@ -35,6 +36,11 @@ from app.models import (
     User,
 )
 from app.services.event_bus import event_bus
+from app.services.dependency_process import DependencyProcessTimeout, run_dependency_process
+from app.services.release_artifacts import (
+    BUILD_INPUTS, ReleaseArtifactError, assert_manifest_restore_compatible,
+    capture_source, owned_release_io, prepare_and_publish, publish_manifest_set_async, safe_file, sha256, source_files, validate_source,
+)
 from app.services.settings import get_runtime_config, update_settings
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_DEPENDENCY_UPDATES,
@@ -52,6 +58,19 @@ GENERATED_COMPOSE = "docker-compose.update-backups.generated.yml"
 JOB_LOG_DIR = settings.log_dir / "dependency-updates"
 JOB_STREAM_LIMIT = 500
 _MOUNT_OPTIONS_UNSET = object()
+# Two signed int32 keys identify this owner in pg_locks (objsubid=2).
+_EXECUTOR_NAMESPACE = 0x49414353
+_EXECUTOR_KEY = 0x44455053
+_INTAKE_LOCK = "SELECT pg_advisory_xact_lock(hashtext('iacs:dependency-update-intake'))"
+
+
+@dataclass
+class _DependencyExecutor:
+    connection: AsyncConnection
+    backend_pid: int
+    lost: bool = False
+    task: asyncio.Task | None = None
+
 
 
 class DependencyUpdateError(RuntimeError):
@@ -100,8 +119,11 @@ class DependencyUpdateService:
         self._job_streams: dict[str, list[dict[str, Any]]] = {}
         self._job_waiters: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self._periodic_scan_task: asyncio.Task[None] | None = None
+        self._executors: dict[uuid.UUID, _DependencyExecutor] = {}
+        self._unpersisted_receipts: dict[uuid.UUID, tuple[str, dict]] = {}
 
     async def start(self) -> None:
+        await self._mark_interrupted_jobs()
         await self.sync_enrollment(reason="boot")
         await self.validate_storage(mark_active=True)
         if self._periodic_scan_task is None or self._periodic_scan_task.done():
@@ -118,6 +140,113 @@ class DependencyUpdateService:
         if self._job_tasks:
             await asyncio.gather(*self._job_tasks.values(), return_exceptions=True)
         self._job_tasks.clear()
+        # A task cancelled before its first instruction cannot enter its finally.
+        for job_id, executor in list(self._executors.items()):
+            await self._release_executor(executor)
+            self._executors.pop(job_id, None)
+
+    async def _acquire_executor(self) -> _DependencyExecutor | None:
+        """A dedicated session owns the executor from queue intake through cleanup."""
+        connection = await engine.connect()
+        try:
+            acquired = await connection.scalar(text("SELECT pg_try_advisory_lock(:namespace, :key)"),
+                {"namespace": _EXECUTOR_NAMESPACE, "key": _EXECUTOR_KEY})
+            if not acquired:
+                await connection.close()
+                return None
+            pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+            await connection.commit()  # Session lock survives; no idle transaction.
+            return _DependencyExecutor(connection, int(pid))
+        except BaseException:
+            # Acquisition may have reached PostgreSQL before cancellation.
+            # Never return an uncertain session lock to the connection pool.
+            await connection.invalidate()
+            await connection.close()
+            raise
+
+    async def _release_executor(self, executor: _DependencyExecutor) -> None:
+        async def release() -> None:
+            connection = executor.connection
+            try:
+                async with asyncio.timeout(5):
+                    if executor.lost or connection.invalidated:
+                        await connection.invalidate()
+                    else:
+                        await connection.rollback()
+                        unlocked = await connection.scalar(text("SELECT pg_advisory_unlock(:namespace, :key)"),
+                            {"namespace": _EXECUTOR_NAMESPACE, "key": _EXECUTOR_KEY})
+                        if not unlocked:
+                            await connection.invalidate()
+                        else:
+                            await connection.commit()
+            except BaseException:
+                await connection.invalidate()
+            finally:
+                executor.lost = True
+                await connection.close()
+
+        cleanup = asyncio.create_task(release())
+        cancellation = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        cleanup.result()
+        if cancellation is not None:
+            raise cancellation
+
+    async def _assert_executor(self, job_id: uuid.UUID, *, require_running: bool = True) -> None:
+        """Do not reconnect/reacquire after loss, or promote a retired job."""
+        executor = self._executors.get(job_id)
+        if executor is None or executor.lost or executor.connection.closed or executor.connection.invalidated:
+            if executor is not None:
+                executor.lost = True
+            raise DependencyUpdateError("Dependency executor ownership was lost; source mutation is refused.")
+        try:
+            connection = executor.connection
+            valid = await connection.scalar(text("""
+                SELECT pg_backend_pid() = :pid AND EXISTS (
+                    SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                    AND pid = pg_backend_pid() AND granted
+                    AND classid = :namespace AND objid = :key AND objsubid = 2)
+                AND (:require_running = FALSE OR EXISTS (
+                    SELECT 1 FROM dependency_update_jobs WHERE id = :job_id AND status = 'running'))
+            """), {"pid": executor.backend_pid, "namespace": _EXECUTOR_NAMESPACE,
+                   "key": _EXECUTOR_KEY, "job_id": job_id, "require_running": require_running})
+            await connection.commit()
+            if not valid:
+                raise DependencyUpdateError("Dependency executor or running job ownership was lost; source mutation is refused.")
+        except BaseException:
+            executor.lost = True
+            raise
+
+    async def _mark_interrupted_jobs(self) -> None:
+        """Only an unowned generation can be retired; restart never resumes work."""
+        executor = await self._acquire_executor()
+        if executor is None:
+            return
+        try:
+            async with AsyncSessionLocal(bind=executor.connection) as session:
+                await session.execute(text(_INTAKE_LOCK))
+                rows = (await session.scalars(select(DependencyUpdateJob).where(
+                    DependencyUpdateJob.status.in_(["queued", "running"])).with_for_update())).all()
+                for row in rows:
+                    row.status, row.phase, row.ended_at = "failed", "review_required", utc_now()
+                    row.error = "Update worker stopped. Inspect retained candidate and manifest transaction evidence before recovery."
+                    row.result = {**(row.result or {}), "review_required": True, "automatically_resumed": False}
+                await session.commit()
+        finally:
+            await self._release_executor(executor)
+
+    async def _record_interrupted_job(self, job_id: uuid.UUID) -> None:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+            if row is not None and row.status in {"queued", "running"}:
+                row.status, row.phase, row.ended_at = "failed", "review_required", utc_now()
+                row.error = "Update cancelled. Its retained transaction records determine the source outcome; no automatic rollback was attempted."
+                row.result = {**(row.result or {}), "review_required": True, "automatically_resumed": False}
+                await session.commit()
 
     async def sync_enrollment(self, *, reason: str = "manual", user: User | None = None) -> dict[str, Any]:
         trace = telemetry.start_trace(
@@ -130,7 +259,7 @@ class DependencyUpdateService:
         span = trace.start_span("Parse dependency manifests")
         try:
             async with self._lock:
-                discovered = await asyncio.to_thread(self._discover_dependencies)
+                discovered = await owned_release_io(self._discover_dependencies)
                 span.finish(output_payload={"dependencies": len(discovered)})
                 changed = await self._persist_discovered_dependencies(discovered)
             await event_bus.publish(
@@ -308,7 +437,7 @@ class DependencyUpdateService:
             changelog = await self._release_notes(dependency, latest)
             changelog_span.finish(output_payload={"source": changelog.get("source")})
             usage_span = trace.start_span("Scan local code usage")
-            usage = await asyncio.to_thread(self._scan_usage, dependency.package_name)
+            usage = await owned_release_io(self._scan_usage, dependency.package_name)
             usage_span.finish(output_payload={"references": usage.get("reference_count")})
             analysis = await self._llm_or_heuristic_analysis(
                 dependency=dependency,
@@ -392,13 +521,19 @@ class DependencyUpdateService:
             await log.info(f"Creating offline backup archive {archive_path}")
         with tempfile.TemporaryDirectory(prefix="iacs-dependency-backup-") as tmp:
             staging = Path(tmp)
-            manifest_snapshot = await asyncio.to_thread(self._write_manifest_snapshot, staging)
+            async with AsyncSessionLocal() as identity_session:
+                revisions = list((await identity_session.scalars(text("SELECT version_num FROM alembic_version"))).all())
+            release_identity = await owned_release_io(capture_source, _workspace_root(), staging / "source",
+                schema_revisions=revisions, image_identity=os.getenv("IACS_IMAGE_IDENTITY"))
+            (staging / "release.json").write_text(json.dumps(release_identity, indent=2, sort_keys=True))
+            manifest_snapshot = await owned_release_io(self._write_manifest_snapshot, staging, source_root=staging / "source")
             config_snapshot = await self._write_config_snapshot(staging, dependency)
             await self._cache_current_artifact(staging, dependency, log=log)
             (staging / "backup.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
+                        "release_source_sha256": release_identity["source_sha256"],
                         "backup_id": str(backup_id),
                         "created_at": datetime.now(tz=UTC).isoformat(),
                         "reason": reason,
@@ -408,9 +543,9 @@ class DependencyUpdateService:
                     sort_keys=True,
                 )
             )
-            await asyncio.to_thread(_create_zstd_archive, staging, archive_path)
+            await _create_zstd_archive(staging, archive_path)
 
-        checksum = await asyncio.to_thread(_sha256_file, archive_path)
+        checksum = await owned_release_io(_sha256_file, archive_path)
         size_bytes = archive_path.stat().st_size
         async with AsyncSessionLocal() as session:
             row = DependencyUpdateBackup(
@@ -426,7 +561,7 @@ class DependencyUpdateService:
                 size_bytes=size_bytes,
                 manifest_snapshot=manifest_snapshot,
                 config_snapshot=config_snapshot,
-                metadata_={"archive_format": "tar.zst"},
+                metadata_={"archive_format": "tar.zst", "release_identity": release_identity},
                 created_by_user_id=getattr(user, "id", None),
             )
             session.add(row)
@@ -612,7 +747,7 @@ class DependencyUpdateService:
             options_changed = True
         if mode in {"nfs", "samba"} and not source:
             raise DependencyUpdateError("NAS storage requires a mount source.")
-        await asyncio.to_thread(self._write_generated_compose_override, mode, source, options)
+        await owned_release_io(self._write_generated_compose_override, mode, source, options)
         updates = {
             "dependency_update_backup_storage_mode": mode,
             "dependency_update_backup_mount_source": source,
@@ -623,7 +758,7 @@ class DependencyUpdateService:
         if options_changed:
             updates["dependency_update_backup_mount_options"] = options
         await update_settings(
-            updates
+            updates, user=user, source="dependency_update_storage"
         )
         result = await self.storage_status()
         result["config_status"] = "pending_reboot"
@@ -661,27 +796,42 @@ class DependencyUpdateService:
         job_id = uuid.uuid4()
         log_path = JOB_LOG_DIR / f"{job_id}.log"
         JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        async with AsyncSessionLocal() as session:
-            job = DependencyUpdateJob(
-                id=job_id,
-                dependency_id=dependency.id if dependency else None,
-                kind=kind,
-                status="queued",
-                phase="queued",
-                actor=actor_from_user(user),
-                actor_user_id=user.id,
-                target_version=target_version,
-                backup_id=backup_id,
-                stdout_log_path=str(log_path),
-            )
-            session.add(job)
-            await session.commit()
-            await session.refresh(job)
-        self._append_job_event(str(job_id), {"type": "queued", "phase": "queued", "message": f"{kind} job queued"})
-        task = asyncio.create_task(self._run_job(job_id, kind=kind, user=user), name=f"dependency-update-job:{job_id}")
-        self._job_tasks[str(job_id)] = task
-        task.add_done_callback(lambda done: self._job_tasks.pop(str(job_id), None))
-        return serialize_job(job)
+        executor = await self._acquire_executor()
+        if executor is None:
+            raise DependencyUpdateError("Another dependency update or restore is in progress.")
+        self._executors[job_id] = executor
+        try:
+            async with AsyncSessionLocal(bind=executor.connection) as session:
+                await session.execute(text(_INTAKE_LOCK))
+                active_job = await session.scalar(select(DependencyUpdateJob.id).where(
+                    DependencyUpdateJob.status.in_(["queued", "running"])).limit(1))
+                if active_job:
+                    raise DependencyUpdateError("Another dependency update or restore is in progress.")
+                job = DependencyUpdateJob(
+                    id=job_id,
+                    dependency_id=dependency.id if dependency else None,
+                    kind=kind,
+                    status="queued",
+                    phase="queued",
+                    actor=actor_from_user(user),
+                    actor_user_id=user.id,
+                    target_version=target_version,
+                    backup_id=backup_id,
+                    stdout_log_path=str(log_path),
+                )
+                session.add(job)
+                await session.commit()
+                await session.refresh(job)
+            self._append_job_event(str(job_id), {"type": "queued", "phase": "queued", "message": f"{kind} job queued"})
+            task = asyncio.create_task(self._run_job(job_id, kind=kind, user=user), name=f"dependency-update-job:{job_id}")
+            executor.task = task
+            self._job_tasks[str(job_id)] = task
+            task.add_done_callback(lambda done: self._job_tasks.pop(str(job_id), None))
+            return serialize_job(job)
+        finally:
+            if str(job_id) not in self._job_tasks:
+                await self._release_executor(executor)
+                self._executors.pop(job_id, None)
 
     async def _run_job(self, job_id: uuid.UUID, *, kind: str, user: User) -> None:
         trace = telemetry.start_trace(
@@ -693,11 +843,28 @@ class DependencyUpdateService:
         logger_ = JobLogger(self, str(job_id))
         dependency: ExternalDependency | None = None
         target_version: str | None = None
+        claimed = False
+        executor = self._executors.get(job_id)
+        if executor is not None and executor.task is not None and executor.task is not asyncio.current_task():
+            trace.finish(status="ok", summary="Dependency job already belongs to another task")
+            return
+        if executor is None:
+            executor = await self._acquire_executor()
+            if executor is None:
+                trace.finish(status="ok", summary="Another executor owns dependency work")
+                return
+            self._executors[job_id] = executor
+        executor.task = asyncio.current_task()
         try:
-            async with AsyncSessionLocal() as session:
-                job = await session.get(DependencyUpdateJob, job_id)
-                if not job:
+            await self._assert_executor(job_id, require_running=False)
+            async with AsyncSessionLocal(bind=executor.connection) as session:
+                await session.execute(text(_INTAKE_LOCK))
+                job = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+                if not job or job.status != "queued":
+                    trace.finish(status="ok", summary="Dependency job is no longer queued; no execution")
                     return
+                if job.kind != kind:
+                    raise DependencyUpdateError("Queued dependency job kind does not match its executor.")
                 job.status = "running"
                 job.phase = "starting"
                 job.started_at = utc_now()
@@ -706,7 +873,9 @@ class DependencyUpdateService:
                 backup = await session.get(DependencyUpdateBackup, job.backup_id) if job.backup_id else None
                 target_version = job.target_version
                 await session.commit()
+                claimed = True
 
+            await self._assert_executor(job_id)
             await logger_.info(f"Starting {kind} job {job_id}")
             if kind == "apply":
                 await self._run_apply_job(job_id, dependency, user, logger_, target_version=job.target_version)
@@ -717,32 +886,81 @@ class DependencyUpdateService:
             else:
                 raise DependencyUpdateError(f"Unsupported job kind: {kind}")
 
+            await self._assert_executor(job_id)
             async with AsyncSessionLocal() as session:
-                job = await session.get(DependencyUpdateJob, job_id)
-                if job:
-                    job.status = "completed"
-                    job.phase = "completed"
+                job = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+                if not job or job.status != "running":
+                    raise DependencyUpdateError("Dependency job ownership changed before completion.")
+                job.status = "completed"
+                job.phase = "completed"
                 job.ended_at = utc_now()
-                job.result = {"ok": True}
+                job.result = {**(job.result or {}), "ok": True, "source_status": "prepared",
+                              "deployment": "not_performed", "runtime_health": "not_checked"}
                 await session.commit()
             self._append_job_event(str(job_id), {"type": "completed", "phase": "completed", "message": "Job completed"})
             trace.finish(status="ok", summary=f"Dependency {kind} job completed")
+        except asyncio.CancelledError as cancellation:
+            checkpoint = asyncio.create_task(self._record_interrupted_job(job_id))
+            try:
+                await asyncio.shield(checkpoint)
+            except Exception:
+                logger.exception("dependency_interruption_checkpoint_failed")
+            finally:
+                while not checkpoint.done():
+                    try:
+                        await asyncio.shield(checkpoint)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        logger.exception("dependency_interruption_checkpoint_failed")
+                        break
+                trace.finish(status="error", level="warning", summary="Dependency job interrupted; review required")
+            raise cancellation
         except Exception as exc:
             await logger_.error(str(exc))
             diagnosis = _diagnose_dependency_failure(kind, dependency, target_version, exc)
-            async with AsyncSessionLocal() as session:
-                job = await session.get(DependencyUpdateJob, job_id)
-                if job:
-                    result = dict(job.result or {})
-                    result.update({"ok": False, "diagnosis": diagnosis})
-                    job.status = "failed"
-                    job.phase = "failed"
-                    job.ended_at = utc_now()
-                    job.error = str(exc)
-                    job.result = result
-                    await session.commit()
-            self._append_job_event(str(job_id), {"type": "failed", "phase": "failed", "message": str(exc), "diagnosis": diagnosis})
+            checkpoint_persisted = False
+            try:
+                async with AsyncSessionLocal() as session:
+                    job = await session.get(DependencyUpdateJob, job_id)
+                    if job and (job.status == "running" or (not claimed and job.status == "queued")):
+                        result = dict(job.result or {})
+                        pending_receipt = self._unpersisted_receipts.get(job_id)
+                        if pending_receipt is not None:
+                            result["receipt_persistence"] = {
+                                "status": "journal_only", "kind": pending_receipt[0],
+                                "transaction_id": pending_receipt[1].get("transaction_id"),
+                                "review_required": True,
+                            }
+                        diagnosis = _diagnose_dependency_failure(kind, dependency, target_version, exc, job_result=result)
+                        result.update({"ok": False, "diagnosis": diagnosis})
+                        job.status = "failed"
+                        job.phase = "failed"
+                        job.ended_at = utc_now()
+                        job.error = str(exc)
+                        job.result = result
+                        await session.commit()
+                        checkpoint_persisted = True
+            except Exception:
+                # The filesystem transaction/candidate is the last-resort receipt
+                # when even failure accounting cannot reach the database.
+                await logger_.error("Job outcome could not be persisted. Inspect retained source transaction and candidate journals; no automatic recovery was attempted.")
+            if not checkpoint_persisted:
+                diagnosis = {**diagnosis, "database_outcome": "unverified", "review_required": True}
+                pending_receipt = self._unpersisted_receipts.get(job_id)
+                if pending_receipt is not None:
+                    await logger_.error(f"Journal-only {pending_receipt[0]} receipt: transaction {pending_receipt[1].get('transaction_id')}; database checkpoint unavailable.")
+                    diagnosis["receipt_persistence"] = {"status": "journal_only", "kind": pending_receipt[0],
+                        "transaction_id": pending_receipt[1].get("transaction_id")}
+            self._append_job_event(str(job_id), {"type": "failed", "phase": "failed" if checkpoint_persisted else "review_required",
+                "message": str(exc), "diagnosis": diagnosis})
             trace.finish(status="error", level="error", summary=f"Dependency {kind} job failed", error=exc)
+        finally:
+            try:
+                await self._release_executor(executor)
+            finally:
+                self._executors.pop(job_id, None)
+                self._unpersisted_receipts.pop(job_id, None)
 
     async def _run_apply_job(
         self,
@@ -768,31 +986,42 @@ class DependencyUpdateService:
                 job.backup_id = uuid.UUID(backup["id"])
                 await session.commit()
 
+        promotion = None
         try:
             await self._set_job_phase(job_id, "apply")
             await log.info(f"Applying {dependency.package_name} {dependency.current_version or 'unknown'} -> {target_version or dependency.latest_version or 'target'}")
-            await self._run_update_commands(dependency, target_version, log)
+            promotion = await self._run_update_commands(dependency, target_version, log,
+                release_context=(backup.get("metadata") or {}).get("release_identity", {}), job_id=job_id)
+            self._unpersisted_receipts[job_id] = ("promotion", promotion)
+            await log.info(f"Source promotion receipt: transaction {promotion.get('transaction_id')}. Deployment was not performed.")
+            async with AsyncSessionLocal() as session:
+                saved_backup = await session.get(DependencyUpdateBackup, uuid.UUID(backup["id"]), with_for_update=True)
+                saved_job = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+                saved_backup.metadata_ = {**(saved_backup.metadata_ or {}), "promotion": promotion}
+                saved_job.result = {**(saved_job.result or {}), "promotion": promotion}
+                await session.commit()
+            self._unpersisted_receipts.pop(job_id, None)
             await self.sync_enrollment(reason="apply_job", user=user)
             await self._set_job_phase(job_id, "verify")
-            await log.info("Verifying backend health after update job.")
+            await log.info("Checking Python syntax only. Source is prepared; image build, runtime health and deployment remain separate release checks.")
             await self._run_command(["python", "-m", "compileall", "-q", "backend/app"], cwd=_workspace_root(), log=log, timeout=180)
         except Exception:
-            await self._set_job_phase(job_id, "rollback")
-            await log.error("Update failed; restoring dependency manifests from the offline backup.")
-            await self._restore_backup_manifests(Path(backup["archive_path"]))
-            await self.sync_enrollment(reason="apply_job_rollback", user=user)
+            # The file-set owner restores its own preimages on ordinary write
+            # failure. A later job/accounting error is not permission to overwrite
+            # intervening source changes or reset a durable executor generation.
+            await log.error("Update did not complete. Retain its candidate/transaction evidence for review; no broad automatic restore was attempted.")
             async with AsyncSessionLocal() as session:
-                job = await session.get(DependencyUpdateJob, job_id)
-                if job:
-                    result = dict(job.result or {})
-                    result["rollback"] = {
-                        "attempted": True,
-                        "restored": True,
-                        "backup_id": backup["id"],
-                        "archive_path": backup["archive_path"],
-                    }
-                    job.result = result
+                if promotion is not None:
+                    saved_backup = await session.get(DependencyUpdateBackup, uuid.UUID(backup["id"]), with_for_update=True)
+                    if saved_backup:
+                        saved_backup.metadata_ = {**(saved_backup.metadata_ or {}), "promotion": promotion}
+                saved_job = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+                if saved_job:
+                    saved_job.result = {**(saved_job.result or {}),
+                        **({"promotion": promotion} if promotion is not None else {}), "rollback": {
+                        "attempted": False, "review_required": True, "backup_id": backup["id"]}}
                     await session.commit()
+            self._unpersisted_receipts.pop(job_id, None)
             raise
         emit_audit_log(
             category=TELEMETRY_CATEGORY_DEPENDENCY_UPDATES,
@@ -822,16 +1051,23 @@ class DependencyUpdateService:
         archive_path = Path(backup.archive_path)
         await log.info(f"Restoring backup {backup.id} from {archive_path}")
         await self._set_job_phase(job_id, "restore_files")
-        await self._restore_backup_manifests(archive_path)
-        async with AsyncSessionLocal() as session:
-            row = await session.get(DependencyUpdateBackup, backup.id)
-            if row:
-                row.restored_at = utc_now()
-                row.restored_by_user_id = user.id
-                await session.commit()
-        await self.sync_enrollment(reason="restore_job", user=user)
-        await self._set_job_phase(job_id, "verify")
-        await self._run_command(["python", "-m", "compileall", "-q", "backend/app"], cwd=_workspace_root(), log=log, timeout=180)
+        restoration = None
+        try:
+            restoration = await self._restore_backup_manifests(archive_path, job_id=job_id,
+                promotion=(backup.metadata_ or {}).get("promotion"))
+            self._unpersisted_receipts[job_id] = ("restoration", restoration)
+            await log.info(f"Source restoration receipt: transaction {restoration.get('transaction_id')}. Runtime and database were not restored.")
+            await self._persist_restoration(job_id, backup.id, user.id, restoration)
+            self._unpersisted_receipts.pop(job_id, None)
+            await self.sync_enrollment(reason="restore_job", user=user)
+            await self._set_job_phase(job_id, "verify")
+            await self._run_command(["python", "-m", "compileall", "-q", "backend/app"], cwd=_workspace_root(), log=log, timeout=180)
+        except Exception:
+            if restoration is not None:
+                # Receipt retry only: never repeat the filesystem restoration.
+                await self._persist_restoration(job_id, backup.id, user.id, restoration)
+                self._unpersisted_receipts.pop(job_id, None)
+            raise
         emit_audit_log(
             category=TELEMETRY_CATEGORY_DEPENDENCY_UPDATES,
             action="dependency_updates.backup.restore",
@@ -843,24 +1079,73 @@ class DependencyUpdateService:
             metadata={"archive_path": backup.archive_path},
         )
 
-    async def _restore_backup_manifests(self, archive_path: Path) -> None:
+    async def _persist_restoration(self, job_id: uuid.UUID, backup_id: uuid.UUID,
+                                   user_id: uuid.UUID, restoration: dict) -> None:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(DependencyUpdateBackup, backup_id, with_for_update=True)
+            job = await session.get(DependencyUpdateJob, job_id, with_for_update=True)
+            if row is None or job is None:
+                raise DependencyUpdateError("Restoration receipt metadata is missing; inspect the retained filesystem journal.")
+            row.restored_at = utc_now()
+            row.restored_by_user_id = user_id
+            row.metadata_ = {**(row.metadata_ or {}), "restoration": restoration}
+            job.result = {**(job.result or {}), "restoration": restoration}
+            await session.commit()
+
+    async def _restore_backup_manifests(self, archive_path: Path, *, job_id: uuid.UUID, promotion: dict | None = None) -> dict:
+        if not promotion or not isinstance(promotion.get("files"), dict) or not promotion["files"]:
+            raise DependencyUpdateError("Backup has no owned promoted transaction; a reviewed recovery procedure is required.")
         with tempfile.TemporaryDirectory(prefix="iacs-dependency-restore-") as tmp:
             staging = Path(tmp)
-            await asyncio.to_thread(_extract_archive, archive_path, staging)
+            await _extract_archive(archive_path, staging)
+            identity_path = staging / "release.json"
+            if not identity_path.exists():
+                raise DependencyUpdateError("Legacy backup lacks release identity; manual recovery review is required.")
+            identity = json.loads(identity_path.read_text())
+            await owned_release_io(validate_source, staging / "source", identity)
+            async with AsyncSessionLocal() as session:
+                revisions = list((await session.scalars(text("SELECT version_num FROM alembic_version"))).all())
             snapshot_root = staging / "manifests"
-            await asyncio.to_thread(self._restore_manifest_snapshot, snapshot_root)
+            paths = sorted(promotion["files"])
+            before = promotion.get("before")
+            if not isinstance(before, dict) or set(before) != set(paths):
+                raise DependencyUpdateError("Backup lacks the transaction's exact preimage ownership.")
+            absent_paths = set()
+            for name in paths:
+                expected_before = identity["files"].get(name)
+                candidate = safe_file(snapshot_root, name)
+                if before[name] != expected_before:
+                    raise DependencyUpdateError("Transaction preimage differs from the backup's release identity.")
+                if expected_before is None:
+                    if candidate.exists():
+                        raise DependencyUpdateError("An absent backup preimage cannot contain replacement bytes.")
+                    absent_paths.add(name)
+                elif not candidate.is_file() or sha256(candidate) != expected_before:
+                    raise DependencyUpdateError("Restored bytes do not match the backup's release identity.")
+            await owned_release_io(assert_manifest_restore_compatible, _workspace_root(), identity,
+                schema_revisions=revisions, image_identity=os.getenv("IACS_IMAGE_IDENTITY"), restored_paths=paths)
+            # Only the recorded transaction afterimages may be changed. Its
+            # explicit absent preimage also authorizes removing a file it added.
+            expected_source = dict(identity["files"])
+            expected_source.update(promotion["files"])
+            await self._assert_executor(job_id)
+            return await publish_manifest_set_async(snapshot_root, _workspace_root(), paths,
+                expected=promotion["files"], absent_paths=absent_paths, expected_source=expected_source)
 
     async def _validate_backup_archive(self, backup: DependencyUpdateBackup) -> dict[str, Any]:
         archive_path = Path(backup.archive_path)
         if not archive_path.exists():
             raise DependencyUpdateError("Backup archive is missing from configured storage.")
-        checksum = await asyncio.to_thread(_sha256_file, archive_path)
+        checksum = await owned_release_io(_sha256_file, archive_path)
         if checksum != backup.checksum_sha256:
             raise DependencyUpdateError("Backup checksum validation failed.")
         with tempfile.TemporaryDirectory(prefix="iacs-dependency-validate-") as tmp:
             staging = Path(tmp)
-            await asyncio.to_thread(_extract_archive, archive_path, staging)
-            return await asyncio.to_thread(self._validate_backup_snapshot, staging, backup, checksum)
+            await _extract_archive(archive_path, staging)
+            try:
+                return await owned_release_io(self._validate_backup_snapshot, staging, backup, checksum)
+            except ReleaseArtifactError as exc:
+                raise DependencyUpdateError(str(exc)) from exc
 
     def _validate_backup_snapshot(
         self,
@@ -925,7 +1210,13 @@ class DependencyUpdateService:
             if not package_artifacts:
                 raise DependencyUpdateError("Backup archive did not include a usable offline package artifact.")
 
+        release_path = staging / "release.json"
+        release_identity = json.loads(release_path.read_text()) if release_path.exists() else None
+        if release_identity is not None:
+            validate_source(staging / "source", release_identity)
         return {
+            "release_identity": release_identity,
+            "compatibility_review_required": release_identity is None or not release_identity.get("image_identity"),
             "backup_id": str(backup.id),
             "archive_path": str(backup.archive_path),
             "checksum_sha256": checksum,
@@ -935,43 +1226,57 @@ class DependencyUpdateService:
             "artifact_metadata_count": len(artifact_files) - len(package_artifacts),
         }
 
-    async def _run_update_commands(self, dependency: ExternalDependency, target_version: str | None, log: "JobLogger") -> None:
+    async def _run_update_commands(self, dependency: ExternalDependency, target_version: str | None, log: "JobLogger", *,
+                                   job_id: uuid.UUID, release_context: dict | None = None) -> dict:
         root = _workspace_root()
         target = target_version or dependency.latest_version
+        baseline_source = {name: sha256(root / name) for name in source_files(root)}
         if not target:
             raise DependencyUpdateError("No latest version is recorded for this dependency.")
         if dependency.ecosystem == "python" and dependency.is_direct and dependency.manifest_path.endswith("pyproject.toml"):
             with tempfile.TemporaryDirectory(prefix="iacs-python-update-") as tmp:
                 staged_root = Path(tmp)
-                await asyncio.to_thread(_copy_manifest_to_staging_root, root, staged_root, str(dependency.manifest_path or ""))
-                await log.info("Updating backend Python dependency constraint in an isolated manifest workspace.")
-                await asyncio.to_thread(_update_python_requirement, dependency, target, staged_root)
-                command = ["python", "-m", "pip", "download", "--no-deps", "--dest", str(_cache_root() / "downloads"), f"{dependency.package_name}=={target}"]
-                await self._run_command(command, cwd=staged_root, log=log, timeout=240)
-                await asyncio.to_thread(_promote_manifest_from_staging_root, staged_root, root, str(dependency.manifest_path or ""))
-            await log.info("Verified Python manifest promoted. Rebuild the backend container to activate the new package version.")
-            return
+                paths = ["backend/pyproject.toml", "backend/uv.lock"]
+                expected = {name: sha256(root / name) if (root / name).exists() else None for name in paths}
+                if any(value is None for value in expected.values()):
+                    raise DependencyUpdateError("Python candidate requires the existing manifest and lockfile.")
+                for name in paths:
+                    await owned_release_io(_copy_manifest_to_staging_root, root, staged_root, name)
+                await log.info("Resolving the requested Python dependency in an isolated locked candidate.")
+                await owned_release_io(_update_python_requirement, dependency, target, staged_root)
+                await self._run_command(["uv", "lock", "--upgrade-package", f"{dependency.package_name}=={target}"],
+                                        cwd=staged_root / "backend", log=log, timeout=600)
+                await self._run_command(["uv", "lock", "--check"], cwd=staged_root / "backend", log=log, timeout=180)
+                await self._run_command(["uv", "sync", "--locked", "--all-extras", "--no-install-project"],
+                                        cwd=staged_root / "backend", log=log, timeout=900)
+                await self._assert_executor(job_id)
+                promotion = await prepare_and_publish(staged_root, root, paths, expected_source=baseline_source,
+                    release_context=release_context or {}, before_publish=lambda: self._assert_executor(job_id), checks=["uv lock --check", "uv sync --locked --all-extras --no-install-project"])
+            return promotion
         if dependency.ecosystem == "npm" and dependency.is_direct:
             frontend = root / "frontend"
             if not frontend.exists():
                 raise DependencyUpdateError("Frontend workspace is not mounted in the updater environment.")
-            await self._apply_npm_update_transactionally(frontend, dependency, target, log)
-            return
+            return await self._apply_npm_update_transactionally(frontend, dependency, target, log,
+                release_context=release_context, expected_source=baseline_source, job_id=job_id)
         if dependency.ecosystem == "docker_image":
             with tempfile.TemporaryDirectory(prefix="iacs-docker-update-") as tmp:
                 staged_root = Path(tmp)
-                await asyncio.to_thread(_copy_manifest_to_staging_root, root, staged_root, str(dependency.manifest_path or ""))
+                await owned_release_io(_copy_manifest_to_staging_root, root, staged_root, str(dependency.manifest_path or ""))
                 if (root / "docker-compose.yml").exists() and dependency.manifest_path != "docker-compose.yml":
-                    await asyncio.to_thread(_copy_manifest_to_staging_root, root, staged_root, "docker-compose.yml")
+                    await owned_release_io(_copy_manifest_to_staging_root, root, staged_root, "docker-compose.yml")
                 await log.info("Updating Docker image tag in an isolated manifest workspace.")
-                await asyncio.to_thread(_update_docker_image_tag, dependency, target, staged_root)
+                await owned_release_io(_update_docker_image_tag, dependency, target, staged_root)
                 if dependency.manifest_path == "docker-compose.yml" and shutil.which("docker"):
                     await self._run_command(["docker", "compose", "-f", "docker-compose.yml", "config"], cwd=staged_root, log=log, timeout=180)
                 elif dependency.manifest_path == "docker-compose.yml":
                     await log.warning("Docker CLI is not available in this container; skipping compose syntax verification.")
-                await asyncio.to_thread(_promote_manifest_from_staging_root, staged_root, root, str(dependency.manifest_path or ""))
-            await log.info("Verified Docker image manifest promoted. Recreate the affected container to pull/build the new image.")
-            return
+                await self._assert_executor(job_id)
+                promotion = await prepare_and_publish(staged_root, root, [str(dependency.manifest_path)],
+                    expected_source=baseline_source, release_context=release_context or {},
+                    before_publish=lambda: self._assert_executor(job_id), checks=["compose syntax" if dependency.manifest_path == "docker-compose.yml" and shutil.which("docker")
+                            else "image reference edit only; compose/build not checked"])
+            return promotion
         raise DependencyUpdateError("Only direct Python/npm dependencies can be applied by this build.")
 
     async def _run_command(
@@ -985,22 +1290,16 @@ class DependencyUpdateService:
         await log.info("$ " + " ".join(command))
         if not shutil.which(command[0]):
             raise DependencyUpdateError(f"Required command is not available in this container: {command[0]}")
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError as exc:
-            process.kill()
-            raise DependencyUpdateError(f"Command timed out: {' '.join(command)}") from exc
+            completed = await run_dependency_process(command, cwd, timeout)
+        except DependencyProcessTimeout as exc:
+            raise DependencyUpdateError("Dependency command timed out; its owned process tree was stopped.") from exc
+        stdout = completed.stdout
         output = stdout.decode(errors="replace") if stdout else ""
         for line in output.splitlines():
             await log.stdout(line)
-        if process.returncode != 0:
-            raise DependencyCommandError(command, process.returncode or 1, output)
+        if completed.returncode != 0:
+            raise DependencyCommandError(command, completed.returncode or 1, output)
         return output
 
     async def _apply_npm_update_transactionally(
@@ -1008,11 +1307,16 @@ class DependencyUpdateService:
         frontend: Path,
         dependency: ExternalDependency,
         target: str,
-        log: "JobLogger",
-    ) -> None:
+        log: "JobLogger", *, job_id: uuid.UUID, release_context: dict | None = None, expected_source: dict | None = None,
+    ) -> dict:
+        root = frontend.parent
+        baseline_source = expected_source or {name: sha256(root / name) for name in source_files(root)}
         with tempfile.TemporaryDirectory(prefix="iacs-frontend-build-") as tmp:
-            staged_frontend = Path(tmp)
-            await asyncio.to_thread(_copy_frontend_build_context, frontend, staged_frontend)
+            staged_frontend = Path(tmp) / "frontend"
+            await owned_release_io(_copy_frontend_build_context, frontend, staged_frontend)
+            staged_before = {name: sha256(Path(tmp) / name) for name in source_files(Path(tmp))}
+            if any(baseline_source.get(name) != value for name, value in staged_before.items()):
+                raise ReleaseArtifactError("Frontend source changed while preparing its build context.")
             await log.info("Prepared isolated frontend update workspace. Real manifests will not be changed until verification passes.")
             install_command = ["npm", "install", f"{dependency.package_name}@{target}", "--package-lock-only"]
             try:
@@ -1033,8 +1337,16 @@ class DependencyUpdateService:
                 if not recovered:
                     raise
                 await self._run_command(["npm", "run", "build"], cwd=staged_frontend, log=log, timeout=600)
-            await asyncio.to_thread(_promote_frontend_manifests, staged_frontend, frontend)
-            await log.info("Verified frontend manifests promoted into the live workspace.")
+            paths = ["frontend/" + name for name in ["package.json", "package-lock.json", "tsconfig.json", "src/vite-env.d.ts"]
+                     if (staged_frontend / name).exists()]
+            staged_after = {name: sha256(Path(tmp) / name) for name in source_files(Path(tmp))}
+            if ({name: value for name, value in staged_before.items() if name not in paths}
+                    != {name: value for name, value in staged_after.items() if name not in paths}):
+                raise ReleaseArtifactError("Frontend build changed source outside its approved build inputs; review the candidate.")
+            await self._assert_executor(job_id)
+            promotion = await prepare_and_publish(Path(tmp), root, paths, expected_source=baseline_source,
+                release_context=release_context or {}, before_publish=lambda: self._assert_executor(job_id), checks=["npm ci --include=optional --no-audit", "npm run build"])
+            return promotion
 
     async def _attempt_frontend_build_recovery(
         self,
@@ -1090,7 +1402,7 @@ class DependencyUpdateService:
         seen: set[tuple[str, tuple[str, ...]]] = set()
         current_failure = failure
         for _ in range(3):
-            plan = await asyncio.to_thread(_npm_recovery_plan, staged_frontend, dependency, target, current_failure.output)
+            plan = await _npm_recovery_plan(staged_frontend, dependency, target, current_failure.output)
             if not plan:
                 break
             key = (plan.strategy, tuple(plan.specs))
@@ -1100,7 +1412,7 @@ class DependencyUpdateService:
             await log.warning(plan.summary)
             await log.info("Recovery retry: " + ", ".join(plan.specs))
             if plan.regenerate_lockfile:
-                await asyncio.to_thread(_apply_npm_recovery_specs, staged_frontend, plan.specs)
+                await owned_release_io(_apply_npm_recovery_specs, staged_frontend, plan.specs)
                 lockfile = staged_frontend / "package-lock.json"
                 if lockfile.exists():
                     lockfile.unlink()
@@ -1557,21 +1869,12 @@ class DependencyUpdateService:
         fallback["raw_result"] = {"fallback_reason": "local heuristic analysis"}
         return fallback
 
-    def _write_manifest_snapshot(self, staging: Path) -> dict[str, Any]:
-        root = _workspace_root()
+    def _write_manifest_snapshot(self, staging: Path, *, source_root: Path | None = None) -> dict[str, Any]:
+        root = source_root or _workspace_root()
         manifest_root = staging / "manifests"
         manifest_root.mkdir(parents=True, exist_ok=True)
         copied: list[dict[str, Any]] = []
-        for relative in [
-            "backend/pyproject.toml",
-            "frontend/package.json",
-            "frontend/package-lock.json",
-            "frontend/tsconfig.json",
-            "frontend/src/vite-env.d.ts",
-            "backend/Dockerfile",
-            "frontend/Dockerfile",
-            "docker-compose.yml",
-        ]:
+        for relative in (*BUILD_INPUTS, "frontend/src/vite-env.d.ts"):
             source = root / relative
             if not source.exists():
                 continue
@@ -1621,28 +1924,12 @@ class DependencyUpdateService:
         try:
             if log:
                 await log.info("Caching current package artifact: " + " ".join(command))
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(_workspace_root()),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=180)
-            (artifact_dir / "artifact-cache.log").write_bytes(stdout or b"")
+            completed = await run_dependency_process(command, _workspace_root(), 180)
+            (artifact_dir / "artifact-cache.log").write_bytes(completed.stdout)
+            if completed.returncode:
+                raise DependencyUpdateError("Package artifact caching failed; the source backup is not an offline package installation proof.")
         except Exception as exc:
             (artifact_dir / "artifact-cache-error.txt").write_text(str(exc))
-
-    def _restore_manifest_snapshot(self, snapshot_root: Path) -> None:
-        root = _workspace_root()
-        if not snapshot_root.exists():
-            raise DependencyUpdateError("Backup archive did not include manifest snapshots.")
-        for source in snapshot_root.rglob("*"):
-            if not source.is_file():
-                continue
-            relative = source.relative_to(snapshot_root)
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
 
     def _write_generated_compose_override(self, mode: str, source: str, options: str) -> None:
         root = _workspace_root()
@@ -1729,7 +2016,7 @@ class JobLogger:
     async def _write(self, kind: str, message: str) -> None:
         clean = str(sanitize_payload(message))
         line = f"{datetime.now(tz=UTC).isoformat()} {kind.upper()} {clean}\n"
-        await asyncio.to_thread(_append_text, self._path, line)
+        await owned_release_io(_append_text, self._path, line)
         self._service._append_job_event(
             self._job_id,
             {"type": kind, "phase": kind, "message": clean},
@@ -1821,6 +2108,7 @@ def _diagnose_dependency_failure(
     dependency: ExternalDependency | None,
     target_version: str | None,
     exc: Exception,
+    *, job_result: dict | None = None,
 ) -> dict[str, Any]:
     output = exc.output if isinstance(exc, DependencyCommandError) else ""
     command = " ".join(exc.command) if isinstance(exc, DependencyCommandError) else ""
@@ -1834,7 +2122,7 @@ def _diagnose_dependency_failure(
         "category": "unknown",
         "title": "Update job failed",
         "summary": str(exc),
-        "safe_state": "IACS stopped the job before promoting unverified runtime changes.",
+        "safe_state": "Source outcome is unverified; inspect the retained transaction evidence. Deployment was not performed.",
         "retry_recommendation": "Review the diagnosis and retry after the listed issue has been resolved.",
         "actions": [
             "Open the Updates & Rollbacks logs for the full command output.",
@@ -1969,6 +2257,19 @@ def _diagnose_dependency_failure(
             }
         )
 
+    result = job_result or {}
+    receipt = result.get("restoration") or result.get("promotion")
+    prepared = isinstance(receipt, dict) and receipt.get("status") == "source_prepared"
+    diagnosis.update(
+        source_status="prepared" if prepared else "unverified",
+        review_required=True,
+        safe_state=("Source files were prepared, but a later job step failed. Deployment was not performed."
+                    if prepared else diagnosis["safe_state"]),
+        retry_recommendation="Review the retained transaction and current source before starting another update or restore.",
+        actions=["Inspect the job logs and retained candidate/transaction evidence.",
+                 "Compare the current source with the transaction afterimages; preserve any intervening edits.",
+                 "Use a separately reviewed recovery or release plan; this failed job does not authorize an automatic retry."],
+    )
     diagnosis["technical_detail"] = _truncate(output or str(exc), 2400)
     return sanitize_payload(diagnosis)
 
@@ -2097,7 +2398,7 @@ def _npm_peer_update_group(frontend: Path, dependency: ExternalDependency, targe
     return [f"{name}@{target_version}" for name in names]
 
 
-def _npm_recovery_plan(frontend: Path, dependency: ExternalDependency, target_version: str, command_output: str) -> NpmRecoveryPlan | None:
+async def _npm_recovery_plan(frontend: Path, dependency: ExternalDependency, target_version: str, command_output: str) -> NpmRecoveryPlan | None:
     output = command_output.lower()
     if "eresolve" not in output and "peer" not in output:
         return None
@@ -2134,7 +2435,7 @@ def _npm_recovery_plan(frontend: Path, dependency: ExternalDependency, target_ve
             continue
         if name.startswith("@types/") and not dependency.package_name.startswith("@types/"):
             continue
-        latest = _npm_latest_version(name, frontend)
+        latest = await _npm_latest_version(name, frontend)
         if latest:
             specs[name] = latest
 
@@ -2181,30 +2482,21 @@ def _npm_direct_names_from_peer_output(command_output: str) -> list[str]:
     return names
 
 
-def _npm_latest_version(package_name: str, cwd: Path) -> str | None:
+async def _npm_latest_version(package_name: str, cwd: Path) -> str | None:
     if not re.match(r"^(?:@[\w.-]+/)?[\w.-]+$", package_name):
         return None
     try:
-        result = subprocess.run(
-            ["npm", "view", package_name, "version", "--json"],
-            cwd=str(cwd),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-    except Exception:
+        result = await run_dependency_process(["npm", "view", package_name, "version", "--json"], cwd, 45)
+    except (DependencyProcessTimeout, OSError):
         return None
     if result.returncode != 0:
         return None
-    text = result.stdout.strip()
+    raw = result.stdout.decode(errors="replace").strip()
     try:
-        payload = json.loads(text)
+        payload = json.loads(raw)
     except json.JSONDecodeError:
-        payload = text.strip('"')
-    if isinstance(payload, str) and payload:
-        return payload
-    return None
+        payload = raw.strip('"')
+    return payload if isinstance(payload, str) and payload else None
 
 
 def _split_npm_spec(spec: str) -> tuple[str, str]:
@@ -2291,6 +2583,7 @@ def _repair_vite_type_declarations(frontend: Path, command_output: str) -> bool:
 
 
 def _copy_frontend_build_context(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
     for filename in ["package.json", "package-lock.json", "tsconfig.json", "vite.config.ts", "index.html"]:
         source_path = source / filename
         if source_path.exists():
@@ -2301,36 +2594,13 @@ def _copy_frontend_build_context(source: Path, destination: Path) -> None:
     shutil.copytree(source / "src", destination / "src")
 
 
-def _promote_frontend_manifests(staged_frontend: Path, live_frontend: Path) -> None:
-    for filename in ["package.json", "package-lock.json", "tsconfig.json"]:
-        source = staged_frontend / filename
-        target = live_frontend / filename
-        if not source.exists():
-            raise DependencyUpdateError(f"Verified frontend update did not produce {filename}.")
-        shutil.copy2(source, target)
-    declaration = staged_frontend / "src" / "vite-env.d.ts"
-    if declaration.exists():
-        target = live_frontend / "src" / "vite-env.d.ts"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(declaration, target)
-
-
 def _copy_manifest_to_staging_root(live_root: Path, staged_root: Path, relative_path: str) -> None:
     if not relative_path:
         raise DependencyUpdateError("Dependency manifest path is missing.")
-    source = live_root / relative_path
+    source = safe_file(live_root, relative_path)
     if not source.exists():
         raise DependencyUpdateError(f"Manifest not found: {relative_path}")
-    target = staged_root / relative_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
-
-
-def _promote_manifest_from_staging_root(staged_root: Path, live_root: Path, relative_path: str) -> None:
-    source = staged_root / relative_path
-    if not source.exists():
-        raise DependencyUpdateError(f"Verified update did not produce {relative_path}.")
-    target = live_root / relative_path
+    target = safe_file(staged_root, relative_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
 
@@ -2528,46 +2798,48 @@ def _update_docker_image_tag(dependency: ExternalDependency, target_version: str
     path.write_text(text.replace(raw, replacement, 1))
 
 
-def _create_zstd_archive(source: Path, archive_path: Path) -> None:
+ARCHIVE_PROCESS_TIMEOUT = 600
+
+
+async def _create_zstd_archive(source: Path, archive_path: Path) -> None:
     zstd = shutil.which("zstd")
     if not zstd:
         raise DependencyUpdateError("zstd is required to create dependency update backups.")
     archive_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="iacs-dependency-archive-") as tmp:
-        tar_path = Path(tmp) / "backup.tar"
-        with tarfile.open(tar_path, "w") as archive:
-            archive.add(source, arcname=".")
-        result = subprocess.run(
-            [zstd, "-T0", "-3", "-f", str(tar_path), "-o", str(archive_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    if result.returncode != 0:
-        raise DependencyUpdateError(f"zstd backup compression failed: {result.stderr.strip() or result.stdout.strip()}")
+    # Keep the compressed output private until the bounded process has ended.
+    # Cancellation drains both the tar thread and the process before cleanup.
+    with tempfile.TemporaryDirectory(prefix=".iacs-dependency-archive-", dir=archive_path.parent) as tmp:
+        tar_path, compressed = Path(tmp) / "backup.tar", Path(tmp) / "backup.tar.zst"
+        await owned_release_io(_write_tar_archive, source, tar_path)
+        result = await run_dependency_process(
+            [zstd, "-T0", "-3", "-f", str(tar_path), "-o", str(compressed)], Path(tmp), ARCHIVE_PROCESS_TIMEOUT)
+        if result.returncode != 0:
+            raise DependencyUpdateError("zstd backup compression failed: " + result.stdout.decode(errors="replace").strip())
+        os.replace(compressed, archive_path)
 
 
-def _extract_archive(archive_path: Path, destination: Path) -> None:
+async def _extract_archive(archive_path: Path, destination: Path) -> None:
     if archive_path.name.endswith(".tar.zst"):
         zstd = shutil.which("zstd")
         if not zstd:
             raise DependencyUpdateError("zstd is required to restore dependency update backups.")
         with tempfile.TemporaryDirectory(prefix="iacs-dependency-extract-") as tmp:
             tar_path = Path(tmp) / "backup.tar"
-            with tar_path.open("wb") as output:
-                result = subprocess.run(
-                    [zstd, "-d", "-c", str(archive_path)],
-                    check=False,
-                    stdout=output,
-                    stderr=subprocess.PIPE,
-                )
+            result = await run_dependency_process(
+                [zstd, "-d", "-f", str(archive_path), "-o", str(tar_path)], Path(tmp), ARCHIVE_PROCESS_TIMEOUT)
             if result.returncode != 0:
-                stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr)
-                raise DependencyUpdateError(f"zstd backup decompression failed: {stderr.strip()}")
-            with tarfile.open(tar_path, "r:") as archive:
-                _safe_extract_archive(archive, destination)
+                raise DependencyUpdateError("zstd backup decompression failed: " + result.stdout.decode(errors="replace").strip())
+            await owned_release_io(_extract_tar_archive, tar_path, destination)
         return
+    await owned_release_io(_extract_tar_archive, archive_path, destination)
 
+
+def _write_tar_archive(source: Path, tar_path: Path) -> None:
+    with tarfile.open(tar_path, "w") as archive:
+        archive.add(source, arcname=".")
+
+
+def _extract_tar_archive(archive_path: Path, destination: Path) -> None:
     with tarfile.open(archive_path, "r:*") as archive:
         _safe_extract_archive(archive, destination)
 

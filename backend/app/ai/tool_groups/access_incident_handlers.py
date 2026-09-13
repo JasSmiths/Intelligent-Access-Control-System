@@ -1,7 +1,42 @@
 """Access incident and backfill Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
-from app.ai.tool_groups._shared import *
+import asyncio
+import re
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
+from difflib import (
+    SequenceMatcher,
+)
+from typing import (
+    Any,
+)
+
+from sqlalchemy import (
+    select,
+)
+from sqlalchemy.orm import (
+    selectinload,
+)
+
+from app.ai.context import (
+    get_chat_tool_context,
+)
+from app.ai.tool_groups._shared import (
+    DEFAULT_AGENT_TIMEZONE,
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _agent_timezone,
+    _bounded_int,
+    _compact_observation,
+    _normalize,
+    _parse_agent_datetime,
+    _payload_summary,
+    _person_record_matches,
+    _uuid_from_value,
+)
 from app.ai.tool_groups.access_diagnostics_handlers import (
     _access_event_core_fields,
     _access_event_load_options,
@@ -14,7 +49,60 @@ from app.ai.tool_groups.access_diagnostics_handlers import (
     _vehicle_agent_payload,
     diagnose_access_event,
 )
+from app.db.session import (
+    AsyncSessionLocal,
+)
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    AuditLog,
+    GateStateObservation,
+    NotificationRule,
+    Person,
+    TelemetryTrace,
+    Vehicle,
+)
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+    TimingClassification,
+)
+from app.modules.dvla.vehicle_enquiry import (
+    normalize_registration_number,
+)
+from app.modules.unifi_protect.client import (
+    UnifiProtectError,
+)
+from app.services.access.historical import (
+    HistoricalSessionInput,
+    persist_historical_event_in_session,
+)
+from app.services.event_bus import (
+    event_bus,
+)
 from app.services.movement.sessions import VEHICLE_SESSION_PAYLOAD_KEY
+from app.services.schedules import (
+    evaluate_person_schedule,
+    evaluate_vehicle_schedule,
+)
+from app.services.settings import (
+    get_runtime_config,
+)
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_ACCESS,
+    TELEMETRY_CATEGORY_ALFRED,
+    TELEMETRY_CATEGORY_WEBHOOKS_API,
+    telemetry,
+    write_audit_log,
+)
+from app.services.type_helpers import (
+    as_dict,
+    as_dict_list,
+    as_list,
+)
+from app.services.unifi_protect import (
+    get_unifi_protect_service,
+)
 
 SUPPRESSED_READ_ROOT_CAUSES = {
     "iacs_read_suppressed_as_active_vehicle_session",
@@ -1589,16 +1677,17 @@ async def backfill_access_event_from_protect(arguments: dict[str, Any]) -> dict[
         session.add(event)
         await session.flush()
 
-        presence_updated = False
-        if event.decision == AccessDecision.GRANTED and event.person_id and event.direction in {AccessDirection.ENTRY, AccessDirection.EXIT}:
-            presence = await session.get(Presence, event.person_id)
-            if not presence:
-                presence = Presence(person_id=event.person_id)
-                session.add(presence)
-            presence.state = PresenceState.PRESENT if event.direction == AccessDirection.ENTRY else PresenceState.EXITED
-            presence.last_event_id = event.id
-            presence.last_changed_at = event.occurred_at
-            presence_updated = True
+        finalized = await persist_historical_event_in_session(session, event,
+            idempotency_key=f"movement-alfred-backfill:{candidate.get('protect_event_id') or event.id}",
+            evidence={"source": "alfred_backfill", "protect_event_id": candidate.get("protect_event_id"),
+                "source_access_event_id": candidate.get("source_access_event_id"),
+                "evidence_kind": candidate.get("evidence_kind"), "reason": candidate.get("reason")},
+            session_input=HistoricalSessionInput(
+                debounce_seconds=config.lpr_debounce_max_seconds,
+                idle_seconds=config.lpr_vehicle_session_idle_seconds, camera_id=candidate.get("camera_id"),
+                protect_event_ids={str(candidate["protect_event_id"])} if candidate.get("protect_event_id") else set(),
+                ocr_variants={event.registration_number}))
+        presence_updated = finalized.presence_changed
 
         await write_audit_log(
             session,

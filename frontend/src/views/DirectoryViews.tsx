@@ -1796,6 +1796,7 @@ export function VehicleModal({
   };
 
   React.useEffect(() => {
+    const requestId = ++lookupRequestRef.current;
     const registrationNumber = normalizePlateInput(form.registration_number);
     const initialRegistration = normalizePlateInput(initialRegistrationRef.current);
     if (registrationNumber.length < 2 || (mode === "edit" && registrationNumber === initialRegistration)) {
@@ -1804,16 +1805,15 @@ export function VehicleModal({
     }
     if (registrationNumber === lastLookupRegistrationRef.current) return;
 
-    const requestId = lookupRequestRef.current + 1;
-    lookupRequestRef.current = requestId;
+    const controller = new AbortController();
     setDvlaLookup({ status: "loading", message: "Looking up DVLA vehicle details" });
 
     const timer = window.setTimeout(async () => {
       try {
           const result = await api.post<DvlaLookupResponse>("/api/v1/integrations/dvla/lookup", {
             registration_number: registrationNumber
-          });
-          if (lookupRequestRef.current !== requestId) return;
+          }, { signal: controller.signal });
+          if (controller.signal.aborted || lookupRequestRef.current !== requestId) return;
           lastLookupRegistrationRef.current = registrationNumber;
           const displayVehicle = result.display_vehicle ?? result.vehicle;
           const normalizedVehicle = result.normalized_vehicle;
@@ -1837,7 +1837,7 @@ export function VehicleModal({
           }));
         setDvlaLookup({ status: "found", message: "DVLA details applied" });
       } catch (lookupError) {
-        if (lookupRequestRef.current !== requestId) return;
+        if (controller.signal.aborted || lookupRequestRef.current !== requestId) return;
         const message = lookupError instanceof Error ? lookupError.message : "DVLA lookup failed";
         if (message.toLowerCase().includes("api key is not configured")) {
           lastLookupRegistrationRef.current = registrationNumber;
@@ -1848,7 +1848,11 @@ export function VehicleModal({
       }
     }, 850);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      ++lookupRequestRef.current;
+    };
   }, [form.registration_number, mode]);
 
   const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {

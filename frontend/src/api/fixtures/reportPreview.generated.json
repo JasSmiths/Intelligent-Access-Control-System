@@ -1,0 +1,109 @@
+{
+  "ready": {
+    "status": "ready",
+    "complete": true,
+    "report": {
+      "report_id": null,
+      "subject_type": "person",
+      "generated_at": "2026-07-14T09:00:00+00:00",
+      "generated_label": "14 Jul 2026 at 10:00",
+      "person": {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "first_name": "Synthetic",
+        "last_name": "Resident",
+        "display_name": "Synthetic Resident",
+        "pronouns": null,
+        "profile_photo_url": null,
+        "group": null,
+        "category": null,
+        "vehicles": []
+      },
+      "period": {
+        "start": "2026-07-14T08:00:00+00:00",
+        "end": "2026-07-14T09:00:00+00:00",
+        "label": "14 Jul at 09:00 to 14 Jul at 10:00",
+        "start_label": "14 Jul 2026",
+        "end_label": "14 Jul 2026",
+        "duration_label": "1 hour",
+        "timezone": "Europe/London"
+      },
+      "presence": {
+        "state": "unknown",
+        "last_changed_at": null
+      },
+      "options": {
+        "include_denied": false,
+        "include_snapshots": true,
+        "include_confidence": true
+      },
+      "summary": {
+        "arrivals": 0,
+        "departures": 0,
+        "denied": 0,
+        "total": 0,
+        "first_event": "None",
+        "last_event": "No movement in window"
+      },
+      "events": [],
+      "timeline": {
+        "all": [],
+        "selected": []
+      },
+      "report_type": "person_movements",
+      "subject": {
+        "type": "person",
+        "id": "00000000-0000-0000-0000-000000000001",
+        "label": "Synthetic Resident"
+      }
+    }
+  },
+  "ambiguous": {
+    "status": "time_choice_required",
+    "site_timezone": "Europe/London",
+    "time_choices": [
+      {
+        "field": "period_start",
+        "local_time": "2026-10-25T01:30:00",
+        "choices": [
+          {
+            "fold": 0,
+            "utc_offset_minutes": 60,
+            "label": "First occurrence (UTC+01:00)"
+          },
+          {
+            "fold": 1,
+            "utc_offset_minutes": 0,
+            "label": "Second occurrence (UTC+00:00)"
+          }
+        ]
+      }
+    ]
+  },
+  "fold_requests": [
+    {
+      "period_start": "2026-10-25T01:30:00",
+      "period_start_fold": 0,
+      "resolved_start": "2026-10-25T00:30:00+00:00"
+    },
+    {
+      "period_start": "2026-10-25T01:30:00",
+      "period_start_fold": 1,
+      "resolved_start": "2026-10-25T01:30:00+00:00"
+    }
+  ],
+  "gap": {
+    "period_start": "2026-03-29T01:30:00",
+    "status_code": 400,
+    "detail": "Start time does not exist in Europe/London because the clocks change. Choose a valid local time."
+  },
+  "timeline_event": {
+    "id": "00000000-0000-0000-0000-000000000002",
+    "registration_number": "SYNTH01",
+    "direction": "entry",
+    "decision": "granted",
+    "occurred_at": "2026-07-14T08:30:00+00:00",
+    "label": "Arrival",
+    "tone": "green",
+    "progress": 39.58333333333333
+  }
+}

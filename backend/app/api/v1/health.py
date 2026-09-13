@@ -1,6 +1,9 @@
 from typing import Any
 
-from fastapi import APIRouter
+import asyncio
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.db.session import AsyncSessionLocal
@@ -9,9 +12,23 @@ from app.services.discord_messaging import get_discord_messaging_service
 from app.services.event_bus import event_bus
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import get_status as get_maintenance_status
-from app.services.whatsapp_messaging import get_whatsapp_messaging_service
+from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
 
 router = APIRouter()
+
+
+@router.get("/health/ready")
+async def readiness(request: Request) -> JSONResponse:
+    """Core readiness; optional vendor outages stay in the detailed health view."""
+    try:
+        database = await asyncio.wait_for(_database_check(), timeout=2)
+    except TimeoutError:
+        database = {"status": "down"}
+    ready = (bool(getattr(request.app.state, "startup_complete", False))
+             and database.get("status") == "ok"
+             and bool(_realtime_check().get("started"))
+             and bool(_access_events_check().get("worker_running")))
+    return JSONResponse({"ready": ready}, status_code=200 if ready else 503)
 
 
 @router.get("/health")
@@ -130,7 +147,7 @@ async def _discord_check() -> dict[str, Any]:
 
 async def _whatsapp_check() -> dict[str, Any]:
     try:
-        status = await get_whatsapp_messaging_service().status()
+        status = await get_whatsapp_delivery_service().status()
     except Exception as exc:
         return {"status": "degraded", "enabled": None, "configured": None, "detail": _safe_error(exc)}
     enabled = bool(status.get("enabled"))

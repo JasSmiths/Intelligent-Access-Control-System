@@ -8,13 +8,17 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.v1 import notifications as notification_api
-from app.ai import tools as ai_tools
+from app.models.enums import UserRole
+from app.ai.tool_groups import access_diagnostics_handlers as alfred_access_diagnostics_handlers
+from app.ai.tool_groups import notifications_handlers as alfred_notifications_handlers
+from app.ai.tool_groups import registry as alfred_registry
 from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppNotifier,
     HomeAssistantMobileAppTarget,
 )
 from app.modules.notifications.base import ComposedNotification, NotificationContext
 from app.modules.notifications.base import NotificationDeliveryError
+from app.services.workflows.notification_payloads import (normalize_actions, normalize_conditions)
 from app.services.notifications import (
     ACTIONABLE_NOTIFICATION_CATALOG,
     GATE_MALFUNCTION_EVENT_TYPE,
@@ -29,8 +33,6 @@ from app.services.notifications import (
     gate_malfunction_notification_content,
     gate_malfunction_plain_body,
     home_assistant_notification_actions,
-    normalize_actions,
-    normalize_conditions,
     notification_action_buttons,
     postprocess_gate_malfunction_body,
     presence_condition_matches,
@@ -61,6 +63,16 @@ class FakeRuleSession:
 
     async def scalars(self, _statement):
         return ScalarResult([self.rule] if self.rule else [])
+
+    async def scalar(self, _statement):
+        return self.rule
+
+    async def flush(self):
+        await self.refresh(self.rule)
+
+    async def rollback(self):
+        pass
+
 
     def add(self, rule) -> None:
         self.rule = rule
@@ -864,11 +876,25 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
         )
 
     class FakeHomeAssistantNotifier:
-        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None, actions=None):
-            calls.append((target.service_name, title, body, image_url, image_content_type, actions))
+        async def send(
+            self,
+            target,
+            title,
+            body,
+            context,
+            *,
+            image_url=None,
+            image_content_type=None,
+            actions=None,
+            runtime_config=None,
+        ):
+            calls.append(
+                (target.service_name, title, body, image_url, image_content_type, actions, runtime_config)
+            )
 
     monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
     monkeypatch.setattr("app.services.notifications.HomeAssistantMobileAppNotifier", FakeHomeAssistantNotifier)
+    runtime = SimpleNamespace(apprise_urls="")
 
     await service._send_mobile(
         {
@@ -880,7 +906,7 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
             "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
         },
         NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
-        SimpleNamespace(apprise_urls=""),
+        runtime,
     )
 
     assert calls == [
@@ -891,6 +917,7 @@ async def test_mobile_workflow_passes_snapshot_url_to_home_assistant(monkeypatch
             "https://access.example.test/api/v1/notification-snapshots/snapshot.jpg",
             "image/jpeg",
             [],
+            runtime,
         )
     ]
 
@@ -904,11 +931,15 @@ async def test_mobile_workflow_reports_partial_success_when_secondary_sender_del
         facts={"message": "Steph arrived."},
     )
 
-    async def fake_apprise(_action, _context, _urls, _attachments, failures):
+    async def fake_apprise(_action, _context, _urls, _attachments, failures, *, receipts=None):
         failures.append("Apprise: temporary outage")
+        if receipts is not None:
+            receipts.append({"target": "apprise", "delivery": "rejected"})
         return False
 
-    async def fake_home_assistant(_action, _context, _targets, _snapshot, _failures):
+    async def fake_home_assistant(_action, _context, targets, _snapshot, _failures, *, runtime_config=None, receipts=None):
+        if receipts is not None:
+            receipts.extend({"target": target, "delivery": "accepted"} for target in targets)
         return True
 
     monkeypatch.setattr(service, "_send_mobile_apprise", fake_apprise)
@@ -930,15 +961,20 @@ async def test_mobile_workflow_reports_partial_success_when_secondary_sender_del
     assert outcome.reason == "delivered_with_failures"
     assert outcome.metadata["partial_failure"] is True
     assert outcome.metadata["failures"] == ["Apprise: temporary outage"]
+    assert outcome.metadata["destination_outcomes"] == [
+        {"target": "apprise", "delivery": "rejected"},
+        {"target": "notify.mobile_app_jason", "delivery": "accepted"},
+    ]
 
 
 async def test_mobile_workflow_adds_configured_home_assistant_gate_action(monkeypatch) -> None:
     service = NotificationService()
     calls = []
+    snapshot = SimpleNamespace(home_assistant_url="https://snapshot.invalid")
 
     class FakeActionableService:
-        async def create_gate_open_action(self, *, context, notify_service):
-            calls.append((context.event_type, notify_service, context.facts["registration_number"]))
+        async def create_gate_open_action(self, *, context, notify_service, runtime_config=None):
+            calls.append((context.event_type, notify_service, context.facts["registration_number"], runtime_config))
             return {"action": "iacs:gate_open:token", "title": "Open Gate"}
 
     monkeypatch.setattr(
@@ -955,9 +991,10 @@ async def test_mobile_workflow_adds_configured_home_assistant_gate_action(monkey
             facts={"registration_number": "AB12CDE"},
         ),
         "notify.mobile_app_jason",
+        runtime_config=snapshot,
     )
 
-    assert calls == [("unauthorized_plate", "notify.mobile_app_jason", "AB12CDE")]
+    assert calls == [("unauthorized_plate", "notify.mobile_app_jason", "AB12CDE", snapshot)]
     assert actions == [{"action": "iacs:gate_open:token", "title": "Open Gate"}]
 
 
@@ -973,11 +1010,25 @@ async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base
         )
 
     class FakeHomeAssistantNotifier:
-        async def send(self, target, title, body, context, *, image_url=None, image_content_type=None, actions=None):
-            calls.append((target.service_name, title, body, image_url, image_content_type, actions))
+        async def send(
+            self,
+            target,
+            title,
+            body,
+            context,
+            *,
+            image_url=None,
+            image_content_type=None,
+            actions=None,
+            runtime_config=None,
+        ):
+            calls.append(
+                (target.service_name, title, body, image_url, image_content_type, actions, runtime_config)
+            )
 
     monkeypatch.setattr(service, "_snapshot_attachment", fake_snapshot_attachment)
     monkeypatch.setattr("app.services.notifications.HomeAssistantMobileAppNotifier", FakeHomeAssistantNotifier)
+    runtime = SimpleNamespace(apprise_urls="")
 
     await service._send_mobile(
         {
@@ -989,7 +1040,7 @@ async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base
             "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
         },
         NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
-        SimpleNamespace(apprise_urls=""),
+        runtime,
     )
 
     assert calls == [
@@ -1000,6 +1051,7 @@ async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base
             None,
             None,
             [],
+            runtime,
         )
     ]
 
@@ -1007,21 +1059,22 @@ async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base
 async def test_home_assistant_mobile_action_decides_visitor_timeframe(monkeypatch) -> None:
     calls = []
 
-    class FakeWhatsAppService:
-        async def decide_visitor_timeframe_request(self, pass_id, request_id, decision, *, actor_label=None):
-            calls.append((pass_id, request_id, decision, actor_label))
-            return {"admin_message": "Approved"}
+    class FakeVisitorConversationService:
+        async def decide_timeframe_request(self, pass_id, request_id, decision, *, integration_action):
+            calls.append((pass_id, request_id, decision, integration_action))
+            return SimpleNamespace(kind="approved")
 
     monkeypatch.setattr(
-        "app.services.whatsapp_messaging.get_whatsapp_messaging_service",
-        lambda: FakeWhatsAppService(),
+        "app.services.visitor_conversations.get_visitor_conversation_service",
+        lambda: FakeVisitorConversationService(),
     )
 
     await HomeAssistantIntegrationService()._handle_mobile_notification_action(
         {"data": {"action": "iacs:vp_time:allow:pass-1:request-1"}}
     )
 
-    assert calls == [("pass-1", "request-1", "allow", "Home Assistant Notification")]
+    from app.services.visitor_conversations import HomeAssistantTimeframeAction
+    assert calls == [("pass-1", "request-1", "allow", HomeAssistantTimeframeAction("pass-1", "request-1", "allow"))]
 
 
 async def test_home_assistant_mobile_action_routes_actionable_gate_event(monkeypatch) -> None:
@@ -1088,7 +1141,7 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatc
                 }
             ],
         ),
-        _=SimpleNamespace(),
+        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
         session=session,
     )
 
@@ -1097,7 +1150,7 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatc
     assert created["conditions"][0]["type"] == "presence"
     assert created["actions"][0]["type"] == "in_app"
 
-    listed = await notification_api.list_notification_rules(_=SimpleNamespace(), session=session)
+    listed = await notification_api.list_notification_rules(_=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True), session=session)
     assert [rule["id"] for rule in listed] == [created["id"]]
 
     updated = await notification_api.update_notification_rule(
@@ -1114,7 +1167,7 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatc
                 }
             ],
         ),
-        _=SimpleNamespace(),
+        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
         session=session,
     )
     assert updated["name"] == "Gate arrivals updated"
@@ -1122,7 +1175,7 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatc
 
     fetched = await notification_api.get_notification_rule(
         uuid.UUID(created["id"]),
-        _=SimpleNamespace(),
+        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
         session=session,
     )
     assert fetched["id"] == created["id"]
@@ -1130,7 +1183,7 @@ async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatc
     await notification_api.delete_notification_rule(
         uuid.UUID(created["id"]),
         request=notification_api.NotificationRuleDeleteRequest(confirmation_token="confirmed"),
-        _=SimpleNamespace(),
+        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
         session=session,
     )
     assert session.deleted is not None
@@ -1178,14 +1231,12 @@ async def test_preview_endpoint_resolves_mock_variables() -> None:
 
 async def test_rule_test_endpoint_propagates_delivery_failures(monkeypatch) -> None:
     class FailingNotificationService:
-        async def process_context(self, *_args, **_kwargs):
-            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
-
-        async def send_notification_now(self, *_args, **_kwargs):
-            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
-
-        async def send_notification_now_with_result(self, *_args, **_kwargs):
-            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+        async def reserve_confirmed_request(self, *_args, **kwargs):
+            assert kwargs["action"] == "notification_rule.test"
+            return uuid.UUID(int=75), object()
+        async def dispatch_reserved(self, *_args, **kwargs):
+            return SimpleNamespace(status="review_required", failed_count=1,
+                failures=["No Apprise endpoints are configured or selected."], skipped_reasons=[])
 
     rule_id = uuid.uuid4()
     now = datetime(2026, 4, 26, 18, 42, tzinfo=UTC)
@@ -1207,16 +1258,7 @@ async def test_rule_test_endpoint_propagates_delivery_failures(monkeypatch) -> N
             updated_at=now,
         )
     )
-    monkeypatch.setattr(notification_api, "get_notification_service", lambda: FailingNotificationService())
-
-    async def consume_confirmation(*_args, **_kwargs):
-        return SimpleNamespace()
-
-    async def write_test_audit(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(notification_api, "consume_action_confirmation", consume_confirmation)
-    monkeypatch.setattr(notification_api, "write_notification_test_audit", write_test_audit)
+    monkeypatch.setattr("app.services.notifications.get_notification_service", lambda: FailingNotificationService())
 
     with pytest.raises(HTTPException) as exc:
         await notification_api.test_notification_rule(
@@ -1235,9 +1277,9 @@ async def test_ai_alert_tool_does_not_report_false_success(monkeypatch) -> None:
         async def notify(self, *_args, **_kwargs):
             raise NotificationDeliveryError("No active notification workflow matched this event.")
 
-    monkeypatch.setattr(ai_tools, "get_notification_service", lambda: FailingNotificationService())
+    monkeypatch.setattr(alfred_access_diagnostics_handlers, "get_notification_service", lambda: FailingNotificationService())
 
-    result = await ai_tools.trigger_anomaly_alert(
+    result = await alfred_access_diagnostics_handlers.trigger_anomaly_alert(
         {"subject": "Test anomaly", "severity": "critical", "message": "Something happened", "confirm": True}
     )
 
@@ -1246,7 +1288,7 @@ async def test_ai_alert_tool_does_not_report_false_success(monkeypatch) -> None:
 
 
 def test_ai_notification_workflow_tools_are_registered() -> None:
-    tools = ai_tools.build_agent_tools()
+    tools = alfred_registry.build_agent_tools()
 
     expected = {
         "query_notification_catalog",
@@ -1262,7 +1304,7 @@ def test_ai_notification_workflow_tools_are_registered() -> None:
 
 
 async def test_ai_preview_notification_workflow_resolves_variables() -> None:
-    result = await ai_tools.preview_notification_workflow(
+    result = await alfred_notifications_handlers.preview_notification_workflow(
         {
             "rule": {
                 "name": "Preview",
@@ -1282,16 +1324,20 @@ async def test_ai_preview_notification_workflow_resolves_variables() -> None:
     assert result["preview"]["actions"][0]["title"] == "Steph arrived"
 
 
-async def test_ai_notification_mutation_tools_require_confirmation() -> None:
-    create_result = await ai_tools.create_notification_workflow(
+async def test_ai_notification_mutation_tools_require_confirmation(monkeypatch) -> None:
+    async def actor(_purpose): return SimpleNamespace(id=uuid.UUID(int=76), auth_session_version=0)
+    async def prepare(*args, **kwargs): return [], "synthetic-config-binding"
+    monkeypatch.setattr(alfred_notifications_handlers, "_require_admin_user", actor)
+    monkeypatch.setattr(alfred_notifications_handlers, "get_notification_service", lambda: SimpleNamespace(prepare_confirmed_delivery=prepare))
+    create_result = await alfred_notifications_handlers.create_notification_workflow(
         {
             "name": "Gate arrivals",
             "trigger_event": "authorized_entry",
             "actions": [{"type": "in_app"}],
         }
     )
-    delete_result = await ai_tools.delete_notification_workflow({"rule_name": "Gate arrivals"})
-    test_result = await ai_tools.test_notification_workflow(
+    delete_result = await alfred_notifications_handlers.delete_notification_workflow({"rule_name": "Gate arrivals"})
+    test_result = await alfred_notifications_handlers.test_notification_workflow(
         {
             "rule": {
                 "name": "Preview",
@@ -1313,16 +1359,29 @@ async def test_ai_notification_mutation_tools_require_confirmation() -> None:
 
 
 async def test_ai_notification_test_tool_propagates_provider_failure(monkeypatch) -> None:
+    actor = SimpleNamespace(id=uuid.UUID(int=76), auth_session_version=0)
+    operation = uuid.UUID(int=77)
     class FailingWorkflowService:
-        async def process_context(self, *_args, **_kwargs):
+        async def prepare_confirmed_delivery(self, *args, **kwargs): return [], "synthetic-config-binding"
+        async def reserve_confirmed_in_session(self, session, **kwargs):
+            assert kwargs["operation_id"] == operation and kwargs["actor_user_id"] == actor.id
+            return operation, object()
+        async def dispatch_reserved(self, *args, **kwargs):
             raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def commit(self): pass
+    async def current_actor(_purpose): return actor
+    monkeypatch.setattr(alfred_notifications_handlers, "_require_admin_user", current_actor)
+    monkeypatch.setattr(alfred_notifications_handlers, "AsyncSessionLocal", Session)
+    monkeypatch.setattr(alfred_notifications_handlers, "get_notification_service", lambda: FailingWorkflowService())
+    monkeypatch.setattr(alfred_notifications_handlers, "get_chat_tool_context", lambda: {
+        "intent_id": operation, "approval": {"requester_user_id": str(actor.id), "requester_auth_session_version": 0,
+            "tool_name": "test_notification_workflow", "preview_output": {"prepared_delivery": {
+                "plan": [], "configuration_binding": "synthetic-config-binding"}}}})
 
-        async def preview_rule(self, rule, _context=None):
-            return {"id": rule["id"], "actions": []}
-
-    monkeypatch.setattr(ai_tools, "get_notification_service", lambda: FailingWorkflowService())
-
-    result = await ai_tools.test_notification_workflow(
+    result = await alfred_notifications_handlers.test_notification_workflow(
         {
             "confirm_send": True,
             "rule": {
@@ -1349,7 +1408,7 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
 
     event_bus.subscribe(capture)
     try:
-        await NotificationService().process_context(
+        await NotificationService(run_store=FakeRunStore()).send_notification_now(
             NotificationContext(
                 event_type="authorized_entry",
                 subject="Steph arrived",
@@ -1392,8 +1451,10 @@ async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(
     calls = []
 
     class FakeDiscordService:
-        async def send_notification_action(self, action, context, *, attachment_paths=None):
-            calls.append((action, context, list(attachment_paths or [])))
+        async def send_notification_action(self, action, context, *, attachment_paths=None, config):
+            calls.append((action, context, list(attachment_paths or []), config))
+            return {"destination_outcomes": [{"target": "123", "delivery": "accepted"}],
+                    "partial_failure": False, "failure_count": 0}
 
     service = NotificationService()
 
@@ -1402,8 +1463,9 @@ async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(
 
     monkeypatch.setattr(service, "_snapshot_attachments", fake_snapshot_attachments)
     monkeypatch.setattr("app.services.notifications.get_discord_messaging_service", lambda: FakeDiscordService())
+    monkeypatch.setattr("app.services.notifications.discord_config_from_runtime", lambda config: config)
 
-    await service._send_discord(
+    outcome = await service._send_discord(
         {
             "type": "discord",
             "target_mode": "selected",
@@ -1413,10 +1475,12 @@ async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(
             "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
         },
         NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
+        SimpleNamespace(),
     )
 
     assert calls[0][0]["target_ids"] == ["discord:123"]
     assert calls[0][2] == [str(snapshot_path)]
+    assert outcome.delivered is True
     assert not snapshot_path.exists()
 
 
@@ -1543,7 +1607,7 @@ async def test_voice_action_off_suppresses_and_records_telemetry(monkeypatch) ->
 
     event_bus.subscribe(capture)
     try:
-        result = await NotificationService().execute_rule_with_result(
+        result = await send_test_rule(
             {
                 "id": "rule-voice",
                 "name": "Voice alert",
@@ -1637,7 +1701,7 @@ async def test_suppressed_voice_action_does_not_block_other_workflow_actions(mon
 
     event_bus.subscribe(capture)
     try:
-        result = await NotificationService().execute_rule_with_result(
+        result = await send_test_rule(
             {
                 "id": "rule-mixed",
                 "name": "Mixed alert",
@@ -1677,13 +1741,13 @@ async def test_suppressed_voice_action_does_not_block_other_workflow_actions(mon
     assert [event.type for event in captured_events].count("notification.skipped") == 1
 
 
-async def test_process_context_with_result_reports_delivery_status(monkeypatch) -> None:
+async def test_durable_send_reports_delivery_status(monkeypatch) -> None:
     async def fake_runtime_config():
         return SimpleNamespace()
 
     monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
 
-    result = await NotificationService().process_context_with_result(
+    result = await NotificationService(run_store=FakeRunStore()).send_notification_now_with_result(
         NotificationContext(
             event_type="authorized_entry",
             subject="Steph arrived",
@@ -1724,26 +1788,12 @@ async def test_notification_service_exposes_distinct_enqueue_and_send_apis(monke
     async def fake_runtime_config():
         return SimpleNamespace()
 
-    async def fake_create_run(
-        self: NotificationService,
-        context: NotificationContext,
-        *,
-        status: str,
-    ):
-        created_runs.append((status, context))
-        return SimpleNamespace(id=uuid.uuid4())
-
-    async def fake_finish_run(
-        self: NotificationService,
-        run_id: uuid.UUID,
-        result: NotificationWorkflowResult,
-    ) -> None:
-        finished_runs.append((run_id, result))
-
     monkeypatch.setattr("app.services.notifications.event_bus.publish", fake_publish)
     monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(NotificationService, "_create_notification_run", fake_create_run)
-    monkeypatch.setattr(NotificationService, "_finish_notification_run", fake_finish_run)
+    store = FakeRunStore()
+    service = NotificationService(run_store=store)
+    created_runs = store.created_runs
+    finished_runs = store.finished_runs
 
     context = NotificationContext(
         event_type="authorized_entry",
@@ -1752,8 +1802,8 @@ async def test_notification_service_exposes_distinct_enqueue_and_send_apis(monke
         facts={"first_name": "Steph", "message": "Gate opened"},
     )
 
-    queued = await NotificationService().enqueue_notification(context)
-    sent = await NotificationService().send_notification_now_with_result(
+    queued = await service.enqueue_notification(context)
+    sent = await service.send_notification_now_with_result(
         context,
         rules_override=[
             {
@@ -1797,3 +1847,82 @@ async def test_notification_rule_last_fired_timestamp_is_persisted(monkeypatch) 
     assert session.commits == 1
     assert rule.last_fired_at is not None
     assert rule.last_fired_at.tzinfo is not None
+
+
+class FakeRunStore:
+    def __init__(self):
+        self.rows = {}
+        self.created_runs = []
+        self.finished_runs = []
+
+    async def create(self, context, *, rules_override=None, run_id=None):
+        identity, _ = await self._new(context, rules_override, "queued")
+        return identity
+
+    async def reserve(self, context, *, rules_override=None, run_id=None):
+        return await self._new(context, rules_override, "processing")
+
+    async def _new(self, context, overrides, status):
+        self.created_runs.append((status, context))
+        row = SimpleNamespace(id=uuid.uuid4(), context=context, rules_override=overrides,
+                              status=status, claim_token=uuid.uuid4(), delivery_plan=None,
+                              delivered_count=0, failed_count=0, skipped_count=0,
+                              failures=[], skipped_reasons=[], review_reason=None)
+        self.rows[row.id] = row
+        return row.id, row
+
+    async def get(self, identity):
+        return self.rows[identity]
+
+    async def save_plan(self, identity, token, plan):
+        self.rows[identity].delivery_plan = plan
+
+    async def begin_action(self, identity, token, index, *, authorize_origin=None, refresh_authorization=None):
+        self.rows[identity].delivery_plan[index]["state"] = "attempting"
+
+    async def finish_action(self, identity, token, index, outcome, *, prepare_output=None):
+        row = self.rows[identity]
+        assert not row.context.get("visitor_conversation_origin"), "Domain participants require the real PostgreSQL fixture"
+        row.delivery_plan[index].update(outcome)
+        row.delivered_count += outcome["state"] == "accepted"
+        row.skipped_count += outcome["state"] == "skipped"
+        if outcome["state"] == "skipped":
+            row.skipped_reasons.append(outcome.get("reason", "skipped"))
+
+    async def finish(self, identity, token):
+        row = self.rows[identity]
+        row.status = "provider_accepted" if row.delivered_count else "skipped"
+        self.finished_runs.append((identity, NotificationService.result_from_run(row)))
+        return row
+
+
+async def send_test_rule(rule, context):
+    return await NotificationService(run_store=FakeRunStore()).send_notification_now_with_result(
+        context, rules_override=[rule],
+    )
+
+
+@pytest.mark.parametrize("raises", [False, True])
+async def test_home_assistant_gate_bearer_never_enters_success_or_error_logs(monkeypatch, raises):
+    from unittest.mock import AsyncMock
+    from app.services.actionable_notifications import ActionableNotificationService
+    from app.services import home_assistant as owner
+    token = "synthetic-private-bearer-never-log"
+    records = []
+    service = ActionableNotificationService()
+    service.execute_gate_action = AsyncMock(
+        side_effect=RuntimeError(token) if raises else None,
+        return_value=SimpleNamespace(accepted=False, reason="wrong action; token remains unused"),
+    )
+    monkeypatch.setattr("app.services.actionable_notifications.get_actionable_notification_service", lambda: service)
+    monkeypatch.setattr(owner.logger, "info", lambda message, **kwargs: records.append((message, kwargs)))
+    monkeypatch.setattr(owner.logger, "warning", lambda message, **kwargs: records.append((message, kwargs)))
+    await HomeAssistantIntegrationService()._handle_mobile_notification_action(
+        {"data": {"action": "iacs:gate_force_open:" + token}}
+    )
+    service.execute_gate_action.assert_awaited_once()
+    assert len(records) == 1
+    assert token not in repr(records)
+    assert records[0][1]["extra"]["action_kind"] == "gate_force_open"
+    if raises:
+        assert records[0][1]["extra"]["error_class"] == "RuntimeError"

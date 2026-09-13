@@ -20,107 +20,16 @@ import React from "react";
 import { createPortal } from "react-dom";
 
 import { api } from "../api/client";
-import { formatDate, initials, matches, titleCase } from "../lib/format";
+import { reportsApi, type ReportDurationInfo, type ReportExportResponse, type ReportSnapshotEvent,
+  type ReportSnapshotVehicle, type ReportPreviewResponse, type ReportPreviewRequest } from "../api/reports";
+import { initials, matches, titleCase } from "../lib/format";
 import { mediaSource } from "../lib/media";
 import { Badge } from "../ui/primitives";
 import type { AccessEvent, Person, Presence, TooltipPositionState } from "../api/types";
 import type { VisitorPass } from "./PassesView";
 
 type QuickRange = "24h" | "3d" | "7d" | "14d" | "custom";
-
-type ReportOptions = {
-  includeDenied: boolean;
-  includeSnapshots: boolean;
-  includeConfidence: boolean;
-};
-
-type ReportDurationInfo = {
-  label: string;
-  tone?: "muted" | "new";
-  tooltip?: string;
-  tooltipDetail?: string;
-};
-
-type ReportSnapshotVehicle = Person["vehicles"][number] & {
-  title?: string;
-  mot_label?: string;
-  tax_label?: string;
-  mot_tone?: "green" | "red" | "muted";
-  tax_tone?: "green" | "red" | "muted";
-};
-
-type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "profile_photo_data_url" | "vehicles"> & {
-  profile_photo_data_url?: string | null;
-  vehicles: ReportSnapshotVehicle[];
-};
-
-type ReportSnapshotEvent = AccessEvent & {
-  confidence_percent?: number;
-  detail?: string;
-  duration?: ReportDurationInfo;
-  occurred_label?: string;
-  source_label?: string;
-  tone?: "green" | "blue" | "red";
-  type_label?: string;
-};
-
-type ReportSnapshotTimelineEvent = {
-  id: string;
-  registration_number: string;
-  direction: AccessEvent["direction"];
-  decision: AccessEvent["decision"];
-  occurred_at: string;
-  label: string;
-  tone: "green" | "blue" | "red";
-  progress: number;
-};
-
-type ReportSnapshot = {
-  report_id: string;
-  subject_type?: "person" | "visitor_pass";
-  generated_at: string;
-  generated_label: string;
-  person: ReportSnapshotPerson;
-  period: {
-    start: string;
-    end: string;
-    label: string;
-    start_label: string;
-    end_label: string;
-    duration_label: string;
-    timezone: string;
-  };
-  presence: {
-    state: Presence["state"];
-    last_changed_at: string | null;
-  };
-  options: {
-    include_denied: boolean;
-    include_snapshots: boolean;
-    include_confidence: boolean;
-  };
-  summary: {
-    arrivals: number;
-    departures: number;
-    denied: number;
-    total: number;
-    first_event: string;
-    last_event: string;
-  };
-  events: ReportSnapshotEvent[];
-  timeline: {
-    all: ReportSnapshotTimelineEvent[];
-    selected: ReportSnapshotTimelineEvent[];
-  };
-};
-
-type ReportExportResponse = {
-  report_id: string;
-  created_at: string | null;
-  download_url: string;
-  pdf_bytes: number;
-  report: ReportSnapshot;
-};
+type ReportOptions = { includeDenied: boolean; includeSnapshots: boolean; includeConfidence: boolean };
 
 type ReportSearchResult =
   | { type: "report"; reportId: string }
@@ -140,66 +49,37 @@ const defaultOptions: ReportOptions = {
   includeConfidence: true
 };
 
-function normalizePlate(value: string) {
-  return value.replace(/[^a-z0-9]/gi, "").toUpperCase();
-}
-
+// Civil calendar values use UTC Date fields only as a calendar carrier. They are
+// never interpreted as instants; the report API resolves site-zone input and DST.
 function toDateTimeInputValue(date: Date) {
-  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return offsetDate.toISOString().slice(0, 16);
+  return date.toISOString().slice(0, 16);
 }
-
 function parseDateTimeInput(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? new Date() : date;
+  return new Date(`${value || "2000-01-01T00:00"}Z`);
 }
-
-function formatDateRange(start: Date, end: Date) {
-  return `${formatDate(start.toISOString())} to ${formatDate(end.toISOString())}`;
+function siteCivilInput(value: string, timezone: string) {
+  if (!value || !timezone) return "";
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(value)) return value.slice(0, 16);
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date(value));
+  const part = (key: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === key)!.value;
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
 }
-
-function formatDateOnly(date: Date) {
+function formatSiteDate(value: string, timezone: string) {
   return new Intl.DateTimeFormat(undefined, {
-    day: "2-digit",
-    month: "short",
-    year: "numeric"
-  }).format(date);
+    timeZone: timezone, year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(value));
 }
 
 function reportInitials(person: Pick<Person, "display_name" | "first_name" | "last_name">) {
   return initials(person.display_name || `${person.first_name} ${person.last_name}`);
 }
 
-function eventTone(event: AccessEvent) {
-  if (event.decision === "denied") return "red";
-  return event.direction === "entry" ? "green" : "blue";
-}
-
-function eventIcon(event: AccessEvent) {
+function eventIcon(event: Pick<ReportSnapshotEvent, "decision" | "direction">) {
   if (event.decision === "denied") return AlertTriangle;
   return event.direction === "entry" ? LogIn : LogOut;
-}
-
-function eventLabel(event: AccessEvent) {
-  if (event.decision === "denied") return "Denied";
-  return event.direction === "entry" ? "Arrival" : "Departure";
-}
-
-function directionSummary(events: AccessEvent[]) {
-  return {
-    arrivals: events.filter((event) => event.decision === "granted" && event.direction === "entry").length,
-    departures: events.filter((event) => event.decision === "granted" && event.direction === "exit").length,
-    denied: events.filter((event) => event.decision === "denied").length
-  };
-}
-
-function lastMovement(events: AccessEvent[]) {
-  const latest = [...events].sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())[0];
-  return latest ? `${eventLabel(latest)} ${formatDate(latest.occurred_at)}` : "No movement in window";
-}
-
-function firstMovement(events: AccessEvent[]) {
-  return events[0] ? formatDate(events[0].occurred_at) : "None";
 }
 
 function vehicleLabel(person: { vehicles: Array<{ registration_number: string }> } | null) {
@@ -214,14 +94,6 @@ function personMetaLabel(person: { group?: string | null; category?: string | nu
   return Array.from(new Set(parts)).join(" · ") || "No group assigned";
 }
 
-function reportDurationLabel(start: Date, end: Date) {
-  const milliseconds = Math.max(0, end.getTime() - start.getTime());
-  const hours = Math.max(1, Math.ceil(milliseconds / (60 * 60 * 1000)));
-  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
-  const days = Math.ceil(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"}`;
-}
-
 function reportVehicleTitle(vehicle: Pick<Person["vehicles"][number], "make" | "model" | "description"> & { title?: string }) {
   return vehicle.title || [vehicle.make, vehicle.model].filter(Boolean).join(" ") || vehicle.description || "Vehicle";
 }
@@ -232,43 +104,6 @@ function visitorPassMetaLabel(visitorPass: VisitorPass) {
 
 function visitorPassVehicleLabel(visitorPass: VisitorPass) {
   return visitorPass.number_plate || "No plate assigned";
-}
-
-function visitorPassToReportPerson(visitorPass: VisitorPass): ReportSnapshotPerson {
-  const plate = visitorPass.number_plate?.trim() || "";
-  return {
-    id: visitorPass.id,
-    first_name: visitorPass.visitor_name,
-    last_name: "",
-    display_name: visitorPass.visitor_name,
-    pronouns: null,
-    profile_photo_data_url: null,
-    group: "Visitor Pass",
-    category: visitorPass.pass_type,
-    vehicles: plate
-      ? [{
-          id: `visitor-pass-${visitorPass.id}`,
-          registration_number: plate,
-          vehicle_photo_data_url: null,
-          description: "Visitor Pass Vehicle",
-          make: visitorPass.vehicle_make,
-          model: null,
-          color: visitorPass.vehicle_colour,
-          fuel_type: null,
-          title: visitorPass.vehicle_make || "Visitor Vehicle",
-          mot_label: "No data",
-          tax_label: "No data",
-          mot_tone: "muted",
-          tax_tone: "muted"
-        }]
-      : []
-  };
-}
-
-function visitorPassPresence(visitorPass: VisitorPass): Pick<Presence, "state" | "last_changed_at"> {
-  if (visitorPass.departure_time) return { state: "exited", last_changed_at: visitorPass.departure_time };
-  if (visitorPass.arrival_time) return { state: "present", last_changed_at: visitorPass.arrival_time };
-  return { state: "unknown", last_changed_at: null };
 }
 
 function reportComplianceDate(value?: string | null) {
@@ -297,78 +132,6 @@ function reportComplianceTone(status?: string | null) {
   return "muted";
 }
 
-function formatDurationReferenceDate(value: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    hour: "2-digit",
-    hour12: false,
-    minute: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  }).formatToParts(new Date(value));
-  const getPart = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${getPart("day")}/${getPart("month")}/${getPart("year")} - ${getPart("hour")}:${getPart("minute")}`;
-}
-
-function pluralUnit(value: number, singular: string, plural = `${singular}s`) {
-  return `${value} ${value === 1 ? singular : plural}`;
-}
-
-function formatVerboseDuration(milliseconds: number) {
-  const totalDays = Math.max(0, Math.floor(milliseconds / (24 * 60 * 60 * 1000)));
-  const years = Math.floor(totalDays / 365);
-  const months = Math.floor((totalDays % 365) / 30);
-  const days = (totalDays % 365) % 30;
-  const parts = [
-    years ? pluralUnit(years, "Year") : null,
-    months ? pluralUnit(months, "Month") : null,
-    days ? pluralUnit(days, "Day") : null
-  ].filter(Boolean);
-  return parts.join(", ") || "Less than 1 Day";
-}
-
-function formatTableDuration(start: string, end: string, detail: string): ReportDurationInfo {
-  const milliseconds = Math.max(0, new Date(end).getTime() - new Date(start).getTime());
-  const totalMinutes = Math.max(0, Math.floor(milliseconds / (60 * 1000)));
-  const totalHours = Math.floor(totalMinutes / 60);
-  const totalDays = Math.floor(totalHours / 24);
-  const minutes = totalMinutes % 60;
-  const hours = totalHours % 24;
-
-  if (totalHours < 24) {
-    return { label: totalHours ? `${totalHours}hr${totalHours === 1 ? "" : "s"} ${minutes}m` : `${minutes}m` };
-  }
-
-  if (totalDays < 14) {
-    return { label: `${pluralUnit(totalDays, "Day")}, ${hours}hr${hours === 1 ? "" : "s"} ${minutes}m` };
-  }
-
-  return {
-    label: formatDurationReferenceDate(start),
-    tooltip: formatVerboseDuration(milliseconds),
-    tooltipDetail: detail
-  };
-}
-
-function isMovementEvent(event: AccessEvent) {
-  return event.decision === "granted" && (event.direction === "entry" || event.direction === "exit");
-}
-
-function dayRhythmProgress(event: AccessEvent) {
-  const occurredAt = new Date(event.occurred_at);
-  const minutes = occurredAt.getHours() * 60 + occurredAt.getMinutes() + occurredAt.getSeconds() / 60;
-  return Math.min(99.6, Math.max(0.4, (minutes / (24 * 60)) * 100));
-}
-
-function sourceLabel(source: string) {
-  const trimmed = source.trim();
-  const normalized = trimmed.toLowerCase();
-  if (!normalized) return "Gate LPR";
-  if (normalized === "ubiquiti" || normalized.includes("ubiquiti") || normalized.includes("unifi")) return "Gate LPR";
-  if (normalized.includes("top gate") || normalized.includes("gate lpr")) return "Gate LPR";
-  return trimmed;
-}
-
 const dayRhythmTicks = [
   { left: 0, label: "12 AM" },
   { left: 100 / 6, label: "4 AM" },
@@ -383,26 +146,27 @@ const reportWeekdayLabels = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 function localDateKey(date: Date) {
   return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0")
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0")
   ].join("-");
 }
 
 function reportCalendarDays(month: Date) {
-  const firstDay = new Date(month.getFullYear(), month.getMonth(), 1);
-  const mondayOffset = (firstDay.getDay() + 6) % 7;
+  const firstDay = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), 1));
+  const mondayOffset = (firstDay.getUTCDay() + 6) % 7;
   const start = new Date(firstDay);
-  start.setDate(firstDay.getDate() - mondayOffset);
+  start.setUTCDate(firstDay.getUTCDate() - mondayOffset);
   return Array.from({ length: 42 }, (_, index) => {
     const next = new Date(start);
-    next.setDate(start.getDate() + index);
+    next.setUTCDate(start.getUTCDate() + index);
     return next;
   });
 }
 
 function formatReportPickerValue(date: Date) {
   return new Intl.DateTimeFormat(undefined, {
+    timeZone: "UTC",
     day: "2-digit",
     hour: "2-digit",
     hour12: false,
@@ -432,12 +196,12 @@ function ReportsDateTimePicker({
   const buttonRef = React.useRef<HTMLButtonElement | null>(null);
   const popoverRef = React.useRef<HTMLDivElement | null>(null);
   const selectedDate = React.useMemo(() => parseDateTimeInput(value), [value]);
-  const [visibleMonth, setVisibleMonth] = React.useState(() => new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1));
+  const [visibleMonth, setVisibleMonth] = React.useState(() => new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), 1)));
   const selectedKey = localDateKey(selectedDate);
   const days = React.useMemo(() => reportCalendarDays(visibleMonth), [visibleMonth]);
 
   React.useEffect(() => {
-    if (!open) setVisibleMonth(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1));
+    if (!open) setVisibleMonth(new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), 1)));
   }, [open, selectedDate]);
 
   const positionPopover = React.useCallback(() => {
@@ -485,16 +249,16 @@ function ReportsDateTimePicker({
 
   const setDay = (day: Date) => {
     const next = new Date(day);
-    next.setHours(selectedDate.getHours(), selectedDate.getMinutes(), 0, 0);
+    next.setUTCHours(selectedDate.getUTCHours(), selectedDate.getUTCMinutes(), 0, 0);
     updateDate(next);
   };
 
   const setTimePart = (part: "hour" | "minute", rawValue: string) => {
     const parsed = Number(rawValue);
     const next = new Date(selectedDate);
-    if (part === "hour") next.setHours(clampDateTimePart(parsed, 0, 23));
-    if (part === "minute") next.setMinutes(clampDateTimePart(parsed, 0, 59));
-    next.setSeconds(0, 0);
+    if (part === "hour") next.setUTCHours(clampDateTimePart(parsed, 0, 23));
+    if (part === "minute") next.setUTCMinutes(clampDateTimePart(parsed, 0, 59));
+    next.setUTCSeconds(0, 0);
     updateDate(next);
   };
 
@@ -502,6 +266,8 @@ function ReportsDateTimePicker({
     <div className="report-date-time-field">
       <span>{label}</span>
       <button
+        aria-label={label}
+        disabled={!value}
         aria-controls={open ? pickerId : undefined}
         aria-expanded={open}
         className="report-date-time-trigger"
@@ -510,7 +276,7 @@ function ReportsDateTimePicker({
         type="button"
       >
         <CalendarDays size={15} />
-        <strong>{formatReportPickerValue(selectedDate)}</strong>
+        <strong>{value ? formatReportPickerValue(selectedDate) : "Loading site time…"}</strong>
         <Clock3 size={14} />
       </button>
       {open && popoverPosition ? createPortal(
@@ -522,11 +288,11 @@ function ReportsDateTimePicker({
           style={{ left: popoverPosition.left, top: popoverPosition.top }}
         >
           <div className="report-date-time-popover-head">
-            <button aria-label="Previous month" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))} type="button">
+            <button aria-label="Previous month" onClick={() => setVisibleMonth(new Date(Date.UTC(visibleMonth.getUTCFullYear(), visibleMonth.getUTCMonth() - 1, 1)))} type="button">
               <ChevronLeft size={16} />
             </button>
-            <strong>{visibleMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</strong>
-            <button aria-label="Next month" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))} type="button">
+            <strong>{visibleMonth.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}</strong>
+            <button aria-label="Next month" onClick={() => setVisibleMonth(new Date(Date.UTC(visibleMonth.getUTCFullYear(), visibleMonth.getUTCMonth() + 1, 1)))} type="button">
               <ChevronRight size={16} />
             </button>
           </div>
@@ -536,12 +302,12 @@ function ReportsDateTimePicker({
               const key = localDateKey(day);
               return (
                 <button
-                  className={`${day.getMonth() === visibleMonth.getMonth() ? "" : "muted"} ${key === selectedKey ? "active" : ""}`}
+                  className={`${day.getUTCMonth() === visibleMonth.getUTCMonth() ? "" : "muted"} ${key === selectedKey ? "active" : ""}`}
                   key={key}
                   onClick={() => setDay(day)}
                   type="button"
                 >
-                  {day.getDate()}
+                  {day.getUTCDate()}
                 </button>
               );
             })}
@@ -549,15 +315,15 @@ function ReportsDateTimePicker({
           <div className="report-date-time-footer">
             <div>
               <span>Time</span>
-              <strong>{String(selectedDate.getHours()).padStart(2, "0")}:{String(selectedDate.getMinutes()).padStart(2, "0")}</strong>
+              <strong>{String(selectedDate.getUTCHours()).padStart(2, "0")}:{String(selectedDate.getUTCMinutes()).padStart(2, "0")}</strong>
             </div>
             <label>
               <span>Hour</span>
-              <input max={23} min={0} onChange={(event) => setTimePart("hour", event.target.value)} type="number" value={String(selectedDate.getHours()).padStart(2, "0")} />
+              <input max={23} min={0} onChange={(event) => setTimePart("hour", event.target.value)} type="number" value={String(selectedDate.getUTCHours()).padStart(2, "0")} />
             </label>
             <label>
               <span>Min</span>
-              <input max={59} min={0} onChange={(event) => setTimePart("minute", event.target.value)} type="number" value={String(selectedDate.getMinutes()).padStart(2, "0")} />
+              <input max={59} min={0} onChange={(event) => setTimePart("minute", event.target.value)} type="number" value={String(selectedDate.getUTCMinutes()).padStart(2, "0")} />
             </label>
           </div>
         </div>,
@@ -630,7 +396,7 @@ function ReportDurationCell({ duration }: { duration: ReportDurationInfo }) {
   );
 }
 
-function ReportSnapshotThumb({ event }: { event: AccessEvent }) {
+function ReportSnapshotThumb({ event, timezone }: { event: ReportSnapshotEvent; timezone: string }) {
   const tooltipId = React.useId();
   const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
 
@@ -691,7 +457,7 @@ function ReportSnapshotThumb({ event }: { event: AccessEvent }) {
         >
           <img alt="" loading="lazy" src={event.snapshot_url} />
           <strong>{event.registration_number}</strong>
-          <span>{event.snapshot_captured_at ? `Captured ${formatDate(event.snapshot_captured_at)}` : `${eventLabel(event)} at ${formatDate(event.occurred_at)}`}</span>
+          <span>{event.snapshot_captured_at ? `Captured ${formatSiteDate(event.snapshot_captured_at, timezone)}` : `${event.type_label} at ${event.occurred_label ?? formatSiteDate(event.occurred_at, timezone)}`}</span>
         </div>,
         document.body
       ) : null}
@@ -700,9 +466,7 @@ function ReportSnapshotThumb({ event }: { event: AccessEvent }) {
 }
 
 export function ReportsView({
-  events,
-  people,
-  presence
+  events, people, presence
 }: {
   events: AccessEvent[];
   people: Person[];
@@ -720,17 +484,44 @@ export function ReportsView({
   const [isPersonSearchOpen, setIsPersonSearchOpen] = React.useState(false);
   const [highlightedPersonIndex, setHighlightedPersonIndex] = React.useState(0);
   const [range, setRange] = React.useState<QuickRange>("7d");
-  const [endInput, setEndInput] = React.useState(() => toDateTimeInputValue(new Date()));
-  const [startInput, setStartInput] = React.useState(() => toDateTimeInputValue(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)));
+  const [endInput, setEndInput] = React.useState("");
+  const [startInput, setStartInput] = React.useState("");
+  const [siteTimezone, setSiteTimezone] = React.useState("");
+  const [rangeRevision, setRangeRevision] = React.useState(0);
+  const [isLoadingContext, setIsLoadingContext] = React.useState(true);
+  const [contextError, setContextError] = React.useState<string | null>(null);
+  const [folds, setFolds] = React.useState<Pick<ReportPreviewRequest, "period_start_fold" | "period_end_fold">>({});
+  const [preview, setPreview] = React.useState<{ request: ReportPreviewRequest; result: ReportPreviewResponse } | null>(null);
+  const [previewError, setPreviewError] = React.useState<{ request: ReportPreviewRequest; message: string } | null>(null);
   const [options, setOptions] = React.useState<ReportOptions>(defaultOptions);
-  const [reportSourceEvents, setReportSourceEvents] = React.useState(events);
   const [visitorPasses, setVisitorPasses] = React.useState<VisitorPass[]>([]);
   const [loadedReport, setLoadedReport] = React.useState<ReportExportResponse | null>(null);
   const [isExportingReport, setIsExportingReport] = React.useState(false);
   const [isLoadingReportId, setIsLoadingReportId] = React.useState(false);
   const [reportActionError, setReportActionError] = React.useState<string | null>(null);
-  const visitorPassesRequestedRef = React.useRef(false);
-  const reportEventsRequestedRef = React.useRef(false);
+  const visitorPassesLoadedRef = React.useRef(false);
+  const actionController = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => actionController.current?.abort(), []);
+
+  React.useEffect(() => {
+    if (range === "custom") { setIsLoadingContext(false); return; }
+    const controller = new AbortController();
+    setIsLoadingContext(true);
+    setContextError(null);
+    reportsApi.context({ signal: controller.signal }).then((context) => {
+      if (controller.signal.aborted) return;
+      setSiteTimezone(context.site_timezone);
+      const hours = quickRanges.find((item) => item.value === range)!.hours;
+      setEndInput(context.now);
+      setStartInput(new Date(new Date(context.now).getTime() - hours * 3_600_000).toISOString());
+      setFolds({});
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setContextError(error instanceof Error ? error.message : "Site time could not be loaded.");
+    }).finally(() => {
+      if (!controller.signal.aborted) setIsLoadingContext(false);
+    });
+    return () => controller.abort();
+  }, [range, rangeRevision]);
 
   React.useEffect(() => {
     if (selectedPersonId && reportablePeople.some((person) => person.id === selectedPersonId)) return;
@@ -750,80 +541,20 @@ export function ReportsView({
 
   const selectedPerson = reportablePeople.find((person) => person.id === selectedPersonId) ?? null;
   const selectedVisitorPass = visitorPasses.find((visitorPass) => visitorPass.id === selectedVisitorPassId) ?? null;
-  const selectedPresence = selectedPerson
-    ? presence.find((item) => item.person_id === selectedPerson.id) ?? null
-    : null;
-  const selectedPlates = React.useMemo(
-    () => {
-      if (selectedPerson) {
-        return new Set(selectedPerson.vehicles.map((vehicle) => normalizePlate(vehicle.registration_number)));
-      }
-      return new Set(selectedVisitorPass?.number_plate ? [normalizePlate(selectedVisitorPass.number_plate)] : []);
-    },
-    [selectedPerson, selectedVisitorPass]
-  );
-  const selectedVisitorPassEventIds = React.useMemo(
-    () => new Set([selectedVisitorPass?.arrival_event_id, selectedVisitorPass?.departure_event_id].filter((value): value is string => Boolean(value))),
-    [selectedVisitorPass]
-  );
-  const selectedSubject = selectedPerson || selectedVisitorPass;
-  React.useEffect(() => {
-    setReportSourceEvents((current) => {
-      if (!reportEventsRequestedRef.current) return events;
-      const byId = new Map(current.map((event) => [event.id, event]));
-      events.forEach((event) => byId.set(event.id, event));
-      return [...byId.values()]
-        .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
-        .slice(0, 250);
-    });
-  }, [events]);
-
   React.useEffect(() => {
     const shouldLoadVisitorPasses = isPersonSearchOpen || Boolean(personQuery.trim()) || Boolean(selectedVisitorPassId);
-    if (!shouldLoadVisitorPasses || visitorPassesRequestedRef.current) return undefined;
-    let cancelled = false;
-    visitorPassesRequestedRef.current = true;
-    api.get<VisitorPass[]>("/api/v1/visitor-passes?limit=500")
+    if (!shouldLoadVisitorPasses || visitorPassesLoadedRef.current) return undefined;
+    const controller = new AbortController();
+    api.get<VisitorPass[]>("/api/v1/visitor-passes?limit=500", { signal: controller.signal })
       .then((nextVisitorPasses) => {
-        if (!cancelled) setVisitorPasses(nextVisitorPasses);
+        if (controller.signal.aborted) return;
+        visitorPassesLoadedRef.current = true;
+        setVisitorPasses(nextVisitorPasses);
       })
-      .catch(() => {
-        if (!cancelled) visitorPassesRequestedRef.current = false;
-      });
-    return () => {
-      cancelled = true;
-    };
+      .catch(() => undefined);
+    return () => controller.abort();
   }, [isPersonSearchOpen, personQuery, selectedVisitorPassId]);
 
-  React.useEffect(() => {
-    if (!selectedSubject || reportEventsRequestedRef.current) return undefined;
-    let cancelled = false;
-    reportEventsRequestedRef.current = true;
-    api.get<AccessEvent[]>("/api/v1/events?limit=250")
-      .then((nextEvents) => {
-        if (!cancelled) setReportSourceEvents(nextEvents);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          reportEventsRequestedRef.current = false;
-          setReportSourceEvents(events);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [events, selectedSubject]);
-  const eventMatchesSelectedSubject = React.useCallback((event: AccessEvent) => {
-    if (selectedPerson) return selectedPlates.has(normalizePlate(event.registration_number));
-    if (selectedVisitorPass) {
-      return (
-        event.visitor_pass_id === selectedVisitorPass.id ||
-        selectedVisitorPassEventIds.has(event.id) ||
-        selectedPlates.has(normalizePlate(event.registration_number))
-      );
-    }
-    return false;
-  }, [selectedPerson, selectedPlates, selectedVisitorPass, selectedVisitorPassEventIds]);
   const reportableVisitorPasses = React.useMemo(
     () => [...visitorPasses].sort((a, b) => a.visitor_name.localeCompare(b.visitor_name)),
     [visitorPasses]
@@ -865,138 +596,64 @@ export function ReportsView({
     setHighlightedPersonIndex(0);
   }, [personQuery, personSearchResults.length]);
 
-  const startDate = React.useMemo(() => parseDateTimeInput(startInput), [startInput]);
-  const endDate = React.useMemo(() => parseDateTimeInput(endInput), [endInput]);
-  const generatedAt = React.useMemo(() => formatDate(new Date().toISOString()), [selectedPersonId, selectedVisitorPassId, startInput, endInput, options]);
-  const reportEvents = React.useMemo(() => {
-    const startTime = startDate.getTime();
-    const endTime = endDate.getTime();
-    return reportSourceEvents
-      .filter(eventMatchesSelectedSubject)
-      .filter((event) => {
-        const occurredAt = new Date(event.occurred_at).getTime();
-        return occurredAt >= startTime && occurredAt <= endTime;
-      })
-      .filter((event) => options.includeDenied || event.decision !== "denied")
-      .sort((a, b) => new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime());
-  }, [endDate, eventMatchesSelectedSubject, options.includeDenied, reportSourceEvents, startDate]);
-  const visibleEvents = React.useMemo(
-    () => [...reportEvents]
-      .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
-      .slice(0, 12),
-    [reportEvents]
-  );
-  const summary = directionSummary(reportEvents);
-  const durationByEventId = React.useMemo(() => {
-    const selectedHistory = reportSourceEvents
-      .filter(isMovementEvent)
-      .filter(eventMatchesSelectedSubject)
-      .sort((a, b) => new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime());
-    const nextDurations = new Map<string, ReportDurationInfo>();
-
-    reportEvents.forEach((event) => {
-      if (!isMovementEvent(event)) {
-        nextDurations.set(event.id, { label: "N/A", tone: "muted" });
-        return;
-      }
-
-      const eventTime = new Date(event.occurred_at).getTime();
-      const eventPlate = normalizePlate(event.registration_number);
-      const selectedBefore = selectedHistory.filter((item) => new Date(item.occurred_at).getTime() < eventTime);
-
-      if (event.direction === "entry") {
-        const vehicleBefore = selectedBefore.filter((item) => normalizePlate(item.registration_number) === eventPlate);
-        const previousArrival = [...vehicleBefore].reverse().find((item) => item.direction === "entry");
-        const previousDeparture = [...vehicleBefore].reverse().find((item) => item.direction === "exit");
-
-        if (!previousArrival) {
-          nextDurations.set(event.id, { label: "New Arrival", tone: "new" });
-          return;
-        }
-
-        if (previousDeparture && new Date(previousDeparture.occurred_at).getTime() > new Date(previousArrival.occurred_at).getTime()) {
-          nextDurations.set(event.id, formatTableDuration(previousDeparture.occurred_at, event.occurred_at, "Time since this vehicle was last on site"));
-          return;
-        }
-
-        nextDurations.set(event.id, { label: "No prior departure", tone: "muted" });
-        return;
-      }
-
-      const previousArrival = [...selectedBefore].reverse().find((item) => item.direction === "entry");
-      const previousDeparture = [...selectedBefore].reverse().find((item) => item.direction === "exit");
-
-      if (!previousArrival) {
-        nextDurations.set(event.id, { label: "No arrival found", tone: "muted" });
-        return;
-      }
-
-      if (previousDeparture && new Date(previousDeparture.occurred_at).getTime() > new Date(previousArrival.occurred_at).getTime()) {
-        nextDurations.set(event.id, { label: "No active visit", tone: "muted" });
-        return;
-      }
-
-      nextDurations.set(event.id, formatTableDuration(previousArrival.occurred_at, event.occurred_at, "Time on site since last arrival"));
-    });
-
-    return nextDurations;
-  }, [eventMatchesSelectedSubject, reportEvents, reportSourceEvents]);
-  const allTimelineEvents = React.useMemo(() => {
-    if (!selectedSubject) return [];
-    const startTime = startDate.getTime();
-    const endTime = endDate.getTime();
-    return reportSourceEvents
-      .filter(isMovementEvent)
-      .filter((event) => {
-        const occurredAt = new Date(event.occurred_at).getTime();
-        return occurredAt >= startTime && occurredAt <= endTime;
-      })
-      .sort((a, b) => new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime());
-  }, [endDate, reportSourceEvents, selectedSubject, startDate]);
-  const selectedTimelineEvents = selectedSubject ? reportEvents.filter(isMovementEvent) : [];
-  const activeReport = loadedReport?.report ?? null;
-  const previewPerson = activeReport?.person ?? selectedPerson ?? (selectedVisitorPass ? visitorPassToReportPerson(selectedVisitorPass) : null);
-  const previewPresence = activeReport?.presence
-    ? { state: activeReport.presence.state, last_changed_at: activeReport.presence.last_changed_at }
-    : selectedPerson ? selectedPresence : selectedVisitorPass ? visitorPassPresence(selectedVisitorPass) : null;
-  const previewSummary = activeReport
-    ? {
-        arrivals: activeReport.summary.arrivals,
-        departures: activeReport.summary.departures,
-        denied: activeReport.summary.denied,
-        total: activeReport.summary.total,
-        firstEvent: activeReport.summary.first_event,
-        lastEvent: activeReport.summary.last_event
-      }
-    : {
-        arrivals: summary.arrivals,
-        departures: summary.departures,
-        denied: summary.denied,
-        total: reportEvents.length,
-        firstEvent: firstMovement(reportEvents),
-        lastEvent: lastMovement(reportEvents)
-      };
-  const previewEvents: ReportSnapshotEvent[] = activeReport ? activeReport.events : visibleEvents;
-  const previewEventCount = activeReport ? activeReport.events.length : reportEvents.length;
+  // Shell resources invalidate the backend read; they never supply partial report data.
+  const previewRequest = React.useMemo<ReportPreviewRequest | null>(() => {
+    if (loadedReport || isLoadingContext || contextError || !startInput || !endInput || (!selectedPersonId && !selectedVisitorPassId)) return null;
+    return {
+      person_id: selectedPersonId || undefined, visitor_pass_id: selectedVisitorPassId || undefined,
+      period_start: startInput, period_end: endInput,
+      include_denied: options.includeDenied, include_snapshots: options.includeSnapshots,
+      include_confidence: options.includeConfidence, ...folds
+    };
+  }, [selectedPersonId, selectedVisitorPassId, startInput, endInput, options, folds, loadedReport,
+    isLoadingContext, contextError, events, people, presence]);
+  React.useEffect(() => {
+    if (!previewRequest) return;
+    const controller = new AbortController();
+    reportsApi.preview(previewRequest, { signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setPreview({ request: previewRequest, result }); })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setPreviewError({ request: previewRequest, message: error instanceof Error ? error.message : "Report preview failed." });
+      });
+    return () => controller.abort();
+  }, [previewRequest]);
+  const currentPreview = preview?.request === previewRequest ? preview.result : null;
+  const currentPreviewError = previewError?.request === previewRequest ? previewError.message : null;
+  const previewPending = Boolean(previewRequest && !currentPreview && !currentPreviewError);
+  const activeReport = loadedReport?.report ?? (currentPreview?.status === "ready" ? currentPreview.report : null);
+  const previewPerson = activeReport?.person ?? null;
+  const previewPresence = activeReport?.presence ?? null;
+  const previewSummary = {
+    arrivals: activeReport?.summary.arrivals ?? "—", departures: activeReport?.summary.departures ?? "—",
+    total: activeReport?.summary.total ?? "—", firstEvent: activeReport?.summary.first_event ?? "—"
+  };
+  const previewEvents = activeReport?.events ?? [];
+  const previewEventCount = previewEvents.length;
   const previewVehicles: ReportSnapshotVehicle[] = previewPerson?.vehicles ?? [];
-  const previewAllTimelineEvents = activeReport ? activeReport.timeline.all : allTimelineEvents;
-  const previewSelectedTimelineEvents = activeReport ? activeReport.timeline.selected : selectedTimelineEvents;
-  const previewPeriodLabel = activeReport?.period.label ?? formatDateRange(startDate, endDate);
-  const previewPeriodStartLabel = activeReport?.period.start_label ?? formatDateOnly(startDate);
-  const previewPeriodEndLabel = activeReport?.period.end_label ?? formatDateOnly(endDate);
-  const previewPeriodDurationLabel = activeReport?.period.duration_label ?? reportDurationLabel(startDate, endDate);
-  const previewGeneratedLabel = activeReport?.generated_label ?? generatedAt;
-  const previewOptions = activeReport
-    ? {
-        includeDenied: activeReport.options.include_denied,
-        includeSnapshots: activeReport.options.include_snapshots,
-        includeConfidence: activeReport.options.include_confidence
-      }
-    : options;
-  const previewSubjectKind = activeReport?.subject_type === "visitor_pass" || selectedVisitorPass ? "Visitor Pass" : "Person";
+  const previewAllTimelineEvents = activeReport?.timeline.all ?? [];
+  const previewSelectedTimelineEvents = activeReport?.timeline.selected ?? [];
+  const previewPeriodLabel = activeReport?.period.label ?? "";
+  const previewPeriodStartLabel = activeReport?.period.start_label ?? "";
+  const previewPeriodEndLabel = activeReport?.period.end_label ?? "";
+  const previewPeriodDurationLabel = activeReport?.period.duration_label ?? "";
+  const previewGeneratedLabel = activeReport?.generated_label ?? "";
+  const previewOptions = activeReport ? {
+    includeDenied: activeReport.options.include_denied, includeSnapshots: activeReport.options.include_snapshots,
+    includeConfidence: activeReport.options.include_confidence
+  } : options;
+  const previewSubjectKind = activeReport?.subject_type === "visitor_pass" ? "Visitor Pass" : "Person";
+  const displayTimezone = activeReport?.period.timezone ?? siteTimezone;
   const previewPersonPhoto = previewPerson ? mediaSource(previewPerson.profile_photo_url, previewPerson.profile_photo_data_url, "thumb") : "";
 
+  const cancelReportAction = React.useCallback(() => {
+    actionController.current?.abort();
+    actionController.current = null;
+    setIsLoadingReportId(false);
+    setIsExportingReport(false);
+  }, []);
+
   const selectPerson = React.useCallback((person: Person) => {
+    cancelReportAction();
     setSelectedPersonId(person.id);
     setSelectedVisitorPassId("");
     setPersonQuery(person.display_name);
@@ -1004,17 +661,18 @@ export function ReportsView({
     setHighlightedPersonIndex(0);
     setLoadedReport(null);
     setReportActionError(null);
-  }, []);
+  }, [cancelReportAction]);
 
   const selectVisitorPass = React.useCallback((visitorPass: VisitorPass) => {
     setSelectedPersonId("");
+    cancelReportAction();
     setSelectedVisitorPassId(visitorPass.id);
     setPersonQuery(visitorPass.visitor_name);
     setIsPersonSearchOpen(false);
     setHighlightedPersonIndex(0);
     setLoadedReport(null);
     setReportActionError(null);
-  }, []);
+  }, [cancelReportAction]);
 
   const downloadReportPdf = React.useCallback((downloadUrl: string) => {
     const anchor = document.createElement("a");
@@ -1026,10 +684,15 @@ export function ReportsView({
   }, []);
 
   const loadReportById = React.useCallback(async (reportId: string) => {
+    cancelReportAction();
+    const controller = new AbortController();
+    actionController.current = controller;
+    setRange("custom");
     setIsLoadingReportId(true);
     setReportActionError(null);
     try {
-      const response = await api.get<ReportExportResponse>(`/api/v1/reports/${encodeURIComponent(reportId)}`);
+      const response = await reportsApi.load(reportId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       const matchingPerson = response.report.subject_type === "visitor_pass"
         ? null
         : reportablePeople.find((person) => person.id === response.report.person.id);
@@ -1037,11 +700,13 @@ export function ReportsView({
         ? visitorPasses.find((visitorPass) => visitorPass.id === response.report.person.id)
         : null;
       setLoadedReport(response);
+      setSiteTimezone(response.report.period.timezone);
+      setFolds({});
       setSelectedPersonId(matchingPerson?.id ?? "");
       setSelectedVisitorPassId(matchingVisitorPass?.id ?? "");
       setPersonQuery(`Report #${response.report_id} - ${response.report.person.display_name}`);
-      setStartInput(toDateTimeInputValue(new Date(response.report.period.start)));
-      setEndInput(toDateTimeInputValue(new Date(response.report.period.end)));
+      setStartInput(response.report.period.start);
+      setEndInput(response.report.period.end);
       setOptions({
         includeDenied: response.report.options.include_denied,
         includeSnapshots: response.report.options.include_snapshots,
@@ -1051,35 +716,34 @@ export function ReportsView({
       setIsPersonSearchOpen(false);
       setHighlightedPersonIndex(0);
     } catch (error) {
-      setReportActionError(error instanceof Error ? error.message : "Report could not be loaded.");
+      if (!controller.signal.aborted) setReportActionError(error instanceof Error ? error.message : "Report could not be loaded.");
     } finally {
-      setIsLoadingReportId(false);
+      if (actionController.current === controller) { actionController.current = null; setIsLoadingReportId(false); }
     }
-  }, [reportablePeople, visitorPasses]);
+  }, [cancelReportAction, reportablePeople, visitorPasses]);
 
   const exportCurrentReport = React.useCallback(async () => {
-    if (!selectedPerson && !selectedVisitorPass) return;
+    if (currentPreview?.status !== "ready" || actionController.current) return;
+    const controller = new AbortController();
+    actionController.current = controller;
     setIsExportingReport(true);
     setReportActionError(null);
     try {
-      const response = await api.post<ReportExportResponse>("/api/v1/reports/person-movements/export", {
-        person_id: selectedPerson?.id,
-        visitor_pass_id: selectedVisitorPass?.id,
-        period_start: startDate.toISOString(),
-        period_end: endDate.toISOString(),
-        include_denied: options.includeDenied,
-        include_snapshots: options.includeSnapshots,
-        include_confidence: options.includeConfidence
-      });
+      const report = currentPreview.report;
+      const response = await reportsApi.export({
+        person_id: selectedPersonId || undefined, visitor_pass_id: selectedVisitorPassId || undefined,
+        period_start: report.period.start, period_end: report.period.end, ...report.options
+      }, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setLoadedReport(response);
       setPersonQuery(`Report #${response.report_id} - ${response.report.person.display_name}`);
       downloadReportPdf(response.download_url);
     } catch (error) {
-      setReportActionError(error instanceof Error ? error.message : "Report could not be exported.");
+      if (!controller.signal.aborted) setReportActionError(error instanceof Error ? error.message : "Report could not be exported.");
     } finally {
-      setIsExportingReport(false);
+      if (actionController.current === controller) { actionController.current = null; setIsExportingReport(false); }
     }
-  }, [downloadReportPdf, endDate, options.includeConfidence, options.includeDenied, options.includeSnapshots, selectedPerson, selectedVisitorPass, startDate]);
+  }, [currentPreview, downloadReportPdf, selectedPersonId, selectedVisitorPassId]);
 
   const handleReportExportClick = () => {
     if (loadedReport) {
@@ -1090,6 +754,7 @@ export function ReportsView({
   };
 
   const clearLoadedReport = () => {
+    cancelReportAction();
     if (loadedReport) setLoadedReport(null);
     if (reportActionError) setReportActionError(null);
   };
@@ -1129,14 +794,10 @@ export function ReportsView({
   };
 
   const applyQuickRange = (nextRange: QuickRange) => {
-    const option = quickRanges.find((item) => item.value === nextRange);
-    if (!option) return;
     clearLoadedReport();
-    const end = new Date();
-    const start = new Date(end.getTime() - option.hours * 60 * 60 * 1000);
+    setIsLoadingContext(true);
     setRange(nextRange);
-    setEndInput(toDateTimeInputValue(end));
-    setStartInput(toDateTimeInputValue(start));
+    setRangeRevision((revision) => revision + 1);
   };
 
   const updateOption = (key: keyof ReportOptions) => {
@@ -1307,8 +968,9 @@ export function ReportsView({
                   clearLoadedReport();
                   setRange("custom");
                   setStartInput(nextValue);
+                  setFolds((current) => ({ ...current, period_start_fold: undefined }));
                 }}
-                value={startInput}
+                value={siteCivilInput(startInput, displayTimezone)}
               />
               <ReportsDateTimePicker
                 label="To"
@@ -1316,13 +978,14 @@ export function ReportsView({
                   clearLoadedReport();
                   setRange("custom");
                   setEndInput(nextValue);
+                  setFolds((current) => ({ ...current, period_end_fold: undefined }));
                 }}
-                value={endInput}
+                value={siteCivilInput(endInput, displayTimezone)}
               />
             </div>
             <div className="report-timezone-note">
               <Clock3 size={14} />
-              Live Preview | Browser&apos;s Timezone
+              Complete Preview | {displayTimezone || "Loading site timezone…"}
             </div>
           </div>
 
@@ -1340,7 +1003,7 @@ export function ReportsView({
           </div>
 
           <div className="report-live-summary-panel">
-            <span className="report-panel-label">{loadedReport ? "Report Summary" : "Live Summary"}</span>
+            <span className="report-panel-label">{loadedReport ? "Report Summary" : "Preview Summary"}</span>
             <div><LogIn size={15} /><span>Arrivals</span><strong>{previewSummary.arrivals}</strong></div>
             <div><LogOut size={15} /><span>Departures</span><strong>{previewSummary.departures}</strong></div>
             <div><BarChart3 size={15} /><span>Total Events</span><strong>{previewSummary.total}</strong></div>
@@ -1351,19 +1014,30 @@ export function ReportsView({
         <div className="report-builder-status">
           <div>
             <span className="report-live-dot" />
-            <strong>{loadedReport ? `Report #${loadedReport.report_id}` : "Live"}</strong>
+            <strong>{loadedReport ? `Report #${loadedReport.report_id}` : previewPending ? "Loading complete preview…" : activeReport ? "Complete preview" : "Choose a subject and period"}</strong>
           </div>
           <button
             className="report-export-button"
-            disabled={(!selectedPerson && !selectedVisitorPass && !loadedReport) || isExportingReport}
+            disabled={(!loadedReport && currentPreview?.status !== "ready") || isExportingReport || isLoadingReportId}
             onClick={handleReportExportClick}
             type="button"
           >
             <Download size={16} /> {isExportingReport ? "Exporting PDF" : loadedReport ? "Download PDF" : "Export PDF"}
           </button>
         </div>
-        {reportActionError ? (
-          <div className="report-action-error" role="alert">{reportActionError}</div>
+        {currentPreview?.status === "time_choice_required" ? currentPreview.time_choices.map((choice) => (
+          <label className="report-field" key={choice.field}>
+            <span>{choice.field === "period_start" ? "From" : "To"}: {choice.local_time.replace("T", " ")} occurs twice in {currentPreview.site_timezone}</span>
+            <select aria-label={`${choice.field === "period_start" ? "From" : "To"} occurrence`}
+              value={folds[`${choice.field}_fold`] ?? ""}
+              onChange={(event) => setFolds((current) => ({ ...current, [`${choice.field}_fold`]: Number(event.target.value) as 0 | 1 }))}>
+              <option value="" disabled>Choose an occurrence</option>
+              {choice.choices.map((occurrence) => <option key={occurrence.fold} value={occurrence.fold}>{occurrence.label}</option>)}
+            </select>
+          </label>
+        )) : null}
+        {reportActionError || currentPreviewError || contextError ? (
+          <div className="report-action-error" role="alert">{reportActionError || currentPreviewError || contextError}</div>
         ) : null}
       </div>
 
@@ -1371,10 +1045,10 @@ export function ReportsView({
       <div className="report-preview-shell">
         <div className="report-preview-header">
           <div>
-            <h2>{loadedReport ? "Exported Report" : "Live Preview"}</h2>
+            <h2>{loadedReport ? "Exported Report" : "Complete Preview"}</h2>
             <p>{previewPerson.display_name} {previewSubjectKind.toLowerCase()} movement report</p>
           </div>
-          <Badge tone="blue">{loadedReport ? `Report #${loadedReport.report_id}` : "Updates live"}</Badge>
+          <Badge tone="blue">{loadedReport ? `Report #${loadedReport.report_id}` : "Complete history"}</Badge>
         </div>
 
         <article className="report-sheet" aria-label="Report preview">
@@ -1431,15 +1105,15 @@ export function ReportsView({
                     const Icon = eventIcon(event);
                     return (
                       <div className="report-table-row" key={event.id}>
-                        <time className="report-cell-time">{formatDate(event.occurred_at)}</time>
-                        <span className={`report-type-pill ${eventTone(event)}`}><Icon size={15} /> {eventLabel(event)}</span>
+                        <time className="report-cell-time">{event.occurred_label ?? formatSiteDate(event.occurred_at, displayTimezone)}</time>
+                        <span className={`report-type-pill ${event.tone}`}><Icon size={15} /> {event.type_label}</span>
                         <strong className="report-cell-vehicle">{event.registration_number}</strong>
                         <span className="report-cell-detail">{event.detail ?? (event.decision === "granted" ? "Access granted" : "Access denied")}</span>
                         <span className="report-cell-duration">
-                          <ReportDurationCell duration={event.duration ?? durationByEventId.get(event.id) ?? { label: "N/A", tone: "muted" }} />
+                          <ReportDurationCell duration={event.duration ?? { label: "N/A", tone: "muted" }} />
                         </span>
-                        <span className="report-cell-source">{event.source_label ?? sourceLabel(event.source)}</span>
-                        {previewOptions.includeSnapshots ? <ReportSnapshotThumb event={event} /> : <span className="report-table-excluded">Off</span>}
+                        <span className="report-cell-source">{event.source_label ?? event.source}</span>
+                        {previewOptions.includeSnapshots ? <ReportSnapshotThumb event={event} timezone={displayTimezone} /> : <span className="report-table-excluded">Off</span>}
                         {previewOptions.includeConfidence ? <span className="report-confidence">{event.confidence_percent ?? Math.round(event.confidence * 100)}%</span> : <span className="report-table-excluded">Off</span>}
                       </div>
                     );
@@ -1517,16 +1191,16 @@ export function ReportsView({
                     <span
                       className="report-period-marker grey"
                       key={`all-${event.id}`}
-                      style={{ left: `${"progress" in event ? event.progress : dayRhythmProgress(event)}%` }}
-                      title={`All vehicles · ${"label" in event ? event.label : eventLabel(event)} · ${formatDate(event.occurred_at)} · ${event.registration_number}`}
+                      style={{ left: `${event.progress}%` }}
+                      title={`All vehicles · ${event.label} · ${formatSiteDate(event.occurred_at, displayTimezone)} · ${event.registration_number}`}
                     />
                   ))}
                   {previewSelectedTimelineEvents.map((event) => (
                     <span
-                      className={`report-period-marker ${"tone" in event ? event.tone : eventTone(event)}`}
+                      className={`report-period-marker ${event.tone}`}
                       key={event.id}
-                      style={{ left: `${"progress" in event ? event.progress : dayRhythmProgress(event)}%` }}
-                      title={`${"label" in event ? event.label : eventLabel(event)} · ${formatDate(event.occurred_at)} · ${event.registration_number}`}
+                      style={{ left: `${event.progress}%` }}
+                      title={`${event.label} · ${formatSiteDate(event.occurred_at, displayTimezone)} · ${event.registration_number}`}
                     />
                   ))}
                 </div>

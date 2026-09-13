@@ -1,4 +1,4 @@
-import { api, createActionConfirmation } from "./client";
+import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
 import type { NotificationChannelId, NotificationTriggerOption, UnifiProtectCamera, UserAccount } from "./types";
 
 export type NotificationActionType = NotificationChannelId;
@@ -21,6 +21,18 @@ export type NotificationCatalogResponse = { triggers: NotificationTriggerGroup[]
 
 export type AutomationNode = { id: string; type: string; config: Record<string, unknown> };
 export type AutomationAction = AutomationNode & { reason_template?: string };
+// Historical checkpoint values may be malformed. Presentation must explicitly
+// show unavailable fields instead of treating them as a successful action.
+export type AutomationActionState = { index?: unknown; id?: unknown; operation_id?: unknown; state?: unknown };
+export type AutomationRun = {
+  id: string; rule_id: string | null; trigger_key: string; status: string;
+  started_at: string | null; finished_at: string | null; recovery_version: number | null;
+  review_reason: string | null; requires_review: boolean; action_states: AutomationActionState[];
+  action_results: Record<string, unknown>[]; error: string | null;
+  trace_id: string | null; actor: string; source: string;
+};
+export type AutomationRunPage = { items: AutomationRun[]; next_cursor: string | null };
+export const notificationRunReceiptUrl = (runId: string) => `/api/v1/notifications/runs/${encodeURIComponent(runId)}`;
 export type AutomationRule = { id: string; name: string; description: string; is_active: boolean; triggers: AutomationNode[]; trigger_keys: string[]; conditions: AutomationNode[]; actions: AutomationAction[]; next_run_at?: string | null; last_fired_at?: string | null; run_count: number; last_run_status?: string | null; last_error?: string | null; created_at?: string | null; updated_at?: string | null };
 export type AutomationCatalogItem = { type: string; label: string; description?: string; scopes?: string[]; enabled?: boolean; disabled?: boolean; disabled_reason?: string | null; integration_action?: boolean; integration_provider?: string; integration_provider_label?: string; integration_action_key?: string; default_config?: Record<string, unknown> };
 export type AutomationIntegrationCatalog = { id: string; label: string; description?: string; enabled?: boolean; disabled_reason?: string | null; actions: AutomationCatalogItem[] };
@@ -47,8 +59,16 @@ async function confirmedDelete(path: string, action: string, payload: Record<str
 }
 
 export const workflowApi = {
-  async getAutomationData(): Promise<{ catalog: AutomationCatalogResponse; rules: AutomationRule[]; users: UserAccount[] }> {
-    const [catalog, rules, users] = await Promise.all([api.get<AutomationCatalogResponse>("/api/v1/automations/catalog"), api.get<AutomationRule[]>("/api/v1/automations/rules"), api.get<UserAccount[]>("/api/v1/users")]);
+  getAutomationRuns(beforeId?: string, options: ApiRequestOptions = {}): Promise<AutomationRunPage> {
+    const query = new URLSearchParams({ limit: "25" });
+    if (beforeId) query.set("before_id", beforeId);
+    return api.get<AutomationRunPage>(`/api/v1/automations/runs?${query}`, options);
+  },
+  getAutomationRun(runId: string, options: ApiRequestOptions = {}): Promise<AutomationRun> {
+    return api.get<AutomationRun>(`/api/v1/automations/runs/${encodeURIComponent(runId)}`, options);
+  },
+  async getAutomationData(options: ApiRequestOptions = {}): Promise<{ catalog: AutomationCatalogResponse; rules: AutomationRule[]; users: UserAccount[] }> {
+    const [catalog, rules, users] = await Promise.all([api.get<AutomationCatalogResponse>("/api/v1/automations/catalog", options), api.get<AutomationRule[]>("/api/v1/automations/rules", options), api.get<UserAccount[]>("/api/v1/users?include_photo=false", options)]);
     return { catalog, rules, users };
   },
   saveAutomationRule(rule: AutomationRule, payload: AutomationRulePayload): Promise<AutomationRule> {
@@ -69,9 +89,16 @@ export const workflowApi = {
   parseAutomationSchedule(text: string): Promise<Record<string, unknown>> {
     return api.post<Record<string, unknown>>("/api/v1/automations/parse-schedule", { text });
   },
-  async getNotificationData(): Promise<{ catalog: NotificationCatalogResponse; rules: NotificationRule[]; cameras: UnifiProtectCamera[] }> {
-    const [catalog, rules, cameraResult] = await Promise.all([api.get<NotificationCatalogResponse>("/api/v1/notifications/catalog"), api.get<NotificationRule[]>("/api/v1/notifications/rules"), api.get<{ cameras: UnifiProtectCamera[] }>("/api/v1/integrations/unifi-protect/cameras").catch(() => ({ cameras: [] }))]);
-    return { catalog, rules, cameras: cameraResult.cameras };
+  async getNotificationData(options: ApiRequestOptions = {}): Promise<{ catalog: NotificationCatalogResponse; rules: NotificationRule[] }> {
+    const [catalog, rules] = await Promise.all([
+      api.get<NotificationCatalogResponse>("/api/v1/notifications/catalog", options),
+      api.get<NotificationRule[]>("/api/v1/notifications/rules", options)
+    ]);
+    return { catalog, rules };
+  },
+  async getNotificationCameras(options: ApiRequestOptions = {}): Promise<UnifiProtectCamera[]> {
+    const result = await api.get<{ cameras: UnifiProtectCamera[] }>("/api/v1/integrations/unifi-protect/cameras", options);
+    return result.cameras;
   },
   saveNotificationRule(rule: NotificationRule, payload: NotificationRulePayload): Promise<NotificationRule> {
     const isCreate = rule.id.startsWith("draft-");

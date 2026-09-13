@@ -3,7 +3,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -17,6 +17,12 @@ logger = get_logger(__name__)
 
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant rejects or cannot complete a request."""
+
+    def __init__(
+        self, message: str, *, delivery: Literal["not_sent", "rejected", "accepted", "unknown"] = "unknown"
+    ) -> None:
+        super().__init__(message)
+        self.delivery = delivery
 
 
 @dataclass(frozen=True)
@@ -61,12 +67,13 @@ class HomeAssistantClient:
         if client is not None:
             await client.aclose()
 
-    async def call_service(self, service_name: str, service_data: dict[str, Any]) -> dict[str, Any]:
+    async def call_service(self, service_name: str, service_data: dict[str, Any], *,
+                           runtime_config: RuntimeConfig | None = None) -> dict[str, Any]:
         domain, service = self._split_service_name(service_name)
-        return await self._request("POST", f"/api/services/{domain}/{service}", json=service_data)
+        return await self._request("POST", f"/api/services/{domain}/{service}", json=service_data, runtime_config=runtime_config)
 
-    async def get_state(self, entity_id: str) -> HomeAssistantState:
-        data = await self._request("GET", f"/api/states/{entity_id}")
+    async def get_state(self, entity_id: str, *, runtime_config: RuntimeConfig | None = None) -> HomeAssistantState:
+        data = await self._request("GET", f"/api/states/{entity_id}", runtime_config=runtime_config)
         return HomeAssistantState(
             entity_id=data["entity_id"],
             state=data["state"],
@@ -163,15 +170,19 @@ class HomeAssistantClient:
                 await asyncio.sleep(5)
 
     async def _request(
-        self, method: str, path: str, *, json: dict[str, Any] | None = None
+        self, method: str, path: str, *, json: dict[str, Any] | None = None,
+        runtime_config: RuntimeConfig | None = None,
     ) -> dict[str, Any]:
-        config = await self.config()
+        config = runtime_config if runtime_config is not None else await self.config()
         base_url = config.home_assistant_url.rstrip("/")
         token = config.home_assistant_token
         if not (base_url and token):
-            raise HomeAssistantError("Home Assistant URL/token are not configured.")
+            raise HomeAssistantError("Home Assistant URL/token are not configured.", delivery="not_sent")
 
-        client = await self._request_client(base_url=base_url, token=token)
+        try:
+            client = await self._request_client(base_url=base_url, token=token)
+        except Exception as exc:
+            raise HomeAssistantError("Home Assistant request client is unavailable.", delivery="not_sent") from exc
 
         try:
             response = await client.request(
@@ -184,15 +195,24 @@ class HomeAssistantClient:
                 json=json,
             )
         except httpx.RequestError as exc:
-            raise HomeAssistantError(f"Unable to reach Home Assistant: {exc}") from exc
-
-        if response.status_code >= 400:
             raise HomeAssistantError(
-                f"Home Assistant returned {response.status_code}: {response.text[:300]}"
+                f"Unable to reach Home Assistant: {exc}",
+                delivery="not_sent" if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)) else "unknown",
+            ) from exc
+
+        if not 200 <= response.status_code < 300:
+            raise HomeAssistantError(
+                f"Home Assistant returned {response.status_code}: {response.text[:300]}",
+                # Only authentication/routing/method refusal proves non-execution.
+                # In particular 408, 429 and 5xx do not prove a command was rejected.
+                delivery="rejected" if response.status_code in {401, 403, 404, 405} else "unknown",
             )
         if not response.content:
             return {}
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise HomeAssistantError("Home Assistant returned an invalid JSON receipt.", delivery="accepted") from exc
 
     async def _request_client(self, *, base_url: str, token: str) -> httpx.AsyncClient:
         signature = (base_url, token)
@@ -216,7 +236,7 @@ class HomeAssistantClient:
 
     def _split_service_name(self, service_name: str) -> tuple[str, str]:
         if "." not in service_name:
-            raise HomeAssistantError(f"Invalid Home Assistant service name: {service_name}")
+            raise HomeAssistantError(f"Invalid Home Assistant service name: {service_name}", delivery="not_sent")
         domain, service = service_name.split(".", 1)
         return domain, service
 

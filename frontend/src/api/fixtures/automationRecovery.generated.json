@@ -1,0 +1,37 @@
+{
+  "id": "00000000-0000-0000-0000-000000000007",
+  "rule_id": "00000000-0000-0000-0000-000000000070",
+  "trigger_key": "time.every_x",
+  "status": "review_required",
+  "started_at": "2026-09-12T12:00:00+00:00",
+  "finished_at": "2026-09-12T12:05:00+00:00",
+  "trigger_payload": {},
+  "context": {
+    "version": 1
+  },
+  "recovery_version": 1,
+  "review_reason": "action_outcome_unknown",
+  "requires_review": true,
+  "action_states": [
+    {
+      "index": 0,
+      "id": "gate",
+      "operation_id": "89225313-ec55-5064-8b1b-41f1e430e539",
+      "state": "unknown"
+    }
+  ],
+  "condition_results": [],
+  "action_results": [
+    {
+      "id": "gate",
+      "type": "gate.open",
+      "status": "unknown",
+      "reason": "action_outcome_unknown",
+      "requires_review": true
+    }
+  ],
+  "trace_id": null,
+  "error": "action_outcome_unknown",
+  "actor": "Automation Engine",
+  "source": "scheduler"
+}

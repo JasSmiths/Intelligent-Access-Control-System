@@ -1,11 +1,51 @@
 """Notification Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+import json
+import uuid
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from sqlalchemy import (
+    func,
+    or_,
+    select,
+)
+
+from app.ai.context import get_chat_tool_context
+from app.ai.tool_groups._shared import (
+    _agent_datetime_display,
+    _agent_datetime_iso,
+    _bounded_int,
+    _chat_context_user,
+    _compact_observation,
+    _normalize,
+    _require_admin_user,
+    _uuid_from_value,
+    logger,
+)
+from app.db.session import AsyncSessionLocal
+from app.models import NotificationRule
+from app.modules.notifications.base import (
+    NotificationContext,
+    NotificationDeliveryError,
+)
+from app.services import notification_rules
+from app.services.mutation_context import MutationError
+from app.services.notifications import (
+    get_notification_service,
+    notification_context_from_payload,
+    sample_notification_context,
+)
+from app.services.type_helpers import (
+    as_dict_list,
+    as_list,
+)
+from app.services.workflows.notification_payloads import (
+    normalize_actions,
+    normalize_conditions,
+    normalize_rule_payload,
+)
 
 
 async def _resolve_notification_rule(session, arguments: dict[str, Any]) -> NotificationRule | None:
@@ -35,7 +75,16 @@ async def _resolve_notification_rule(session, arguments: dict[str, Any]) -> Noti
 async def _notification_rule_payload_for_agent(arguments: dict[str, Any]) -> dict[str, Any] | None:
     raw_rule = arguments.get("rule")
     if isinstance(raw_rule, dict):
-        return normalize_rule_payload(raw_rule)
+        if raw_rule.get("id"):
+            return normalize_rule_payload(raw_rule)
+        # Unsaved previews need a stable content identity across confirmation.
+        # This is never a persisted rule ID or the delivery operation identity.
+        draft = normalize_rule_payload({**raw_rule, "id": "draft"})
+        draft["id"] = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "iacs:notification-preview:" + json.dumps(draft, sort_keys=True, separators=(",", ":")),
+        ))
+        return draft
     async with AsyncSessionLocal() as session:
         rule = await _resolve_notification_rule(session, arguments)
         if not rule:
@@ -175,39 +224,13 @@ async def create_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
             "detail": "Create this notification workflow? Future matching events may send real notifications.",
         }
 
-    normalized = normalize_rule_payload(arguments)
-    name = normalized["name"]
-    trigger_event = normalized["trigger_event"]
-    actions = normalized["actions"]
-    if not name:
-        return {"created": False, "error": "Workflow name is required."}
-    if not trigger_event:
-        return {"created": False, "error": "trigger_event is required."}
-    if not actions:
-        return {"created": False, "error": "At least one notification action is required."}
-
     async with AsyncSessionLocal() as session:
-        rule = NotificationRule(
-            name=name,
-            trigger_event=trigger_event,
-            conditions=normalized["conditions"],
-            actions=actions,
-            is_active=normalized["is_active"],
-        )
-        session.add(rule)
         try:
-            await session.commit()
-            await session.refresh(rule)
-        except IntegrityError:
-            await session.rollback()
-            return {"created": False, "error": "Notification workflow could not be created."}
+            rule = await notification_rules.create_rule(session, arguments, user=await _chat_context_user(), source="alfred")
+        except MutationError as exc:
+            return {"created": False, "error": str(exc), "error_code": exc.code}
         workflow = _serialize_notification_rule_for_agent(rule)
-
-    return {
-        "created": True,
-        "workflow": workflow,
-        "preview": await get_notification_service().preview_rule(workflow),
-    }
+    return {"created": True, "workflow": workflow, **await _optional_rule_preview(workflow)}
 
 
 async def update_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -226,52 +249,13 @@ async def update_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
         if not rule:
             return {"updated": False, "error": "Notification workflow not found."}
 
-        if "name" in arguments:
-            name = str(arguments.get("name") or "").strip()
-            if not name:
-                return {"updated": False, "error": "Workflow name cannot be empty."}
-            rule.name = name
-        if "trigger_event" in arguments:
-            trigger_event = str(arguments.get("trigger_event") or "").strip()
-            if not trigger_event:
-                return {"updated": False, "error": "trigger_event cannot be empty."}
-            normalized_trigger_payload = normalize_rule_payload(
-                {
-                    "trigger_event": trigger_event,
-                    "actions": rule.actions,
-                }
-            )
-            rule.trigger_event = normalized_trigger_payload["trigger_event"]
-            if "actions" not in arguments:
-                rule.actions = normalized_trigger_payload["actions"]
-        if "conditions" in arguments:
-            rule.conditions = normalize_conditions(arguments.get("conditions"))
-        if "actions" in arguments:
-            actions = normalize_rule_payload(
-                {
-                    "trigger_event": arguments.get("trigger_event", rule.trigger_event),
-                    "actions": arguments.get("actions"),
-                }
-            )["actions"]
-            if not actions:
-                return {"updated": False, "error": "At least one notification action is required."}
-            rule.actions = actions
-        if "is_active" in arguments:
-            rule.is_active = bool(arguments.get("is_active"))
-
+        changes: dict[str, Any] = {key: arguments[key] for key in ("name", "trigger_event", "conditions", "actions", "is_active") if key in arguments}
         try:
-            await session.commit()
-            await session.refresh(rule)
-        except IntegrityError:
-            await session.rollback()
-            return {"updated": False, "error": "Notification workflow could not be updated."}
+            rule = await notification_rules.update_rule(session, rule.id, changes, user=await _chat_context_user(), source="alfred")
+        except MutationError as exc:
+            return {"updated": False, "error": str(exc), "error_code": exc.code}
         workflow = _serialize_notification_rule_for_agent(rule)
-
-    return {
-        "updated": True,
-        "workflow": workflow,
-        "preview": await get_notification_service().preview_rule(workflow),
-    }
+    return {"updated": True, "workflow": workflow, **await _optional_rule_preview(workflow)}
 
 
 async def delete_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -289,10 +273,20 @@ async def delete_notification_workflow(arguments: dict[str, Any]) -> dict[str, A
         rule = await _resolve_notification_rule(session, arguments)
         if not rule:
             return {"deleted": False, "error": "Notification workflow not found."}
+        try:
+            rule = await notification_rules.delete_rule(session, rule.id, user=await _chat_context_user(), source="alfred")
+        except MutationError as exc:
+            return {"deleted": False, "error": str(exc), "error_code": exc.code}
         workflow = _serialize_notification_rule_for_agent(rule)
-        await session.delete(rule)
-        await session.commit()
     return {"deleted": True, "workflow": workflow}
+
+
+async def _optional_rule_preview(workflow: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return {"preview": await get_notification_service().preview_rule(workflow)}
+    except Exception:  # noqa: BLE001 - Preview failure must not undo a committed rule.
+        logger.exception("notification_rule_saved_preview_failed")
+        return {"warnings": ["The workflow was saved, but its preview is unavailable."]}
 
 
 async def preview_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -307,16 +301,9 @@ async def preview_notification_workflow(arguments: dict[str, Any]) -> dict[str, 
 
 
 async def test_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not bool(arguments.get("confirm_send")):
-        name = str(arguments.get("rule_name") or arguments.get("name") or "notification workflow").strip()
-        return {
-            "sent": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm_send",
-            "workflow_name": name,
-            "detail": "Send a real test notification for this workflow?",
-        }
-
+    user = await _require_admin_user("notification tests")
+    if isinstance(user, dict):
+        return {"sent": False, "error": user["error"]}
     rule = await _notification_rule_payload_for_agent(arguments)
     if not rule:
         return {"sent": False, "error": "Supply rule payload, rule_id, or rule_name."}
@@ -324,24 +311,42 @@ async def test_notification_workflow(arguments: dict[str, Any]) -> dict[str, Any
         return {"sent": False, "error": "A trigger_event is required before sending a test."}
     if not rule["actions"]:
         return {"sent": False, "error": "At least one notification action is required before sending a test."}
-
     context = _notification_context_for_agent(arguments.get("context"), rule["trigger_event"])
+    service = get_notification_service()
     try:
-        notification = await get_notification_service().process_context(
-            context,
-            raise_on_failure=True,
-            rules_override=[rule],
+        prepared = await service.prepare_confirmed_delivery(
+            context, action="notification_rule.test", rules_override=[rule],
         )
-    except NotificationDeliveryError as exc:
+    except (NotificationDeliveryError, ValueError) as exc:
+        return {"sent": False, "error": str(exc)}
+    preview = {"plan": prepared[0], "configuration_binding": prepared[1]}
+    if not bool(arguments.get("confirm_send")):
         return {
-            "sent": False,
-            "error": str(exc),
-            "preview": await get_notification_service().preview_rule(rule, context),
+            "sent": False, "requires_confirmation": True, "confirmation_field": "confirm_send",
+            "workflow_name": rule.get("name") or "notification workflow", "prepared_delivery": preview,
+            "detail": "Send a real test notification for this workflow?",
         }
-
+    request_context = get_chat_tool_context()
+    approval = request_context.get("approval") or {}
+    if (approval.get("requester_user_id") != str(user.id)
+            or approval.get("requester_auth_session_version") != user.auth_session_version
+            or approval.get("tool_name") != "test_notification_workflow"
+            or (approval.get("preview_output") or {}).get("prepared_delivery") != preview
+            or not request_context.get("intent_id")):
+        return {"sent": False, "error": "Create a fresh requester-bound notification preview before sending."}
+    try:
+        async with AsyncSessionLocal() as session:
+            identity, claimed = await service.reserve_confirmed_in_session(
+                session, actor_user_id=user.id, auth_version=user.auth_session_version,
+                operation_id=request_context["intent_id"], authority="alfred", action="notification_rule.test",
+                context=context, rules_override=[rule], prepared=prepared,
+            )
+            await session.commit()
+        result = await service.dispatch_reserved(identity, claimed)
+    except (MutationError, NotificationDeliveryError, ValueError) as exc:
+        return {"sent": False, "error": str(exc)}
     return {
-        "sent": True,
-        "title": notification.title,
-        "body": notification.body,
-        "preview": await get_notification_service().preview_rule(rule, context),
+        "sent": result.status == "sent", "title": result.notification.title, "body": result.notification.body,
+        "notification_run_id": result.run_id, "delivery_status": result.status,
+        "preview": await service.preview_rule(rule, context),
     }

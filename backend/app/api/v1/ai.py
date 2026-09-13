@@ -2,9 +2,9 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
@@ -63,6 +63,12 @@ class ChatResponse(BaseModel):
     pending_action: dict[str, Any] | None = None
     user_message_id: str | None = None
     assistant_message_id: str | None = None
+
+
+class ChatApprovalInspectionResponse(BaseModel):
+    status: Literal["pending", "in_progress", "completed", "unknown", "cancelled", "expired", "unavailable"]
+    pending_action: dict[str, Any] | None = None
+    result: ChatResponse | None = None
 
 
 class AlfredFeedbackRequest(BaseModel):
@@ -264,6 +270,36 @@ async def confirm_chat_action(
         user_message_id=result.user_message_id,
         assistant_message_id=result.assistant_message_id,
     )
+
+
+@router.get("/chat/approvals")
+async def list_chat_approvals(
+    response: Response,
+    session_id: str | None = None,
+    before_id: str | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
+    current_user: User = Depends(require_current_user),
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await chat_service.list_tool_confirmations(
+            user_id=str(current_user.id), session_id=session_id, before_id=before_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/chat/approvals/{confirmation_id}", response_model=ChatApprovalInspectionResponse)
+async def inspect_chat_approval(
+    confirmation_id: str,
+    session_id: str,
+    response: Response,
+    current_user: User = Depends(require_current_user),
+) -> ChatApprovalInspectionResponse:
+    response.headers["Cache-Control"] = "no-store"
+    result = await chat_service.inspect_tool_confirmation(
+        session_id=session_id, confirmation_id=confirmation_id, user_id=str(current_user.id),
+    )
+    return ChatApprovalInspectionResponse(**result)
 
 
 @router.post("/feedback")

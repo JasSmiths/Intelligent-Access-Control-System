@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from app.ai.tool_groups.general_handlers import (
-    get_system_users,
-    query_presence,
-    resolve_human_entity,
-)
+from app.ai.tool_groups import general_handlers
 from app.ai.tool_groups.metadata import admin_permissions, apply_group_metadata
 from app.ai.tools import AgentTool
 
@@ -42,7 +38,7 @@ def build_tools() -> list[AgentTool]:
                         "required": ["query"],
                         "additionalProperties": False,
                     },
-                    handler=resolve_human_entity,
+                    handler=general_handlers.resolve_human_entity,
                     categories=("General",),
                     example_inputs=(
                         {"query": "the missus", "entity_types": ["person", "vehicle"]},
@@ -61,7 +57,7 @@ def build_tools() -> list[AgentTool]:
                         "properties": {"person": {"type": "string"}},
                         "additionalProperties": False,
                     },
-                    handler=query_presence,
+                    handler=general_handlers.query_presence,
                     example_inputs=(
                         {"person": "Steph"},
                         {},
@@ -80,9 +76,12 @@ def build_tools() -> list[AgentTool]:
                         "properties": {"include_inactive": {"type": "boolean"}},
                         "additionalProperties": False,
                     },
-                    handler=get_system_users,
+                    handler=general_handlers.get_system_users,
                 ),
         ],
         categories=TOOL_CATEGORIES,
+        status_labels={'resolve_human_entity': 'Resolving system entity...', 'query_presence': 'Checking presence logs...', 'get_system_users': 'Checking user directory...'},
+        success_fields={},
+        finish_after_confirmation=frozenset(),
         required_permissions=REQUIRED_PERMISSIONS,
     )

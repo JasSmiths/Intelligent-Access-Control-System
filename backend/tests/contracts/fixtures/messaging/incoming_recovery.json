@@ -1,0 +1,113 @@
+{
+  "whatsapp": {
+    "items": [
+      {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "provider": "whatsapp",
+        "provider_message_id": null,
+        "batch_id": null,
+        "state": "received",
+        "origin_kind": "visitor",
+        "user_id": null,
+        "visitor_pass_id": "00000000-0000-0000-0000-000000000018",
+        "created_at": "2026-09-12T12:00:00+00:00",
+        "received_at": "2026-09-12T11:59:59+00:00",
+        "available_at": "2026-09-12T12:00:02.500000+00:00",
+        "claimed_at": null,
+        "handled_at": null,
+        "lease_expired": false,
+        "requires_review": false,
+        "review_reason": null,
+        "replies": [],
+        "result_ids": {}
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000000003",
+        "provider": "whatsapp",
+        "provider_message_id": null,
+        "batch_id": "00000000-0000-0000-0000-000000000003",
+        "state": "processing",
+        "origin_kind": "admin",
+        "user_id": "00000000-0000-0000-0000-000000000017",
+        "visitor_pass_id": null,
+        "created_at": "2026-09-12T12:00:00+00:00",
+        "received_at": "2026-09-12T11:59:59+00:00",
+        "available_at": "2026-09-12T12:00:02.500000+00:00",
+        "claimed_at": "2026-09-12T12:00:03+00:00",
+        "handled_at": null,
+        "lease_expired": false,
+        "requires_review": false,
+        "review_reason": null,
+        "replies": [],
+        "result_ids": {}
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "provider": "whatsapp",
+        "provider_message_id": null,
+        "batch_id": "00000000-0000-0000-0000-000000000002",
+        "state": "review_required",
+        "origin_kind": "admin",
+        "user_id": "00000000-0000-0000-0000-000000000017",
+        "visitor_pass_id": null,
+        "created_at": "2026-09-12T12:00:00+00:00",
+        "received_at": "2026-09-12T11:59:59+00:00",
+        "available_at": "2026-09-12T12:00:02.500000+00:00",
+        "claimed_at": "2026-09-12T12:00:03+00:00",
+        "handled_at": "2026-09-12T12:00:04+00:00",
+        "lease_expired": false,
+        "requires_review": true,
+        "review_reason": "reply_outcome_unknown",
+        "replies": [
+          {
+            "index": 0,
+            "operation_id": "00000000-0000-0000-0000-000000000023",
+            "delivery": "unknown",
+            "attempted_at": "2026-09-12T12:00:03+00:00",
+            "completed_at": "2026-09-12T12:00:04+00:00"
+          }
+        ],
+        "result_ids": {
+          "session_id": "00000000-0000-0000-0000-000000000021",
+          "confirmation_id": "confirm-00000000000000000000000000000022"
+        }
+      }
+    ],
+    "next_cursor": null
+  },
+  "discord": {
+    "items": [
+      {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "provider": "discord",
+        "provider_message_id": "123456789",
+        "batch_id": "00000000-0000-0000-0000-000000000001",
+        "state": "handled",
+        "origin_kind": "standard",
+        "user_id": null,
+        "visitor_pass_id": null,
+        "created_at": "2026-09-12T12:00:00+00:00",
+        "received_at": "2026-09-12T11:59:59+00:00",
+        "available_at": "2026-09-12T12:00:02.500000+00:00",
+        "claimed_at": "2026-09-12T12:00:03+00:00",
+        "handled_at": "2026-09-12T12:00:04+00:00",
+        "lease_expired": false,
+        "requires_review": false,
+        "review_reason": null,
+        "replies": [
+          {
+            "index": 0,
+            "operation_id": "00000000-0000-0000-0000-000000000025",
+            "delivery": "accepted",
+            "attempted_at": "2026-09-12T12:00:03+00:00",
+            "completed_at": "2026-09-12T12:00:04+00:00"
+          }
+        ],
+        "result_ids": {
+          "session_id": "00000000-0000-0000-0000-000000000024"
+        }
+      }
+    ],
+    "next_cursor": null
+  }
+}

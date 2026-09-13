@@ -81,7 +81,14 @@ async def test_standard_users_are_denied_access_policy_mutations(method: str, pa
         ("DELETE", "/api/v1/telemetry/purge", {"scope": "telemetry"}),
     ],
 )
-async def test_safety_critical_admin_routes_require_server_confirmation(method: str, path: str, body: dict | None) -> None:
+async def test_safety_critical_admin_routes_require_server_confirmation(method: str, path: str, body: dict | None, monkeypatch) -> None:
+    from app.simulation import router as simulation_router
+
+    async def maintenance_inactive():
+        return False
+
+    # This test establishes the confirmation boundary with maintenance inactive.
+    monkeypatch.setattr(simulation_router, "is_maintenance_mode_active", maintenance_inactive)
     transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.request(method, path, json=body)

@@ -27,7 +27,7 @@
 - `POST /api/v1/webhooks/ubiquiti/lpr`
 - `POST /api/v1/simulation/arrival/{registration_number}`
 - `POST /api/v1/simulation/misread-sequence/{registration_number}`
-- `POST /api/v1/simulation/e2e/full-access-flow` (Admin)
+- `POST /api/v1/simulation/e2e/full-access-flow` (retired; returns HTTP 410, full-flow scenarios run only through isolated tests)
 - `GET /api/v1/events`
 - `GET /api/v1/events/{event_id}/snapshot`
 - `GET /api/v1/alerts`

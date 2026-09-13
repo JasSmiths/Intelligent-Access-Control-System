@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -206,7 +206,7 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.STANDARD, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    auth_session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    auth_session_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
@@ -608,6 +608,7 @@ class GateMalfunctionNotificationOutbox(Base, TimestampMixin):
         UniqueConstraint("malfunction_id", "stage", name="uq_gate_malfunction_notification_stage"),
     )
 
+    recovery_version: Mapped[int | None] = mapped_column(Integer)
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     malfunction_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("gate_malfunction_states.id", ondelete="CASCADE"), nullable=False, index=True
@@ -632,6 +633,8 @@ class GateStateObservation(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     gate_entity_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     gate_name: Mapped[str | None] = mapped_column(String(160))
+    access_device_id: Mapped[uuid.UUID | None] = mapped_column()
+    binding_fingerprint: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     raw_state: Mapped[str | None] = mapped_column(String(80))
     previous_state: Mapped[str | None] = mapped_column(String(40), index=True)
@@ -664,6 +667,14 @@ class NotificationRun(Base, TimestampMixin):
     __tablename__ = "notification_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Null identifies historical work; only explicit v1 dispatch is recoverable.
+    recovery_version: Mapped[int | None] = mapped_column(Integer)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column()
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_plan: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
+    rules_override: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
+    review_reason: Mapped[str | None] = mapped_column(String(120))
+    claim_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     trigger_event: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
@@ -755,6 +766,11 @@ class AutomationRule(Base, TimestampMixin):
 
 class AutomationRun(Base, TimestampMixin):
     __tablename__ = "automation_runs"
+    __table_args__ = (
+        UniqueConstraint("occurrence_key", name="uq_automation_run_occurrence"),
+        Index("ix_automation_run_recovery_queue", "queued_at", "id",
+              postgresql_where=text("recovery_version = 1 AND status IN ('queued', 'processing')")),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     rule_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -773,6 +789,14 @@ class AutomationRun(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text)
     actor: Mapped[str] = mapped_column(String(160), default="System", nullable=False, index=True)
     source: Mapped[str] = mapped_column(String(120), default="automation", nullable=False, index=True)
+    recovery_version: Mapped[int | None] = mapped_column(Integer)
+    occurrence_key: Mapped[str | None] = mapped_column(String(255))
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[uuid.UUID | None] = mapped_column()
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    action_plan: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
+    review_reason: Mapped[str | None] = mapped_column(String(120))
 
     rule: Mapped[AutomationRule | None] = relationship(back_populates="runs")
 
@@ -1046,6 +1070,9 @@ Index("ix_lpr_ingest_events_source_captured", LprIngestEvent.source, LprIngestEv
 
 class MovementSagaRecord(Base, TimestampMixin):
     __tablename__ = "movement_sagas"
+    __table_args__ = (CheckConstraint(
+        "admission_status IS NULL OR admission_status IN ('pending','verified','not_required','denied','historical')",
+        name="ck_movement_sagas_admission_status"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False, index=True)
@@ -1068,6 +1095,9 @@ class MovementSagaRecord(Base, TimestampMixin):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     gate_command_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     presence_committed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # NULL is unclassified legacy history, never proof of entry admission.
+    admission_status: Mapped[str | None] = mapped_column(String(24))
+    admission_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     reconciliation_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     failure_detail: Mapped[str | None] = mapped_column(Text)
     intent_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
@@ -1119,6 +1149,53 @@ class GateCommandRecord(Base, TimestampMixin):
     command_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
     movement_saga: Mapped[MovementSagaRecord | None] = relationship(back_populates="gate_commands")
+
+
+class AccessDeviceCommandRecord(Base, TimestampMixin):
+    """Journal owns transport truth; access delivery owns its output checkpoint."""
+
+    __tablename__ = "access_device_command_records"
+    __table_args__ = (
+        CheckConstraint("action IN ('open', 'close')", name="ck_device_command_action"),
+        CheckConstraint("state IN ('prepared', 'attempting', 'accepted', 'rejected', 'unknown', 'verified', 'not_sent')",
+                        name="ck_device_command_state"),
+        UniqueConstraint("idempotency_key", name="uq_device_command_idempotency"),
+        Index("uq_device_command_unresolved_target", "target_device_id", unique=True,
+              postgresql_where=text("state IN ('prepared', 'attempting', 'accepted', 'unknown')")),
+        Index("ix_device_command_parent_state", "gate_command_id", "state"),
+        Index("ix_device_command_state_lease", "state", "lease_expires_at"),
+        CheckConstraint("origin_context IS NULL OR (jsonb_typeof(origin_context) = 'object' AND COALESCE(origin_context->>'kind' = 'automatic_access_garage', FALSE))", name="ck_device_command_origin"),
+        CheckConstraint("outcome_recorded_at IS NULL OR origin_context IS NOT NULL", name="ck_device_command_output_origin"),
+        Index("ix_device_command_pending_output", "created_at", "id",
+              postgresql_where=text("origin_context IS NOT NULL AND outcome_recorded_at IS NULL")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    gate_command_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("gate_command_records.id", ondelete="SET NULL"))
+    # Immutable historical identity: deleting a terminal device must not erase receipts.
+    target_device_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    device_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    intent_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    recovery_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    binding_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    binding_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(80))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted: Mapped[bool | None] = mapped_column(Boolean)
+    gate_state: Mapped[str | None] = mapped_column(String(40))
+    verification_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("gate_state_observations.id", ondelete="SET NULL"))
+    verification_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    provider_receipts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list,
+                                                                  server_default=text("'[]'::jsonb"), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    origin_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    outcome_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MovementSessionRecord(Base, TimestampMixin):
@@ -1211,6 +1288,9 @@ class ProcessedMessagingMessage(Base, TimestampMixin):
     __tablename__ = "processed_messaging_messages"
     __table_args__ = (
         UniqueConstraint("provider", "provider_message_id", name="ux_processed_messaging_message_provider_id"),
+        CheckConstraint("recovery_version IS NULL OR (recovery_version = 1 AND state IS NOT NULL AND state IN ('received','processing','handled','review_required') AND envelope IS NOT NULL AND jsonb_typeof(envelope) = 'object' AND routing_context IS NOT NULL AND jsonb_typeof(routing_context) = 'object' AND available_at IS NOT NULL)", name="ck_incoming_message_recovery"),
+        Index("ix_incoming_message_eligible", "state", "available_at", "created_at", postgresql_where=text("recovery_version = 1")),
+        Index("ix_incoming_message_batch", "batch_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -1219,6 +1299,20 @@ class ProcessedMessagingMessage(Base, TimestampMixin):
     provider_channel_id: Mapped[str | None] = mapped_column(String(180), index=True)
     author_provider_id: Mapped[str | None] = mapped_column(String(180), index=True)
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # Historical dedupe markers remain NULL and can never become executable.
+    recovery_version: Mapped[int | None] = mapped_column(Integer)
+    state: Mapped[str | None] = mapped_column(String(24))
+    envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    routing_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    batch_id: Mapped[uuid.UUID | None] = mapped_column()
+    claim_token: Mapped[uuid.UUID | None] = mapped_column()
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_plan: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    review_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class VisitorPass(Base, TimestampMixin):
@@ -1269,6 +1363,38 @@ class VisitorPass(Base, TimestampMixin):
     created_by: Mapped[User | None] = relationship()
     arrival_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[arrival_event_id])
     departure_event: Mapped[AccessEvent | None] = relationship(foreign_keys=[departure_event_id])
+
+
+class VisitorPassReservationRecord(Base, TimestampMixin):
+    """Immutable arrival identity; reservation settlement owns consumption.
+
+    Historical IDs intentionally survive event/pass retention. The visitor owner
+    refuses destructive mutation while a reservation is unresolved.
+    """
+    __tablename__ = "visitor_pass_reservations"
+    __table_args__ = (
+        UniqueConstraint("access_event_id", name="uq_visitor_reservation_event"),
+        UniqueConstraint("intent_id", name="uq_visitor_reservation_intent"),
+        CheckConstraint("state IN ('reserved','held','consumed','released')", name="ck_visitor_reservation_state"),
+        CheckConstraint("pass_type IN ('one-time','duration')", name="ck_visitor_reservation_pass_type"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    visitor_pass_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    access_event_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    intent_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    gate_command_id: Mapped[uuid.UUID | None] = mapped_column()
+    pass_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    normalized_plate: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), default="reserved", nullable=False)
+    dispatch_deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completion_reason: Mapped[str | None] = mapped_column(Text)
+    verification_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+
+
+Index("uq_visitor_reservation_unavailable", VisitorPassReservationRecord.visitor_pass_id, unique=True,
+      postgresql_where=text("state IN ('reserved','held') OR (state = 'consumed' AND pass_type = 'one-time')"))
+Index("ix_visitor_reservation_state_deadline", VisitorPassReservationRecord.state, VisitorPassReservationRecord.dispatch_deadline)
 
 
 Index(
@@ -1405,6 +1531,32 @@ class ChatSession(Base, TimestampMixin):
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+
+
+class AlfredApproval(Base, TimestampMixin):
+    """Requester-bound executable approval; chat history is never execution state."""
+
+    __tablename__ = "alfred_approvals"
+    __table_args__ = (
+        UniqueConstraint("operation_id", name="uq_alfred_approval_operation"),
+        CheckConstraint("status IN ('pending', 'claimed', 'completed', 'cancelled', 'expired', 'unknown')",
+                        name="ck_alfred_approval_status"),
+        Index("ix_alfred_approval_requester", "session_id", "requester_user_id", "created_at"),
+        Index("uq_alfred_approval_pending", "session_id", "requester_user_id", unique=True,
+              postgresql_where=text("status = 'pending' AND requester_user_id IS NOT NULL")),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"))
+    requester_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    requester_auth_session_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RevokedAuthToken(Base, TimestampMixin):

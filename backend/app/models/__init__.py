@@ -3,9 +3,11 @@
 from app.models.core import (
     AccessEvent,
     AccessDevice,
+    AccessDeviceCommandRecord,
     AccessDeviceProviderBinding,
     ActionConfirmation,
     AlfredEvalExample,
+    AlfredApproval,
     AlfredFeedback,
     AlfredLesson,
     AlfredMemory,
@@ -53,14 +55,17 @@ from app.models.core import (
     Vehicle,
     VehiclePersonAssignment,
     VisitorPass,
+    VisitorPassReservationRecord,
 )
 
 __all__ = [
     "AccessEvent",
     "AccessDevice",
+    "AccessDeviceCommandRecord",
     "AccessDeviceProviderBinding",
     "ActionConfirmation",
     "AlfredEvalExample",
+    "AlfredApproval",
     "AlfredFeedback",
     "AlfredLesson",
     "AlfredMemory",
@@ -108,4 +113,5 @@ __all__ = [
     "Vehicle",
     "VehiclePersonAssignment",
     "VisitorPass",
+    "VisitorPassReservationRecord",
 ]

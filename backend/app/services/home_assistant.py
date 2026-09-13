@@ -263,19 +263,17 @@ class HomeAssistantIntegrationService:
         action_id = str(data.get("action") or "").strip()
         if not action_id:
             return
-        from app.services.whatsapp_messaging import (
-            get_whatsapp_messaging_service,
-            parse_visitor_pass_timeframe_button_id,
-        )
+        from app.services.messaging.whatsapp_helpers import parse_visitor_pass_timeframe_button_id
+        from app.services.visitor_conversations import HomeAssistantTimeframeAction, get_visitor_conversation_service
 
         decision = parse_visitor_pass_timeframe_button_id(action_id)
         if decision:
             try:
-                result = await get_whatsapp_messaging_service().decide_visitor_timeframe_request(
+                result = await get_visitor_conversation_service().decide_timeframe_request(
                     decision.pass_id,
                     decision.request_id,
                     decision.decision,
-                    actor_label="Home Assistant Notification",
+                    integration_action=HomeAssistantTimeframeAction(decision.pass_id, decision.request_id, decision.decision),
                 )
                 logger.info(
                     "home_assistant_notification_action_processed",
@@ -284,7 +282,7 @@ class HomeAssistantIntegrationService:
                         "decision": decision.decision,
                         "visitor_pass_id": decision.pass_id,
                         "request_id": decision.request_id,
-                        "admin_message": result.get("admin_message"),
+                        "outcome": result.kind,
                     },
                 )
                 await event_bus.publish(
@@ -310,7 +308,17 @@ class HomeAssistantIntegrationService:
                 )
                 return
 
-        from app.services.actionable_notifications import get_actionable_notification_service
+        from app.services.actionable_notifications import (
+            GATE_FORCE_OPEN_PREFIX,
+            GATE_OPEN_PREFIX,
+            get_actionable_notification_service,
+        )
+
+        action_kind = (
+            "gate_force_open" if action_id.startswith(GATE_FORCE_OPEN_PREFIX)
+            else "gate_open" if action_id.startswith(GATE_OPEN_PREFIX)
+            else "unrecognized"
+        )
 
         try:
             handled = await get_actionable_notification_service().handle_home_assistant_action(
@@ -320,12 +328,12 @@ class HomeAssistantIntegrationService:
             if handled:
                 logger.info(
                     "home_assistant_actionable_notification_processed",
-                    extra={"action": action_id},
+                    extra={"action_kind": action_kind},
                 )
         except Exception as exc:
             logger.warning(
                 "home_assistant_actionable_notification_failed",
-                extra={"action": action_id, "error": str(exc)},
+                extra={"action_kind": action_kind, "error_class": type(exc).__name__},
             )
 
     async def _sync_gate_state(
@@ -573,7 +581,7 @@ class HomeAssistantIntegrationService:
         if not self._last_error or previous_error:
             return
         from app.modules.notifications.base import NotificationContext
-        from app.services.notifications import INTEGRATION_DEGRADED_EVENT_TYPE, notification_context_payload
+        from app.services.notifications import INTEGRATION_DEGRADED_EVENT_TYPE, get_notification_service
 
         reason = self._last_error
         occurred_at = self._last_failure_at or datetime.now(tz=UTC)
@@ -592,7 +600,7 @@ class HomeAssistantIntegrationService:
                 "source": "home_assistant",
             },
         )
-        await event_bus.publish("notification.trigger", notification_context_payload(context))
+        await get_notification_service().enqueue_notification(context)
 
     async def _record_gate_state_observation(
         self,

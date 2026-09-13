@@ -1,0 +1,533 @@
+{
+  "contract_version": 1,
+  "notes": "Provider acceptance is distinct from physical verification. Admission belongs only to the designated entry target. These are synthetic receipts; opening does not prove vehicle passage. Partial is an aggregate-only outcome: inspect individual target receipts for acceptance and no-send evidence.",
+  "cases": [
+    {
+      "name": "selected_open_verified",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 1,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000001",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000001",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000001",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": true,
+        "accepted": true,
+        "delivery": "accepted",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    },
+    {
+      "name": "accepted_unverified",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 1,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000002",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "accepted",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "unknown",
+            "verified": false,
+            "requires_reconciliation": true,
+            "verification_observation_id": null,
+            "verification_evidence": null,
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "unknown",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical verification is pending."
+          }
+        ],
+        "admission_verified": false,
+        "mechanically_confirmed": false,
+        "accepted": true,
+        "delivery": "accepted",
+        "requires_reconciliation": true,
+        "state": "unknown"
+      }
+    },
+    {
+      "name": "lost_response_unknown",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 1,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000003",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "unknown",
+            "accepted": false,
+            "delivery": "unknown",
+            "state": "unknown",
+            "verified": false,
+            "requires_reconciliation": true,
+            "verification_observation_id": null,
+            "verification_evidence": null,
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "unknown",
+                "status": "unknown",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "unknown",
+                "acceptance_basis": null
+              }
+            ],
+            "detail": "Physical verification is pending."
+          }
+        ],
+        "admission_verified": false,
+        "mechanically_confirmed": false,
+        "accepted": false,
+        "delivery": "unknown",
+        "requires_reconciliation": true,
+        "state": "unknown"
+      }
+    },
+    {
+      "name": "partial_entry_verified",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 2,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000004",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000004",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000004",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          },
+          {
+            "command_id": "10000000-0000-4000-8000-000000000005",
+            "target_device_id": "00000000-0000-4000-8000-000000000002",
+            "device_key": "secondary",
+            "action": "open",
+            "status": "unknown",
+            "accepted": false,
+            "delivery": "unknown",
+            "state": "unknown",
+            "verified": false,
+            "requires_reconciliation": true,
+            "verification_observation_id": null,
+            "verification_evidence": null,
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_secondary",
+                "delivery": "unknown",
+                "status": "unknown",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "unknown",
+                "acceptance_basis": null
+              }
+            ],
+            "detail": "Physical verification is pending."
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": false,
+        "accepted": false,
+        "delivery": "unknown",
+        "requires_reconciliation": true,
+        "state": "open"
+      }
+    },
+    {
+      "name": "other_gate_manual",
+      "admission_target_device_id": null,
+      "expected_target_count": 1,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000006",
+            "target_device_id": "00000000-0000-4000-8000-000000000002",
+            "device_key": "secondary",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000006",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000006",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000002",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_secondary",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          }
+        ],
+        "admission_verified": false,
+        "mechanically_confirmed": true,
+        "accepted": true,
+        "delivery": "accepted",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    },
+    {
+      "name": "already_open_verified",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 1,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000007",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": false,
+            "delivery": "not_sent",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000007",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000007",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": null,
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [],
+            "detail": "Physical opening verified."
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": true,
+        "accepted": false,
+        "delivery": "not_sent",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    },
+    {
+      "name": "partial_entry_verified_other_not_sent",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 2,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000001",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000001",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000001",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          },
+          {
+            "command_id": "10000000-0000-4000-8000-000000000002",
+            "target_device_id": "00000000-0000-4000-8000-000000000002",
+            "device_key": "secondary",
+            "action": "open",
+            "status": "not_sent",
+            "accepted": false,
+            "delivery": "not_sent",
+            "state": "unknown",
+            "verified": false,
+            "requires_reconciliation": false,
+            "verification_observation_id": null,
+            "verification_evidence": null,
+            "attempted_at": null,
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [],
+            "detail": "Synthetic conclusive target outcome"
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": false,
+        "accepted": false,
+        "delivery": "partial",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    },
+    {
+      "name": "partial_entry_verified_other_rejected",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 2,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000001",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000001",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000001",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          },
+          {
+            "command_id": "10000000-0000-4000-8000-000000000002",
+            "target_device_id": "00000000-0000-4000-8000-000000000002",
+            "device_key": "secondary",
+            "action": "open",
+            "status": "rejected",
+            "accepted": false,
+            "delivery": "rejected",
+            "state": "unknown",
+            "verified": false,
+            "requires_reconciliation": false,
+            "verification_observation_id": null,
+            "verification_evidence": null,
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_secondary",
+                "delivery": "rejected",
+                "status": "rejected",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "unknown",
+                "acceptance_basis": null
+              }
+            ],
+            "detail": "Synthetic conclusive target outcome"
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": false,
+        "accepted": false,
+        "delivery": "partial",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    },
+    {
+      "name": "partial_already_open_other_accepted",
+      "admission_target_device_id": "00000000-0000-4000-8000-000000000001",
+      "expected_target_count": 2,
+      "outcome": {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000007",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": false,
+            "delivery": "not_sent",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000007",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000007",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": null,
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [],
+            "detail": "Physical opening verified."
+          },
+          {
+            "command_id": "10000000-0000-4000-8000-000000000002",
+            "target_device_id": "00000000-0000-4000-8000-000000000002",
+            "device_key": "secondary",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000002",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000002",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000002",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_secondary",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": true,
+        "accepted": false,
+        "delivery": "partial",
+        "requires_reconciliation": false,
+        "state": "open"
+      }
+    }
+  ]
+}

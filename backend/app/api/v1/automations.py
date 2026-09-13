@@ -2,24 +2,25 @@ import json
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import AutomationRule, User
+from app.services.mutation_context import MutationError, load_active_admin
 from app.services.automations import (
     WEBHOOK_NONCE_HEADER,
     WEBHOOK_SIGNATURE_HEADER,
     WEBHOOK_TIMESTAMP_HEADER,
     AutomationError,
     get_automation_service,
-    normalize_actions,
-    normalize_conditions,
-    normalize_triggers,
     serialize_rule,
+    serialize_run,
 )
+from app.services.automation_execution import AutomationRunStore
+from app.services.workflows.automation_definition import normalize_actions, normalize_conditions, normalize_triggers
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 
 router = APIRouter()
@@ -63,6 +64,42 @@ async def automation_catalog(_: User = Depends(admin_user)) -> dict[str, Any]:
     return await get_automation_service().catalog()
 
 
+async def _current_history_admin(session: AsyncSession, user: User) -> None:
+    try:
+        await load_active_admin(session, user.id, auth_version=user.auth_session_version)
+    except MutationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/runs")
+async def list_automation_runs(
+    limit: int = Query(default=25, ge=1, le=100),
+    before_id: uuid.UUID | None = None,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await _current_history_admin(session, user)
+    try:
+        rows, cursor = await AutomationRunStore().read_page(session, limit=limit, before_id=before_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"items": [serialize_run(row) for row in rows], "next_cursor": str(cursor) if cursor else None}
+
+
+@router.get("/runs/{run_id}")
+async def get_automation_run(
+    run_id: uuid.UUID,
+    user: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    await _current_history_admin(session, user)
+    try:
+        row = await AutomationRunStore().read_detail(session, run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_run(row)
+
+
 @router.get("/rules")
 async def list_automation_rules(
     _: User = Depends(admin_user),
@@ -100,9 +137,9 @@ async def create_automation_rule(
         await session.commit()
         await session.refresh(rule)
         return serialize_rule(rule)
-    except AutomationError as exc:
+    except (AutomationError, MutationError) as exc:
         await session.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, MutationError) else 400, detail=str(exc)) from exc
 
 
 @router.get("/rules/{rule_id}")
@@ -145,9 +182,9 @@ async def update_automation_rule(
         await session.commit()
         await session.refresh(rule)
         return serialize_rule(rule)
-    except AutomationError as exc:
+    except (AutomationError, MutationError) as exc:
         await session.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, MutationError) else 400, detail=str(exc)) from exc
 
 
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)

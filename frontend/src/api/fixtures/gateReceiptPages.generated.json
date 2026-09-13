@@ -1,0 +1,100 @@
+{
+  "gates": {
+    "items": [
+      {
+        "target_receipts": [
+          {
+            "command_id": "10000000-0000-4000-8000-000000000001",
+            "target_device_id": "00000000-0000-4000-8000-000000000001",
+            "device_key": "entry",
+            "action": "open",
+            "status": "verified",
+            "accepted": true,
+            "delivery": "accepted",
+            "state": "open",
+            "verified": true,
+            "requires_reconciliation": false,
+            "verification_observation_id": "20000000-0000-4000-8000-000000000001",
+            "verification_evidence": {
+              "observation_id": "20000000-0000-4000-8000-000000000001",
+              "observed_at": "2026-09-12T12:00:01+00:00",
+              "state": "open",
+              "target_device_id": "00000000-0000-4000-8000-000000000001",
+              "provider": "home_assistant"
+            },
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "provider_receipts": [
+              {
+                "provider": "home_assistant",
+                "external_id": "cover.synthetic_entry",
+                "delivery": "accepted",
+                "status": "accepted",
+                "attempted_at": "2026-09-12T12:00:00+00:00",
+                "completed_at": "2026-09-12T12:00:01+00:00",
+                "state": "open",
+                "acceptance_basis": "home_assistant_http_2xx"
+              }
+            ],
+            "detail": "Physical opening verified."
+          }
+        ],
+        "admission_verified": true,
+        "mechanically_confirmed": true,
+        "accepted": true,
+        "delivery": "accepted",
+        "requires_reconciliation": false,
+        "state": "open",
+        "command_id": "30000000-0000-4000-8000-000000000001",
+        "movement_saga_id": null,
+        "detail": "Physical opening verified.",
+        "exception_class": null,
+        "started_at": "2026-09-12T12:00:00+00:00",
+        "completed_at": "2026-09-12T12:00:01+00:00",
+        "intent_id": "40000000-0000-4000-8000-000000000001",
+        "command_status": "reconciled"
+      }
+    ],
+    "next_cursor": null
+  },
+  "covers": {
+    "items": [
+      {
+        "command_id": "10000000-0000-4000-8000-000000000001",
+        "target_device_id": "00000000-0000-4000-8000-000000000001",
+        "device_key": "entry",
+        "action": "open",
+        "status": "verified",
+        "accepted": true,
+        "delivery": "accepted",
+        "state": "open",
+        "verified": true,
+        "requires_reconciliation": false,
+        "verification_observation_id": "20000000-0000-4000-8000-000000000001",
+        "verification_evidence": {
+          "observation_id": "20000000-0000-4000-8000-000000000001",
+          "observed_at": "2026-09-12T12:00:01+00:00",
+          "state": "open",
+          "target_device_id": "00000000-0000-4000-8000-000000000001",
+          "provider": "home_assistant"
+        },
+        "attempted_at": "2026-09-12T12:00:00+00:00",
+        "completed_at": "2026-09-12T12:00:01+00:00",
+        "provider_receipts": [
+          {
+            "provider": "home_assistant",
+            "external_id": "cover.synthetic_entry",
+            "delivery": "accepted",
+            "status": "accepted",
+            "attempted_at": "2026-09-12T12:00:00+00:00",
+            "completed_at": "2026-09-12T12:00:01+00:00",
+            "state": "open",
+            "acceptance_basis": "home_assistant_http_2xx"
+          }
+        ],
+        "detail": "Physical opening verified."
+      }
+    ],
+    "next_cursor": null
+  }
+}

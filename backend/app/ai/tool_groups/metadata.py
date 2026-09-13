@@ -11,6 +11,7 @@ from app.ai.tools import (
     SAFETY_CONFIRMATION_REQUIRED,
     SAFETY_READ_ONLY,
     AgentTool,
+    ToolSummary,
 )
 
 DOMAIN_SUMMARIES = {
@@ -38,6 +39,11 @@ def apply_group_metadata(
     confirmation_required: set[str] | frozenset[str] = frozenset(),
     default_limits: Mapping[str, int] | None = None,
     required_permissions: Mapping[str, tuple[str, ...]] | None = None,
+    status_labels: Mapping[str, str] | None = None,
+    success_fields: Mapping[str, tuple[str, ...]] | None = None,
+    finish_after_confirmation: set[str] | frozenset[str] = frozenset(),
+    summary_handler: ToolSummary | None = None,
+    button_handler: ToolSummary | None = None,
 ) -> list[AgentTool]:
     """Attach explicit group-owned metadata to tool definitions."""
 
@@ -53,6 +59,11 @@ def apply_group_metadata(
         annotated.append(
             replace(
                 tool,
+                status_label=(status_labels or {}).get(tool.name, tool.status_label),
+                success_fields=(success_fields or {}).get(tool.name, tool.success_fields),
+                finish_after_confirmation=tool.name in finish_after_confirmation,
+                summary_handler=summary_handler,
+                button_handler=button_handler,
                 categories=categories.get(tool.name, tool.categories),
                 safety_level=safety_level,
                 required_permissions=permissions,

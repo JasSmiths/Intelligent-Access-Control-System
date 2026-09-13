@@ -16,6 +16,7 @@ from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
     emit_audit_log,
+    write_audit_log,
 )
 
 CONFIRMATION_TTL_SECONDS = 120
@@ -58,6 +59,7 @@ async def create_action_confirmation(
     now = datetime.now(tz=UTC)
     payload_hash = confirmation_payload_hash(payload)
     row = ActionConfirmation(
+        id=uuid.uuid4(),
         token_hash=confirmation_token_hash(token),
         action=normalized_action,
         payload_hash=payload_hash,
@@ -72,9 +74,8 @@ async def create_action_confirmation(
         },
     )
     session.add(row)
-    await session.commit()
-    await session.refresh(row)
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="real_world_action.confirmation.created",
         actor=actor_from_user(user),
@@ -90,6 +91,8 @@ async def create_action_confirmation(
             "reason": reason or "",
         },
     )
+    await session.commit()
+    await session.refresh(row)
     return {
         "confirmation_id": str(row.id),
         "confirmation_token": token,
@@ -105,7 +108,15 @@ async def consume_action_confirmation(
     action: str,
     payload: dict[str, Any],
     confirmation_token: str | None,
+    expected_hardware_plan: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> ActionConfirmation:
+    """Consume once; ``commit=False`` joins a durable effect's intake transaction.
+
+    The participant never commits a rejection either. Its caller must roll back
+    the whole transaction on failure. Existing standalone callers retain their
+    commit behavior.
+    """
     if not confirmation_token:
         raise ActionConfirmationError(
             "Server-side confirmation is required for this action.",
@@ -131,24 +142,29 @@ async def consume_action_confirmation(
             payload_hash=expected_payload_hash,
             now=datetime.now(tz=UTC),
         )
+        if expected_hardware_plan is not None and (row.metadata_ or {}).get("hardware_plan") != expected_hardware_plan:
+            raise ActionConfirmationError(
+                "Hardware targets or configuration changed. Create a fresh confirmation.", status_code=409,
+            )
     except ActionConfirmationError as exc:
         if row.consumed_at is None:
             row.consumed_at = datetime.now(tz=UTC)
             row.outcome = "rejected"
-            await session.commit()
-        _emit_confirmation_rejected(
-            user,
-            action=action,
-            payload_hash=expected_payload_hash,
-            reason=exc.detail,
-            row=row,
-        )
+            await write_audit_log(session, **_confirmation_rejection(
+                user, action=action, payload_hash=expected_payload_hash,
+                reason=exc.detail, row=row,
+            ))
+            if commit:
+                await session.commit()
+        else:
+            _emit_confirmation_rejected(user, action=action, payload_hash=expected_payload_hash,
+                                        reason=exc.detail, row=row)
         raise
 
     row.consumed_at = datetime.now(tz=UTC)
     row.outcome = "consumed"
-    await session.commit()
-    emit_audit_log(
+    await write_audit_log(
+        session,
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="real_world_action.confirmation.consumed",
         actor=actor_from_user(user),
@@ -162,6 +178,8 @@ async def consume_action_confirmation(
             "payload_hash": row.payload_hash,
         },
     )
+    if commit:
+        await session.commit()
     return row
 
 
@@ -236,15 +254,15 @@ def _canonical_timestamp(value: datetime) -> str:
     return f"{timestamp}Z"
 
 
-def _emit_confirmation_rejected(
+def _confirmation_rejection(
     user: User,
     *,
     action: str,
     payload_hash: str,
     reason: str,
     row: ActionConfirmation | None = None,
-) -> None:
-    emit_audit_log(
+) -> dict[str, Any]:
+    return dict(
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="real_world_action.confirmation.rejected",
         actor=actor_from_user(user),
@@ -261,6 +279,10 @@ def _emit_confirmation_rejected(
             "reason": reason,
         },
     )
+
+
+def _emit_confirmation_rejected(user: User, **kwargs: Any) -> None:
+    emit_audit_log(**_confirmation_rejection(user, **kwargs))
 
 
 def _normalize_action(action: str) -> str:

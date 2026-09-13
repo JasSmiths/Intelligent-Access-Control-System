@@ -1,16 +1,39 @@
 """Compliance, camera, and file Alfred tool handlers."""
-# ruff: noqa: F403, F405
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
+import re
 from typing import Any
 
-from app.ai.tool_groups._shared import *
+from app.ai.context import get_chat_tool_context
+from app.ai.providers import analyze_image_with_provider
+from app.ai.tool_groups._shared import (
+    _agent_datetime_display,
+    _agent_now,
+)
 from app.ai.tool_groups.access_diagnostics_handlers import (
     calculate_visit_duration,
     query_access_events,
 )
 from app.ai.tool_groups.general_handlers import query_presence
+from app.modules.dvla.vehicle_enquiry import (
+    DvlaVehicleEnquiryError,
+    display_vehicle_record,
+    normalize_registration_number,
+)
+from app.services.chat_attachments import (
+    ChatAttachmentError,
+    chat_attachment_store,
+)
+from app.services.dvla import (
+    lookup_vehicle_registration,
+    normalize_vehicle_enquiry_response,
+)
+from app.services.settings import get_runtime_config
+from app.services.unifi_protect import get_unifi_protect_service
 
 
 def _filename_slug(value: str) -> str:

@@ -98,7 +98,10 @@ export function useInvestigationData(query: InvestigationQuery, refreshToken: nu
     if (!filters) return undefined;
     const controller = new AbortController();
     loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
     const sequence = ++sequenceRef.current;
+    setLoadingMore(false);
+    setPage(null);
     setLoading(true);
     setError("");
     setForbidden(false);
@@ -119,26 +122,36 @@ export function useInvestigationData(query: InvestigationQuery, refreshToken: nu
   }, [filters, query, refreshToken]);
 
   const loadMore = React.useCallback(async () => {
-    if (!page?.next_cursor || loadingMore) return;
+    if (!page?.next_cursor || loading || loadingMore) return;
     loadMoreAbortRef.current?.abort();
     const controller = new AbortController();
+    const sequence = sequenceRef.current;
     loadMoreAbortRef.current = controller;
     setLoadingMore(true);
     try {
       const nextPage = await getActivityPage(query, page.site_timezone, page.next_cursor, 30, { signal: controller.signal });
+      if (controller.signal.aborted || sequence !== sequenceRef.current) return;
       setPage(nextPage);
       setItems((current) => {
         const seen = new Set(current.map((item) => item.episode_id));
         return [...current, ...nextPage.items.filter((item) => !seen.has(item.episode_id))];
       });
     } catch (error) {
-      if (!isAbortError(error)) setError(errorMessage(error, "Unable to load more activity"));
+      if (!controller.signal.aborted && sequence === sequenceRef.current && !isAbortError(error)) {
+        setError(errorMessage(error, "Unable to load more activity"));
+      }
     } finally {
-      if (!controller.signal.aborted) setLoadingMore(false);
+      if (loadMoreAbortRef.current === controller) {
+        loadMoreAbortRef.current = null;
+        setLoadingMore(false);
+      }
     }
-  }, [loadingMore, page, query]);
+  }, [loading, loadingMore, page, query]);
 
-  React.useEffect(() => () => loadMoreAbortRef.current?.abort(), []);
+  React.useEffect(() => () => {
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+  }, []);
 
   return {
     filters,

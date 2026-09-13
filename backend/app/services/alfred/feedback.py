@@ -7,10 +7,10 @@ import json
 import re
 import uuid
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.ai.providers import ChatMessageInput, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
@@ -18,10 +18,22 @@ from app.db.session import AsyncSessionLocal
 from app.models import AlfredEvalExample, AlfredFeedback, AlfredLesson, ChatMessage, User
 from app.services.alfred.embeddings import embedding_text, generate_embedding
 from app.services.settings import get_runtime_config
-from app.services.telemetry import TELEMETRY_CATEGORY_ALFRED, emit_audit_log, sanitize_payload
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_ALFRED,
+    emit_audit_log,
+    sanitize_payload,
+    write_audit_log,
+)
 from app.services.type_helpers import as_dict, as_list
 
 logger = get_logger(__name__)
+
+FEEDBACK_ANALYSIS_TIMEOUT_SECONDS = 90
+FEEDBACK_STALE_AFTER_SECONDS = 180
+FEEDBACK_POLL_SECONDS = 2
+FEEDBACK_REVIEW_CHECKPOINT_SECONDS = 5
+REFLECTION_TIMEOUT_SECONDS = 60
+MAX_REFLECTION_TASKS = 4
 
 FEEDBACK_ANALYSIS_PROMPT = """You convert Alfred response feedback into durable IACS learning.
 Do not create keyword rules. Produce concise behavioral guidance and examples that help an LLM answer similar future IACS requests better.
@@ -221,6 +233,54 @@ class AlfredFeedbackError(ValueError):
 
 
 class AlfredFeedbackService:
+    def __init__(self) -> None:
+        self._running = False
+        self._dispatcher: asyncio.Task | None = None
+        self._wake = asyncio.Event()
+        self._reflections: set[asyncio.Task] = set()
+
+    async def start(self) -> None:
+        if self._dispatcher is not None and not self._dispatcher.done():
+            return
+        self._running = True
+        self._dispatcher = asyncio.create_task(self._dispatch_loop(), name="alfred-feedback-dispatch")
+
+    async def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+        tasks = list(self._reflections)
+        if self._dispatcher is not None:
+            tasks.append(self._dispatcher)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._dispatcher = None
+        self._reflections.clear()
+
+    def wake(self) -> None:
+        self._wake.set()  # Advisory only; committed queued work is discovered by polling.
+
+    async def _dispatch_loop(self) -> None:
+        while self._running:
+            self._wake.clear()
+            try:
+                await self.review_interrupted_feedback()
+                if await self.process_feedback() is not None:
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - worker boundary; retain durable work without exposing payloads
+                logger.warning("alfred_feedback_dispatch_failed", extra={"error_type": type(exc).__name__})
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=FEEDBACK_POLL_SECONDS)
+            except TimeoutError:
+                pass
+
+    async def _bounded_reflection(self, provider: Any, **kwargs) -> None:
+        async with asyncio.timeout(REFLECTION_TIMEOUT_SECONDS):
+            await self.reflect_on_turn(provider, **kwargs)
+
     def schedule_reflection(
         self,
         provider: Any,
@@ -233,9 +293,12 @@ class AlfredFeedbackService:
         provider_name: str,
         model_name: str | None,
     ) -> None:
+        if not self._running or len(self._reflections) >= MAX_REFLECTION_TASKS:
+            return  # Optional reflection never creates an unbounded background queue.
         try:
-            task = asyncio.create_task(
-                self.reflect_on_turn(
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(
+                self._bounded_reflection(
                     provider,
                     user_message=user_message,
                     assistant_text=assistant_text,
@@ -249,6 +312,8 @@ class AlfredFeedbackService:
         except RuntimeError:
             logger.info("alfred_reflection_not_scheduled", extra={"session_id": session_id})
             return
+        self._reflections.add(task)
+        task.add_done_callback(self._reflections.discard)
         task.add_done_callback(self._log_reflection_failure)
 
     def _log_reflection_failure(self, task: asyncio.Task) -> None:
@@ -439,7 +504,8 @@ class AlfredFeedbackService:
             raise AlfredFeedbackError("Thumbs-down feedback needs a short reason.")
 
         actor_uuid = _coerce_uuid(str(user.id) if user else actor_user_id)
-        role = (user.role.value if user else actor_role or "standard").strip().lower()
+        if actor_uuid is None:
+            raise AlfredFeedbackError("An active IACS user is required to submit feedback.")
         assistant_uuid = _coerce_uuid(assistant_message_id)
         if not assistant_uuid:
             raise AlfredFeedbackError("assistant_message_id is required.")
@@ -447,8 +513,6 @@ class AlfredFeedbackService:
         context = await self._load_turn_context(assistant_uuid)
         if not context:
             raise AlfredFeedbackError("Alfred response not found.")
-        self._assert_feedback_allowed(context, actor_uuid=actor_uuid, role=role)
-
         runtime = await get_runtime_config()
         source_channel = (source_channel or "dashboard").strip().lower()[:40] or "dashboard"
         turn_snapshot = sanitize_payload(context["turn_snapshot"])
@@ -458,6 +522,11 @@ class AlfredFeedbackService:
         model_name = str(context.get("model") or "")
 
         async with AsyncSessionLocal() as session:
+            current_actor = await session.get(User, actor_uuid, with_for_update=True)
+            if current_actor is None or not current_actor.is_active:
+                raise AlfredFeedbackError("An active IACS user is required to submit feedback.")
+            role = str(current_actor.role).strip().lower()
+            self._assert_feedback_allowed(context, actor_uuid=actor_uuid, role=role)
             feedback = AlfredFeedback(
                 rating=rating,
                 source_channel=source_channel,
@@ -476,24 +545,17 @@ class AlfredFeedbackService:
                 status="queued",
             )
             session.add(feedback)
+            await session.flush()
+            await write_audit_log(session,
+                category=TELEMETRY_CATEGORY_ALFRED,
+                action="alfred.feedback.submit",
+                actor="Alfred_Feedback", actor_user_id=actor_uuid,
+                target_entity="AlfredFeedback", target_id=str(feedback.id), target_label=rating,
+                metadata={"rating": rating, "source_channel": source_channel, "status": "queued"})
             await session.commit()
             await session.refresh(feedback)
 
-        emit_audit_log(
-            category=TELEMETRY_CATEGORY_ALFRED,
-            action="alfred.feedback.submit",
-            actor="Alfred_Feedback",
-            actor_user_id=actor_uuid,
-            target_entity="AlfredFeedback",
-            target_id=str(feedback.id),
-            target_label=rating,
-            metadata={
-                "rating": rating,
-                "source_channel": source_channel,
-                "status": "queued",
-            },
-        )
-        self._schedule_processing(feedback.id)
+        self.wake()
         return {
             "feedback": self._public_feedback(feedback),
             "lesson": None,
@@ -502,108 +564,161 @@ class AlfredFeedbackService:
             "processing": True,
         }
 
-    def _schedule_processing(self, feedback_id: uuid.UUID) -> None:
-        try:
-            task = asyncio.create_task(self.process_feedback(feedback_id))
-        except RuntimeError:
-            logger.info("alfred_feedback_processing_not_scheduled", extra={"feedback_id": str(feedback_id)})
-            return
-        task.add_done_callback(self._log_processing_failure)
-
-    def _log_processing_failure(self, task: asyncio.Task) -> None:
-        try:
-            task.result()
-        except Exception as exc:  # noqa: BLE001 - Consume and log background feedback-task failures.
-            logger.warning("alfred_feedback_processing_failed", extra={"error": str(exc)[:240]})
-
-    async def process_feedback(self, feedback_id: uuid.UUID | str) -> dict[str, Any] | None:
-        feedback_uuid = _coerce_uuid(feedback_id)
-        if not feedback_uuid:
-            return None
+    async def _claim_feedback(self, feedback_id: uuid.UUID | None) -> AlfredFeedback | None:
         async with AsyncSessionLocal() as session:
-            feedback = await session.get(AlfredFeedback, feedback_uuid)
-            if not feedback:
+            statement = select(AlfredFeedback).where(AlfredFeedback.status == "queued")
+            if feedback_id is not None:
+                statement = statement.where(AlfredFeedback.id == feedback_id)
+            row = await session.scalar(statement.order_by(AlfredFeedback.created_at, AlfredFeedback.id)
+                .limit(1).with_for_update(skip_locked=True))
+            if row is None:
                 return None
-            if feedback.status not in {"queued", "received", "analysis_failed"}:
-                return self._public_feedback(feedback)
-            feedback.status = "analyzing"
+            row.status = "analyzing"
+            row.updated_at = await session.scalar(select(func.clock_timestamp()))
             await session.commit()
-            await session.refresh(feedback)
+            await session.refresh(row)
+            return row
 
+    @staticmethod
+    def _same_claim(row: AlfredFeedback | None, claim: AlfredFeedback) -> bool:
+        return row is not None and row.status == "analyzing" and row.updated_at == claim.updated_at
+
+    @staticmethod
+    def _actor_unchanged(actor: User | None, claim: AlfredFeedback) -> bool:
+        return bool(actor and actor.is_active and str(actor.role).strip().lower() == claim.actor_role)
+
+    @staticmethod
+    def _review(row: AlfredFeedback, reason: str, now: datetime) -> None:
+        row.status, row.updated_at = "review_required", now
+        row.analysis = {**(row.analysis or {}),
+            "summary": "Feedback retained for review; analysis was not automatically repeated.",
+            "recovery": {"reason": reason, "automatic_retry": False}}
+
+    async def review_interrupted_feedback(self) -> int:
+        async with AsyncSessionLocal() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            rows = list((await session.scalars(select(AlfredFeedback).where(or_(
+                AlfredFeedback.status == "received",
+                (AlfredFeedback.status == "analyzing") &
+                (AlfredFeedback.updated_at <= now - timedelta(seconds=FEEDBACK_STALE_AFTER_SECONDS))))
+                .order_by(AlfredFeedback.updated_at, AlfredFeedback.id).limit(25)
+                .with_for_update(skip_locked=True))).all())
+            for row in rows:
+                self._review(row, "historical_unprocessed" if row.status == "received" else "analysis_interrupted", now)
+            await session.commit()
+            return len(rows)
+
+    async def _review_claim(self, claim: AlfredFeedback, reason: str) -> None:
+        async with asyncio.timeout(FEEDBACK_REVIEW_CHECKPOINT_SECONDS):
+            async with AsyncSessionLocal() as session:
+                row = await session.get(AlfredFeedback, claim.id, with_for_update=True)
+                if self._same_claim(row, claim):
+                    self._review(row, reason, await session.scalar(select(func.clock_timestamp())))
+                    await session.commit()
+
+    async def _review_claim_before_cancel(self, claim: AlfredFeedback) -> None:
+        checkpoint = asyncio.create_task(self._review_claim(claim, "analysis_cancelled"))
+        while not checkpoint.done():
+            try:
+                await asyncio.shield(checkpoint)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001 - inspect the drained checkpoint below
+                break
+        try:
+            checkpoint.result()
+        except Exception as exc:  # noqa: BLE001 - failed checkpoint remains recoverable after DB outage
+            # The analyzing timestamp remains discoverable after a DB outage.
+            logger.warning("alfred_feedback_review_checkpoint_failed", extra={"error_type": type(exc).__name__})
+
+    async def process_feedback(self, feedback_id: uuid.UUID | str | None = None) -> dict[str, Any] | None:
+        feedback_uuid = _coerce_uuid(feedback_id) if feedback_id is not None else None
+        if feedback_id is not None and feedback_uuid is None:
+            return None
+        claim = await self._claim_feedback(feedback_uuid)
+        if claim is None:
+            return None
+        try:
+            async with asyncio.timeout(FEEDBACK_ANALYSIS_TIMEOUT_SECONDS):
+                return await self._process_claimed_feedback(claim)
+        except asyncio.CancelledError:
+            await self._review_claim_before_cancel(claim)
+            raise
+        except TimeoutError:
+            await self._review_claim(claim, "analysis_deadline_exceeded")
+        except Exception as exc:  # noqa: BLE001 - durable review boundary around provider analysis
+            logger.warning("alfred_feedback_analysis_interrupted", extra={"error_type": type(exc).__name__})
+            await self._review_claim(claim, "analysis_failed_before_commit")
+        async with AsyncSessionLocal() as session:
+            current = await session.get(AlfredFeedback, claim.id)
+            return {"feedback": self._public_feedback(current), "lesson": None, "eval_example": None,
+                    "corrected_answer": "", "processing": False} if current else None
+
+    async def _process_claimed_feedback(self, claim: AlfredFeedback) -> dict[str, Any] | None:
+        # Do not send retained private context for a vanished or changed actor.
+        async with AsyncSessionLocal() as session:
+            actor = await session.get(User, claim.actor_user_id) if claim.actor_user_id else None
+            actor_valid = self._actor_unchanged(actor, claim)
+        if not actor_valid:
+            await self._review_claim(claim, "actor_authority_changed")
+            async with AsyncSessionLocal() as session:
+                current = await session.get(AlfredFeedback, claim.id)
+                return {"feedback": self._public_feedback(current), "lesson": None,
+                        "eval_example": None, "corrected_answer": "", "processing": False} if current else None
         runtime = await get_runtime_config()
-        rating = feedback.rating
-        reason = feedback.reason or ""
-        ideal_answer = feedback.ideal_answer or ""
-        original_prompt = feedback.original_user_prompt or ""
-        original_answer = feedback.original_assistant_response or ""
-        turn_snapshot = sanitize_payload(feedback.turn_snapshot or {})
-        feedback_embedding = await generate_embedding(
-            _feedback_embedding_text(feedback),
-            purpose="alfred_feedback",
-        )
-        learning_mode = runtime.alfred_learning_mode
-        source_channel = feedback.source_channel
-        provider_name = feedback.provider or runtime.llm_provider
-        model_name = feedback.model or ""
-        role = (feedback.actor_role or "standard").strip().lower()
-        actor_uuid = feedback.actor_user_id
-
+        turn_snapshot = sanitize_payload(claim.turn_snapshot or {})
+        feedback_embedding = await generate_embedding(_feedback_embedding_text(claim), purpose="alfred_feedback")
         analysis = await self._analyze_feedback(
             runtime_provider=runtime.llm_provider,
             model_name=str(getattr(runtime, "alfred_background_model", "") or "").strip() or None,
-            rating=rating,
-            reason=reason,
-            ideal_answer=ideal_answer,
-            original_prompt=original_prompt,
-            original_answer=original_answer,
-            turn_snapshot=turn_snapshot,
-        )
-        corrected_answer = _safe_corrected_answer(
-            analysis.get("corrected_answer"),
-            ideal_answer=ideal_answer,
-            turn_snapshot=turn_snapshot,
-        )
+            rating=claim.rating, reason=claim.reason or "", ideal_answer=claim.ideal_answer or "",
+            original_prompt=claim.original_user_prompt or "", original_answer=claim.original_assistant_response or "",
+            turn_snapshot=turn_snapshot)
+        corrected_answer = _safe_corrected_answer(analysis.get("corrected_answer"),
+            ideal_answer=claim.ideal_answer or "", turn_snapshot=turn_snapshot)
         analysis["corrected_answer"] = corrected_answer
-        lesson = await self._create_lesson_from_analysis(
-            feedback_id=str(feedback.id),
-            actor_uuid=actor_uuid,
-            actor_role=role,
-            rating=rating,
-            learning_mode=learning_mode,
-            analysis=analysis,
-        )
-        eval_scope = str(lesson.get("scope") if lesson else ("site" if role == "admin" else "user"))
-        eval_example = await self._create_eval_example(
-            feedback_id=str(feedback.id),
-            scope=eval_scope,
-            original_prompt=original_prompt,
-            original_answer=original_answer,
-            ideal_answer=ideal_answer,
-            corrected_answer=corrected_answer,
+        lesson = await self._prepare_lesson_from_analysis(feedback_id=str(claim.id), actor_uuid=claim.actor_user_id,
+            actor_role=claim.actor_role, rating=claim.rating, learning_mode=runtime.alfred_learning_mode, analysis=analysis)
+        eval_example = await self._prepare_eval_example(feedback_id=str(claim.id),
+            scope=lesson.scope if lesson else ("site" if claim.actor_role == "admin" else "user"),
+            original_prompt=claim.original_user_prompt or "", original_answer=claim.original_assistant_response or "",
+            ideal_answer=claim.ideal_answer or "", corrected_answer=corrected_answer,
             lesson_text=str((analysis.get("lesson") or {}).get("lesson") or ""),
-            metadata={"rating": rating, "source_channel": source_channel, "provider": provider_name, "model": model_name},
-        )
-
+            metadata={"rating": claim.rating, "source_channel": claim.source_channel,
+                "provider": claim.provider or runtime.llm_provider, "model": claim.model or ""})
         async with AsyncSessionLocal() as session:
-            row = await session.get(AlfredFeedback, feedback.id)
-            if row:
-                row.analysis = analysis
-                row.corrected_answer = corrected_answer or None
-                if row.embedding is None:
-                    row.embedding = feedback_embedding
-                row.lesson_id = _coerce_uuid(lesson.get("id")) if lesson else None
-                row.status = "processed" if lesson or eval_example else "analysis_failed"
+            # Actor before feedback is the same lock order used by submission.
+            actor = await session.get(User, claim.actor_user_id, with_for_update=True) if claim.actor_user_id else None
+            row = await session.get(AlfredFeedback, claim.id, with_for_update=True)
+            if not self._same_claim(row, claim):
+                return None  # A stale provider result cannot publish orphan training rows.
+            now = await session.scalar(select(func.clock_timestamp()))
+            if now >= claim.updated_at + timedelta(seconds=FEEDBACK_ANALYSIS_TIMEOUT_SECONDS):
+                self._review(row, "analysis_deadline_exceeded", now)
                 await session.commit()
-                await session.refresh(row)
-                feedback = row
-
-        return {
-            "feedback": self._public_feedback(feedback),
-            "lesson": lesson,
-            "eval_example": eval_example,
-            "corrected_answer": corrected_answer,
-            "processing": False,
-        }
+                return {"feedback": self._public_feedback(row), "lesson": None, "eval_example": None,
+                        "corrected_answer": "", "processing": False}
+            if not self._actor_unchanged(actor, claim):
+                self._review(row, "actor_authority_changed", now)
+                await session.commit()
+                return {"feedback": self._public_feedback(row), "lesson": None, "eval_example": None,
+                        "corrected_answer": "", "processing": False}
+            if lesson is not None:
+                session.add(lesson)
+            if eval_example is not None:
+                session.add(eval_example)
+            await session.flush()
+            row.analysis, row.corrected_answer = analysis, corrected_answer or None
+            if row.embedding is None:
+                row.embedding = feedback_embedding
+            row.lesson_id = lesson.id if lesson else None
+            row.status = "processed" if lesson or eval_example else "analysis_failed"
+            row.updated_at = now
+            await session.commit()
+            return {"feedback": self._public_feedback(row),
+                "lesson": (self._public_lesson(lesson, include_owner=True) | {"rating": claim.rating}) if lesson else None,
+                "eval_example": self._public_eval(eval_example) if eval_example else None,
+                "corrected_answer": corrected_answer, "processing": False}
 
     async def submit_feedback_for_last_response(
         self,
@@ -875,7 +990,18 @@ class AlfredFeedbackService:
             }
         return sanitize_payload(payload)
 
-    async def _create_lesson_from_analysis(
+    async def _create_lesson_from_analysis(self, **kwargs) -> dict[str, Any] | None:
+        """Optional reflection uses the same policy builder with its own commit."""
+        row = await self._prepare_lesson_from_analysis(**kwargs)
+        if row is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+        return self._public_lesson(row, include_owner=True) | {"rating": kwargs["rating"]}
+
+    async def _prepare_lesson_from_analysis(
         self,
         *,
         feedback_id: str,
@@ -884,7 +1010,7 @@ class AlfredFeedbackService:
         rating: str,
         learning_mode: str,
         analysis: dict[str, Any],
-    ) -> dict[str, Any] | None:
+    ) -> AlfredLesson | None:
         raw_lesson = as_dict(analysis.get("lesson"))
         lesson_text = str(raw_lesson.get("lesson") or "").strip()
         if not lesson_text:
@@ -916,30 +1042,25 @@ class AlfredFeedbackService:
             embedding_text(title, lesson_text, " ".join(tags)),
             purpose="alfred_lesson",
         )
-        async with AsyncSessionLocal() as session:
-            row = AlfredLesson(
-                scope=scope,
-                owner_user_id=None if scope == "site" else actor_uuid,
-                title=title,
-                lesson=lesson_text[:2000],
-                tags=tags,
-                source_feedback_ids=[feedback_id],
-                confidence=confidence,
-                embedding=embedding,
-                status=status,
-                created_by_user_id=actor_uuid,
-                approved_by_user_id=actor_uuid if status == "active" and actor_role == "admin" else None,
-                approved_at=now if status == "active" and actor_role == "admin" else None,
-                active_at=now if status == "active" else None,
-                rejected_by_user_id=actor_uuid if unsafe_lesson else None,
-                rejected_at=now if unsafe_lesson else None,
-            )
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-        return self._public_lesson(row, include_owner=True) | {"rating": rating}
+        return AlfredLesson(
+            scope=scope,
+            owner_user_id=None if scope == "site" else actor_uuid,
+            title=title,
+            lesson=lesson_text[:2000],
+            tags=tags,
+            source_feedback_ids=[feedback_id],
+            confidence=confidence,
+            embedding=embedding,
+            status=status,
+            created_by_user_id=actor_uuid,
+            approved_by_user_id=actor_uuid if status == "active" and actor_role == "admin" else None,
+            approved_at=now if status == "active" and actor_role == "admin" else None,
+            active_at=now if status == "active" else None,
+            rejected_by_user_id=actor_uuid if unsafe_lesson else None,
+            rejected_at=now if unsafe_lesson else None,
+        )
 
-    async def _create_eval_example(
+    async def _prepare_eval_example(
         self,
         *,
         feedback_id: str,
@@ -950,7 +1071,7 @@ class AlfredFeedbackService:
         corrected_answer: str,
         lesson_text: str,
         metadata: dict[str, Any],
-    ) -> dict[str, Any] | None:
+    ) -> AlfredEvalExample | None:
         prompt = original_prompt.strip()
         if not prompt:
             return None
@@ -963,22 +1084,17 @@ class AlfredFeedbackService:
             embedding_text(prompt, safe_ideal_answer, safe_corrected_answer, lesson_text),
             purpose="alfred_eval_example",
         )
-        async with AsyncSessionLocal() as session:
-            row = AlfredEvalExample(
-                feedback_id=_coerce_uuid(feedback_id),
-                scope=scope if scope in {"user", "site"} else "user",
-                prompt=prompt[:4000],
-                bad_answer=original_answer[:4000] or None,
-                ideal_answer=safe_ideal_answer[:4000] or None,
-                corrected_answer=safe_corrected_answer[:4000] or None,
-                lesson=lesson_text[:2000] or None,
-                metadata_=sanitize_payload(metadata),
-                embedding=embedding,
-            )
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-        return self._public_eval(row)
+        return AlfredEvalExample(
+            feedback_id=_coerce_uuid(feedback_id),
+            scope=scope if scope in {"user", "site"} else "user",
+            prompt=prompt[:4000],
+            bad_answer=original_answer[:4000] or None,
+            ideal_answer=safe_ideal_answer[:4000] or None,
+            corrected_answer=safe_corrected_answer[:4000] or None,
+            lesson=lesson_text[:2000] or None,
+            metadata_=sanitize_payload(metadata),
+            embedding=embedding,
+        )
 
     def _public_feedback(self, row: AlfredFeedback) -> dict[str, Any]:
         corrected_answer = "" if _contains_placeholder(row.corrected_answer or "") else row.corrected_answer

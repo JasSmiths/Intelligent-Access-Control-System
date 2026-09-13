@@ -27,7 +27,10 @@ shim or route imports through one.
 - `auth.tsx`: login/setup/session behavior
 - `routes.tsx`: route registry/composition
 - `navigation.tsx`: sidebar/nav metadata
-- `realtimeEvents.ts`: realtime event interpretation/refresh wiring
+- `realtimeEvents.ts`: compact realtime event interpretation
+- `realtimeRefresh.ts`: event impact and relevant resource/route selection
+- `useShellRefresh.ts`: typed shell reads and route/account request lifetime
+- `refreshCoordinator.ts`: serialized batches, burst coalescing and trailing invalidations
 - `searchPalette.tsx`: global search UI/state
 - `theme.tsx`: light/dark/system theme behavior
 - `toasts.tsx`: toast state/UI
@@ -45,6 +48,7 @@ Typed resource owners include:
 
 - `frontend/src/api/integrations.ts`
 - `frontend/src/api/workflows.ts`
+- `frontend/src/api/schedules.ts`
 - `frontend/src/api/search.ts`
 - `frontend/src/api/chat.ts`
 - `frontend/src/api/types.ts`
@@ -65,13 +69,26 @@ Integrations:
 - Shared provider primitives live in the feature folder unless truly domain-neutral.
 - Backend metadata/config/status is the source of truth; do not recreate frontend fallback catalogs.
 
+Schedules:
+
+- Direct lazy route: `features/schedules/SchedulesView.tsx`.
+- Form/dependencies: `ScheduleEditor.tsx`; weekly interactions: `WeeklyScheduleGrid.tsx`.
+- Interval conversion and summaries: `features/schedules/model.ts`.
+- CRUD and confirmation HTTP contracts: `api/schedules.ts`.
+- Default-policy persistence remains under `lib/settings.tsx`.
+
 Workflows:
 
-- Route shell: `frontend/src/views/WorkflowViews.tsx`
-- Feature owner: `frontend/src/features/workflows/WorkflowFeature.tsx`
+- Direct lazy entries: `features/workflows/AutomationsView.tsx` and `NotificationsView.tsx`.
+- Automation node editing: `AutomationEditor.tsx`; draft/presentation helpers: `automationModel.tsx`.
+- Notification editing: `NotificationEditor.tsx`, `NotificationActionCard.tsx`, `NotificationSelection.tsx`; draft/presentation helpers: `notificationModel.tsx`.
+- Common lists/selection blocks: `components.tsx`; rich text: `TemplateEditor.tsx`.
+- Shared model and state/read ownership: `model.ts`, `hooks.ts`.
+- The aggregate WorkflowFeature and WorkflowViews paths were retired; do not recreate aliases.
 - API owner: `frontend/src/api/workflows.ts`
 - Backend workflow catalogs are the source of truth.
-- Keep automation and notification builders sharing primitives where concepts overlap.
+- Keep automation and notification builders sharing primitives where concepts overlap. Shared modules must not import a concrete editor.
+- Use the shared request hook; do not let stale reads replace a completed mutation. Load camera choices only for an editor that can use them.
 - Do not reintroduce frontend fallback workflow/notification catalogs.
 
 ## UI And Helpers
@@ -133,3 +150,15 @@ rg "from ['\"].*/shared|shared.tsx|frontend/src/shared" frontend/src
 rg "fetch\\(" frontend/src
 ```
 
+
+## Ownership and retirement checks
+
+`frontendOwnership.test.ts` enforces direct route ownership and acyclic feature
+imports. Schedule tests live in `features/schedules/`; workflow tests in
+`features/workflows/`; confirmation contracts in `api/mutationContracts.test.ts`.
+Refresh selection, batching and lifetime tests live beside their `app/` owners.
+
+Add event impact entries with tests for affected and unaffected routes. Preserve
+full active-route refresh on reconnect/manual refresh. Do not double-refresh routes
+that already consume compact events. Check dynamic/responsive CSS consumers before
+removing selectors. See [milestone 6](../validation/milestone6-frontend.md).
