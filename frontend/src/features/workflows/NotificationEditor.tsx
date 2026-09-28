@@ -156,7 +156,7 @@ export function NotificationWorkflowEditor({
           </div>
         </section>
       </div>
-      <NotificationLivePreviewPanel actions={previewActions} />
+      <div id="workflow-preview" className="workflow-preview-wrapper"><NotificationLivePreviewPanel actions={previewActions} /></div>
     </div>
   );
 }

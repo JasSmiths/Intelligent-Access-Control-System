@@ -31,9 +31,11 @@ import { UnifiProtectCameraSection } from "../features/integrations/unifiProtect
 const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
 
 export function IntegrationsView({ currentUser, people, latestRealtime, refreshToken, status }: { currentUser: UserAccount; people: Person[]; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
-  const { values, loading, save, reload } = useSettings();
+  const { values, loading, error: settingsError, save, reload } = useSettings();
   const isAdmin = currentUser.role === "admin";
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
+  const [homeAssistantError, setHomeAssistantError] = React.useState("");
+  const [initialStatusesLoaded, setInitialStatusesLoaded] = React.useState(false);
   const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
@@ -96,10 +98,12 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
     }
   }, []);
   const loadHomeAssistantStatus = React.useCallback(async () => {
+    setHomeAssistantError("");
     try {
       setHomeAssistantStatus(await integrationsApi.getHomeAssistantStatus());
-    } catch {
+    } catch (error) {
       setHomeAssistantStatus(null);
+      setHomeAssistantError(error instanceof Error ? error.message : "Connection status unavailable.");
     }
   }, []);
   const loadAccessDeviceStatus = React.useCallback(async () => {
@@ -183,12 +187,8 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp, reload]);
 
   React.useEffect(() => {
-    loadHomeAssistantStatus().catch(() => undefined);
-    loadAccessDeviceStatus().catch(() => undefined);
-    loadProtect(false).catch(() => undefined);
-    loadICloudCalendar().catch(() => undefined);
-    loadDiscord().catch(() => undefined);
-    loadWhatsApp().catch(() => undefined);
+    Promise.all([loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(false), loadICloudCalendar(), loadDiscord(), loadWhatsApp()])
+      .finally(() => setInitialStatusesLoaded(true));
   }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp]);
 
   React.useEffect(() => {
@@ -207,6 +207,8 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   return (
     <section className="view-stack integrations-page">
       <Toolbar title="API & Integrations" count={tiles.length} icon={PlugZap} />
+      <p className="integration-state-note">Configured means credentials or a service address are saved. Connected means a status read verified the connection.</p>
+      {settingsError ? <div className="error-banner" role="alert">Configuration unavailable: {settingsError}</div> : null}
       <div className="integration-category-stack">
         {groupedTiles.map((category) => (
           <section className="integration-category" key={category.key}>
@@ -243,6 +245,8 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
             <div className="integration-tile-grid">
               {category.tiles.map((tile) => {
                 const Icon = tile.icon;
+                const checking = loading || !initialStatusesLoaded;
+                const unavailable = Boolean(settingsError || (tile.key === "home_assistant" && homeAssistantError) || (tile.key === "unifi_protect" && protectError) || (tile.key === "icloud_calendar" && icloudError) || (tile.key === "discord" && discordError) || (tile.key === "whatsapp" && whatsappError));
                 return (
                   <article className="card integration-tile" key={tile.key}>
                     <button
@@ -263,7 +267,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
                           </span>
                         ) : null}
                       </div>
-                      <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
+                      <Badge tone={checking ? "gray" : unavailable ? "amber" : tile.statusTone}>{checking ? "Checking" : unavailable ? "Unavailable" : tile.statusLabel}</Badge>
                     </button>
                   </article>
                 );

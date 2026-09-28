@@ -3,13 +3,16 @@ ArrowLeft,
 ArrowRight,
 Clock3,
 FileImage,
+RefreshCw,
 } from "lucide-react";
 import React from "react";
 
-import { formatDate, matches, movementSagaDisplay, visitorEventDisplayName } from "../lib/format";
+import { api } from "../api/client";
+import { formatDate, movementSagaDisplay, visitorEventDisplayName } from "../lib/format";
 import { mediaVariantUrl } from "../lib/media";
-import { Badge, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, Toolbar } from "../ui/primitives";
 import type { AccessEvent } from "../api/types";
+import { useHistoryPage } from "./useHistoryPage";
 
 
 
@@ -71,44 +74,51 @@ export const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event
   );
 });
 
-const EVENTS_PAGE_SIZE = 7;
-
-export function EventsView({ events, query }: { events: AccessEvent[]; query: string }) {
+export function EventsView({ refreshToken, resetToken, targetId }: { refreshToken: number; resetToken: number; targetId: string | null }) {
+  const [query, setQuery] = React.useState("");
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
+  const [decision, setDecision] = React.useState("");
+  const [focused, setFocused] = React.useState<AccessEvent | null>(null);
+  const [focusError, setFocusError] = React.useState("");
   const deferredQuery = React.useDeferredValue(query);
-  const [page, setPage] = React.useState(0);
-  const filtered = React.useMemo(
-    () => events.filter(
-      (item) =>
-        matches(item.registration_number, deferredQuery) ||
-        matches(item.source, deferredQuery) ||
-        matches(item.visitor_name || "", deferredQuery)
-    ),
-    [deferredQuery, events]
-  );
-
-  const pageCount = React.useMemo(
-    () => Math.max(1, Math.ceil(filtered.length / EVENTS_PAGE_SIZE)),
-    [filtered.length]
-  );
-  const pagedEvents = React.useMemo(
-    () => filtered.slice(page * EVENTS_PAGE_SIZE, (page + 1) * EVENTS_PAGE_SIZE),
-    [page, filtered]
-  );
-
-  const firstItem = page * EVENTS_PAGE_SIZE + 1;
-  const lastItem = Math.min(filtered.length, (page + 1) * EVENTS_PAGE_SIZE);
-
+  const filters = new URLSearchParams();
+  if (deferredQuery.trim()) filters.set("q", deferredQuery.trim());
+  if (from) filters.set("from", from);
+  if (to) filters.set("to", to);
+  if (decision) filters.set("decision", decision);
+  const history = useHistoryPage<AccessEvent>("/api/v1/events/history", filters, refreshToken, resetToken);
   React.useEffect(() => {
-    setPage(0);
-  }, [deferredQuery]);
-
-  React.useEffect(() => {
-    setPage((p) => Math.min(p, pageCount - 1));
-  }, [pageCount]);
+    if (!targetId) { setFocused(null); return; }
+    if (history.loading) return;
+    if (history.items.some((item) => item.id === targetId)) { setFocused(null); return; }
+    let active = true;
+    void api.get<AccessEvent>(`/api/v1/events/${encodeURIComponent(targetId)}`)
+      .then((item) => { if (active) { setFocused(item); setFocusError(""); } })
+      .catch((error: unknown) => { if (active) setFocusError(error instanceof Error ? error.message : "Event unavailable."); });
+    return () => { active = false; };
+  }, [targetId, history.items, history.loading]);
+  const visible = focused ? [focused, ...history.items.filter((item) => item.id !== focused.id)] : history.items;
+  const firstItem = history.index * 50 + 1;
+  const lastItem = history.index * 50 + history.items.length;
 
   return (
     <section className="view-stack">
-      <Toolbar title="Timeline" count={filtered.length} icon={Clock3} />
+      <Toolbar title="Events" icon={Clock3}>
+        <button className="secondary-button" type="button" onClick={history.refresh} disabled={history.loading}><RefreshCw size={15} /> Refresh</button>
+      </Toolbar>
+      <div className="history-filters" aria-label="Event filters">
+        <label>Search events<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Plate or source" /></label>
+        <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+        <label>Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+        <label>Decision<select value={decision} onChange={(event) => setDecision(event.target.value)}><option value="">All decisions</option><option value="granted">Granted</option><option value="denied">Denied</option></select></label>
+        {(query || from || to || decision) ? <button className="secondary-button" type="button" onClick={() => { setQuery(""); setFrom(""); setTo(""); setDecision(""); }}>Clear filters</button> : null}
+        <p className="history-date-hint">Dates use the site timezone. Before excludes the selected date.</p>
+      </div>
+      {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
+      {history.error ? <div className="callout danger" role="alert">Events unavailable: {history.error}</div> : null}
+      {focusError ? <div className="callout danger" role="alert">{focusError}</div> : null}
+      {focused ? <div className="callout">Showing the selected event from outside this page.</div> : null}
       <div className="table-card events-table-card">
         <table>
           <thead>
@@ -124,10 +134,10 @@ export function EventsView({ events, query }: { events: AccessEvent[]; query: st
             </tr>
           </thead>
           <tbody>
-            {pagedEvents.map((event) => {
+            {visible.map((event) => {
               const movement = movementSagaDisplay(event.movement_saga);
               return (
-                <tr key={event.id}>
+                <tr key={event.id} id={`event-${event.id}`}>
                   <td className="event-snapshot-cell">
                     <EventSnapshotThumb event={event} />
                   </td>
@@ -146,29 +156,29 @@ export function EventsView({ events, query }: { events: AccessEvent[]; query: st
             })}
           </tbody>
         </table>
-        {filtered.length > EVENTS_PAGE_SIZE ? (
+        {history.items.length || history.index ? (
           <div
             className="top-charts-pagination"
             style={{ padding: "8px 12px", borderTop: "1px solid var(--line)" }}
             aria-label="Events pagination"
           >
-            <span>{firstItem}-{lastItem} of {filtered.length}</span>
+            <span>{history.items.length ? `${firstItem}-${lastItem}` : "0"} records on this page{history.nextCursor ? "; more available" : ""}</span>
             <div className="top-charts-pagination-controls">
               <button
                 aria-label="Previous page"
                 className="icon-button top-charts-page-button"
-                disabled={page === 0}
-                onClick={() => setPage(Math.max(0, page - 1))}
+                disabled={history.index === 0 || history.loading}
+                onClick={history.previous}
                 type="button"
               >
                 <ArrowLeft size={15} />
               </button>
-              <span>Page {page + 1} of {pageCount}</span>
+              <span>Page {history.index + 1}</span>
               <button
                 aria-label="Next page"
                 className="icon-button top-charts-page-button"
-                disabled={page >= pageCount - 1}
-                onClick={() => setPage(Math.min(pageCount - 1, page + 1))}
+                disabled={!history.nextCursor || history.loading}
+                onClick={history.next}
                 type="button"
               >
                 <ArrowRight size={15} />
@@ -176,6 +186,8 @@ export function EventsView({ events, query }: { events: AccessEvent[]; query: st
             </div>
           </div>
         ) : null}
+        {history.loading ? <div className="loading-panel">Loading events…</div> : null}
+        {!history.loading && !history.error && !visible.length ? <EmptyState icon={Clock3} label={query || from || to || decision ? "No events match these filters." : "No events recorded yet."} /> : null}
       </div>
     </section>
   );

@@ -1,13 +1,14 @@
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import admin_user, current_user
+from app.api.v1.history import HistoryPage, older_than, range_boundary, read_cursor, site_zone, write_cursor
 from app.db.session import get_db_session
 from app.models import AccessEvent, GateCommandRecord, MovementSagaRecord, User
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
@@ -15,6 +16,7 @@ from app.services.event_bus import event_bus
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
 from app.services.type_helpers import as_dict
+from app.services.settings import get_runtime_config
 
 router = APIRouter()
 movement_ledger = get_movement_ledger_repository()
@@ -22,6 +24,72 @@ movement_ledger = get_movement_ledger_repository()
 
 class MovementReconciliationRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/movements/history", response_model=HistoryPage[dict[str, Any]])
+async def movements_history(
+    _: User = Depends(current_user),
+    session: AsyncSession = Depends(get_db_session),
+    limit: int = Query(default=50, ge=1, le=250),
+    cursor: str | None = Query(default=None, max_length=1024),
+    q: str | None = Query(default=None, max_length=120),
+    from_: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    state: MovementSagaState | None = None,
+    reconciliation_required: bool | None = None,
+    category: Literal["pending", "confirmed", "needs_reconciliation", "failed", "suppressed", "unknown"] | None = None,
+) -> HistoryPage[dict[str, Any]]:
+    zone = site_zone((await get_runtime_config()).site_timezone)
+    start, end = range_boundary(from_, zone), range_boundary(to, zone)
+    if start and end and start >= end:
+        raise HTTPException(status_code=422, detail="History start must be before end.")
+    filters = {"q": (q or "").strip(), "from": start, "to": end, "state": state,
+               "reconciliation_required": reconciliation_required, "category": category}
+    as_of, after_stamp, after_id = read_cursor(cursor, filters)
+    query = (select(MovementSagaRecord).options(selectinload(MovementSagaRecord.gate_commands))
+             .where(MovementSagaRecord.created_at <= as_of))
+    if start:
+        query = query.where(MovementSagaRecord.occurred_at >= start)
+    if end:
+        query = query.where(MovementSagaRecord.occurred_at < end)
+    if state:
+        query = query.where(MovementSagaRecord.state == state)
+    if reconciliation_required is not None:
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(reconciliation_required))
+    pending_states = (MovementSagaState.OBSERVED, MovementSagaState.DIRECTION_RESOLVED,
+                      MovementSagaState.PHYSICAL_COMMAND_PENDING, MovementSagaState.PHYSICAL_COMMAND_ACCEPTED)
+    if category == "needs_reconciliation":
+        query = query.where(or_(MovementSagaRecord.reconciliation_required.is_(True),
+                                MovementSagaRecord.state == MovementSagaState.RECONCILIATION_REQUIRED))
+    elif category == "failed":
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(False),
+                            MovementSagaRecord.state == MovementSagaState.FAILED)
+    elif category == "suppressed":
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(False),
+                            MovementSagaRecord.state == MovementSagaState.SUPPRESSED)
+    elif category == "pending":
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(False),
+                            MovementSagaRecord.state.in_(pending_states))
+    elif category == "confirmed":
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(False),
+                            MovementSagaRecord.state.in_((MovementSagaState.PRESENCE_COMMITTED, MovementSagaState.COMPLETED)))
+    elif category == "unknown":
+        known = (*pending_states, MovementSagaState.PRESENCE_COMMITTED, MovementSagaState.COMPLETED,
+                 MovementSagaState.FAILED, MovementSagaState.SUPPRESSED, MovementSagaState.RECONCILIATION_REQUIRED)
+        query = query.where(MovementSagaRecord.reconciliation_required.is_(False),
+                            ~MovementSagaRecord.state.in_(known))
+    if filters["q"]:
+        pattern = f"%{filters['q']}%"
+        query = query.where(or_(MovementSagaRecord.registration_number.ilike(pattern),
+                                MovementSagaRecord.source.ilike(pattern), MovementSagaRecord.failure_detail.ilike(pattern)))
+    if after_stamp and after_id:
+        query = query.where(older_than(MovementSagaRecord.occurred_at, MovementSagaRecord.id, after_stamp, after_id))
+    rows = (await session.scalars(query.order_by(MovementSagaRecord.occurred_at.desc(),
+                                                  MovementSagaRecord.id.desc()).limit(limit + 1))).all()
+    page_rows = rows[:limit]
+    next_cursor = write_cursor(as_of, page_rows[-1].occurred_at, page_rows[-1].id, filters) if len(rows) > limit else None
+    return HistoryPage(items=[_movement_payload(row, include_history=False) for row in page_rows],
+                       next_cursor=next_cursor, as_of=as_of)
 
 
 @router.get("/movements")

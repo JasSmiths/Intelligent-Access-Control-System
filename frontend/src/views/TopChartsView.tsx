@@ -198,6 +198,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
           <RefreshCcw size={15} /> {refreshing ? "Refreshing" : "Refresh"}
         </button>
       </Toolbar>
+      <p className="top-charts-scope">All recorded access events through {leaderboard?.generated_at ? formatDate(leaderboard.generated_at) : "the latest refresh"}. Known counts include granted entries linked to a vehicle; unknown counts include denied events without a linked vehicle. Each chart shows up to 25 plates.</p>
 
       {error ? <div className="error-banner">{error}</div> : null}
       {loading ? (
@@ -208,10 +209,10 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
             <div className="top-charts-card-header">
               <div>
                 <span className="eyebrow">Known Plates</span>
-                <h2>The VIP Lounge</h2>
-                <p>Known plates battling for driveway supremacy.</p>
+                <h2>Known vehicle entries</h2>
+                <p>Ranked by granted entry events.</p>
               </div>
-              <Badge tone="green">{knownReadCount} Detections</Badge>
+              <Badge tone="green">{knownReadCount} shown events</Badge>
             </div>
 
             {knownRows.length ? (
@@ -229,7 +230,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 />
               </>
             ) : (
-              <EmptyState icon={Trophy} label="No VIP Detections yet" />
+              <EmptyState icon={Trophy} label={query ? "No known entries match this filter" : "No known vehicle entries recorded"} />
             )}
           </section>
 
@@ -237,10 +238,10 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
             <div className="top-charts-card-header">
               <div>
                 <span className="eyebrow">Unknown Plates</span>
-                <h2>The Mystery Guests</h2>
-                <p>Unrecognized plates ranked by repeat visits.</p>
+                <h2>Unknown denied plates</h2>
+                <p>Ranked by denied events without a linked vehicle.</p>
               </div>
-              <Badge tone="amber">{unknownReadCount} Detections</Badge>
+              <Badge tone="amber">{unknownReadCount} shown events</Badge>
             </div>
 
             {unknownRows.length ? (
@@ -258,7 +259,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 />
               </>
             ) : (
-              <EmptyState icon={Search} label="No mystery guests yet" />
+              <EmptyState icon={Search} label={query ? "No unknown plates match this filter" : "No unknown denied plates recorded"} />
             )}
           </section>
         </div>
@@ -299,7 +300,7 @@ export function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntr
       <div className="top-charts-row-main">
         <strong>{entry.registration_number}</strong>
         <span>{label}</span>
-        <small>{mysteryGuestQuip(entry.rank)}</small>
+        <small>{entry.last_seen_at ? `Last seen ${formatDate(entry.last_seen_at)}` : "Last seen time unavailable"}</small>
       </div>
       <div className="top-charts-read-count">
         {showStatus ? <Badge tone={leaderboardDvlaTone(entry.dvla.status)}>{leaderboardDvlaLabel(entry.dvla.status)}</Badge> : null}

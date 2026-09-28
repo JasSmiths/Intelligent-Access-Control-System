@@ -507,6 +507,7 @@ export function ReportsView({
   const [isExportingReport, setIsExportingReport] = React.useState(false);
   const [isLoadingReportId, setIsLoadingReportId] = React.useState(false);
   const [reportActionError, setReportActionError] = React.useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = React.useState(false);
   const visitorPassesLoadedRef = React.useRef(false);
   const actionController = React.useRef<AbortController | null>(null);
   React.useEffect(() => () => actionController.current?.abort(), []);
@@ -820,10 +821,11 @@ export function ReportsView({
           <h1>Reports</h1>
           <p>Access Arrivals / Departures</p>
         </div>
-        <button className="report-help-button" type="button">
+        <button className="report-help-button" type="button" aria-expanded={helpOpen} aria-controls="report-help" onClick={() => setHelpOpen((open) => !open)}>
           <HelpCircle size={16} /> How this report works
         </button>
       </div>
+      {helpOpen ? <div className="card report-help" id="report-help"><h2>How this report works</h2><p>Choose a person or visitor pass, then a date range. Dates use the site timezone shown below the controls. At a repeated daylight saving time, choose the intended occurrence when prompted.</p><p>The preview reads the full selected period. Its event table may show a subset for space; the count states how many records the complete report contains. Export creates a saved PDF for the same subject, range and options. Wait for the preview to finish before exporting.</p></div> : null}
 
       <div className="report-builder-panel">
         <div className="report-builder-main">

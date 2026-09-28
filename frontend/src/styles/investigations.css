@@ -411,6 +411,10 @@
   gap: 22px;
 }
 
+.investigation-overview-grid:has(> :only-child) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .investigation-overview-block h3,
 .investigation-important-strip h3 {
   display: flex;
@@ -539,6 +543,13 @@
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.investigation-overview-empty.compact {
+  min-height: 0;
+  justify-content: flex-start;
+  padding: 12px 0 0;
+  text-align: left;
 }
 
 .investigation-overview-empty svg { color: var(--green); }
@@ -746,6 +757,11 @@
   padding: 28px;
   color: var(--muted);
   text-align: center;
+}
+
+.investigation-timeline-empty {
+  min-height: 112px;
+  padding: 18px;
 }
 
 .investigation-timeline-loading strong,

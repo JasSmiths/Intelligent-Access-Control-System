@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { searchApi, type GlobalSearchResult, type SearchPaletteItem } from "../api/search";
 import type { UserAccount, ViewKey } from "../api/types";
 import { Badge } from "../ui/primitives";
-import { primaryNavItems, settingsNavItems } from "./navigation";
+import { navigationItems } from "./navigation";
 
 type SearchMeta = { icon: React.ElementType; label: string };
 const searchMeta: Record<SearchPaletteItem["type"], SearchMeta> = {
@@ -88,7 +88,7 @@ function SearchPalettePreview({ item, onOpen }: { item: SearchPaletteItem | null
 }
 
 function searchShortcuts(currentUser: UserAccount): SearchPaletteItem[] {
-  return [...primaryNavItems.map((item) => searchShortcut(item.key, item.label)), ...settingsNavItems.filter((item) => !item.adminOnly || currentUser.role === "admin").map((item) => searchShortcut(item.key, item.label, "Settings"))];
+  return navigationItems.filter((item) => !item.adminOnly || currentUser.role === "admin").map((item) => searchShortcut(item.key, item.label, item.group));
 }
 function searchShortcut(view: ViewKey, label: string, subtitle = "Open view"): SearchPaletteItem { return { id: view, type: "shortcut", label, subtitle, filter_value: "", target: { view }, preview: { title: label, body: null, badges: ["Shortcut"], facts: [] } }; }
 function searchCompletion(query: string, results: GlobalSearchResult[]) {

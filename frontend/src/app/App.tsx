@@ -9,7 +9,7 @@ import { UserAvatar } from "../lib/media";
 import { AlertTray, isBellAlert } from "./alerts";
 import { AuthLoading, LoginPage, SetupPage, type AuthStatus } from "./auth";
 import { DeferredChatWidget } from "./chatLauncher";
-import { initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths } from "./navigation";
+import { canAccessView, initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths, type ShellDataKey } from "./navigation";
 import { useProfilePreferences } from "./profile";
 import {
   accessEventFromRealtime,
@@ -31,6 +31,7 @@ import { useShellRefresh } from "./useShellRefresh";
 import { useRealtimeConnection } from "./useRealtimeConnection";
 export function App() {
   const [view, setView] = React.useState<ViewKey>(() => initialViewFromLocation());
+  const [locationSearch, setLocationSearch] = React.useState(() => window.location.search);
   const [theme, setTheme] = useTheme();
   const [authStatus, setAuthStatus] = React.useState<AuthStatus | null>(null);
   const currentUser = authStatus?.user ?? null;
@@ -48,11 +49,12 @@ export function App() {
   const [latestRealtime, setLatestRealtime] = React.useState<RealtimeMessage | null>(null);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
+  const [historyResetToken, setHistoryResetToken] = React.useState(0);
   const [realtimeConnection, setRealtimeConnection] = React.useState<RealtimeConnectionState>(() =>
     realtimeStatus("connecting", "Preparing live updates")
   );
   const realtimeConnectionStatus = realtimeConnection.status;
-  const [search, setSearch] = React.useState("");
+  const [routeSearch, setRouteSearch] = React.useState<{ view: ViewKey; value: string } | null>(null);
   const [searchPaletteOpen, setSearchPaletteOpen] = React.useState(false);
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
   const [alertsOpen, setAlertsOpen] = React.useState(false);
@@ -72,8 +74,11 @@ export function App() {
     setRealtimeConnection(realtimeStatus(status, detail));
   }, []);
   const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
+    setRouteSearch(null);
     setView(nextView);
-    localStorage.setItem("iacs-active-view", nextView);
+    setLocationSearch(options?.search ?? "");
+    setSettingsExpanded(nextView === "settings" || settingsNavViewKeys.has(nextView));
+    setMobileNavOpen(false);
     const nextPath = `${viewPaths[nextView]}${options?.search ?? ""}${options?.hash ?? ""}`;
     const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     if (currentPath !== nextPath) {
@@ -88,8 +93,11 @@ export function App() {
     const onPopState = () => {
       const nextView = viewFromPath(window.location.pathname);
       if (nextView) {
+        setRouteSearch(null);
         setView(nextView);
-        localStorage.setItem("iacs-active-view", nextView);
+        setLocationSearch(window.location.search);
+        setSettingsExpanded(nextView === "settings" || settingsNavViewKeys.has(nextView));
+        setMobileNavOpen(false);
       }
     };
     window.addEventListener("popstate", onPopState);
@@ -102,15 +110,18 @@ export function App() {
   React.useEffect(() => {
     refreshAuth().catch(() => setAuthStatus({ setup_required: false, authenticated: false, user: null }));
   }, [refreshAuth]);
-  const { loading, dataRefreshToken, refresh, initialRefresh, refreshRealtime, selectionForEvent, resetRefresh } = useShellRefresh(view, currentUser, {
+  const { loading, readState, failedKeys, dataRefreshToken, refresh, initialRefresh, refreshRealtime, selectionForEvent, resetRefresh } = useShellRefresh(view, currentUser, {
     presence: setPresence, expectedPresence: setExpectedPresence, events: setEvents, anomalies: setAnomalies,
     people: setPeople, vehicles: setVehicles, groups: setGroups, schedules: setSchedules,
     integrationStatus: setIntegrationStatus, maintenanceStatus: setMaintenanceStatus
   });
+  const failedLabels: Record<ShellDataKey, string> = { presence: "presence", expectedPresence: "expected arrivals", events: "events", anomalies: "alerts", people: "people", vehicles: "vehicles", groups: "groups", schedules: "schedules", integrationStatus: "integration status", maintenanceStatus: "maintenance status" };
+  const failedDescription = failedKeys.map((key) => failedLabels[key]).join(", ");
   const refreshDashboard = React.useCallback(async () => {
     setDashboardRefreshing(true);
     try {
       await refresh();
+      setHistoryResetToken((token) => token + 1);
     } finally {
       setDashboardRefreshing(false);
     }
@@ -199,12 +210,7 @@ export function App() {
       navigateToView(view, { replace: true });
     }
   }, [authStatus, navigateToView, view]);
-  React.useEffect(() => {
-    if (!authStatus?.authenticated) return;
-    if (currentUser?.role !== "admin" && view === "users") {
-      navigateToView("settings", { replace: true });
-    }
-  }, [authStatus?.authenticated, currentUser?.role, navigateToView, view]);
+  const restrictedView = !canAccessView(view, currentUser);
   const sidebarCollapsed = profilePreferences.sidebarCollapsed;
   const navigationCollapsed = !isMobileNavigation && sidebarCollapsed;
   const navigationExpanded = isMobileNavigation ? mobileNavOpen : !sidebarCollapsed;
@@ -248,6 +254,11 @@ export function App() {
       resetRefresh();
       setLatestRealtime(null);
       setNotificationToasts([]);
+      setRouteSearch(null);
+      setSettingsExpanded(false);
+      setView("dashboard");
+      setLocationSearch("");
+      localStorage.removeItem("iacs-active-view");
       setMobileNavOpen(false);
       window.history.replaceState({}, "", "/login");
     } catch (logoutError) {
@@ -257,9 +268,9 @@ export function App() {
     }
   }, [loggingOut]);
   const openSearchResult = React.useCallback((result: SearchPaletteItem) => {
-    setSearch(result.filter_value);
     setSearchPaletteOpen(false);
     navigateToView(result.target.view, { search: result.target.route_search ?? "" });
+    if (result.filter_value && !["events", "movements", "alerts"].includes(result.target.view)) setRouteSearch({ view: result.target.view, value: result.filter_value });
     if (isMobileNavigation) {
       setMobileNavOpen(false);
     }
@@ -275,10 +286,22 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [authStatus?.authenticated]);
   React.useEffect(() => {
-    if (settingsActive && !navigationCollapsed) {
-      setSettingsExpanded(true);
-    }
-  }, [settingsActive, navigationCollapsed]);
+    setSettingsExpanded(settingsActive);
+  }, [view]);
+  React.useEffect(() => {
+    if (!settingsExpanded && !isMobileNavigation) return;
+    const frame = window.requestAnimationFrame(() => {
+      const sidebar = sidebarRef.current;
+      const list = sidebar?.querySelector<HTMLElement>(".nav-list");
+      const active = sidebar?.querySelector<HTMLElement>(".nav-item.nested.active") ?? sidebar?.querySelector<HTMLElement>(".nav-item.active");
+      if (!list || !active) return;
+      const listBounds = list.getBoundingClientRect();
+      const activeBounds = active.getBoundingClientRect();
+      if (activeBounds.bottom > listBounds.bottom) list.scrollTop += activeBounds.bottom - listBounds.bottom + 8;
+      else if (activeBounds.top < listBounds.top) list.scrollTop -= listBounds.top - activeBounds.top + 8;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [view, settingsExpanded, isMobileNavigation, mobileNavOpen, authStatus?.authenticated]);
   React.useEffect(() => {
     if (!alertsOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -346,27 +369,23 @@ export function App() {
         </div>
         <nav className="nav-list" aria-label="Main navigation">
           {primaryNavItems.map((item) => {
+            if (item.adminOnly && currentUser.role !== "admin") return null;
             const Icon = item.icon;
             if (item.key === "settings") {
               return (
                 <div className="nav-group" key={item.key}>
-                  <button
+                  <div className="nav-settings-row"><button
                     className={settingsActive ? "nav-item active" : "nav-item"}
-                    onClick={() => {
-                      navigateToView("settings");
-                      setSettingsExpanded((current) => !current);
-                    }}
+                    onClick={() => navigateFromNav("settings")}
                     type="button"
                     title={item.label}
                     aria-label={item.label}
-                    aria-expanded={settingsExpanded && !navigationCollapsed}
                   >
                     <Icon size={18} />
                     <span>{item.label}</span>
-                    <ChevronDown className="nav-chevron" size={15} />
-                  </button>
+                  </button><button className="nav-disclosure" type="button" aria-label={settingsExpanded ? "Collapse Settings" : "Expand Settings"} aria-expanded={settingsExpanded && !navigationCollapsed} aria-controls="settings-submenu" onClick={() => setSettingsExpanded((current) => !current)}><ChevronDown size={15} /></button></div>
                   {settingsExpanded && !navigationCollapsed ? (
-                    <div className="nav-submenu">
+                    <div className="nav-submenu" id="settings-submenu">
                       {visibleSettingsNavItems.map((subItem) => {
                         const SubIcon = subItem.icon;
                         return (
@@ -389,6 +408,8 @@ export function App() {
               );
             }
             return (
+              <React.Fragment key={item.key}>
+              {(item.key === "dashboard" || item.key === "people" || item.key === "reports") ? <div className="nav-section-label">{item.group}</div> : null}
               <button
                 key={item.key}
                 aria-label={item.label}
@@ -400,6 +421,7 @@ export function App() {
                 <Icon size={18} />
                 <span>{item.label}</span>
               </button>
+              </React.Fragment>
             );
           })}
         </nav>
@@ -462,18 +484,18 @@ export function App() {
             >
               <Menu size={20} />
             </button>
-            <button className="estate-select" type="button" aria-label="Current site">
+            <span className="estate-select" aria-label="Current site">
               <span>Crest House</span>
-            </button>
+            </span>
           </div>
           <div className="topbar-actions">
             <button
-              className={search ? "search global-search-trigger has-value" : "search global-search-trigger"}
+              className="search global-search-trigger"
               onClick={() => setSearchPaletteOpen(true)}
               type="button"
             >
               <Search size={16} />
-              <span>{search || "Search Anything..."}</span>
+              <span>Search Anything...</span>
             </button>
             <div className="alert-tray-shell">
               <button
@@ -507,12 +529,18 @@ export function App() {
             <ThemeControl theme={theme} setTheme={setTheme} />
           </div>
         </header>
-        {loading ? (
+        {routeSearch?.view === view && routeSearch.value && !restrictedView ? <div className="route-filter-bar"><label><Search size={16} /><span>Page filter</span><input aria-label="Page filter" value={routeSearch.value} onChange={(event) => setRouteSearch({ view, value: event.target.value })} /></label><button className="secondary-button" type="button" onClick={() => setRouteSearch(null)}>Clear</button></div> : null}
+        {restrictedView ? (
+          <section className="view-stack permission-state" role="alert"><h1>Administrator access required</h1><p>This page is restricted to administrators. Your account can continue using the other console pages.</p><button className="secondary-button" type="button" onClick={() => navigateToView("dashboard")}>Go to Dashboard</button></section>
+        ) : loading ? (
           <div className="loading-panel">Loading live site data</div>
+        ) : readState === "unavailable" ? (
+          <section className="view-stack permission-state" role="alert"><h1>Site data unavailable</h1><p>Required {failedDescription} data could not be loaded. Editors are paused until a successful read.</p><button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></section>
         ) : (
-          <View
+          <>{readState === "stale" ? <div className="shell-stale-banner" role="status">Some site data is unavailable ({failedDescription}). Displayed information may be incomplete. <button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></div> : null}<View
             view={view}
-            search={search}
+            locationSearch={locationSearch}
+            search={routeSearch?.view === view ? routeSearch.value : ""}
             presence={presence}
             expectedPresence={expectedPresence}
             events={events}
@@ -525,19 +553,22 @@ export function App() {
             maintenanceStatus={maintenanceStatus}
             latestRealtime={latestRealtime}
             dataRefreshToken={dataRefreshToken}
+            historyResetToken={historyResetToken}
             refresh={refresh}
             currentUser={currentUser}
+            theme={theme}
+            setTheme={setTheme}
             navigateToView={navigateToView}
             onCurrentUserUpdated={(user) =>
               setAuthStatus((current) => current ? { ...current, user } : current)
             }
             onMaintenanceStatusChanged={setMaintenanceStatus}
-          />
+          /></>
         )}
       </main>
       <SearchPalette
         currentUser={currentUser}
-        initialQuery={search}
+        initialQuery=""
         onClose={() => setSearchPaletteOpen(false)}
         onOpenResult={openSearchResult}
         open={searchPaletteOpen}

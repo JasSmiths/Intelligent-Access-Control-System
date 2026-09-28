@@ -6,7 +6,7 @@ import type { Schedule } from "../../api/types";
 import { matches, scheduleDays } from "../../lib/format";
 import { useSettings } from "../../lib/settings";
 import { Badge, EmptyState } from "../../ui/primitives";
-import { scheduleDayHasBlocks, scheduleHasBlocks, scheduleSummary } from "./model";
+import { scheduleDayHasBlocks, scheduleHasBlocks, scheduleIntervalLabels, scheduleSummary } from "./model";
 import { ScheduleEditor } from "./ScheduleEditor";
 
 export function SchedulesView({
@@ -23,6 +23,7 @@ export function SchedulesView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedSchedule, setSelectedSchedule] = React.useState<Schedule | null>(null);
   const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
   const [policySaved, setPolicySaved] = React.useState("");
   const [policySaving, setPolicySaving] = React.useState(false);
   const accessSettings = useSettings("access", refreshToken);
@@ -30,7 +31,8 @@ export function SchedulesView({
   const filtered = schedules.filter((schedule) =>
     matches(schedule.name, query) ||
     matches(schedule.description ?? "", query) ||
-    matches(scheduleSummary(schedule.time_blocks), query)
+    matches(scheduleSummary(schedule.time_blocks), query) ||
+    matches(scheduleIntervalLabels(schedule.time_blocks).join(" "), query)
   );
 
   React.useEffect(() => {
@@ -148,6 +150,7 @@ export function SchedulesView({
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note" role="status">{saved}</div> : null}
       {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
 
       <div className="schedule-card-grid">
@@ -175,6 +178,7 @@ export function SchedulesView({
                 </span>
               ))}
             </div>
+            {scheduleIntervalLabels(schedule.time_blocks).length ? <div className="schedule-card-intervals" aria-label={`${schedule.name} allowed intervals`}>{scheduleIntervalLabels(schedule.time_blocks).map((label) => <span key={label}>{label}</span>)}</div> : null}
             <div className="schedule-card-actions">
               <button className="secondary-button" onClick={() => openEdit(schedule)} type="button">
                 <CalendarDays size={15} /> Edit
@@ -196,8 +200,9 @@ export function SchedulesView({
           mode={selectedSchedule ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
-            await refresh();
             closeModal();
+            setSaved("Schedule saved.");
+            try { await refresh(); } catch { setError("Schedule saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           schedule={selectedSchedule}
           setPageError={setError}

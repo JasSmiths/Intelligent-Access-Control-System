@@ -37,6 +37,7 @@ export function useModalFocus<T extends HTMLElement>(
     const previousTabIndex = modal.getAttribute("tabindex");
     modal.tabIndex = -1;
     modalStack.push(modal);
+    document.body.classList.add("iacs-modal-open");
 
     // Safari's keyboard can reduce the visual viewport without changing dvh.
     const backdrop = modal.closest<HTMLElement>(".modal-backdrop, .search-palette-backdrop");
@@ -100,6 +101,7 @@ export function useModalFocus<T extends HTMLElement>(
       backdrop?.style.removeProperty("--overlay-viewport-top");
       document.removeEventListener("keydown", onKeyDown);
       modalStack.splice(modalStack.indexOf(modal), 1);
+      if (!modalStack.length) document.body.classList.remove("iacs-modal-open");
       for (const sibling of isolated) {
         const owner = inertOwners.get(sibling)!;
         owner.count -= 1;

@@ -302,6 +302,11 @@ test("keeps a group form draft through resize and contains/restores modal focus"
   await expect(dialog).toBeVisible();
   await expect(groupName).toHaveValue("A long access group name for responsive checks");
 
+  page.once("dialog", (confirmation) => confirmation.dismiss());
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect(groupName).toHaveValue("A long access group name for responsive checks");
+  page.once("dialog", (confirmation) => confirmation.accept());
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(addGroup).toBeFocused();

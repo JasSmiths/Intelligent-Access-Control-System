@@ -313,6 +313,7 @@ export function WeeklyScheduleGrid({
         </div>
       </div>
 
+      <p className="schedule-swipe-hint">Swipe horizontally to see all seven days.</p>
       <div className="schedule-calendar" onDragStart={(event) => event.preventDefault()} ref={calendarRef}>
         <div className="schedule-calendar-head">
           <span />

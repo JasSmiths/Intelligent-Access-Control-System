@@ -28,17 +28,17 @@ function domId(value: string) {
 }
 
 function CopyButton({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = React.useState(false);
+  const [status, setStatus] = React.useState<"idle" | "copied" | "failed">("idle");
   async function copy() {
     try {
       await navigator.clipboard.writeText(value);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
+      setStatus("copied");
+      window.setTimeout(() => setStatus("idle"), 1_500);
     } catch {
-      setCopied(false);
+      setStatus("failed");
     }
   }
-  return <button aria-label={`Copy ${label}`} className="investigation-copy" onClick={copy} type="button"><Clipboard aria-hidden="true" size={13} /> {copied ? "Copied" : "Copy"}</button>;
+  return <button aria-label={`Copy ${label}`} className="investigation-copy" onClick={copy} type="button"><Clipboard aria-hidden="true" size={13} /> <span aria-live="polite">{status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "Copy"}</span></button>;
 }
 
 function RawEvidence({ value }: { value: unknown }) {
@@ -69,7 +69,7 @@ function EvidenceStep({ evidence, episodeId, focused, timezone }: { evidence: In
           {evidence.source ? <><dt>Source</dt><dd>{evidence.source}</dd></> : null}
           {evidence.reason_code ? <><dt>Reason code</dt><dd><code>{evidence.reason_code}</code></dd></> : null}
           {evidence.command_sent != null ? <><dt>Command sent</dt><dd>{evidence.command_sent ? "Yes" : "No"}</dd></> : null}
-          {evidence.event_id ? <><dt>Event ID</dt><dd><code>{evidence.event_id}</code></dd></> : null}
+          {evidence.event_id ? <><dt>Event</dt><dd><a href={`/events?event=${encodeURIComponent(evidence.event_id)}`} aria-label={`View event ${evidence.event_id}`}><code>{evidence.event_id}</code></a></dd></> : null}
         </dl>
         {evidence.raw != null ? <RawEvidence value={evidence.raw} /> : null}
       </div>
@@ -259,10 +259,14 @@ export function ActivityTimeline({
       {partial ? <div className="investigation-partial" role="status">Some evidence sources were unavailable. Results below may be incomplete.</div> : null}
       {pinnedDetail ? (
         <div className="investigation-pinned-episode">
-          <span>Selected investigation</span>
+          <span>Selected investigation · outside the current results</span>
           <EpisodeRow detail={pinnedDetail} episode={pinnedDetail.episode} error={detailErrors[pinnedDetail.episode.episode_id]} expanded focusedEvidenceId={focusedEvidenceId} loading={false} onToggle={() => toggle(pinnedDetail.episode.episode_id)} timezone={timezone} />
         </div>
       ) : null}
+      {requestedEpisodeId && !items.some((item) => item.episode_id === requestedEpisodeId) && !pinnedDetail && loadingDetailIds.has(requestedEpisodeId) ?
+        <div className="investigation-partial" role="status">Opening the selected investigation from outside the current results…</div> : null}
+      {requestedEpisodeId && !items.some((item) => item.episode_id === requestedEpisodeId) && detailErrors[requestedEpisodeId] ?
+        <div className="investigation-page-error" role="alert">Selected investigation unavailable: {detailErrors[requestedEpisodeId]}</div> : null}
       {!items.length ? (
         <div className="investigation-timeline-empty">
           {hasFilters ? <SearchX aria-hidden="true" size={24} /> : <FileQuestion aria-hidden="true" size={24} />}

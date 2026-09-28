@@ -108,6 +108,16 @@ describe("activity timeline", () => {
     fireEvent.click(screen.getByRole("button", { name: /Open on arrival was blocked/ }));
     expect(screen.getByRole("alert")).toHaveTextContent("Evidence service unavailable");
   });
+
+  it("links retained event evidence and identifies an older selected investigation", () => {
+    const selected = { ...scheduleBlockedDetail, timeline: [
+      { ...scheduleBlockedDetail.timeline[0], event_id: "11111111-1111-4111-8111-111111111111" },
+      ...scheduleBlockedDetail.timeline.slice(1)
+    ] };
+    render(<ActivityTimeline {...timelineDefaults} items={[]} details={{ [scheduleBlockedEpisode.episode_id]: selected }} requestedEpisodeId={scheduleBlockedEpisode.episode_id} />);
+    expect(screen.getByText(/outside the current results/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /View event 11111111/ })).toHaveAttribute("href", "/events?event=11111111-1111-4111-8111-111111111111");
+  });
 });
 
 describe("default investigation overview", () => {
@@ -117,6 +127,13 @@ describe("default investigation overview", () => {
     expect(screen.getByText("Repeated problems")).toBeInTheDocument();
     expect(screen.getByText("Home Assistant command rejection")).toBeInTheDocument();
     expect(screen.getByText("Important recent activity")).toBeInTheDocument();
+  });
+
+  it("collapses an entirely quiet overview into one concise state", () => {
+    render(<InvestigationOverview onSelect={vi.fn()} overview={{ ...defaultOverview,
+      recent_problems: [], incomplete_runs: [], repeated_problems: [], important_activity: [] }} />);
+    expect(screen.getByText(/No recent problems or repeated failures/)).toBeInTheDocument();
+    expect(screen.queryByText("Problems and blocked actions")).not.toBeInTheDocument();
   });
 });
 

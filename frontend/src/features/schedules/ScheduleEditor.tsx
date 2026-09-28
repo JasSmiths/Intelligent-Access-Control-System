@@ -1,4 +1,5 @@
 import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Car, Clock3, Save, UserRound, Warehouse, X } from "lucide-react";
 import React from "react";
 import type { ScheduleDependencies } from "../../api/schedules";
@@ -23,7 +24,6 @@ export function ScheduleEditor({
   setPageError: (message: string) => void;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
-  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     name: schedule?.name ?? "",
     description: schedule?.description ?? "",
@@ -31,17 +31,23 @@ export function ScheduleEditor({
   });
   const [dependencies, setDependencies] = React.useState<ScheduleDependencies | null>(null);
   const [dependenciesLoading, setDependenciesLoading] = React.useState(false);
+  const [dependenciesError, setDependenciesError] = React.useState(false);
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
+  const originalForm = React.useRef(JSON.stringify(form));
+  const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== originalForm.current, submitting, "schedule changes");
+  useModalFocus(modalRef, true, requestClose);
 
   React.useEffect(() => {
     const controller = new AbortController();
     setDependencies(null);
+    setDependenciesError(false);
     setDependenciesLoading(Boolean(schedule));
     if (schedule) {
       schedulesApi.dependencies(schedule.id, { signal: controller.signal })
         .then((value) => { if (!controller.signal.aborted) setDependencies(value); })
-        .catch(() => { if (!controller.signal.aborted) setDependencies(null); })
+        .catch(() => { if (!controller.signal.aborted) { setDependencies(null); setDependenciesError(true); } })
         .finally(() => { if (!controller.signal.aborted) setDependenciesLoading(false); });
     }
     return () => controller.abort();
@@ -53,6 +59,8 @@ export function ScheduleEditor({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setError("");
     setPageError("");
     setSubmitting(true);
@@ -63,25 +71,27 @@ export function ScheduleEditor({
     };
     try {
       await schedulesApi.save(payload, mode === "edit" ? schedule : null);
-      await onSaved();
+      onClose();
+      try { await onSaved(); } catch { setPageError("Schedule saved, but the list could not be refreshed. Refresh to see the latest data."); }
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Unable to save schedule";
       setError(message);
       setPageError(message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
       <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Schedule" className="modal-card schedule-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Schedule" : "New Schedule"}</h2>
             <p>{scheduleSummary(form.time_blocks)}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -100,7 +110,7 @@ export function ScheduleEditor({
               <span>Description</span>
               <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
             </label>
-            <ScheduleDependencyPanel dependencies={dependencies} loading={dependenciesLoading} />
+            <ScheduleDependencyPanel dependencies={dependencies} loading={dependenciesLoading} unavailable={dependenciesError} />
           </div>
 
           <WeeklyScheduleGrid
@@ -110,7 +120,7 @@ export function ScheduleEditor({
         </div>
 
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             <Save size={16} />
             {submitting ? "Saving..." : mode === "edit" ? "Save Schedule" : "Create Schedule"}
@@ -123,10 +133,12 @@ export function ScheduleEditor({
 
 function ScheduleDependencyPanel({
   dependencies,
-  loading
+  loading,
+  unavailable
 }: {
   dependencies: ScheduleDependencies | null;
   loading: boolean;
+  unavailable: boolean;
 }) {
   const items = dependencies ? [
     ...dependencies.people.map((item) => ({ ...item, tone: "blue" as BadgeTone })),
@@ -138,10 +150,12 @@ function ScheduleDependencyPanel({
     <section className="schedule-dependencies">
       <div className="panel-header">
         <h2>In Use By</h2>
-        <Badge tone={items.length ? "blue" : "gray"}>{loading ? "loading" : String(items.length)}</Badge>
+        <Badge tone={items.length ? "blue" : "gray"}>{loading ? "Loading" : `${items.length} assignment${items.length === 1 ? "" : "s"}`}</Badge>
       </div>
       {loading ? (
         <div className="schedule-dependency-empty">Loading dependencies</div>
+      ) : unavailable ? (
+        <div className="schedule-dependency-empty" role="alert">Assignments unavailable. Try again after the dependency read succeeds.</div>
       ) : items.length ? (
         <div className="schedule-dependency-list">
           {items.map((item) => (

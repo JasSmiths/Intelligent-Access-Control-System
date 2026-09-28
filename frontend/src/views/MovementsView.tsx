@@ -11,9 +11,11 @@ ShieldAlert
 import React from "react";
 
 import { api, isAbortError } from "../api/client";
-import { formatDate, matches, movementSagaDisplay, titleCase } from "../lib/format";
+import { formatDate, movementSagaDisplay, titleCase } from "../lib/format";
 import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import { useModalFocus } from "../ui/useModalFocus";
 import type { BadgeTone } from "../ui/primitives";
+import { useHistoryPage } from "./useHistoryPage";
 
 type GateCommand = {
   id: string;
@@ -54,7 +56,7 @@ type MovementRecord = {
   state_history?: Array<Record<string, unknown>>;
 };
 
-type MovementFilter = "all" | "pending" | "confirmed" | "needs_reconciliation" | "failed" | "suppressed";
+type MovementFilter = "all" | "pending" | "confirmed" | "needs_reconciliation" | "failed" | "suppressed" | "unknown";
 
 type MovementExplanation = {
   label: string;
@@ -68,54 +70,53 @@ const FILTERS: Array<{ key: MovementFilter; label: string }> = [
   { key: "needs_reconciliation", label: "Needs Reconciliation" },
   { key: "failed", label: "Failed" },
   { key: "suppressed", label: "Suppressed" }
+  ,{ key: "unknown", label: "Unknown" }
 ];
 
-const MOVEMENTS_PAGE_SIZE = 7;
-
-export function MovementsView({ query, refreshToken }: { query: string; refreshToken: number }) {
-  const [movements, setMovements] = React.useState<MovementRecord[]>([]);
+export function MovementsView({ refreshToken, resetToken, targetId }: { refreshToken: number; resetToken: number; targetId: string | null }) {
+  const [query, setQuery] = React.useState("");
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
   const [selected, setSelected] = React.useState<MovementRecord | null>(null);
   const [filter, setFilter] = React.useState<MovementFilter>("all");
-  const [loading, setLoading] = React.useState(true);
   const [detailLoading, setDetailLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
-  const [page, setPage] = React.useState(0);
-  const deferredQuery = React.useDeferredValue(query);
-  const movementsLoadSequenceRef = React.useRef(0);
-  const movementsLoadAbortRef = React.useRef<AbortController | null>(null);
+  const [actionLoading, setActionLoading] = React.useState(false);
   const detailLoadSequenceRef = React.useRef(0);
   const detailLoadAbortRef = React.useRef<AbortController | null>(null);
-
-  const loadMovements = React.useCallback(async () => {
-    const sequence = movementsLoadSequenceRef.current + 1;
-    movementsLoadSequenceRef.current = sequence;
-    movementsLoadAbortRef.current?.abort();
-    const controller = new AbortController();
-    movementsLoadAbortRef.current = controller;
-    setLoading(true);
-    setError(null);
-    try {
-      const rows = await api.get<MovementRecord[]>("/api/v1/access/movements?limit=250", { signal: controller.signal });
-      if (movementsLoadSequenceRef.current !== sequence) return;
-      setMovements(rows);
-      setSelected((current) => {
-        if (!current) return rows[0] ?? null;
-        return rows.find((row) => row.id === current.id) ?? rows[0] ?? null;
-      });
-    } catch (loadError) {
-      if (isAbortError(loadError)) return;
-      if (movementsLoadSequenceRef.current !== sequence) return;
-      setError(errorMessage(loadError));
-    } finally {
-      if (movementsLoadSequenceRef.current === sequence) {
-        setLoading(false);
-        if (movementsLoadAbortRef.current === controller) {
-          movementsLoadAbortRef.current = null;
-        }
-      }
-    }
+  const focusBeforeDetailRef = React.useRef<HTMLElement | null>(null);
+  const [narrow, setNarrow] = React.useState(() => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 980px)").matches);
+  React.useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(max-width: 980px)");
+    const update = () => setNarrow(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
   }, []);
+  const deferredQuery = React.useDeferredValue(query);
+  const filters = new URLSearchParams();
+  if (deferredQuery.trim()) filters.set("q", deferredQuery.trim());
+  if (from) filters.set("from", from);
+  if (to) filters.set("to", to);
+  if (filter !== "all") filters.set("category", filter);
+  const history = useHistoryPage<MovementRecord>("/api/v1/access/movements/history", filters, refreshToken, resetToken);
+  React.useEffect(() => {
+    if (!targetId) setSelected(null);
+  }, [targetId]);
+  React.useEffect(() => {
+    if (!targetId) return;
+    if (history.loading) return;
+    if (history.items.some((item) => item.id === targetId)) {
+      const match = history.items.find((item) => item.id === targetId);
+      if (match) setSelected(match);
+      return;
+    }
+    let active = true;
+    void api.get<MovementRecord>(`/api/v1/access/movements/${encodeURIComponent(targetId)}`)
+      .then((item) => { if (active) setSelected(item); })
+      .catch((error: unknown) => { if (active) setActionError(errorMessage(error)); });
+    return () => { active = false; };
+  }, [history.items, history.loading, targetId]);
 
   const loadMovementDetail = React.useCallback(
     async (movement: MovementRecord, options: { optimistic?: boolean; quiet?: boolean } = {}) => {
@@ -137,7 +138,6 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
         });
         if (detailLoadSequenceRef.current !== sequence) return;
         setSelected((current) => (current?.id === movement.id ? detail : current));
-        setMovements((current) => current.map((row) => (row.id === detail.id ? { ...row, ...detail } : row)));
       } catch (detailError) {
         if (isAbortError(detailError)) return;
         if (detailLoadSequenceRef.current !== sequence) return;
@@ -157,15 +157,9 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
   );
 
   React.useEffect(() => () => {
-    movementsLoadSequenceRef.current += 1;
-    movementsLoadAbortRef.current?.abort();
     detailLoadSequenceRef.current += 1;
     detailLoadAbortRef.current?.abort();
   }, []);
-
-  React.useEffect(() => {
-    void loadMovements();
-  }, [loadMovements, refreshToken]);
 
   const selectedNeedsDetail = Boolean(selected && !hasMovementDetail(selected));
 
@@ -174,67 +168,58 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
     void loadMovementDetail(selected, { optimistic: false, quiet: true });
   }, [loadMovementDetail, selected, selectedNeedsDetail]);
 
-  const visibleMovements = React.useMemo(() => movements.filter((movement) => {
-    const category = movementCategory(movement);
-    const textMatches =
-      matches(movement.registration_number || "", deferredQuery) ||
-      matches(movement.source, deferredQuery) ||
-      matches(movement.failure_detail || "", deferredQuery) ||
-      matches(movementExplanationSearchText(movement), deferredQuery);
-    return (filter === "all" || filter === category) && textMatches;
-  }), [deferredQuery, filter, movements]);
-
-  const pageCount = React.useMemo(
-    () => Math.max(1, Math.ceil(visibleMovements.length / MOVEMENTS_PAGE_SIZE)),
-    [visibleMovements.length]
-  );
-  const pagedMovements = React.useMemo(
-    () => visibleMovements.slice(page * MOVEMENTS_PAGE_SIZE, (page + 1) * MOVEMENTS_PAGE_SIZE),
-    [page, visibleMovements]
-  );
-
-  const firstItem = page * MOVEMENTS_PAGE_SIZE + 1;
-  const lastItem = Math.min(visibleMovements.length, (page + 1) * MOVEMENTS_PAGE_SIZE);
-
-  React.useEffect(() => {
-    setPage(0);
-  }, [deferredQuery, filter]);
-
-  React.useEffect(() => {
-    setPage((p) => Math.min(p, pageCount - 1));
-  }, [pageCount]);
+  const visibleMovements = history.items;
+  const firstItem = history.index * 50 + 1;
+  const lastItem = history.index * 50 + visibleMovements.length;
 
   const selectMovement = async (movement: MovementRecord) => {
+    focusBeforeDetailRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     await loadMovementDetail(movement);
   };
 
+  const closeDetail = () => {
+    setSelected(null);
+    focusBeforeDetailRef.current?.focus();
+  };
+
   const requestReconciliation = async () => {
-    if (!selected) return;
+    if (!selected || actionLoading) return;
+    setActionLoading(true);
     setActionError(null);
     try {
       const updated = await api.post<MovementRecord>(`/api/v1/access/movements/${selected.id}/reconciliation-required`, {
         reason: "Operator flagged movement for review from Movement detail."
       });
       setSelected(updated);
-      setMovements((current) => current.map((movement) => (movement.id === updated.id ? updated : movement)));
+      history.refresh();
     } catch (requestError) {
       setActionError(errorMessage(requestError));
+    } finally {
+      setActionLoading(false);
     }
   };
 
   return (
     <section className="view-stack movements-view">
-      <Toolbar title="Movements" count={visibleMovements.length} icon={MoveHorizontal}>
-        <button className="icon-button" type="button" onClick={loadMovements} disabled={loading} title="Refresh movements">
+      <Toolbar title="Movements" icon={MoveHorizontal}>
+        <button className="icon-button" type="button" onClick={history.refresh} disabled={history.loading} aria-label="Refresh movements" title="Refresh movements">
           <RefreshCw size={16} />
         </button>
       </Toolbar>
 
-      <div className="movement-filters" role="tablist" aria-label="Movement status filters">
+      <div className="history-filters" aria-label="Movement filters">
+        <label>Search movements<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Plate, source, or failure" /></label>
+        <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+        <label>Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+        {(query || from || to || filter !== "all") ? <button className="secondary-button" type="button" onClick={() => { setQuery(""); setFrom(""); setTo(""); setFilter("all"); }}>Clear filters</button> : null}
+        <p className="history-date-hint">Dates use the site timezone. Before excludes the selected date.</p>
+      </div>
+      <div className="movement-filters" aria-label="Movement status filters">
         {FILTERS.map((item) => (
           <button
             key={item.key}
             className={filter === item.key ? "active" : ""}
+            aria-pressed={filter === item.key}
             type="button"
             onClick={() => setFilter(item.key)}
           >
@@ -243,7 +228,9 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
         ))}
       </div>
 
-      {error ? <div className="callout danger"><AlertTriangle size={16} /> {error}</div> : null}
+      {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
+      {history.error ? <div className="callout danger" role="alert"><AlertTriangle size={16} /> Movements unavailable: {history.error}</div> : null}
+      {selected && !visibleMovements.some((item) => item.id === selected.id) ? <div className="callout">Showing the selected movement from outside this page.</div> : null}
 
       <div className="movement-layout">
         <div className="table-card movement-table-card">
@@ -259,16 +246,15 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
               </tr>
             </thead>
             <tbody>
-              {pagedMovements.map((movement) => {
+              {visibleMovements.map((movement) => {
                 const display = movementSagaDisplay(movement);
                 return (
                   <tr
                     key={movement.id}
                     className={selected?.id === movement.id ? "selected" : ""}
-                    onClick={() => void selectMovement(movement)}
                   >
                     <td>
-                      <strong>{movement.registration_number || "Unknown"}</strong>
+                      <button className="movement-row-button" type="button" onClick={() => void selectMovement(movement)} aria-label={`View movement ${movement.registration_number || "unknown plate"} at ${formatDate(movement.occurred_at)}`}><strong>{movement.registration_number || "Unknown"}</strong></button>
                       <span className="table-muted-line">{movement.source}</span>
                     </td>
                     <td>{display ? <Badge tone={display.tone}>{display.label}</Badge> : <Badge tone="gray">{titleCase(movement.state)}</Badge>}</td>
@@ -281,29 +267,29 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
               })}
             </tbody>
           </table>
-          {visibleMovements.length > MOVEMENTS_PAGE_SIZE ? (
+          {visibleMovements.length || history.index ? (
             <div
               className="top-charts-pagination"
               style={{ padding: "8px 12px", borderTop: "1px solid var(--line)" }}
               aria-label="Movements pagination"
             >
-              <span>{firstItem}-{lastItem} of {visibleMovements.length}</span>
+              <span>{visibleMovements.length ? `${firstItem}-${lastItem}` : "0"} records on this page{history.nextCursor ? "; more available" : ""}</span>
               <div className="top-charts-pagination-controls">
                 <button
                   aria-label="Previous page"
                   className="icon-button top-charts-page-button"
-                  disabled={page === 0}
-                  onClick={() => setPage(Math.max(0, page - 1))}
+                  disabled={history.index === 0 || history.loading}
+                  onClick={history.previous}
                   type="button"
                 >
                   <ArrowLeft size={15} />
                 </button>
-                <span>Page {page + 1} of {pageCount}</span>
+                <span>Page {history.index + 1}</span>
                 <button
                   aria-label="Next page"
                   className="icon-button top-charts-page-button"
-                  disabled={page >= pageCount - 1}
-                  onClick={() => setPage(Math.min(pageCount - 1, page + 1))}
+                  disabled={!history.nextCursor || history.loading}
+                  onClick={history.next}
                   type="button"
                 >
                   <ArrowRight size={15} />
@@ -311,13 +297,17 @@ export function MovementsView({ query, refreshToken }: { query: string; refreshT
               </div>
             </div>
           ) : null}
-          {!loading && !visibleMovements.length ? <EmptyState icon={Clock3} label="No movements match this filter." /> : null}
+          {history.loading ? <div className="loading-panel">Loading movements…</div> : null}
+          {!history.loading && !history.error && !visibleMovements.length ? <EmptyState icon={Clock3} label={query || from || to || filter !== "all" ? "No movements match these filters." : "No movements recorded yet."} /> : null}
         </div>
 
         <MovementDetail
           movement={selected}
           actionError={actionError}
           detailLoading={detailLoading}
+          actionLoading={actionLoading}
+          onClose={closeDetail}
+          narrow={narrow}
           onRequestReconciliation={requestReconciliation}
         />
       </div>
@@ -329,16 +319,24 @@ function MovementDetail({
   movement,
   actionError,
   detailLoading,
+  actionLoading,
+  onClose,
+  narrow,
   onRequestReconciliation
 }: {
   movement: MovementRecord | null;
   actionError: string | null;
   detailLoading: boolean;
+  actionLoading: boolean;
+  onClose: () => void;
+  narrow: boolean;
   onRequestReconciliation: () => Promise<void>;
 }) {
+  const detailRef = React.useRef<HTMLElement>(null);
+  useModalFocus(detailRef, narrow && Boolean(movement), onClose);
   if (!movement) {
     return (
-      <aside className="movement-detail-panel">
+      <aside className="movement-detail-panel movement-detail-empty">
         <EmptyState icon={MoveHorizontal} label="Select a movement." />
       </aside>
     );
@@ -347,7 +345,7 @@ function MovementDetail({
   const explanations = movementExplanations(movement);
   const loadingDetailPayload = detailLoading && !hasMovementDetail(movement);
   return (
-    <aside className="movement-detail-panel">
+    <aside ref={detailRef} className="movement-detail-panel" role={narrow ? "dialog" : undefined} aria-modal={narrow ? true : undefined} aria-label="Movement details">
       <div className="movement-detail-head">
         <div>
           <span className="eyebrow">{movement.source}</span>
@@ -355,6 +353,7 @@ function MovementDetail({
           <p>{formatDate(movement.occurred_at)}</p>
         </div>
         {display ? <Badge tone={display.tone}>{display.label}</Badge> : null}
+        <button className="movement-detail-close" type="button" onClick={onClose} aria-label="Close movement details">Close</button>
       </div>
 
       <div className="movement-detail-actions">
@@ -363,9 +362,10 @@ function MovementDetail({
           className="secondary-button"
           title="Flags this movement for operator review. It does not change the gate, presence, or hardware state."
           type="button"
+          disabled={actionLoading}
           onClick={() => void onRequestReconciliation()}
         >
-          <ShieldAlert size={15} /> Flag for Review
+          <ShieldAlert size={15} /> {actionLoading ? "Flagging…" : "Flag for Review"}
         </button>
       </div>
       {actionError ? <div className="callout danger"><AlertTriangle size={16} /> {actionError}</div> : null}
@@ -374,7 +374,7 @@ function MovementDetail({
         <DetailTile label="Saga State" value={titleCase(movement.state)} tone={statusTone(movement)} />
         <DetailTile label="Direction" value={movement.direction || "--"} />
         <DetailTile label="Presence" value={movement.presence_committed ? "Committed" : "Pending"} />
-        <DetailTile label="Gate" value={movement.gate_command_required ? "Required" : "Not Required"} />
+        <DetailTile label="Gate" value={movement.gate_command_required === true ? "Required" : movement.gate_command_required === false ? "Not Required" : "Unknown"} />
       </div>
 
       {movement.failure_detail ? (
@@ -407,7 +407,7 @@ function MovementDetail({
             </div>
             <Badge tone={commandTone(command)}>{command.gate_state || "unknown"}</Badge>
           </div>
-        )) : <EmptyState icon={CheckCircle2} label="No gate command was required." />}
+        )) : <EmptyState icon={movement.gate_command_required ? AlertTriangle : CheckCircle2} label={movement.gate_command_required ? "A gate command was required, but no command record is available." : movement.gate_command_required === false ? "No gate command was required." : "Gate command requirement is unknown."} />}
       </section>
 
       <section className="movement-detail-section">
@@ -435,22 +435,8 @@ function DetailTile({ label, value, tone = "gray" }: { label: string; value: str
   );
 }
 
-function movementCategory(movement: MovementRecord): MovementFilter {
-  if (movement.reconciliation_required || movement.state === "reconciliation_required") return "needs_reconciliation";
-  if (movement.state === "failed") return "failed";
-  if (movement.state === "suppressed") return "suppressed";
-  if (["observed", "direction_resolved", "physical_command_pending", "physical_command_accepted"].includes(movement.state)) return "pending";
-  return "confirmed";
-}
-
 function hasMovementDetail(movement: MovementRecord): boolean {
   return Boolean(movement.intent_payload || movement.decision_payload || movement.state_history);
-}
-
-function movementExplanationSearchText(movement: MovementRecord): string {
-  return movementExplanations(movement)
-    .map((item) => `${item.label} ${item.value}`)
-    .join(" ");
 }
 
 function movementExplanations(movement: MovementRecord): MovementExplanation[] {
@@ -523,13 +509,17 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
     rows.push({ label: "Direction", value: "No direction was recorded for this movement." });
   }
 
-  if (movement.gate_command_required) {
+  if (movement.gate_command_required === true) {
     rows.push({
       label: "Gate",
-      value: physicalAction === "gate.open"
+      value: !movement.gate_commands.length
+        ? "A gate command was required, but no command record is available."
+        : physicalAction === "gate.open"
         ? "A gate-open command was required for this granted entry."
         : "A physical gate command was required by the movement saga."
     });
+  } else if (movement.gate_command_required == null) {
+    rows.push({ label: "Gate", value: "The recorded movement does not establish whether a gate command was required." });
   } else if (hardwareSuppressed) {
     rows.push({
       label: "Gate",
@@ -546,7 +536,7 @@ function movementExplanations(movement: MovementRecord): MovementExplanation[] {
   }
 
   if (movement.presence_committed) {
-    rows.push({ label: "Presence", value: "Presence was committed after the movement lifecycle reached a confirmed state." });
+    rows.push({ label: "Presence", value: "A presence update is recorded as committed for this movement." });
   } else if (externalAdmissionMode) {
     rows.push({ label: "Presence", value: "No person presence was changed; this unknown plate is tracked through its active vehicle movement session." });
   } else if (movement.reconciliation_required) {

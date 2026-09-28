@@ -1,5 +1,6 @@
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
 import { useModalFocus } from "../ui/useModalFocus";
+import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 Activity,
 AlertTriangle,
@@ -133,6 +134,7 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
   const [detailPass, setDetailPass] = React.useState<VisitorPass | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
   const deferredQuery = React.useDeferredValue(query);
   const lastRefreshTokenRef = React.useRef(refreshToken);
   const loadSequenceRef = React.useRef(0);
@@ -316,6 +318,7 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       {loading ? (
         <div className="card passes-loading">
@@ -344,8 +347,9 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
           mode={modalPass ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
-            await loadPasses();
             closeModal();
+            setSaved("Pass saved.");
+            try { await loadPasses(); } catch { setError("Pass saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           visitorPass={modalPass}
         />
@@ -1253,7 +1257,6 @@ export function VisitorPassModal({
   onSaved: () => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
-  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [visitorName, setVisitorName] = React.useState(visitorPass?.visitor_name ?? "");
   const [passType, setPassType] = React.useState<VisitorPassType>(visitorPass?.pass_type ?? "one-time");
   const [visitorPhone, setVisitorPhone] = React.useState(visitorPass?.visitor_phone ? `+${visitorPass.visitor_phone}` : "");
@@ -1268,6 +1271,10 @@ export function VisitorPassModal({
   });
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const draftSnapshot = JSON.stringify([visitorName, passType, visitorPhone, expectedTime.toISOString(), windowMinutes, validFrom.toISOString(), validUntil.toISOString()]);
+  const initialDraft = React.useRef(draftSnapshot);
+  const requestClose = useEditorDismiss(onClose, draftSnapshot !== initialDraft.current, submitting, "visitor pass changes");
+  useModalFocus(modalRef, true, requestClose);
   const isDuration = passType === "duration";
   const updateDateFromInput = (value: string, setter: (date: Date) => void) => {
     const iso = fromDateTimeLocal(value);
@@ -1339,14 +1346,14 @@ export function VisitorPassModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
       <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Visitor pass" className="modal-card visitor-pass-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Visitor Pass" : "New Visitor Pass"}</h2>
             <p>{isDuration ? `${formatDate(validFrom.toISOString())} to ${formatDate(validUntil.toISOString())}` : `${formatDate(expectedTime.toISOString())} · +/- ${windowMinutes} minutes`}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -1436,7 +1443,7 @@ export function VisitorPassModal({
         )}
 
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             <Save size={16} />
             {submitting ? "Saving..." : mode === "edit" ? "Save Pass" : "Create Pass"}

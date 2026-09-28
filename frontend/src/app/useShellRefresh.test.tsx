@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { UserAccount, ViewKey } from "../api/types";
 import { useShellRefresh } from "./useShellRefresh";
+import type { ShellDataKey } from "./navigation";
 
 function setters() { return { presence: vi.fn(), expectedPresence: vi.fn(), events: vi.fn(), anomalies: vi.fn(), people: vi.fn(), vehicles: vi.fn(), groups: vi.fn(), schedules: vi.fn(), integrationStatus: vi.fn(), maintenanceStatus: vi.fn() }; }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((yes) => { resolve = yes; }); return { promise, resolve }; }
@@ -61,4 +62,23 @@ it("remains functional after the StrictMode setup/cleanup probe", async () => {
   await act(async () => { await result.current.initialRefresh(); });
   expect(updates.schedules).toHaveBeenCalledOnce();
   expect(result.current.loading).toBe(false);
+});
+it("retains an unavailable critical read across an unrelated successful invalidation", async () => {
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  let schedulesAvailable = false;
+  vi.spyOn(api, "get").mockImplementation((path) => path === "/api/v1/schedules" && !schedulesAvailable
+    ? Promise.reject(new Error("Synthetic schedules outage")) : Promise.resolve([]));
+  const { result } = renderHook(() => useShellRefresh("schedules", admin, setters()));
+  await act(async () => { await expect(result.current.initialRefresh()).rejects.toThrow("Synthetic schedules outage"); });
+  expect(result.current.readState).toBe("unavailable");
+  expect(result.current.failedKeys).toContain("schedules");
+  now += 6000;
+  await act(async () => { await result.current.refreshRealtime({ keys: new Set<ShellDataKey>(["anomalies"]), route: false }); });
+  expect(result.current.readState).toBe("unavailable");
+  expect(result.current.failedKeys).toContain("schedules");
+  schedulesAvailable = true;
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.readState).toBe("ready");
+  expect(result.current.failedKeys).toEqual([]);
 });

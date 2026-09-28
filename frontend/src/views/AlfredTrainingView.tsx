@@ -75,6 +75,10 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
   const [lessonDraft, setLessonDraft] = React.useState<LessonDraft | null>(null);
   const [lessonTab, setLessonTab] = React.useState<LessonTab>("pending");
   const [modeSaving, setModeSaving] = React.useState(false);
+  const [reviewingLessonId, setReviewingLessonId] = React.useState<string | null>(null);
+  const [reviewedLessonIds, setReviewedLessonIds] = React.useState<Set<string>>(() => new Set());
+  const [actionStatus, setActionStatus] = React.useState("");
+  const [actionError, setActionError] = React.useState("");
   const lastRefreshTokenRef = React.useRef(refreshToken);
 
   const load = React.useCallback(async () => {
@@ -89,8 +93,10 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
       setFeedback(feedbackPayload.feedback);
       setLessons(lessonPayload.lessons);
       setExamples(examplePayload.examples);
+      return true;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Alfred training data.");
+      return false;
     } finally {
       setLoading(false);
     }
@@ -153,6 +159,8 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
   const saveLearningMode = async (nextMode: "review_then_learn" | "auto_learn") => {
     if (modeSaving || learningMode === nextMode) return;
     setModeSaving(true);
+    setActionError("");
+    setActionStatus("");
     try {
       const values = { alfred_learning_mode: nextMode };
       const confirmation = await createActionConfirmation("settings.update", { values }, {
@@ -162,12 +170,19 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
         reason: "Update Alfred learning mode"
       });
       await settings.save(values, { confirmationToken: confirmation.confirmation_token });
+      setActionStatus(`Learning mode saved: ${titleCase(nextMode)}.`);
+    } catch (saveError) {
+      setActionError(saveError instanceof Error ? saveError.message : "Unable to save learning mode.");
     } finally {
       setModeSaving(false);
     }
   };
 
   const reviewLesson = async (lesson: AlfredLessonRecord, decision: "approve" | "reject") => {
+    if (reviewingLessonId || reviewedLessonIds.has(lesson.id)) return;
+    setReviewingLessonId(lesson.id);
+    setActionError("");
+    setActionStatus("");
     const draft = lessonDraft?.id === lesson.id ? lessonDraft : null;
     setLessonDraft(draft ? { ...draft, saving: true, error: "" } : null);
     try {
@@ -177,10 +192,15 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
         lesson: draft?.lesson
       });
       setLessonDraft(null);
-      await load();
+      setReviewedLessonIds((current) => new Set(current).add(lesson.id));
+      setActionStatus(`Lesson ${decision === "approve" ? "approved" : "rejected"}.`);
+      if (!(await load())) setActionError("Lesson reviewed, but the latest training data is unavailable.");
     } catch (reviewError) {
       const message = reviewError instanceof Error ? reviewError.message : "Unable to review lesson.";
       setLessonDraft(draft ? { ...draft, saving: false, error: message } : null);
+      setActionError(message);
+    } finally {
+      setReviewingLessonId(null);
     }
   };
 
@@ -204,16 +224,19 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
       </div>
 
       {error ? <div className="inline-error">{error}</div> : null}
+      {settings.error ? <div className="inline-error" role="alert">Learning mode unavailable: {settings.error}</div> : null}
+      {actionError ? <div className="inline-error" role="alert">{actionError}</div> : null}
+      {actionStatus ? <div className="callout" role="status">{actionStatus}</div> : null}
 
       <section className="card alfred-training-mode-card">
         <div className="panel-header">
           <h2>Learning Mode</h2>
-          <Badge tone={learningMode === "auto_learn" ? "green" : "blue"}>{titleCase(learningMode)}</Badge>
+          <Badge tone={settings.loading || settings.error ? "gray" : learningMode === "auto_learn" ? "green" : "blue"}>{settings.loading ? "Loading" : settings.error ? "Unavailable" : titleCase(learningMode)}</Badge>
         </div>
         <div className="alfred-learning-mode">
           <button
             className={learningMode === "review_then_learn" ? "active" : ""}
-            disabled={modeSaving || settings.loading}
+            disabled={modeSaving || settings.loading || Boolean(settings.error)}
             onClick={() => void saveLearningMode("review_then_learn")}
             type="button"
           >
@@ -221,7 +244,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
           </button>
           <button
             className={learningMode === "auto_learn" ? "active" : ""}
-            disabled={modeSaving || settings.loading}
+            disabled={modeSaving || settings.loading || Boolean(settings.error)}
             onClick={() => void saveLearningMode("auto_learn")}
             type="button"
           >
@@ -265,7 +288,8 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
               const linkedFeedback = feedbackForLesson(lesson);
               return (
                 <article className="alfred-training-item" key={lesson.id}>
-                  <input
+                  <label className="alfred-training-field">Lesson title<input
+                    aria-label={`Lesson title for ${lesson.title}`}
                     value={draft?.title ?? lesson.title}
                     onChange={(event) => setLessonDraft({
                       id: lesson.id,
@@ -274,8 +298,9 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                       saving: false,
                       error: ""
                     })}
-                  />
-                  <textarea
+                  /></label>
+                  <label className="alfred-training-field">Lesson guidance<textarea
+                    aria-label={`Lesson guidance for ${lesson.title}`}
                     value={draft?.lesson ?? lesson.lesson}
                     onChange={(event) => setLessonDraft({
                       id: lesson.id,
@@ -285,7 +310,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                       error: ""
                     })}
                     rows={4}
-                  />
+                  /></label>
                   <div className="alfred-training-meta">
                     <Badge tone={lesson.scope === "site" ? "purple" : "gray"}>{lesson.scope}</Badge>
                     <TrainingSourcePill source={lessonSourceForDisplay(lesson, linkedFeedback)} />
@@ -294,13 +319,13 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
                   </div>
                   {draft?.error ? <small className="chat-feedback-error">{draft.error}</small> : null}
                   <div className="alfred-training-actions">
-                    <button className="secondary-button" disabled={draft?.saving} onClick={() => void reviewLesson(lesson, "reject")} type="button">
+                    <button className="secondary-button" disabled={Boolean(reviewingLessonId) || reviewedLessonIds.has(lesson.id)} onClick={() => void reviewLesson(lesson, "reject")} type="button">
                       <X size={14} />
                       <span>Reject</span>
                     </button>
-                    <button className="primary-button" disabled={draft?.saving} onClick={() => void reviewLesson(lesson, "approve")} type="button">
-                      {draft?.saving ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
-                      <span>Approve</span>
+                    <button className="primary-button" disabled={Boolean(reviewingLessonId) || reviewedLessonIds.has(lesson.id)} onClick={() => void reviewLesson(lesson, "approve")} type="button">
+                      {reviewingLessonId === lesson.id ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
+                      <span>{reviewedLessonIds.has(lesson.id) ? "Reviewed" : reviewingLessonId === lesson.id ? "Reviewing…" : "Approve"}</span>
                     </button>
                   </div>
                 </article>

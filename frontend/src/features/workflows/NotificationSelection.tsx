@@ -1,4 +1,5 @@
 import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { ArrowLeft, Check, Clock3, Users, X } from "lucide-react";
 import React from "react";
 import type { Person, Schedule, UserAccount } from "../../api/types";
@@ -143,6 +144,7 @@ export function NotificationActionModal({
   integrations,
   people,
   onClose,
+  onDirtyChange,
   onSelect
 }: {
   embedded?: boolean;
@@ -150,6 +152,7 @@ export function NotificationActionModal({
   integrations: NotificationIntegration[];
   people: Person[];
   onClose: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onSelect: (action: NotificationAction) => void;
 }) {
   const actionCategories = React.useMemo(() => notificationActionCategories(), []);
@@ -158,6 +161,8 @@ export function NotificationActionModal({
   const [selectedMethodId, setSelectedMethodId] = React.useState<string | null>(null);
   const [selectedTargetIds, setSelectedTargetIds] = React.useState<Set<string>>(() => new Set());
   const [searchQuery, setSearchQuery] = React.useState("");
+  React.useEffect(() => { onDirtyChange?.(Boolean(selectedMethodId)); return () => onDirtyChange?.(false); }, [onDirtyChange, selectedMethodId]);
+  const requestClose = useEditorDismiss(onClose, Boolean(selectedMethodId), false, "notification action selection");
   const query = searchQuery.trim().toLowerCase();
   const currentUserPerson = React.useMemo(() => findCurrentUserPerson(people, currentUser), [currentUser, people]);
   const methodsByCategory = React.useMemo(
@@ -243,9 +248,9 @@ export function NotificationActionModal({
           </button>
         </>
       ) : null}
-      onBack={embedded ? onClose : undefined}
+      onBack={embedded ? requestClose : undefined}
       onCategoryChange={chooseCategory}
-      onClose={onClose}
+      onClose={requestClose}
       onSearchChange={setSearchQuery}
       searchPlaceholder={selectedMethod ? "Search targets" : "Search actions"}
       searchQuery={searchQuery}

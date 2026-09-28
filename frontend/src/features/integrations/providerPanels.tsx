@@ -1,4 +1,5 @@
 import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import {
   Activity,
   AlertTriangle,
@@ -166,12 +167,14 @@ export function IntegrationModal({
   onSaved: (updates: Record<string, unknown>, confirmationToken?: string) => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLDivElement>(null);
-  useModalFocus(modalRef, true, () => { if (!saving) onClose(); });
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
   const [form, setForm] = React.useState<Record<string, string>>(() => integrationInitialValues(definition, values));
   const [testing, setTesting] = React.useState(false);
   const [sendingTest, setSendingTest] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const initialForm = React.useRef(JSON.stringify(form));
+  const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== initialForm.current, saving, "integration changes");
+  useModalFocus(modalRef, true, requestClose);
   const [feedback, setFeedback] = React.useState<IntegrationFeedback | null>(null);
   const [haDiscovery, setHaDiscovery] = React.useState<HomeAssistantDiscovery | null>(null);
   const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
@@ -190,7 +193,9 @@ export function IntegrationModal({
   const isWhatsApp = definition.key === "whatsapp";
   const canManage = currentUser.role === "admin";
   React.useEffect(() => {
-    setForm(integrationInitialValues(definition, values));
+    const next = integrationInitialValues(definition, values);
+    initialForm.current = JSON.stringify(next);
+    setForm(next);
     setActiveTab(initialTab);
     setFeedback(null);
     setHaDiscovery(null);
@@ -429,14 +434,14 @@ export function IntegrationModal({
     }
   };
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
       <div ref={modalRef} className="modal-card integration-modal" role="dialog" aria-modal="true" aria-label={definition.title}>
         <div className="modal-header">
           <div>
             <h2>{definition.title}</h2>
             <p>{loading ? "Loading settings..." : definition.description}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close"><X size={16} /></button>
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close"><X size={16} /></button>
         </div>
         {isUnifiProtect ? (
           <div className="integration-modal-tabs" role="tablist" aria-label={`${definition.title} settings sections`}>
@@ -585,7 +590,7 @@ export function IntegrationModal({
             {testing ? "Testing..." : "Test Connection"}
           </button>
           {isApprise || isESPHome ? (
-            <button className="primary-button" onClick={onClose} type="button">Done</button>
+            <button className="primary-button" onClick={requestClose} type="button">Done</button>
           ) : (
             <button className="primary-button" disabled={!canManage || saving} type="submit">
               {saving ? "Saving..." : "Save"}
