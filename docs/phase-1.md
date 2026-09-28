@@ -1,5 +1,9 @@
 # Phase 1: Deployment and Backend Scaffold
 
+> Historical delivery record. It may describe retired services and mounts; use
+> [AGENTS.md](../AGENTS.md) and [the architecture guide](architecture.md) for
+> current implementation and deployment guidance.
+
 This phase establishes the runtime contract and backend boundaries for the
 Intelligent Access Control System.
 

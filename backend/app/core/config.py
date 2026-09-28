@@ -78,9 +78,7 @@ class Settings(BaseSettings):
     llm_provider: str = "local"
     llm_timeout_seconds: float = 45.0
 
-    lpr_adapter: str = "ubiquiti"
     gate_controller: str = "home_assistant"
-    notification_sender: str = "apprise"
 
     @field_validator("cors_origins", mode="before")
     @classmethod

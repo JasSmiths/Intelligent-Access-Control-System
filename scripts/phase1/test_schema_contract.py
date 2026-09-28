@@ -323,10 +323,37 @@ async def postgres_run(output: Path) -> int:
                 record("staged-upgrade", "FAIL", "Failed at " + revision)
                 break
             staged[revision] = await capture_schema(asyncpg.connect, staged_db, output, "staged-" + revision)
+            if revision == "20260912_0007":
+                connection = await asyncpg.connect(scratch_url(staged_db).replace("+asyncpg", ""), timeout=10)
+                try:
+                    await connection.execute("""INSERT INTO system_settings(key, category, value, is_secret)
+                        VALUES
+                        ('dependency_update_backup_storage_mode','retired','{}'::jsonb,false),
+                        ('dependency_update_backup_mount_source','retired','{}'::jsonb,false),
+                        ('dependency_update_backup_mount_options','retired','{}'::jsonb,false),
+                        ('dependency_update_backup_retention_days','retired','{}'::jsonb,false),
+                        ('dependency_update_backup_min_free_bytes','retired','{}'::jsonb,false),
+                        ('dependency_update_backup_config_status','retired','{}'::jsonb,false),
+                        ('schema_retained_setting','synthetic','{}'::jsonb,false);
+                        INSERT INTO audit_logs(id,category,action,actor,outcome,level)
+                        VALUES ('00000000-0000-0000-0000-000000000008','synthetic','schema.retained','Schema test','success','info')""")
+                finally:
+                    await connection.close()
         if fresh is not None and head in staged:
             compare("fresh-vs-staged-head", fresh, staged[head])
         else:
             record("fresh-vs-staged-head", "BLOCKED", "A prerequisite migration failed")
+        if head in staged:
+            connection = await asyncpg.connect(scratch_url(staged_db).replace("+asyncpg", ""), timeout=10)
+            try:
+                retired_settings = await connection.fetchval("SELECT count(*) FROM system_settings WHERE category='retired'")
+                retained_setting = await connection.fetchval("SELECT count(*) FROM system_settings WHERE key='schema_retained_setting'")
+                retained_audit = await connection.fetchval("SELECT count(*) FROM audit_logs WHERE id='00000000-0000-0000-0000-000000000008'")
+            finally:
+                await connection.close()
+            preserved = retired_settings == 0 and retained_setting == 1 and retained_audit == 1
+            record("retired-updater-data-removal", "PASS" if preserved else "FAIL",
+                   "Six retired settings are removed while unrelated settings and audit history survive the populated upgrade")
         if fresh is not None and pre_recovery in staged:
             if migrate(fresh_db, "downgrade", pre_recovery, output, "roundtrip-downgrade"):
                 downgraded = await capture_schema(asyncpg.connect, fresh_db, output, "downgraded-pre-recovery")

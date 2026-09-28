@@ -18,7 +18,6 @@ from app.services.auth_secret_management import (
     rotate_auth_secret,
 )
 from app.services.access_devices import get_access_device_service
-from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
@@ -151,25 +150,6 @@ async def patch_settings(
         await get_unifi_protect_service().restart()
     if any(key.startswith("discord_") for key in request.values):
         await get_discord_messaging_service().restart()
-    if any(
-        key.startswith((
-            "home_assistant_",
-            "esphome_",
-            "gate_",
-            "apprise_",
-            "discord_",
-            "whatsapp_",
-            "dvla_",
-            "unifi_protect_",
-            "llm_",
-            "openai_",
-            "gemini_",
-            "anthropic_",
-            "ollama_",
-        ))
-        for key in request.values
-    ):
-        await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
     return rows
 
 

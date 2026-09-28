@@ -61,7 +61,7 @@ class NotificationDispatcher:
             plan = row.delivery_plan
             if plan is None:
                 plan = await self.service.prepare_delivery_plan(row)
-                await self.store.save_plan(row.id, token, plan)
+                await self.store.save_plan(row.id, token, plan, facts=row.context.get("facts"))
             for index, item in enumerate(plan):
                 if item["state"] != "pending":
                     continue

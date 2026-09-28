@@ -65,11 +65,43 @@ async def test_interrupted_claim_is_recorded_unknown_without_retry(monkeypatch):
     execute = AsyncMock(side_effect=asyncio.CancelledError())
     finish = AsyncMock(return_value=True)
     monkeypatch.setattr(service, "_execute_claimed_approval", execute)
-    monkeypatch.setattr(service, "_approvals", SimpleNamespace(finish=finish))
+    monkeypatch.setattr(service, "_approvals", SimpleNamespace(finish=finish, record_turn=AsyncMock()))
     with pytest.raises(asyncio.CancelledError):
         await service._run_claimed_approval(row, client_context={})
     execute.assert_awaited_once()
     finish.assert_awaited_once_with(row, {"error_code": "approval_interrupted"}, unknown=True)
+
+
+@pytest.mark.asyncio
+async def test_retired_updater_approval_is_rejected_without_invoking_a_tool(monkeypatch):
+    """Historical approval rows cannot revive a removed updater action."""
+    from app.services import chat as chat_module
+
+    service = ChatService()
+    row = approval(payload={
+        "tool_name": "apply_dependency_update",
+        "arguments": {"dependency_id": str(uuid.uuid4()), "confirm": True},
+        "selected_tools": ["apply_dependency_update"],
+        "tool_contract": {"retired": True},
+    })
+    finish = AsyncMock(return_value=True)
+    invoke = AsyncMock(side_effect=AssertionError("retired tool must not execute"))
+
+    monkeypatch.setattr(chat_module, "get_runtime_config", AsyncMock(return_value=SimpleNamespace(llm_provider="local")))
+    monkeypatch.setattr(chat_module, "get_llm_provider", lambda _name: SimpleNamespace(name="local"))
+    monkeypatch.setattr(service, "_build_actor_context", AsyncMock(return_value={"user": {"role": "admin", "auth_session_version": 0}}))
+    monkeypatch.setattr(service, "_append_message", AsyncMock(return_value=uuid.uuid4()))
+    monkeypatch.setattr(service, "_append_tool_message", AsyncMock())
+    monkeypatch.setattr(service, "_update_memory", AsyncMock())
+    monkeypatch.setattr(service, "_audit_agent_tool_call", lambda *_args: None)
+    monkeypatch.setattr(service, "_confirmed_tool_finishes_without_resume", lambda _name: True)
+    monkeypatch.setattr(service, "_invoke_tool_call", invoke)
+    monkeypatch.setattr(service, "_approvals", SimpleNamespace(finish=finish, record_turn=AsyncMock()))
+
+    result = await service._execute_claimed_approval(row, client_context={})
+
+    invoke.assert_not_awaited()
+    assert result.tool_results[0]["output"]["error_code"] in {"unknown_tool", "approval_contract_changed"}
 
 
 @pytest.mark.asyncio

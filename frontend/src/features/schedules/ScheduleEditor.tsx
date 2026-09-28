@@ -1,3 +1,4 @@
+import { useModalFocus } from "../../ui/useModalFocus";
 import { Car, Clock3, Save, UserRound, Warehouse, X } from "lucide-react";
 import React from "react";
 import type { ScheduleDependencies } from "../../api/schedules";
@@ -21,6 +22,8 @@ export function ScheduleEditor({
   schedule: Schedule | null;
   setPageError: (message: string) => void;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     name: schedule?.name ?? "",
     description: schedule?.description ?? "",
@@ -72,7 +75,7 @@ export function ScheduleEditor({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card schedule-modal" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Schedule" className="modal-card schedule-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Schedule" : "New Schedule"}</h2>

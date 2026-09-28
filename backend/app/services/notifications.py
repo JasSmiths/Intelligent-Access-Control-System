@@ -1,3 +1,4 @@
+import asyncio
 import re
 import uuid
 import copy
@@ -35,6 +36,7 @@ from app.services.actionable_notifications import (
 )
 from app.services.workflows.notification_payloads import notification_context_payload, trigger_severity, _duration_label_from_seconds
 from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
+from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.automation_authorization import notification_origin_denial
 from app.services.access.authorization import assert_current_recognition_domain_authorization
@@ -489,7 +491,35 @@ class NotificationService:
             skipped_count=row.skipped_count, failures=list(row.failures), skipped_reasons=list(row.skipped_reasons),
         )
 
+    async def _enrich_unknown_vehicle_notification(self, row: NotificationRun) -> None:
+        """Enrich the claimed notice independently of post-commit access work.
+
+        The dispatcher checkpoints these facts with the rendered plan. A failed
+        optional lookup must not suppress the original unknown-vehicle alert.
+        """
+        facts = dict(row.context.get("facts") or {})
+        registration = facts.get("registration_number")
+        if (row.context.get("event_type") != "unauthorized_plate"
+                or not facts.get("access_event_id") or not registration
+                or (facts.get("vehicle_make") and facts.get("vehicle_colour"))):
+            return
+        try:
+            async with asyncio.timeout(3):
+                vehicle = await lookup_normalized_vehicle_registration(registration)
+        except Exception as exc:  # noqa: BLE001 - optional enrichment cannot block an alert.
+            logger.warning("notification_vehicle_enrichment_failed",
+                           extra={"exception_class": type(exc).__name__})
+            return
+        if not facts.get("vehicle_make") and vehicle.make:
+            facts["vehicle_make"] = vehicle.make
+        colour = facts.get("vehicle_colour") or facts.get("vehicle_color") or vehicle.colour
+        if colour:
+            facts["vehicle_colour"] = colour
+            facts["vehicle_color"] = colour
+        row.context = {**row.context, "facts": facts}
+
     async def prepare_delivery_plan(self, row: NotificationRun) -> list[dict[str, Any]]:
+        await self._enrich_unknown_vehicle_notification(row)
         context = notification_context_from_payload(row.context)
         if row.id is not None:
             context = self._context_with_notification_run_id(context, row.id)

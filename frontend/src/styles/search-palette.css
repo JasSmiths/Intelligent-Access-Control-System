@@ -17,19 +17,21 @@
 
 .search-palette-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--overlay-viewport-top, 0px) 0 auto;
+  height: var(--overlay-viewport-height, var(--app-viewport-height));
   z-index: 160;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   align-items: start;
   justify-items: center;
-  padding: 9vh 18px 24px;
+  padding: max(18px, var(--safe-top)) max(18px, var(--safe-right)) max(24px, var(--safe-bottom)) max(18px, var(--safe-left));
   background: rgba(15, 23, 42, 0.28);
   backdrop-filter: blur(9px);
 }
 
 .search-palette {
   width: min(820px, 100%);
-  max-height: min(720px, calc(var(--app-viewport-height) - 40px));
+  max-height: min(720px, 100%);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
@@ -282,11 +284,11 @@
 @media (max-width: 720px) {
   .search-palette-backdrop {
     align-items: stretch;
-    padding: 10px;
+    padding: max(10px, var(--safe-top)) max(10px, var(--safe-right)) max(10px, var(--safe-bottom)) max(10px, var(--safe-left));
   }
 
   .search-palette {
-    max-height: calc(var(--app-viewport-height) - 20px);
+    max-height: 100%;
   }
 
   .search-palette-input-shell {
@@ -308,13 +310,13 @@
   }
 
   .search-palette-results {
-    max-height: 48vh;
+    max-height: 48%;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
 
   .search-palette-preview {
-    max-height: 34vh;
+    max-height: 34%;
   }
 
   .search-palette-row {

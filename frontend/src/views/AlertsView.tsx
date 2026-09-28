@@ -1,3 +1,4 @@
+import { useModalFocus } from "../ui/useModalFocus";
 import {
 AlertTriangle,
 Bell,
@@ -44,6 +45,8 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
   const [actionTarget, setActionTarget] = React.useState<AlertActionTarget | null>(null);
   const [resolutionNote, setResolutionNote] = React.useState("");
   const [actionLoading, setActionLoading] = React.useState(false);
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, actionTarget?.action === "resolve", () => { if (!actionLoading) setActionTarget(null); });
   const lastRefreshTokenRef = React.useRef(refreshToken);
   const loadSequenceRef = React.useRef(0);
   const loadAbortRef = React.useRef<AbortController | null>(null);
@@ -194,6 +197,7 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
       {actionTarget?.action === "resolve" ? (
         <div className="modal-backdrop" role="presentation">
           <form
+            ref={modalRef}
             className="modal-card alert-resolution-modal"
             onSubmit={(event) => {
               event.preventDefault();

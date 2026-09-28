@@ -1,3 +1,4 @@
+import { useModalFocus } from "../../ui/useModalFocus";
 import { GitBranch, Play, Plus, Save, Split, Trash2, X, Zap } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount, Vehicle } from "../../api/types";
@@ -19,6 +20,12 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
   const [draft, setDraft] = React.useState<AutomationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, Boolean(draft), () => {
+    if (saving) return;
+    if (modal) setModal(null);
+    else setDraft(null);
+  });
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
   const [togglingRuleIds, setRuleToggling] = usePendingWorkflowIds();
   const [ruleStatusFeedback, setRuleStatusFeedback] = useTransientRuleStatusFeedback();
@@ -202,7 +209,7 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
 
       {draft ? (
         <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
-          <div className={modal ? "modal-card workflow-editor-modal selector-mode" : "modal-card workflow-editor-modal"} role="dialog" aria-modal="true">
+          <div ref={modalRef} aria-label="Automation editor" className={modal ? "modal-card workflow-editor-modal selector-mode" : "modal-card workflow-editor-modal"} role="dialog" aria-modal="true">
             <>
               <div
                 className={modal ? "workflow-modal-panel selector" : "workflow-modal-panel editor"}

@@ -16,7 +16,6 @@ const auditImpacts: Record<string, Impact> = {
   home_assistant: { keys: ["integrationStatus"], views: ["settings_gates", "settings_garage_doors", "settings_notifications", "settings_automations", "integrations"] },
   automation_rule: { keys: [], views: ["settings_automations"] },
   notification_rule: { keys: [], views: ["settings_notifications", "settings_automations"] },
-  dependency_updates: { keys: [], views: ["integrations"] },
   group: { keys: ["groups", "people", "vehicles", "expectedPresence"] },
   person: { keys: ["people", "vehicles", "groups", "presence", "expectedPresence"], views: ["settings_notifications", "settings_automations", "passes"] },
   schedule: { keys: ["schedules", "people", "vehicles", "groups", "integrationStatus", "expectedPresence"], views: ["settings_gates", "settings_garage_doors", "settings_notifications", "settings_automations"] },

@@ -36,7 +36,6 @@ from app.modules.notifications.apprise_client import (
     summarize_apprise_url,
     validate_apprise_urls,
 )
-from app.services.dependency_updates import get_dependency_update_service
 from app.services.access_devices import get_access_device_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.home_assistant import get_home_assistant_service
@@ -92,8 +91,6 @@ async def update_integration_settings(
         await service.start()
     if any(key.startswith("esphome_") or key.startswith("gate_") for key in values):
         await get_access_device_service().restart()
-    if any(key.startswith(("home_assistant_", "esphome_", "apprise_")) for key in values):
-        await get_dependency_update_service().sync_enrollment(reason="integration_settings_changed", user=user)
 
 
 class GateOpenRequest(BaseModel):

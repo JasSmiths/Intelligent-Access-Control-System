@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { MessageCircle } from "lucide-react";
+import { Camera, MessageCircle } from "lucide-react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { incomingMessagesApi, type IncomingMessage, type IncomingMessagePage, type IncomingMessageProvider } from "../../api/incomingMessages";
 import type { UserAccount } from "../../api/types";
@@ -33,11 +33,21 @@ it.each<IncomingMessageProvider>(["whatsapp", "discord"])("mounts incoming recov
     icon: MessageCircle, fields: [], statusLabel: "Not configured", statusTone: "gray" };
   const onSaved = vi.fn();
   render(<IntegrationModal definition={definition} currentUser={admin} initialTab="general" values={{}} loading={false}
-    dependencyPackages={[]} dependencyStorage={null} people={[]} onClose={vi.fn()} onSettingsChanged={vi.fn()} onSaved={onSaved} />);
+    people={[]} onClose={vi.fn()} onSettingsChanged={vi.fn()} onSaved={onSaved} />);
   expect(incomingMessagesApi.getPage).not.toHaveBeenCalled();
   openHistory();
   await screen.findByRole("button", { name: `Inspect incoming message ${contract[provider].items[0].id}` });
   expect(onSaved).not.toHaveBeenCalled();
+});
+
+it("keeps UniFi Protect general and exposes controls while omitting retired updater controls", () => {
+  const definition: IntegrationDefinition = { key: "unifi_protect", title: "UniFi Protect", description: "Synthetic integration", category: "data",
+    icon: Camera, fields: [], statusLabel: "Not configured", statusTone: "gray" };
+  render(<IntegrationModal definition={definition} currentUser={admin} initialTab="general" values={{}} loading={false}
+    people={[]} onClose={vi.fn()} onSettingsChanged={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByRole("tab", { name: "General" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Exposes" })).toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: /updates/i })).not.toBeInTheDocument();
 });
 
 it.each<IncomingMessageProvider>(["whatsapp", "discord"])("only reads %s history after the operator opens it", async (provider) => {

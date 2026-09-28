@@ -147,10 +147,6 @@ def test_automation_evidence_helpers_preserve_config_and_dispatch_truth() -> Non
         "outcomes": [{"accepted": False, "attempts": [{"provider": "esphome"}]}],
     }
 
-    assert automations.automation_action_dispatch_state(blocked_result) == "withheld"
-    assert automations.automation_action_reason_code(blocked_result) == "schedule_outside_window"
-    assert automations.automation_action_dispatch_state(rejected_result) == "attempted"
-    assert automations.automation_action_reason_code(rejected_result) == "integration_rejected"
     assert (
         automations.automation_condition_reason_code(
             {"passed": False, "reason": "Current configuration did not match."},

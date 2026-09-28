@@ -36,8 +36,8 @@
 
 .chat-widget {
   position: fixed;
-  right: 30px;
-  bottom: 28px;
+  right: max(30px, var(--safe-right));
+  bottom: max(28px, var(--safe-bottom));
   z-index: 60;
   display: grid;
   justify-items: end;
@@ -80,9 +80,8 @@
 
 .chat-panel {
   position: relative;
-  width: min(430px, calc(100vw - 32px));
-  height: min(640px, calc(100vh - 96px));
-  height: min(640px, calc(100dvh - 96px));
+  width: min(430px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  height: min(640px, calc(var(--app-viewport-height) - 96px));
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
@@ -949,9 +948,8 @@
 }
 
 .chat-panel {
-  width: min(480px, calc(100vw - 32px));
-  height: min(690px, calc(100vh - 96px));
-  height: min(690px, calc(100dvh - 96px));
+  width: min(480px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  height: min(690px, calc(var(--app-viewport-height) - 96px));
   border-radius: 12px;
   background: var(--surface);
   box-shadow:
@@ -1478,7 +1476,7 @@
 @media (max-width: 1280px) {
   .topbar {
     gap: 10px;
-    padding-right: 14px;
+    padding-right: max(14px, var(--safe-right));
   }
 
   .topbar-left {
@@ -1504,18 +1502,6 @@
     flex: 1 1 220px;
   }
 
-  .dashboard-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .presence-summary-card,
-  .chart-card {
-    grid-column: span 2;
-  }
-
-  .schedule-card-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 1100px) {
@@ -1534,14 +1520,14 @@
   }
 
   .modal-card.schedule-modal .schedule-calendar {
-    height: min(680px, calc(var(--app-viewport-height) - 270px));
+    height: clamp(180px, 55vh, 680px);
   }
 }
 
 @media (max-width: 980px) {
   .sidebar {
-    width: 82px;
-    padding-inline: 10px;
+    width: calc(82px + var(--safe-left));
+    padding-inline: max(10px, var(--safe-left)) 10px;
   }
 
   .brand {
@@ -1582,15 +1568,15 @@
   }
 
   .main {
-    margin-left: 82px;
-    width: calc(100vw - 82px);
-    max-width: calc(100vw - 82px);
+    margin-left: calc(82px + var(--safe-left));
+    width: calc(100vw - 82px - var(--safe-left));
+    max-width: calc(100vw - 82px - var(--safe-left));
     overflow-x: hidden;
   }
 
   .topbar {
     gap: 12px;
-    padding: 0 18px 0 4px;
+    padding: var(--safe-top) max(18px, var(--safe-right)) 0 max(4px, var(--safe-left));
   }
 
   .topbar-left {
@@ -1631,9 +1617,7 @@
     max-width: 100%;
   }
 
-  .integration-tile-grid,
   .protect-camera-grid,
-  .schedule-card-grid,
   .schedule-modal-grid,
   .settings-form-grid,
   .ha-setup-grid,
@@ -1650,11 +1634,11 @@
   }
 
   .two-pane-selection-modal {
-    width: min(940px, calc(100vw - 32px));
+    width: min(940px, 100%);
   }
 
   .two-pane-selection-modal.wide {
-    width: min(1128px, calc(100vw - 32px));
+    width: min(1128px, 100%);
   }
 
   .two-pane-selection-body {
@@ -1687,14 +1671,14 @@
   .sidebar {
     position: fixed;
     inset: 0 auto 0 0;
-    width: min(310px, 100vw);
-    max-width: 100vw;
+    width: min(310px, 100%);
+    max-width: 100%;
     height: auto;
     flex-direction: column;
     align-items: stretch;
     overflow-x: hidden;
     overflow-y: auto;
-    padding: calc(16px + env(safe-area-inset-top)) 10px calc(18px + env(safe-area-inset-bottom));
+    padding: max(16px, var(--safe-top)) max(10px, var(--safe-right)) max(18px, var(--safe-bottom)) max(10px, var(--safe-left));
     border-top: 0;
     border-right: 1px solid var(--line);
     box-shadow: 18px 0 42px rgba(15, 23, 42, 0.16);
@@ -1850,8 +1834,8 @@
   }
 
   .sidebar-collapsed .sidebar {
-    width: min(310px, 100vw);
-    padding: calc(16px + env(safe-area-inset-top)) 10px calc(18px + env(safe-area-inset-bottom));
+    width: min(310px, 100%);
+    padding: max(16px, var(--safe-top)) max(10px, var(--safe-right)) max(18px, var(--safe-bottom)) max(10px, var(--safe-left));
   }
 
   .sidebar-collapsed .brand {
@@ -1901,13 +1885,6 @@
     padding: 0 30px;
   }
 
-  .topbar {
-    height: auto;
-    align-items: stretch;
-    flex-direction: column;
-    padding: 12px 14px 12px 4px;
-  }
-
   .toolbar,
   .card-header,
   .panel-header {
@@ -1932,25 +1909,25 @@
   }
 
   .modal-backdrop {
-    padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    padding: max(12px, var(--safe-top)) max(12px, var(--safe-right)) max(12px, var(--safe-bottom)) max(12px, var(--safe-left));
   }
 
   .workflow-editor-backdrop {
-    padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    padding: max(12px, var(--safe-top)) max(12px, var(--safe-right)) max(12px, var(--safe-bottom)) max(12px, var(--safe-left));
   }
 
   .modal-card.workflow-editor-modal {
-    width: calc(100vw - 24px);
-    height: calc(var(--app-viewport-height) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-    max-width: calc(100vw - 24px);
-    max-height: calc(var(--app-viewport-height) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
   }
 
   .two-pane-selection-modal {
-    width: calc(100vw - 24px);
-    height: calc(var(--app-viewport-height) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-    max-width: calc(100vw - 24px);
-    max-height: calc(var(--app-viewport-height) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
   }
 
   .two-pane-selection-header {
@@ -2075,11 +2052,11 @@
 
   .alert-tray {
     position: fixed;
-    top: calc(68px + env(safe-area-inset-top));
-    right: 14px;
-    left: 14px;
+    top: max(68px, calc(var(--safe-top) + 54px));
+    right: max(14px, var(--safe-right));
+    left: max(14px, var(--safe-left));
     width: auto;
-    max-height: calc(var(--app-viewport-height) - 154px - env(safe-area-inset-top));
+    max-height: calc(var(--app-viewport-height) - max(68px, calc(var(--safe-top) + 54px)) - var(--edge-bottom));
   }
 
   .estate-select {
@@ -2099,7 +2076,7 @@
   .dashboard-page,
   .view-stack,
   .settings-grid {
-    padding: 18px 14px calc(22px + env(safe-area-inset-bottom) + var(--alfred-launcher-clearance));
+    padding: 18px max(14px, var(--safe-right)) calc(max(22px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) max(14px, var(--safe-left));
   }
 
   .dashboard-intro {
@@ -2107,8 +2084,6 @@
     flex-direction: column;
   }
 
-  .dashboard-grid,
-  .integration-tile-grid,
   .protect-camera-grid,
   .visitor-pass-grid,
   .settings-form-grid,
@@ -2144,11 +2119,6 @@
   .protect-section-header,
   .protect-exposes-header,
   .protect-exposes-grid,
-  .protect-update-summary,
-  .protect-update-actions,
-  .protect-analysis-summary,
-  .protect-analysis-sections,
-  .protect-backup-row,
   .protect-analysis-box,
   .protect-analysis-box {
     grid-template-columns: 1fr;
@@ -2244,8 +2214,8 @@
   }
 
   .modal-card.visitor-pass-detail-modal {
-    width: calc(100vw - 20px);
-    max-height: calc(var(--app-viewport-height) - 20px);
+    width: 100%;
+    max-height: 100%;
     padding: 14px;
     gap: 12px;
   }
@@ -2298,11 +2268,11 @@
   }
 
   .visitor-pass-whatsapp-thread {
-    max-height: calc(var(--app-viewport-height) - 330px);
+    max-height: max(160px, calc(var(--app-viewport-height) - 330px));
   }
 
   .visitor-pass-log-panel {
-    max-height: calc(var(--app-viewport-height) - 330px);
+    max-height: max(160px, calc(var(--app-viewport-height) - 330px));
   }
 
   .visitor-pass-whatsapp-bubble {
@@ -2391,13 +2361,22 @@
     border-bottom: 0;
   }
 
+  .presence-stat:first-child,
+  .presence-stat:last-child {
+    --presence-tooltip-left: 50%;
+    --presence-tooltip-right: auto;
+    --presence-tooltip-shift: translateX(-50%) translateY(-4px);
+    --presence-tooltip-shift-open: translateX(-50%);
+    --presence-tooltip-arrow-left: calc(50% - 5px);
+    --presence-tooltip-arrow-right: auto;
+  }
+
   .event-feed-row {
     grid-template-columns: 54px 28px minmax(0, 1fr) auto;
   }
 
   .event-feed-row.has-snapshot .dashboard-event-snapshot-preview,
-  .event-feed-row.has-snapshot:not(.snapshot-open):hover .dashboard-event-snapshot-preview,
-  .event-feed-row.has-snapshot:not(.snapshot-open) .dashboard-event-snapshot-preview {
+  .event-feed-row.has-snapshot:not(.snapshot-open):hover .dashboard-event-snapshot-preview {
     width: min(100%, 320px);
     max-height: 0;
     display: block;
@@ -2544,15 +2523,15 @@
   }
 
   .chat-widget {
-    right: 12px;
-    left: 12px;
-    bottom: calc(80px + env(safe-area-inset-bottom));
+    right: var(--edge-right);
+    left: var(--edge-left);
+    bottom: max(80px, var(--edge-bottom));
     z-index: 150;
     justify-items: stretch;
   }
 
   .chat-widget.open {
-    top: calc(var(--chat-vv-top, 0px) + max(10px, env(safe-area-inset-top)));
+    top: calc(var(--chat-vv-top, 0px) + max(10px, var(--safe-top)));
     bottom: auto;
   }
 
@@ -2575,9 +2554,8 @@
 
   .chat-panel {
     width: 100%;
-    height: min(620px, calc(100vh - 104px));
-    height: min(620px, calc(var(--chat-vvh, 100dvh) - 24px));
-    max-height: calc(var(--chat-vvh, 100dvh) - 24px);
+    height: min(620px, calc(var(--chat-vvh, var(--app-viewport-height)) - var(--edge-top) - var(--edge-bottom)));
+    max-height: calc(var(--chat-vvh, var(--app-viewport-height)) - var(--edge-top) - var(--edge-bottom));
     margin-bottom: 0;
   }
 
@@ -2595,8 +2573,8 @@
 @media (max-width: 768px) {
   .chat-widget {
     left: auto;
-    right: calc(12px + env(safe-area-inset-right));
-    bottom: calc(12px + env(safe-area-inset-bottom));
+    right: var(--edge-right);
+    bottom: var(--edge-bottom);
     justify-items: end;
     overflow: visible;
   }
@@ -2612,22 +2590,44 @@
   }
 
   .chat-widget.open {
-    top: calc(var(--chat-vv-top, 0px) + max(8px, env(safe-area-inset-top)));
-    right: calc(8px + env(safe-area-inset-right));
+    top: calc(var(--chat-vv-top, 0px) + max(8px, var(--safe-top)));
+    right: max(8px, var(--safe-right));
     bottom: auto;
-    left: calc(8px + env(safe-area-inset-left));
+    left: max(8px, var(--safe-left));
     justify-items: stretch;
   }
 
   .chat-widget.open .chat-panel {
     width: 100%;
-    height: calc(var(--chat-vvh, 100dvh) - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
-    max-height: calc(var(--chat-vvh, 100dvh) - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
+    height: calc(var(--chat-vvh, var(--app-viewport-height)) - max(8px, var(--safe-top)) - max(8px, var(--safe-bottom)));
+    max-height: calc(var(--chat-vvh, var(--app-viewport-height)) - max(8px, var(--safe-top)) - max(8px, var(--safe-bottom)));
     margin-bottom: 0;
   }
 }
 
-@media (max-width: 768px) and (orientation: portrait) {
+@media (max-height: 600px) {
+  .modal-card.schedule-modal {
+    overflow-y: auto;
+    grid-template-rows: auto auto auto;
+  }
+
+  .modal-card.schedule-modal .schedule-modal-grid,
+  .modal-card.schedule-modal .schedule-details-panel,
+  .modal-card.schedule-modal .weekly-schedule-panel {
+    overflow: visible;
+  }
+
+  .modal-card.schedule-modal .weekly-schedule-panel {
+    height: auto;
+    max-height: none;
+  }
+
+  .modal-card.schedule-modal .schedule-calendar {
+    height: clamp(180px, 55vh, 680px);
+  }
+}
+
+@media (max-width: 720px) {
   .topbar {
     min-height: 54px;
     height: auto;
@@ -2635,7 +2635,7 @@
     grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px 8px 4px;
+    padding: max(8px, var(--safe-top)) max(12px, var(--safe-right)) 8px max(4px, var(--safe-left));
   }
 
   .topbar-left,
@@ -2738,6 +2738,24 @@
     border-right: 0;
   }
 
+  .presence-stat:first-child {
+    --presence-tooltip-left: 0px;
+    --presence-tooltip-right: auto;
+    --presence-tooltip-shift: translateY(-4px);
+    --presence-tooltip-shift-open: none;
+    --presence-tooltip-arrow-left: 52px;
+    --presence-tooltip-arrow-right: auto;
+  }
+
+  .presence-stat:last-child {
+    --presence-tooltip-left: auto;
+    --presence-tooltip-right: 0px;
+    --presence-tooltip-shift: translateY(-4px);
+    --presence-tooltip-shift-open: none;
+    --presence-tooltip-arrow-left: auto;
+    --presence-tooltip-arrow-right: 52px;
+  }
+
   .presence-stat span,
   .presence-stat small {
     font-size: 11px;
@@ -2830,7 +2848,7 @@
 @media (max-width: 430px) {
   .topbar {
     gap: 6px;
-    padding: 7px 9px 7px 4px;
+    padding: max(7px, var(--safe-top)) max(9px, var(--safe-right)) 7px max(4px, var(--safe-left));
   }
 
   .topbar-menu {
@@ -2851,7 +2869,7 @@
   .dashboard-page,
   .view-stack,
   .settings-grid {
-    padding-inline: 10px;
+    padding-inline: max(10px, var(--safe-left)) max(10px, var(--safe-right));
   }
 
   .toolbar {
@@ -2880,7 +2898,29 @@
   }
 }
 
-@media (max-width: 768px), (hover: none) and (pointer: coarse) and (orientation: landscape) {
+@media (max-width: 360px) {
+  .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .refresh-button {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  .theme-button {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  .alert-tray {
+    top: calc(var(--safe-top) + 106px);
+    max-height: calc(var(--app-viewport-height) - var(--safe-top) - 106px - var(--edge-bottom));
+  }
+}
+
+@media (max-width: 768px) {
   .schedule-policy-card {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
@@ -2993,6 +3033,32 @@
   .chat-pill::after,
   .typing-bubble i {
     animation: none;
+  }
+}
+
+@media (any-pointer: coarse) {
+  :root :is(input, select, textarea, [contenteditable="true"]) {
+    /* Keep form text readable without Safari's automatic focus zoom. */
+    font-size: max(1rem, 16px);
+  }
+
+  .nav-item,
+  .icon-button,
+  .primary-button,
+  .secondary-button,
+  .danger-button,
+  .panel-link,
+  .panel-select,
+  .schedule-policy-option,
+  .chat-copy-menu button {
+    min-height: 44px;
+  }
+
+  .icon-button,
+  .topbar .icon-button,
+  .notification-toast-head .icon-button {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 

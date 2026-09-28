@@ -1,3 +1,4 @@
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
 import {
 ArrowLeft,
 ArrowRight,
@@ -13,7 +14,7 @@ import { api, isAbortError } from "../api/client";
 import { formatDate, initials, matches, titleCase } from "../lib/format";
 import { mediaSource, mediaVariantUrl } from "../lib/media";
 import { Badge, EmptyState, Toolbar } from "../ui/primitives";
-import type { RealtimeMessage, TooltipPositionState } from "../api/types";
+import type { RealtimeMessage } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
 
 
@@ -312,31 +313,32 @@ export function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntr
 export function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownEntry }) {
   const snapshot = entry.latest_snapshot;
   const tooltipId = React.useId();
-  const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+  const [tooltipPosition, setTooltipPosition] = React.useState<OverlayPlacement | null>(null);
+  const anchorRef = React.useRef<HTMLElement | null>(null);
+  const tooltipRef = React.useRef<HTMLDivElement | null>(null);
+  const tooltipOpen = tooltipPosition !== null;
 
-  React.useEffect(() => {
-    if (!tooltipPosition) return undefined;
-    const hideTooltip = () => setTooltipPosition(null);
-    window.addEventListener("resize", hideTooltip);
-    window.addEventListener("scroll", hideTooltip, true);
-    return () => {
-      window.removeEventListener("resize", hideTooltip);
-      window.removeEventListener("scroll", hideTooltip, true);
+  React.useLayoutEffect(() => {
+    if (!tooltipOpen) return;
+    const anchor = anchorRef.current;
+    const overlay = tooltipRef.current;
+    if (!anchor || !overlay) return;
+    const update = () => {
+      if (!anchor.isConnected) { setTooltipPosition(null); return; }
+      const rect = overlay.getBoundingClientRect();
+      setTooltipPosition(placeOverlay(anchor.getBoundingClientRect(), {
+        width: rect.width, height: Math.max(rect.height, overlay.scrollHeight),
+      }, getUsableViewportBounds(), { alignment: "center", gap: 10 }));
     };
-  }, [tooltipPosition]);
+    update();
+    return observeOverlayPlacement(anchor, overlay, update);
+  }, [tooltipOpen]);
 
   const showTooltip = (target: HTMLElement) => {
     if (!snapshot?.url) return;
-    const tooltipWidth = Math.min(336, window.innerWidth - 24);
-    const tooltipHeight = Math.round((tooltipWidth - 16) * 9 / 16) + 56;
-    const rect = target.getBoundingClientRect();
-    const gap = 10;
-    const placement = rect.bottom + gap + tooltipHeight > window.innerHeight - 8 ? "top" : "bottom";
-    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
-    const top = placement === "bottom"
-      ? Math.min(window.innerHeight - tooltipHeight - 8, rect.bottom + gap)
-      : Math.max(8, rect.top - tooltipHeight - gap);
-    setTooltipPosition({ left, placement, top });
+    anchorRef.current = target;
+    // The mounted tooltip is measured before paint; this only establishes its initial bounds.
+    setTooltipPosition(placeOverlay(target.getBoundingClientRect(), { width: 336, height: 0 }, getUsableViewportBounds(), { alignment: "center", gap: 10 }));
   };
 
   if (!snapshot?.url) {
@@ -360,16 +362,17 @@ export function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownE
         }
       }}
       onMouseEnter={(event) => showTooltip(event.currentTarget)}
-      onMouseLeave={() => setTooltipPosition(null)}
+      onMouseLeave={(event) => { if (document.activeElement !== event.currentTarget) setTooltipPosition(null); }}
       type="button"
     >
       <img alt="" decoding="async" loading="lazy" src={mediaVariantUrl(snapshot.url, "thumb")} />
       {tooltipPosition ? createPortal(
         <div
-          className={`iacs-tooltip top-charts-snapshot-tooltip ${tooltipPosition.placement}`}
+          className={`iacs-tooltip top-charts-snapshot-tooltip ${tooltipPosition.side}`}
           id={tooltipId}
           role="tooltip"
-          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+          ref={tooltipRef}
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top, maxWidth: tooltipPosition.maxWidth, maxHeight: tooltipPosition.maxHeight, overflow: "auto", pointerEvents: "auto", transform: "none" }}
         >
           <img alt="" loading="lazy" src={snapshot.url} />
           <strong>{entry.registration_number}</strong>

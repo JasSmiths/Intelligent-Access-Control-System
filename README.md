@@ -64,6 +64,11 @@ Schema changes are managed through Alembic. Normal Compose startup runs
 bootstrap compatibility path has been removed. Test migrations only in disposable
 databases; production migration and deployment require a separate instruction.
 
+The application does not update dependencies or UniFi Protect packages at runtime.
+Use the repository's reviewed build and release workflow. Release notes for the
+retirement migration, retained disk files, and rollback limit are in
+[the updater retirement note](docs/releases/remove-dependency-updaters.md).
+
 ## Architecture Shape
 
 - `backend/app/core`: configuration, logging, lifecycle wiring.
@@ -78,8 +83,9 @@ databases; production migration and deployment require a separate instruction.
 - `backend/app/ai`: Alfred tool registry, domain tool groups, and provider boundaries.
 
 Docker storage uses host bind mounts only. No Docker named volumes are declared.
-The backend and updater containers mount the repository at `/workspace`; the updater
-service also mounts Docker's socket for dependency update jobs.
+The backend mounts the repository at `/workspace` for telemetry's read-only
+workspace log inspection. Dependency updates are performed through the reviewed
+repository build and release process, not from the running application.
 
 ## Access API
 
@@ -143,17 +149,12 @@ proxies API/WebSocket traffic to the backend.
 See [docs/phase-5.md](docs/phase-5.md)
 for UI routes, NPM setup, and verification notes.
 
-## Phase 6 Agent Guide
+## Agent guide
 
 Future implementation work should start with
 [AGENTS.md](AGENTS.md), which
 documents the architecture, modular I/O rules, API surface, UI design language,
 reverse-proxy expectations, and safe extension points for future AI agents.
 
-Architecture recovery milestone 3 ownership and validation: [feature operations and Alfred contracts](docs/validation/milestone3-operations.md).
-
-Architecture recovery milestone 4: [durable notification dispatch and recovery](docs/validation/milestone4-recovery.md).
-
-Architecture recovery milestone 5: [access evidence, decisions, execution and enrichment](docs/validation/milestone5-access.md).
-
-Architecture recovery milestone 6: [frontend owners, refresh coordination and retirement](docs/validation/milestone6-frontend.md).
+Historical milestone evidence remains in [docs/validation](docs/validation/); use
+[AGENTS.md](AGENTS.md) and the focused guides for current instructions.

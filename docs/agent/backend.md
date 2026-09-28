@@ -306,7 +306,6 @@ Secret setting keys include:
 - `openai_api_key`
 - `gemini_api_key`
 - `anthropic_api_key`
-- `dependency_update_backup_mount_options`
 
 ## API Notes
 

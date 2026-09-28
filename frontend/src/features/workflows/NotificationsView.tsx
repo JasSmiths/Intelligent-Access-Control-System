@@ -1,3 +1,4 @@
+import { useModalFocus } from "../../ui/useModalFocus";
 import { Bell, Play, Plus, Split, X, Zap } from "lucide-react";
 import React from "react";
 import type { Person, Schedule, UserAccount } from "../../api/types";
@@ -19,6 +20,12 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   const [draft, setDraft] = React.useState<NotificationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, Boolean(draft), () => {
+    if (saving) return;
+    if (modal) setModal(null);
+    else setDraft(null);
+  });
   const [testing, setTesting] = React.useState(false);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
   const [togglingRuleIds, setRuleToggling] = usePendingWorkflowIds();
@@ -219,6 +226,8 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
         <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
           <div
             className={workflowModalMode === "editor" ? "modal-card workflow-editor-modal" : "modal-card workflow-editor-modal selector-mode"}
+            ref={modalRef}
+            aria-label="Notification editor"
             role="dialog"
             aria-modal="true"
             aria-labelledby={workflowModalMode === "editor" ? "workflow-editor-title" : "two-pane-selection-title"}

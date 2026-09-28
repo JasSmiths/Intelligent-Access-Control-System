@@ -43,8 +43,6 @@ PERSISTENCE_TESTS = [
     'scripts/phase1/test_feedback_recovery.py',
     'scripts/phase1/test_recovery_discovery.py',
     'scripts/phase1/test_recovery_hold_persistence.py',
-    'scripts/phase1/test_release_recovery.py',
-    'scripts/phase1/test_release_restore_rehearsal.py',
     'scripts/phase1/test_delivery_schema_compatibility.py',
 ]
 DIAGNOSTIC_TESTS = ['scripts/phase1/test_recovery_boundaries.py']

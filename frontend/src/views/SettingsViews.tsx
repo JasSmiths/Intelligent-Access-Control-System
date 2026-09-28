@@ -1,3 +1,4 @@
+import { useModalFocus } from "../ui/useModalFocus";
 import {
 CalendarDays,
 Camera,
@@ -1526,6 +1527,8 @@ export function UserModal({
   onClose: () => void;
   onSaved: (temporaryPassword: string | null, savedUser?: UserAccount) => Promise<void>;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     username: user?.username ?? "",
     first_name: user?.first_name ?? "",
@@ -1626,7 +1629,7 @@ export function UserModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label={mode === "create" ? "Add User" : "Edit User"} className="modal-card" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "create" ? "Add User" : "Edit User"}</h2>

@@ -1,5 +1,9 @@
 # Target architecture and strategy decision
 
+> Historical proposal. Its updater preservation requirements are superseded by
+> the [current architecture guide](../architecture.md) and
+> [updater retirement note](../releases/remove-dependency-updaters.md).
+
 Implementation decisions and progress are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). The accepted target uses selected manual gates, explicit designated-entry admission, no ambiguous replay, 60-second recognition/scheduled catch-up, requester-bound Admin approvals, and outcome-based visitor consumption. This dated design is implemented through the existing owners; deployment remains separate.
 
 Proposal, 12 September 2026. **All new paths, types, tables and interfaces in this document are proposed, not current repository evidence.** Current evidence and preservation constraints are in [AUDIT.md](AUDIT.md); delivery/rollback gates are in [REMEDIATION_PLAN.md](REMEDIATION_PLAN.md). Keep [the current ownership guide](../architecture.md) authoritative until each approved package lands.

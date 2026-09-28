@@ -252,12 +252,14 @@ class NotificationRunStore:
             raise ClaimLost("Notification claim expired or changed")
         return row, now
 
-    async def save_plan(self, run_id, token, plan: list[dict[str, Any]]) -> None:
+    async def save_plan(self, run_id, token, plan: list[dict[str, Any]], *, facts=None) -> None:
         async with self.sessions() as session:
             row, now = await self._owned(session, run_id, token)
             if row.delivery_plan is not None:
                 raise ValueError("Notification plan is immutable after preparation")
             row.delivery_plan = copy.deepcopy(plan)
+            if facts is not None:
+                row.context = {**row.context, "facts": copy.deepcopy(facts)}
             row.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
             await session.commit()
 

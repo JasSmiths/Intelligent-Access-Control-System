@@ -1355,54 +1355,6 @@ def automation_condition_reason_code(
     return f"{_reason_code(condition_type)}_failed" if condition_type else "condition_failed"
 
 
-def automation_action_reason_code(result: dict[str, Any]) -> str:
-    explicit = str(result.get("reason_code") or "").strip()
-    if explicit:
-        return _reason_code(explicit)
-    for outcome in result.get("outcomes") or []:
-        if not isinstance(outcome, dict):
-            continue
-        metadata = as_dict(outcome.get("metadata"))
-        schedule = as_dict(metadata.get("schedule_evaluation"))
-        if metadata.get("schedule_denied") or schedule.get("allowed") is False:
-            return str(schedule.get("reason_code") or "schedule_denied")
-        if outcome.get("accepted") and not outcome.get("verified"):
-            return "device_state_unverified"
-        if outcome.get("accepted") is False and outcome.get("attempts"):
-            return "integration_rejected"
-    status = str(result.get("status") or "").strip().lower()
-    if status == "success":
-        return "action_succeeded"
-    if status == "skipped":
-        return "action_skipped"
-    if status == "failed":
-        return "action_failed"
-    return "action_outcome_unknown"
-
-
-def automation_action_dispatch_state(result: dict[str, Any]) -> str:
-    outcomes = [item for item in result.get("outcomes") or [] if isinstance(item, dict)]
-    if outcomes:
-        if any(
-            as_dict(item.get("metadata")).get("schedule_denied")
-            or as_dict(as_dict(item.get("metadata")).get("schedule_evaluation")).get("allowed") is False
-            for item in outcomes
-        ):
-            return "withheld"
-        if any(item.get("accepted") and item.get("verified") for item in outcomes):
-            return "verified"
-        if any(item.get("accepted") for item in outcomes):
-            return "accepted"
-        if any(item.get("attempts") for item in outcomes):
-            return "attempted"
-    if result.get("command_id"):
-        if result.get("mechanically_confirmed"):
-            return "verified"
-        return "accepted" if result.get("accepted") else "attempted"
-    if str(result.get("status") or "").lower() == "skipped":
-        return "withheld"
-    return "not_applicable"
-
 
 def _reason_code(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")

@@ -1,3 +1,4 @@
+import { useModalFocus } from "../../ui/useModalFocus";
 import { ArrowLeft, Check, Clock3, Users, X } from "lucide-react";
 import React from "react";
 import type { Person, Schedule, UserAccount } from "../../api/types";
@@ -109,9 +110,11 @@ export function NotificationConditionModal({
   onClose: () => void;
   onSelect: (condition: NotificationCondition) => void;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, true, onClose);
   return (
     <div className="modal-backdrop" role="presentation">
-      <div className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-condition-title">
+      <div ref={modalRef} className="modal-card notification-add-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-condition-title">
         <div className="modal-header">
           <div>
             <h2 id="workflow-condition-title">Add Condition</h2>

@@ -541,15 +541,6 @@ def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload, default=str, separators=(',', ':'))}\n\n"
 
 
-async def _send_runtime_chat_error(websocket: WebSocket, message: str) -> None:
-    try:
-        await websocket.send_json({"type": "chat.error", "payload": {"message": message}})
-    except WebSocketDisconnect:
-        raise
-    except Exception:
-        logger.debug("alfred_chat_error_send_failed")
-
-
 def _record_chat_runtime_error(channel: str, user: User, payload: Mapping[str, Any], exc: Exception) -> None:
     metadata: dict[str, Any] = {
         "channel": channel,

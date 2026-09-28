@@ -38,6 +38,30 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); });
 
+it("updates compact scroll locking across a live breakpoint without losing the composer", () => {
+  const listeners = new Set<() => void>();
+  const compact = {
+    matches: false,
+    addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener)
+  };
+  vi.stubGlobal("matchMedia", vi.fn(() => compact));
+  vi.stubGlobal("scrollTo", vi.fn());
+  const view = render(<ChatWidget currentUser={admin} initialOpen maintenanceStatus={null} />);
+  const composer = screen.getByPlaceholderText("Ask Alfred...");
+  fireEvent.change(composer, { target: { value: "Unsent investigation" } });
+  expect(document.body.style.overflow).not.toBe("hidden");
+  act(() => { compact.matches = true; listeners.forEach((listener) => listener()); });
+  expect(document.body.style.overflow).toBe("hidden");
+  expect(document.body.classList.contains("alfred-chat-open")).toBe(true);
+  act(() => { compact.matches = false; listeners.forEach((listener) => listener()); });
+  expect(document.body.style.overflow).not.toBe("hidden");
+  expect(screen.getByPlaceholderText("Ask Alfred...")).toHaveValue("Unsent investigation");
+  expect(screen.getByPlaceholderText("Ask Alfred...")).toBe(composer);
+  view.unmount();
+  expect(listeners.size).toBe(0);
+});
+
 it("requires server-issued approval/session identifiers and removes tool-result reconstruction", async () => {
   expect(chatPendingAction({ ...contract.pending.pending_action, confirmation_id: undefined })).toBeNull();
   expect(chatPendingAction({ ...contract.pending.pending_action, session_id: undefined })).toBeNull();

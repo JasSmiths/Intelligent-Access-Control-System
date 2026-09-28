@@ -1,3 +1,5 @@
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
+import { useModalFocus } from "../ui/useModalFocus";
 import {
 Activity,
 AlertTriangle,
@@ -35,7 +37,7 @@ import { createPortal } from "react-dom";
 import { api, createActionConfirmation, isAbortError } from "../api/client";
 import { formatDate, fromDateTimeLocal, isRecord, levelTone, matches, numberPayload, scheduleDays, stringPayload, titleCase, toDateTimeLocal } from "../lib/format";
 import { EmptyState } from "../ui/primitives";
-import type { AuditLog, RealtimeMessage, TooltipPositionState } from "../api/types";
+import type { AuditLog, RealtimeMessage } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
 
 
@@ -567,31 +569,32 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
   const state = visitorPassMoreInfoState(visitorPass);
   const tooltip = visitorPassWhatsAppStatusTooltip(visitorPass);
   const tooltipId = React.useId();
-  const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+  const [tooltipPosition, setTooltipPosition] = React.useState<OverlayPlacement | null>(null);
+  const anchorRef = React.useRef<HTMLElement | null>(null);
+  const tooltipRef = React.useRef<HTMLDivElement | null>(null);
+  const tooltipOpen = tooltipPosition !== null;
 
-  React.useEffect(() => {
-    if (!tooltipPosition) return undefined;
-    const hideTooltip = () => setTooltipPosition(null);
-    window.addEventListener("resize", hideTooltip);
-    window.addEventListener("scroll", hideTooltip, true);
-    return () => {
-      window.removeEventListener("resize", hideTooltip);
-      window.removeEventListener("scroll", hideTooltip, true);
+  React.useLayoutEffect(() => {
+    if (!tooltipOpen) return;
+    const anchor = anchorRef.current;
+    const overlay = tooltipRef.current;
+    if (!anchor || !overlay) return;
+    const update = () => {
+      if (!anchor.isConnected) { setTooltipPosition(null); return; }
+      const rect = overlay.getBoundingClientRect();
+      setTooltipPosition(placeOverlay(anchor.getBoundingClientRect(), {
+        width: rect.width, height: Math.max(rect.height, overlay.scrollHeight),
+      }, getUsableViewportBounds(), { alignment: "center", gap: 10 }));
     };
-  }, [tooltipPosition]);
+    update();
+    return observeOverlayPlacement(anchor, overlay, update);
+  }, [tooltipOpen]);
 
   const showTooltip = (target: HTMLElement) => {
     if (!tooltip) return;
-    const rect = target.getBoundingClientRect();
-    const tooltipWidth = Math.min(320, window.innerWidth - 24);
-    const estimatedHeight = Math.min(168, 58 + Math.ceil(tooltip.body.length / 48) * 18);
-    const gap = 10;
-    const placement = rect.bottom + gap + estimatedHeight > window.innerHeight - 8 ? "top" : "bottom";
-    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
-    const top = placement === "bottom"
-      ? rect.bottom + gap
-      : Math.max(12, rect.top - estimatedHeight - gap);
-    setTooltipPosition({ left, placement, top });
+    anchorRef.current = target;
+    // The mounted tooltip is measured before paint; this only establishes its initial bounds.
+    setTooltipPosition(placeOverlay(target.getBoundingClientRect(), { width: 320, height: 0 }, getUsableViewportBounds(), { alignment: "center", gap: 10 }));
   };
 
   if (!state) return null;
@@ -612,22 +615,23 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
         }
       } : undefined}
       onMouseEnter={tooltip ? (event) => showTooltip(event.currentTarget) : undefined}
-      onMouseLeave={tooltip ? () => setTooltipPosition(null) : undefined}
+      onMouseLeave={tooltip ? (event) => { if (document.activeElement !== event.currentTarget) setTooltipPosition(null); } : undefined}
       tabIndex={tooltip ? 0 : undefined}
     >
       <Icon className={state.spinning ? "spin" : undefined} size={15} />
       <strong>{state.label}</strong>
       {tooltip ? <AlertTriangle size={15} /> : <ChevronRight size={15} />}
       {tooltip && tooltipPosition ? createPortal(
-        <span
-          className={`iacs-tooltip visitor-pass-error-tooltip ${tooltipPosition.placement}`}
+        <div
+          className={`iacs-tooltip visitor-pass-error-tooltip ${tooltipPosition.side}`}
           id={tooltipId}
           role="tooltip"
-          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+          ref={tooltipRef}
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top, maxWidth: tooltipPosition.maxWidth, maxHeight: tooltipPosition.maxHeight, overflow: "auto", pointerEvents: "auto", transform: "none" }}
         >
           <strong>{tooltip.title}</strong>
           <span>{tooltip.body}</span>
-        </span>,
+        </div>,
         document.body
       ) : null}
     </div>
@@ -651,6 +655,8 @@ export function VisitorPassDetailsModal({
   onDelete: (visitorPass: VisitorPass) => Promise<boolean>;
   onUpdated: (visitorPass: VisitorPass) => Promise<void>;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, true, () => { onClose(); });
   const [activeTab, setActiveTab] = React.useState<"details" | "whatsapp" | "log">("details");
   const [messages, setMessages] = React.useState<VisitorPassWhatsAppMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = React.useState(false);
@@ -930,7 +936,7 @@ export function VisitorPassDetailsModal({
   return (
     <>
       <div className="modal-backdrop" role="presentation">
-        <div className="modal-card visitor-pass-detail-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-detail-title">
+        <div ref={modalRef} className="modal-card visitor-pass-detail-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-detail-title">
           <div className="modal-header visitor-pass-detail-header">
             <VisitorPassAvatar visitorPass={visitorPass} />
             <div className="visitor-pass-detail-title">
@@ -1160,10 +1166,12 @@ export function VisitorPassActionConfirmModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
   const isDelete = action === "delete";
   return createPortal(
     <div className="modal-backdrop stacked-modal" role="presentation">
-      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-action-confirm-title">
+      <div ref={modalRef} className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="visitor-pass-action-confirm-title">
         <div className="modal-header">
           <div className="gate-confirm-title">
             <span className={`gate-confirm-icon ${isDelete ? "danger" : ""}`}>
@@ -1244,6 +1252,8 @@ export function VisitorPassModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [visitorName, setVisitorName] = React.useState(visitorPass?.visitor_name ?? "");
   const [passType, setPassType] = React.useState<VisitorPassType>(visitorPass?.pass_type ?? "one-time");
   const [visitorPhone, setVisitorPhone] = React.useState(visitorPass?.visitor_phone ? `+${visitorPass.visitor_phone}` : "");
@@ -1330,7 +1340,7 @@ export function VisitorPassModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card visitor-pass-modal" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Visitor pass" className="modal-card visitor-pass-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Visitor Pass" : "New Visitor Pass"}</h2>

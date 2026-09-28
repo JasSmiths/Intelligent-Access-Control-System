@@ -7,7 +7,6 @@ from app.api.v1 import (
     ai,
     automations,
     auth,
-    dependency_updates,
     diagnostics,
     directory,
     discord,
@@ -40,7 +39,6 @@ api_router.include_router(access.router, prefix="/access", tags=["Access Events"
 api_router.include_router(access_devices.router, prefix="/access-devices", tags=["Access Devices"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(action_confirmations.router, prefix="/action-confirmations", tags=["Integrations"])
-api_router.include_router(dependency_updates.router, prefix="/dependency-updates", tags=["Dependency Updates"])
 api_router.include_router(ai.router, prefix="/ai", tags=["AI Agents"])
 api_router.include_router(automations.router, prefix="/automations", tags=["Automations"])
 api_router.include_router(diagnostics.router, prefix="/diagnostics", tags=["Diagnostics"])

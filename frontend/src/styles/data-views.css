@@ -208,7 +208,7 @@
 }
 
 .alert-resolution-modal {
-  width: min(460px, calc(100vw - 32px));
+  width: min(460px, 100%);
 }
 
 .alert-resolution-modal textarea {
@@ -1017,7 +1017,7 @@ tr:last-child td {
 .reports-page {
   display: grid;
   gap: 10px;
-  padding: 20px 28px calc(30px + var(--alfred-launcher-clearance));
+  padding: 20px max(28px, var(--safe-right)) calc(max(30px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) 28px;
 }
 
 .reports-page-head {
@@ -1404,8 +1404,8 @@ tr:last-child td {
 .report-date-time-popover {
   position: fixed;
   z-index: 280;
-  width: min(348px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
+  width: min(348px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  max-height: calc(var(--app-viewport-height) - var(--edge-top) - var(--edge-bottom));
   display: grid;
   gap: 12px;
   overflow-y: auto;
@@ -1954,7 +1954,7 @@ tr:last-child td {
 }
 
 .report-snapshot-tooltip {
-  width: min(360px, calc(100vw - 24px));
+  width: min(360px, calc(100vw - var(--edge-left) - var(--edge-right)));
   gap: 7px;
   padding: 8px;
 }
@@ -1962,6 +1962,7 @@ tr:last-child td {
 .report-snapshot-tooltip img {
   width: 100%;
   aspect-ratio: 16 / 9;
+  max-height: max(40px, calc(var(--app-viewport-height) - var(--edge-top) - var(--edge-bottom) - 72px));
   display: block;
   object-fit: cover;
   border: 1px solid var(--line);
@@ -2013,7 +2014,7 @@ tr:last-child td {
 }
 
 .report-duration-tooltip {
-  width: min(240px, calc(100vw - 24px));
+  width: min(240px, calc(100vw - var(--edge-left) - var(--edge-right)));
 }
 
 .report-confidence {
@@ -2380,7 +2381,7 @@ tr:last-child td {
 @media (max-width: 760px) {
   .reports-page {
     overflow-x: hidden;
-    padding: 18px 14px calc(22px + env(safe-area-inset-bottom) + var(--alfred-launcher-clearance));
+    padding: 18px max(14px, var(--safe-right)) calc(max(22px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) max(14px, var(--safe-left));
   }
 
   .report-builder-panel,

@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.modules.unifi_protect.package import activate_unifi_protect_package_overlay
 from app.services.settings import RuntimeConfig
 
 logger = get_logger(__name__)
@@ -51,7 +50,6 @@ async def build_unifi_protect_client(config: RuntimeConfig):
     if not is_unifi_protect_configured(config):
         raise UnifiProtectNotConfiguredError("UniFi Protect host, username, password, and API key are required.")
 
-    activate_unifi_protect_package_overlay()
     try:
         from uiprotect import ProtectApiClient
         from uiprotect.data import ModelType
@@ -266,7 +264,6 @@ async def list_unifi_protect_events(
     since: datetime | None = None,
     until: datetime | None = None,
 ) -> list[Any]:
-    activate_unifi_protect_package_overlay()
     try:
         from uiprotect.data import EventType
     except ImportError as exc:

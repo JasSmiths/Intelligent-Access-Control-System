@@ -27,11 +27,11 @@ TELEMETRY_CATEGORY_ACCESS = "access_presence"
 TELEMETRY_CATEGORY_LPR = "lpr_telemetry"
 TELEMETRY_CATEGORY_CRUD = "entity_management"
 TELEMETRY_CATEGORY_INTEGRATIONS = "integrations"
-TELEMETRY_CATEGORY_DEPENDENCY_UPDATES = "dependency_updates"
 TELEMETRY_CATEGORY_ALFRED = "alfred_ai"
 TELEMETRY_CATEGORY_MAINTENANCE = "maintenance_mode"
 TELEMETRY_CATEGORY_GATE_MALFUNCTION = "gate_malfunction"
 TELEMETRY_CATEGORY_AUTOMATION = "automation_engine"
+TELEMETRY_CATEGORY_DEPENDENCY_UPDATES = "dependency_updates"
 
 TELEMETRY_CATEGORIES = [
     {
@@ -61,8 +61,8 @@ TELEMETRY_CATEGORIES = [
     },
     {
         "id": TELEMETRY_CATEGORY_DEPENDENCY_UPDATES,
-        "label": "Updates & Rollbacks",
-        "description": "Dependency enrollment, update analysis, backup, apply, restore, and rollback activity.",
+        "label": "Retired updater history",
+        "description": "Retained audit records from the removed dependency and UniFi package updaters.",
     },
     {
         "id": TELEMETRY_CATEGORY_GATE_MALFUNCTION,

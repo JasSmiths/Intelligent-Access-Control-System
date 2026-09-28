@@ -15,7 +15,7 @@ from app.services.chat import ChatService
 
 
 SERVICE_NAMES = (
-    "dependency_update", "notification", "automation", "discord_messaging", "visitor_pass",
+    "notification", "automation", "discord_messaging", "visitor_pass",
     "access_device", "access_event", "movement_reconciliation", "home_assistant",
     "gate_malfunction", "unifi_protect",
 )

@@ -1,4 +1,4 @@
-import { Bell, PlugZap, RefreshCcw } from "lucide-react";
+import { Bell, PlugZap } from "lucide-react";
 import React from "react";
 
 import { isRecord } from "../lib/format";
@@ -7,8 +7,6 @@ import { useSettings } from "../lib/settings";
 import { Badge, Toolbar } from "../ui/primitives";
 import type { IntegrationStatus, Person, RealtimeMessage, UnifiProtectCamera, UserAccount } from "../api/types";
 import {
-  DependencyPackage,
-  DependencyStorageStatus,
   DiscordChannel,
   DiscordIdentity,
   DiscordStatus,
@@ -17,20 +15,16 @@ import {
   ICloudCalendarSyncRun,
   integrationsApi,
   UnifiProtectStatus,
-  UnifiProtectUpdateStatus,
   WhatsAppStatus,
   confirmIntegrationAction
 } from "../api/integrations";
 import {
-  dependenciesForIntegration,
   integrationCategories,
   integrationDefinitions,
   IntegrationDefinition,
-  IntegrationsPageTab,
   LlmProviderSelector,
   ProtectIntegrationTab
 } from "../features/integrations/catalog";
-import { DependencyUpdatesHub, DependencyUpdateModal, dependencyIsActionableUpdate } from "../features/integrations/dependencyUpdates";
 import { IntegrationModal } from "../features/integrations/providerPanels";
 import { UnifiProtectCameraSection } from "../features/integrations/unifiProtect";
 
@@ -41,15 +35,12 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   const isAdmin = currentUser.role === "admin";
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
   const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(status);
-  const [pageTab, setPageTab] = React.useState<IntegrationsPageTab>("integrations");
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
-  const [activeDependency, setActiveDependency] = React.useState<DependencyPackage | null>(null);
   const [llmProviderSaving, setLlmProviderSaving] = React.useState(false);
   const [protectStatus, setProtectStatus] = React.useState<UnifiProtectStatus | null>(null);
   const [protectCameras, setProtectCameras] = React.useState<UnifiProtectCamera[]>([]);
   const [protectSnapshotRefreshToken, setProtectSnapshotRefreshToken] = React.useState(0);
-  const [protectUpdateStatus, setProtectUpdateStatus] = React.useState<UnifiProtectUpdateStatus | null>(null);
   const [protectLoading, setProtectLoading] = React.useState(false);
   const [protectError, setProtectError] = React.useState("");
   const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
@@ -63,12 +54,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   const [whatsappStatus, setWhatsappStatus] = React.useState<WhatsAppStatus | null>(null);
   const [whatsappLoading, setWhatsappLoading] = React.useState(false);
   const [whatsappError, setWhatsappError] = React.useState("");
-  const [dependencyPackages, setDependencyPackages] = React.useState<DependencyPackage[]>([]);
-  const [dependencyStorage, setDependencyStorage] = React.useState<DependencyStorageStatus | null>(null);
-  const [dependencyLoading, setDependencyLoading] = React.useState(false);
-  const [dependencyError, setDependencyError] = React.useState("");
   const [protectCamerasLoaded, setProtectCamerasLoaded] = React.useState(false);
-  const dependencyUpdatesLoadedRef = React.useRef(false);
   const protectCamerasLoadedRef = React.useRef(false);
   const processedIcloudRealtimeRef = React.useRef(new Set<string>());
   const lastRefreshTokenRef = React.useRef(refreshToken);
@@ -96,13 +82,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
       setProtectError(error instanceof Error ? error.message : "Unable to load UniFi Protect cameras.");
     } finally {
       setProtectLoading(false);
-    }
-  }, []);
-  const loadProtectUpdateStatus = React.useCallback(async () => {
-    try {
-      setProtectUpdateStatus(await integrationsApi.getProtectUpdateStatus());
-    } catch {
-      setProtectUpdateStatus(null);
     }
   }, []);
   const loadICloudCalendar = React.useCallback(async () => {
@@ -193,42 +172,24 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
       setWhatsappLoading(false);
     }
   }, []);
-  const loadDependencyUpdates = React.useCallback(async () => {
-    setDependencyLoading(true);
-    setDependencyError("");
-    dependencyUpdatesLoadedRef.current = true;
-    try {
-      const result = await integrationsApi.getDependencyUpdates();
-      setDependencyPackages(result.packages);
-      setDependencyStorage(result.storage);
-    } catch (error) {
-      dependencyUpdatesLoadedRef.current = false;
-      setDependencyError(error instanceof Error ? error.message : "Unable to load dependency updates.");
-    } finally {
-      setDependencyLoading(false);
-    }
-  }, []);
   const reloadSettingsAndProtect = React.useCallback(async () => {
     await reload();
     await loadHomeAssistantStatus();
     await loadAccessDeviceStatus();
     await loadProtect(true);
-    await loadProtectUpdateStatus();
     await loadICloudCalendar();
     await loadDiscord();
     await loadWhatsApp();
-    if (dependencyUpdatesLoadedRef.current) await loadDependencyUpdates();
-  }, [loadAccessDeviceStatus, loadDependencyUpdates, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp, reload]);
+  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp, reload]);
 
   React.useEffect(() => {
     loadHomeAssistantStatus().catch(() => undefined);
     loadAccessDeviceStatus().catch(() => undefined);
     loadProtect(false).catch(() => undefined);
-    loadProtectUpdateStatus().catch(() => undefined);
     loadICloudCalendar().catch(() => undefined);
     loadDiscord().catch(() => undefined);
     loadWhatsApp().catch(() => undefined);
-  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadProtectUpdateStatus, loadWhatsApp]);
+  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp]);
 
   React.useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
@@ -236,13 +197,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
     reloadSettingsAndProtect().catch(() => undefined);
   }, [refreshToken, reloadSettingsAndProtect]);
 
-  React.useEffect(() => {
-    if (pageTab !== "updates" || dependencyUpdatesLoadedRef.current) return;
-    loadDependencyUpdates().catch(() => undefined);
-  }, [loadDependencyUpdates, pageTab]);
-
-  const actionableDependencyUpdateCount = dependencyPackages.filter(dependencyIsActionableUpdate).length;
-  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, protectUpdateStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError, dependencyPackages);
+  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -252,25 +207,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   return (
     <section className="view-stack integrations-page">
       <Toolbar title="API & Integrations" count={tiles.length} icon={PlugZap} />
-      <div className="integration-page-tabs" role="tablist" aria-label="API and integrations sections">
-        <button className={pageTab === "integrations" ? "integration-page-tab active" : "integration-page-tab"} onClick={() => setPageTab("integrations")} type="button">
-          <PlugZap size={16} /> Integrations
-        </button>
-        <button className={pageTab === "updates" ? "integration-page-tab active" : "integration-page-tab"} onClick={() => setPageTab("updates")} type="button">
-          <RefreshCcw size={16} /> Updates
-          {actionableDependencyUpdateCount ? <Badge tone="amber">{actionableDependencyUpdateCount}</Badge> : null}
-        </button>
-      </div>
-      {pageTab === "updates" ? (
-        <DependencyUpdatesHub
-          loading={dependencyLoading}
-          packages={dependencyPackages}
-          storage={dependencyStorage}
-          error={dependencyError}
-          onChanged={loadDependencyUpdates}
-          onInspect={setActiveDependency}
-        />
-      ) : (
       <div className="integration-category-stack">
         {groupedTiles.map((category) => (
           <section className="integration-category" key={category.key}>
@@ -313,7 +249,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
                       className="integration-tile-main"
                       onClick={() => {
                         setActive(tile);
-                        setActiveTab(tile.updateAvailable ? "updates" : "general");
+                        setActiveTab("general");
                       }}
                       type="button"
                     >
@@ -328,7 +264,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
                         ) : null}
                       </div>
                       <Badge tone={tile.statusTone}>{tile.statusLabel}</Badge>
-                      {tile.updateAvailable ? <Badge tone="amber">Update Available</Badge> : null}
                     </button>
                   </article>
                 );
@@ -337,20 +272,16 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
           </section>
         ))}
       </div>
-      )}
       {active ? (
         <IntegrationModal
           definition={active}
           currentUser={currentUser}
           initialTab={activeTab}
-          dependencyPackages={dependenciesForIntegration(active, dependencyPackages)}
-          dependencyStorage={dependencyStorage}
           loading={loading}
           protectCameras={protectCameras}
           protectError={protectError || protectStatus?.last_error || protectStatus?.realtime_error || ""}
           protectLoading={protectLoading}
           protectStatus={protectStatus}
-          protectUpdateStatus={protectUpdateStatus}
           accessDeviceStatus={accessDeviceStatus}
           homeAssistantStatus={homeAssistantStatus}
           icloudError={icloudError}
@@ -370,11 +301,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
           onICloudChanged={loadICloudCalendar}
           onDiscordChanged={loadDiscord}
           onWhatsAppChanged={loadWhatsApp}
-          onProtectUpdateChanged={async () => {
-            await loadProtectUpdateStatus();
-            await loadProtect(true, protectCamerasLoadedRef.current);
-            await loadDependencyUpdates();
-          }}
           onProtectRefresh={() => loadProtect(true, true)}
           onSettingsChanged={reloadSettingsAndProtect}
           onAccessDeviceStatusChanged={setAccessDeviceStatus}
@@ -382,17 +308,8 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
             await save(updates, confirmationToken ? { confirmationToken } : {});
             await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
             await loadWhatsApp();
-            if (dependencyUpdatesLoadedRef.current) await loadDependencyUpdates();
             setActive(null);
           }}
-        />
-      ) : null}
-      {activeDependency ? (
-        <DependencyUpdateModal
-          dependency={activeDependency}
-          storage={dependencyStorage}
-          onClose={() => setActiveDependency(null)}
-          onChanged={loadDependencyUpdates}
         />
       ) : null}
       <UnifiProtectCameraSection

@@ -1,3 +1,4 @@
+import { useModalFocus } from "../ui/useModalFocus";
 import { ArrowRight, Bell, CalendarDays, Car, ClipboardPaste, Clock3, Command, GitBranch, Loader2, Search, UserRound, Users, X } from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
@@ -12,6 +13,8 @@ const searchMeta: Record<SearchPaletteItem["type"], SearchMeta> = {
 };
 
 export function SearchPalette({ currentUser, initialQuery, open, onClose, onOpenResult }: { currentUser: UserAccount; initialQuery: string; open: boolean; onClose: () => void; onOpenResult: (result: SearchPaletteItem) => void }) {
+  const modalRef = React.useRef<HTMLElement>(null);
+  useModalFocus(modalRef, open, onClose);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = React.useState(initialQuery);
   const [results, setResults] = React.useState<GlobalSearchResult[]>([]);
@@ -29,12 +32,7 @@ export function SearchPalette({ currentUser, initialQuery, open, onClose, onOpen
     setQuery(initialQuery); setResults([]); setError(""); setLoading(false); setActiveIndex(0); setPreviewItem(null);
     window.requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.select(); });
   }, [initialQuery, open]);
-  React.useEffect(() => {
-    if (!open) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
+
   React.useEffect(() => {
     if (!open) return undefined;
     if (!trimmedQuery) { setResults([]); setLoading(false); setError(""); return undefined; }
@@ -58,7 +56,7 @@ export function SearchPalette({ currentUser, initialQuery, open, onClose, onOpen
   };
   return createPortal(
     <div className="search-palette-backdrop" onMouseDown={onClose} role="presentation">
-      <section aria-label="Global search" aria-modal="true" className="search-palette" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+      <section ref={modalRef} aria-label="Global search" aria-modal="true" className="search-palette" onMouseDown={(event) => event.stopPropagation()} role="dialog">
         <div className="search-palette-input-shell">
           <Search size={20} />
           <div className="search-palette-input-stack"><input aria-activedescendant={activeItem ? `global-search-result-${activeItem.type}-${activeItem.id}` : undefined} aria-autocomplete="list" aria-controls="global-search-results" autoComplete="off" onChange={(event) => setQuery(event.target.value)} onKeyDown={handleInputKeyDown} placeholder="Search Anything..." ref={inputRef} role="combobox" spellCheck={false} value={query} />{completion ? <span className="search-palette-completion">{completion}</span> : null}</div>

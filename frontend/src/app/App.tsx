@@ -1,3 +1,4 @@
+import { useModalFocus } from "../ui/useModalFocus";
 import { Bell, ChevronDown, Loader2, LogOut, Menu, RefreshCcw, Search, ShieldCheck, X } from "lucide-react";
 import React from "react";
 import { api } from "../api/client";
@@ -62,6 +63,7 @@ export function App() {
   );
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
   const sidebarRef = React.useRef<HTMLElement | null>(null);
+  useModalFocus(sidebarRef, isMobileNavigation && mobileNavOpen, () => setMobileNavOpen(false));
   const alertsButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
   const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -179,16 +181,7 @@ export function App() {
     media.addEventListener("change", syncMobileNavigation);
     return () => media.removeEventListener("change", syncMobileNavigation);
   }, []);
-  React.useEffect(() => {
-    if (!mobileNavOpen) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMobileNavOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [mobileNavOpen]);
+
   React.useEffect(() => {
     if (mobileNavOpen) {
       sidebarRef.current?.scrollTo({ top: 0 });
@@ -338,7 +331,7 @@ export function App() {
   }
   return (
     <div className={`${navigationCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}${mobileNavOpen ? " mobile-nav-open" : ""}`}>
-      <aside className="sidebar" id="site-sidebar" aria-hidden={isMobileNavigation && !mobileNavOpen} ref={sidebarRef}>
+      <aside role={isMobileNavigation && mobileNavOpen ? "dialog" : undefined} aria-modal={isMobileNavigation && mobileNavOpen ? true : undefined} aria-label="Site navigation" inert={isMobileNavigation && !mobileNavOpen} className="sidebar" id="site-sidebar" aria-hidden={isMobileNavigation && !mobileNavOpen} ref={sidebarRef}>
         <div className="brand">
           <div className="brand-mark">
             <ShieldCheck size={28} />
@@ -364,7 +357,8 @@ export function App() {
                       setSettingsExpanded((current) => !current);
                     }}
                     type="button"
-                    title={navigationCollapsed ? item.label : undefined}
+                    title={item.label}
+                    aria-label={item.label}
                     aria-expanded={settingsExpanded && !navigationCollapsed}
                   >
                     <Icon size={18} />
@@ -379,6 +373,8 @@ export function App() {
                           <button
                             className={subItem.key === view ? "nav-item nested active" : "nav-item nested"}
                             key={subItem.key}
+                            aria-label={subItem.label}
+                            title={subItem.label}
                             onClick={() => navigateFromNav(subItem.key)}
                             type="button"
                           >
@@ -395,10 +391,11 @@ export function App() {
             return (
               <button
                 key={item.key}
+                aria-label={item.label}
                 className={item.key === view ? "nav-item active" : "nav-item"}
                 onClick={() => navigateFromNav(item.key)}
                 type="button"
-                title={navigationCollapsed ? item.label : undefined}
+                title={item.label}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
@@ -409,6 +406,7 @@ export function App() {
         <div className="sidebar-footer">
           <div className="profile-menu-shell">
             <button
+              aria-label={`Account menu for ${displayUserName(currentUser)}`}
               aria-controls="profile-menu"
               aria-expanded={profileMenuOpen}
               aria-haspopup="menu"

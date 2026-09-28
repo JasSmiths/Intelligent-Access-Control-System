@@ -24,6 +24,7 @@ import { mediaSource } from "../lib/media";
 import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
 import type { AccessEvent, AlertSeverity, Anomaly, ExpectedPresencePerson, ExpectedPresenceSummary, HomeAssistantManagedCover, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
+import { useModalFocus } from "../ui/useModalFocus";
 
 
 
@@ -35,12 +36,6 @@ export type DashboardCommand = {
   label: string;
   action: DoorCommandAction;
 };
-
-const INLINE_EVENT_SNAPSHOT_QUERY = "(max-width: 768px), (hover: none) and (pointer: coarse) and (orientation: landscape)";
-
-function isInlineEventSnapshotLayout() {
-  return typeof window !== "undefined" && window.matchMedia(INLINE_EVENT_SNAPSHOT_QUERY).matches;
-}
 
 type SavedDashboardCommand = { intentId: string; kind: DashboardCommand["kind"]; deviceKey?: string; action: DoorCommandAction };
 type DashboardReceipt = GateCommandReceipt | DeviceCommandReceipt;
@@ -123,12 +118,10 @@ function DashboardSession({
     setSavedCommands(commands);
   };
   const [openSnapshotEventId, setOpenSnapshotEventId] = React.useState<string | null>(null);
-  const [inlineEventSnapshotLayout, setInlineEventSnapshotLayout] = React.useState(isInlineEventSnapshotLayout);
+  const [hoverSnapshotEventId, setHoverSnapshotEventId] = React.useState<string | null>(null);
   const maintenanceActive = maintenanceStatus?.is_active === true;
   const isAdmin = currentUser.role === "admin";
-  const present = presence.filter((item) => item.state === "present").length;
   const exited = presence.filter((item) => item.state === "exited").length;
-  const unknown = Math.max(presence.length - present - exited, 0);
   const actionableAlerts = anomalies.filter(isActionableAlert);
   const critical = actionableAlerts.filter((item) => item.severity === "critical").length;
   const warning = actionableAlerts.filter((item) => item.severity === "warning").length;
@@ -144,17 +137,15 @@ function DashboardSession({
       const directoryPerson = peopleById.get(person.person_id);
       return {
         ...person,
-        profilePhotoDataUrl: mediaSource(
-          directoryPerson?.profile_photo_url,
-          directoryPerson?.profile_photo_data_url,
-          "thumb"
-        ) || null
+        profilePhotoDataUrl: profilePhotoForPerson(directoryPerson)
       };
     }),
     [expectedPresence?.people, peopleById]
   );
-  const todayEvents = events.filter((event) => isToday(event.occurred_at, now));
-  const exitedToday = todayEvents.filter((event) => event.direction === "exit").length;
+  const insideNowPeople = insideNowRoster(presence, peopleById, now);
+  const present = insideNowPeople.length;
+  const unknown = Math.max(presence.length - present - exited, 0);
+  const exitedTodayPeople = exitedTodayRoster(events, vehicles, people, now);
   const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
   const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
 
@@ -164,19 +155,6 @@ function DashboardSession({
     }
   }, [displayEvents, openSnapshotEventId]);
 
-  React.useEffect(() => {
-    const query = window.matchMedia(INLINE_EVENT_SNAPSHOT_QUERY);
-    const updateInlineLayout = () => {
-      setInlineEventSnapshotLayout(query.matches);
-      if (!query.matches) {
-        setOpenSnapshotEventId(null);
-      }
-    };
-
-    updateInlineLayout();
-    query.addEventListener("change", updateInlineLayout);
-    return () => query.removeEventListener("change", updateInlineLayout);
-  }, []);
 
   const gateEntities = activeManagedCovers(integrationStatus?.gate_entities);
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
@@ -402,7 +380,22 @@ function DashboardSession({
         <div className="card presence-summary-card">
           <PanelHeader title="Presence Summary" action="View all" />
           <div className="presence-stats">
-            <PresenceStat label="Inside Now" value={String(present)} trend="current" tone="green" />
+            <PresenceStat
+              label="Inside Now"
+              tooltip={(
+                <PresenceRosterTooltip
+                  countLabel={personCountLabel(insideNowPeople.length)}
+                  emptyLabel="Nobody is inside right now."
+                  moreLabel={(hidden) => `+${hidden} more inside`}
+                  people={insideNowPeople}
+                  title="Inside Now"
+                />
+              )}
+              tooltipLabel="People inside now"
+              value={String(present)}
+              trend="current"
+              tone="green"
+            />
             <PresenceStat
               badge={expectedPresence?.learning ? "Learning" : undefined}
               label="Expected"
@@ -418,7 +411,22 @@ function DashboardSession({
               trend="today"
               tone="blue"
             />
-            <PresenceStat label="Exited Today" value={String(exitedToday)} trend="events" tone="gray" />
+            <PresenceStat
+              label="Exited Today"
+              tooltip={(
+                <PresenceRosterTooltip
+                  countLabel={exitCountLabel(exitedTodayPeople.length)}
+                  emptyLabel="No exits recorded today."
+                  moreLabel={(hidden) => `+${hidden} more exits`}
+                  people={exitedTodayPeople}
+                  title="Exited Today"
+                />
+              )}
+              tooltipLabel="People who exited today"
+              value={String(exitedTodayPeople.length)}
+              trend="events"
+              tone="gray"
+            />
           </div>
           <div className="presence-bar" aria-label="Presence mix">
             <span className="residents" style={{ width: `${presenceSegmentWidth(present, presence.length)}%` }} />
@@ -438,17 +446,15 @@ function DashboardSession({
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
               const hasSnapshot = Boolean(event.snapshot_url);
-              const snapshotInteractive = hasSnapshot && inlineEventSnapshotLayout;
-              const snapshotOpen = hasSnapshot && openSnapshotEventId === event.id;
+              const snapshotInteractive = hasSnapshot;
+              const snapshotOpen = hasSnapshot && (openSnapshotEventId === event.id || hoverSnapshotEventId === event.id);
               const toggleSnapshot = () => setOpenSnapshotEventId((current) => current === event.id ? null : event.id);
-              const clearSnapshot = () => setOpenSnapshotEventId((current) => current === event.id ? null : current);
               return (
                 <div
                   aria-expanded={snapshotInteractive ? snapshotOpen : undefined}
                   aria-label={snapshotInteractive ? `Toggle ${event.snapshotLabel}` : undefined}
                   className={`${hasSnapshot ? "event-feed-row has-snapshot" : "event-feed-row"}${snapshotOpen ? " snapshot-open" : ""}`}
                   key={event.id}
-                  onBlur={snapshotInteractive ? clearSnapshot : undefined}
                   onClick={snapshotInteractive ? toggleSnapshot : undefined}
                   onKeyDown={snapshotInteractive ? (keyboardEvent) => {
                     if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
@@ -456,10 +462,11 @@ function DashboardSession({
                       toggleSnapshot();
                     } else if (keyboardEvent.key === "Escape") {
                       setOpenSnapshotEventId(null);
+                      setHoverSnapshotEventId(null);
                     }
                   } : undefined}
-                  onMouseEnter={hasSnapshot && !inlineEventSnapshotLayout ? () => setOpenSnapshotEventId(event.id) : undefined}
-                  onMouseLeave={hasSnapshot && !inlineEventSnapshotLayout ? clearSnapshot : undefined}
+                  onPointerEnter={hasSnapshot ? (pointerEvent) => { if (pointerEvent.pointerType === "mouse") setHoverSnapshotEventId(event.id); } : undefined}
+                  onPointerLeave={hasSnapshot ? () => setHoverSnapshotEventId(null) : undefined}
                   role={snapshotInteractive ? "button" : undefined}
                   tabIndex={snapshotInteractive ? 0 : undefined}
                 >
@@ -575,9 +582,11 @@ export function MaintenanceDisableModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
   return (
     <div className="modal-backdrop" role="presentation">
-      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="maintenance-disable-title">
+      <div ref={modalRef} className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="maintenance-disable-title">
         <div className="modal-header">
           <div className="gate-confirm-title">
             <span className="gate-confirm-icon maintenance">
@@ -635,6 +644,8 @@ export function GateConfirmModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
   const actionLabel = titleCase(action);
   const isGarage = label.toLowerCase().includes("garage");
   const Icon = isGarage
@@ -642,7 +653,7 @@ export function GateConfirmModal({
     : action === "open" ? DoorOpen : DoorClosed;
   return (
     <div className="modal-backdrop" role="presentation">
-      <div className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="gate-confirm-title">
+      <div ref={modalRef} className="modal-card gate-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="gate-confirm-title">
         <div className="modal-header">
           <div className="gate-confirm-title">
             <span className="gate-confirm-icon">
@@ -823,6 +834,61 @@ type ExpectedPresenceTooltipPerson = ExpectedPresencePerson & {
   profilePhotoDataUrl: string | null;
 };
 
+const PRESENCE_TOOLTIP_LIMIT = 6;
+
+export type PresenceRosterPerson = {
+  id: string;
+  display_name: string;
+  profilePhotoDataUrl: string | null;
+  detail: string;
+};
+
+export function PresenceRosterTooltip({
+  badge,
+  countLabel,
+  emptyLabel,
+  moreLabel,
+  people,
+  title
+}: {
+  badge?: string;
+  countLabel: string;
+  emptyLabel: string;
+  moreLabel: (hidden: number) => string;
+  people: PresenceRosterPerson[];
+  title: string;
+}) {
+  const visible = people.slice(0, PRESENCE_TOOLTIP_LIMIT);
+  const hidden = people.length - visible.length;
+  return (
+    <>
+      <div className="expected-tooltip-head">
+        <div>
+          <strong>{title}</strong>
+          <span>{countLabel}</span>
+        </div>
+        {badge ? <em>{badge}</em> : null}
+      </div>
+      {people.length ? (
+        <div className="expected-tooltip-list">
+          {visible.map((person) => (
+            <div className="expected-tooltip-person" key={person.id}>
+              <ExpectedPresenceAvatar name={person.display_name} src={person.profilePhotoDataUrl} />
+              <div>
+                <strong>{person.display_name}</strong>
+                <span>{person.detail}</span>
+              </div>
+            </div>
+          ))}
+          {hidden > 0 ? <span className="expected-tooltip-more">{moreLabel(hidden)}</span> : null}
+        </div>
+      ) : (
+        <span className="expected-tooltip-empty">{emptyLabel}</span>
+      )}
+    </>
+  );
+}
+
 export function ExpectedPresenceTooltip({
   count,
   learning,
@@ -833,32 +899,118 @@ export function ExpectedPresenceTooltip({
   people: ExpectedPresenceTooltipPerson[];
 }) {
   return (
-    <>
-      <div className="expected-tooltip-head">
-        <div>
-          <strong>Expected Today</strong>
-          <span>{count} {count === 1 ? "person" : "people"}</span>
-        </div>
-        {learning ? <em>Learning</em> : null}
-      </div>
-      {people.length ? (
-        <div className="expected-tooltip-list">
-          {people.slice(0, 6).map((person) => (
-            <div className="expected-tooltip-person" key={person.person_id}>
-              <ExpectedPresenceAvatar name={person.display_name} src={person.profilePhotoDataUrl} />
-              <div>
-                <strong>{person.display_name}</strong>
-                <span>{expectedPresenceTimingLabel(person)}</span>
-              </div>
-            </div>
-          ))}
-          {people.length > 6 ? <span className="expected-tooltip-more">+{people.length - 6} more expected</span> : null}
-        </div>
-      ) : (
-        <span className="expected-tooltip-empty">No expected arrivals learned for today yet.</span>
-      )}
-    </>
+    <PresenceRosterTooltip
+      badge={learning ? "Learning" : undefined}
+      countLabel={personCountLabel(count)}
+      emptyLabel="No expected arrivals learned for today yet."
+      moreLabel={(hidden) => `+${hidden} more expected`}
+      people={people.map((person) => ({
+        id: person.person_id,
+        display_name: person.display_name,
+        profilePhotoDataUrl: person.profilePhotoDataUrl,
+        detail: expectedPresenceTimingLabel(person)
+      }))}
+      title="Expected Today"
+    />
   );
+}
+
+export function insideNowRoster(rows: Presence[], peopleById: Map<string, Person>, now = new Date()): PresenceRosterPerson[] {
+  return rows
+    .filter((row) => row.state === "present")
+    .slice()
+    .sort((left, right) => {
+      const byTime = timeValue(right.last_changed_at) - timeValue(left.last_changed_at);
+      return byTime || left.display_name.localeCompare(right.display_name);
+    })
+    .map((row) => ({
+      id: row.person_id,
+      display_name: row.display_name,
+      profilePhotoDataUrl: profilePhotoForPerson(peopleById.get(row.person_id)),
+      detail: insideSinceLabel(row.last_changed_at, now)
+    }));
+}
+
+export function exitedTodayRoster(events: AccessEvent[], vehicles: Vehicle[], people: Person[], now = new Date()): PresenceRosterPerson[] {
+  const peopleById = new Map(people.map((person) => [person.id, person]));
+  const vehiclesByRegistration = new Map(vehicles.map((vehicle) => [vehicle.registration_number.toUpperCase(), vehicle]));
+  return events
+    .filter((event) => event.direction === "exit" && isToday(event.occurred_at, now))
+    .slice()
+    .sort((left, right) => timeValue(right.occurred_at) - timeValue(left.occurred_at) || left.id.localeCompare(right.id))
+    .map((event) => exitRosterPerson(event, vehiclesByRegistration.get(event.registration_number.toUpperCase()), people, peopleById));
+}
+
+function exitRosterPerson(
+  event: AccessEvent,
+  vehicle: Vehicle | undefined,
+  people: Person[],
+  peopleById: Map<string, Person>
+): PresenceRosterPerson {
+  const time = formatTime(event.occurred_at);
+  const visitorName = visitorEventDisplayName(event);
+  if (visitorName) {
+    return { id: event.id, display_name: visitorName, profilePhotoDataUrl: null, detail: `Exited at ${time}` };
+  }
+  const owners = ownersForExit(event.registration_number, vehicle, people, peopleById);
+  if (owners.length) {
+    return {
+      id: event.id,
+      display_name: owners.map((person) => person.display_name).join(", "),
+      profilePhotoDataUrl: owners.length === 1 ? profilePhotoForPerson(owners[0]) : null,
+      detail: `Exited at ${time}`
+    };
+  }
+  const ownerLabel = vehicle?.owners?.filter(Boolean).join(", ") || vehicle?.owner || "";
+  if (ownerLabel) {
+    return { id: event.id, display_name: ownerLabel, profilePhotoDataUrl: null, detail: `Exited at ${time}` };
+  }
+  return {
+    id: event.id,
+    display_name: "Unknown",
+    profilePhotoDataUrl: null,
+    detail: event.registration_number ? `${event.registration_number} · ${time}` : `Exited at ${time}`
+  };
+}
+
+function ownersForExit(registration: string, vehicle: Vehicle | undefined, people: Person[], peopleById: Map<string, Person>) {
+  const owners = new Map<string, Person>();
+  const add = (person: Person | undefined) => {
+    if (person) owners.set(person.id, person);
+  };
+  for (const personId of vehicle?.person_ids ?? []) add(peopleById.get(personId));
+  if (vehicle?.person_id) add(peopleById.get(vehicle.person_id));
+  const key = registration.toUpperCase();
+  for (const person of people) {
+    if ((person.vehicles ?? []).some((item) => item.registration_number.toUpperCase() === key)) add(person);
+  }
+  return [...owners.values()].sort((left, right) => left.display_name.localeCompare(right.display_name));
+}
+
+export function insideSinceLabel(value: string | null, now: Date) {
+  if (!value) return "Currently inside";
+  if (isToday(value, now)) return `Since ${formatTime(value)}`;
+  const date = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(value));
+  return `Since ${date}`;
+}
+
+function personCountLabel(count: number) {
+  return `${count} ${count === 1 ? "person" : "people"}`;
+}
+
+function exitCountLabel(count: number) {
+  return `${count} ${count === 1 ? "exit" : "exits"}`;
+}
+
+function profilePhotoForPerson(person: Person | undefined) {
+  if (!person) return null;
+  return mediaSource(person.profile_photo_url, person.profile_photo_data_url, "thumb") || null;
+}
+
+function timeValue(value: string | null) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export function ExpectedPresenceAvatar({ name, src }: { name: string; src: string | null }) {
@@ -945,8 +1097,8 @@ export function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], p
 export function DashboardEventSnapshotPreview({ event, visible }: { event: DashboardEvent; visible: boolean }) {
   if (!event.snapshot_url || !visible) return null;
   return (
-    <span className="dashboard-event-snapshot-preview" aria-hidden="true">
-      <img alt="" decoding="async" loading="lazy" src={event.snapshot_url} />
+    <span className="dashboard-event-snapshot-preview">
+      <img alt={event.snapshotLabel} decoding="async" loading="lazy" src={event.snapshot_url} />
     </span>
   );
 }

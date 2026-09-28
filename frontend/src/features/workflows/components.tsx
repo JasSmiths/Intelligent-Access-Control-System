@@ -3,6 +3,8 @@ import React from "react";
 import { createPortal } from "react-dom";
 import type { BadgeTone } from "../../ui/primitives";
 import { Badge } from "../../ui/primitives";
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "../../lib/viewportPlacement";
+import { useModalFocus } from "../../ui/useModalFocus";
 import type { NotificationFilterCounts, NotificationStatusFilter, TwoPaneCategory, WorkflowListCategory, WorkflowRuleBase, WorkflowRuleListKind, WorkflowRuleMenuState, WorkflowRuleStatusFeedback } from "./model";
 import { formatCompactLastFired, pluralize } from "./model";
 
@@ -24,6 +26,8 @@ export function WorkflowRuleList<Rule extends WorkflowRuleBase>({
   activeId: string; ariaLabel: string; groupedRules: WorkflowListCategory<Rule>[]; kind: WorkflowRuleListKind; renderConfigChips: (rule: Rule) => React.ReactNode; ruleStatusFeedback: WorkflowRuleStatusFeedback | null; statusFilter: NotificationStatusFilter; summaryAriaLabel: string; tableIdPrefix: string; totalRuleCount: number; togglingRuleIds: Set<string>; onDelete: (rule: Rule) => void | Promise<void>; onDuplicate?: (rule: Rule) => void | Promise<void>; onSelect: (rule: Rule) => void; onToggleActive: (rule: Rule, isActive: boolean) => void | Promise<void>;
 }) {
   const [openMenu, setOpenMenu] = React.useState<WorkflowRuleMenuState | null>(null);
+  const menuButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
   const [collapsedCategoryIds, setCollapsedCategoryIds] = React.useState<Set<string>>(() => new Set());
 
   React.useEffect(() => {
@@ -35,18 +39,27 @@ export function WorkflowRuleList<Rule extends WorkflowRuleBase>({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpenMenu(null);
     };
-    const closeOnViewportChange = () => setOpenMenu(null);
     document.addEventListener("pointerdown", closeOnPointerDown);
     document.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("resize", closeOnViewportChange);
-    window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
       document.removeEventListener("pointerdown", closeOnPointerDown);
       document.removeEventListener("keydown", closeOnEscape);
-      window.removeEventListener("resize", closeOnViewportChange);
-      window.removeEventListener("scroll", closeOnViewportChange, true);
     };
-  }, [openMenu]);
+  }, [openMenu?.id]);
+
+  React.useLayoutEffect(() => {
+    if (!openMenu) return undefined;
+    const update = () => {
+      const button = menuButtonRef.current;
+      const menu = menuRef.current;
+      if (!button || !menu) return;
+      const placement = placeOverlay(button.getBoundingClientRect(), { width: menu.offsetWidth, height: menu.scrollHeight }, getUsableViewportBounds(), { gap: 7, alignment: "end" });
+      setOpenMenu((current) => current && (current.left !== placement.left || current.top !== placement.top) ? { ...current, left: placement.left, top: placement.top } : current);
+      menu.style.maxWidth = `${placement.maxWidth}px`;
+      menu.style.maxHeight = `${placement.maxHeight}px`;
+    };
+    return observeOverlayPlacement(menuButtonRef.current, menuRef.current, update);
+  }, [openMenu?.id]);
 
   React.useEffect(() => {
     setCollapsedCategoryIds(new Set());
@@ -62,16 +75,10 @@ export function WorkflowRuleList<Rule extends WorkflowRuleBase>({
     });
   };
   const toggleRuleMenu = (ruleId: string, button: HTMLButtonElement) => {
+    menuButtonRef.current = button;
     setOpenMenu((current) => {
       if (current?.id === ruleId) return null;
-      const rect = button.getBoundingClientRect();
-      const menuWidth = 178;
-      const menuHeight = onDuplicate ? 136 : 94;
-      const gap = 7;
-      const left = Math.max(12, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 12));
-      const below = rect.bottom + gap;
-      const top = below + menuHeight > window.innerHeight - 12 ? Math.max(12, rect.top - menuHeight - gap) : below;
-      return { id: ruleId, left, top };
+      return { id: ruleId, left: 0, top: 0 };
     });
   };
 
@@ -115,7 +122,7 @@ export function WorkflowRuleList<Rule extends WorkflowRuleBase>({
                                     <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label={`Options for ${rule.name}`} className="icon-button workflow-rule-menu-button" onClick={(event) => toggleRuleMenu(rule.id, event.currentTarget)} type="button"><MoreHorizontal size={16} /></button>
                                   </span>
                                 </span>
-                                {menuOpen ? <WorkflowRuleMenu left={openMenu.left} rule={rule} top={openMenu.top} onClose={() => setOpenMenu(null)} onDelete={onDelete} onDuplicate={onDuplicate} onSelect={onSelect} /> : null}
+                                {menuOpen ? <WorkflowRuleMenu left={openMenu.left} menuRef={menuRef} rule={rule} top={openMenu.top} onClose={() => setOpenMenu(null)} onDelete={onDelete} onDuplicate={onDuplicate} onSelect={onSelect} /> : null}
                               </td>
                             </tr>
                           );
@@ -133,9 +140,9 @@ export function WorkflowRuleList<Rule extends WorkflowRuleBase>({
   );
 }
 
-function WorkflowRuleMenu<Rule extends WorkflowRuleBase>({ left, rule, top, onClose, onDelete, onDuplicate, onSelect }: { left: number; rule: Rule; top: number; onClose: () => void; onDelete: (rule: Rule) => void | Promise<void>; onDuplicate?: (rule: Rule) => void | Promise<void>; onSelect: (rule: Rule) => void }) {
+function WorkflowRuleMenu<Rule extends WorkflowRuleBase>({ left, menuRef, rule, top, onClose, onDelete, onDuplicate, onSelect }: { left: number; menuRef: React.RefObject<HTMLDivElement | null>; rule: Rule; top: number; onClose: () => void; onDelete: (rule: Rule) => void | Promise<void>; onDuplicate?: (rule: Rule) => void | Promise<void>; onSelect: (rule: Rule) => void }) {
   return createPortal(
-    <div className="workflow-rule-menu-popover" data-workflow-rule-menu role="menu" style={{ left, top }}>
+    <div className="workflow-rule-menu-popover" data-workflow-rule-menu ref={menuRef} role="menu" style={{ left, top, overflowY: "auto", visibility: left === 0 && top === 0 ? "hidden" : "visible" }}>
       <button onClick={() => { onClose(); onSelect(rule); }} role="menuitem" type="button"><Pencil size={14} /> Edit</button>
       {onDuplicate ? <button onClick={() => { onClose(); onDuplicate(rule); }} role="menuitem" type="button"><Copy size={14} /> Duplicate</button> : null}
       <button className="danger" onClick={() => { onClose(); onDelete(rule); }} role="menuitem" type="button"><Trash2 size={14} /> Delete</button>
@@ -257,6 +264,8 @@ export function TwoPaneSelectionModal({
   title: string;
   wide?: boolean;
 }) {
+  const modalRef = React.useRef<HTMLDivElement | null>(null);
+  useModalFocus(modalRef, !embedded, onClose);
   const className = [
     "modal-card",
     "two-pane-selection-modal",
@@ -264,7 +273,7 @@ export function TwoPaneSelectionModal({
     wide ? "wide" : "",
   ].filter(Boolean).join(" ");
   const content = (
-    <div className={className} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="two-pane-selection-title">
+    <div className={className} ref={modalRef} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="two-pane-selection-title">
       <div className="two-pane-selection-header">
         <div className="modal-header compact">
           <div>

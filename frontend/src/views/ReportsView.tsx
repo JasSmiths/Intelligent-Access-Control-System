@@ -24,6 +24,7 @@ import { reportsApi, type ReportDurationInfo, type ReportExportResponse, type Re
   type ReportSnapshotVehicle, type ReportPreviewResponse, type ReportPreviewRequest } from "../api/reports";
 import { initials, matches, titleCase } from "../lib/format";
 import { mediaSource } from "../lib/media";
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "../lib/viewportPlacement";
 import { Badge } from "../ui/primitives";
 import type { AccessEvent, Person, Presence, TooltipPositionState } from "../api/types";
 import type { VisitorPass } from "./PassesView";
@@ -204,24 +205,8 @@ function ReportsDateTimePicker({
     if (!open) setVisibleMonth(new Date(Date.UTC(selectedDate.getUTCFullYear(), selectedDate.getUTCMonth(), 1)));
   }, [open, selectedDate]);
 
-  const positionPopover = React.useCallback(() => {
-    const target = buttonRef.current;
-    if (!target) return;
-    const width = Math.min(348, window.innerWidth - 24);
-    const height = 430;
-    const rect = target.getBoundingClientRect();
-    const gap = 10;
-    const placement = rect.bottom + gap + height > window.innerHeight - 8 ? "top" : "bottom";
-    const left = Math.max(12 + width / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - width / 2 - 12));
-    const top = placement === "bottom"
-      ? Math.min(window.innerHeight - height - 8, rect.bottom + gap)
-      : Math.max(8, rect.top - height - gap);
-    setPopoverPosition({ left, placement, top });
-  }, []);
-
   React.useEffect(() => {
     if (!open) return undefined;
-    positionPopover();
     const closeOnOutside = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -231,17 +216,31 @@ function ReportsDateTimePicker({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
-    window.addEventListener("resize", positionPopover);
-    window.addEventListener("scroll", positionPopover, true);
     window.addEventListener("pointerdown", closeOnOutside);
     window.addEventListener("keydown", closeOnEscape);
     return () => {
-      window.removeEventListener("resize", positionPopover);
-      window.removeEventListener("scroll", positionPopover, true);
       window.removeEventListener("pointerdown", closeOnOutside);
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [open, positionPopover]);
+  }, [open]);
+
+  React.useLayoutEffect(() => {
+    if (!open || !popoverPosition) return undefined;
+    const update = () => {
+      const button = buttonRef.current;
+      const popover = popoverRef.current;
+      if (!button || !popover) return;
+      const placement = placeOverlay(button.getBoundingClientRect(), { width: popover.offsetWidth, height: popover.scrollHeight }, getUsableViewportBounds(), { gap: 10, alignment: "center" });
+      const center = placement.left + Math.min(popover.offsetWidth, placement.maxWidth) / 2;
+      setPopoverPosition((current) => current && (current.left !== center || current.top !== placement.top || current.placement !== placement.side)
+        ? { left: center, top: placement.top, placement: placement.side }
+        : current);
+      popover.style.maxWidth = `${placement.maxWidth}px`;
+      popover.style.maxHeight = `${placement.maxHeight}px`;
+      popover.style.visibility = "visible";
+    };
+    return observeOverlayPlacement(buttonRef.current, popoverRef.current, update);
+  }, [open, Boolean(popoverPosition)]);
 
   const updateDate = (nextDate: Date) => {
     onChange(toDateTimeInputValue(nextDate));
@@ -271,7 +270,7 @@ function ReportsDateTimePicker({
         aria-controls={open ? pickerId : undefined}
         aria-expanded={open}
         className="report-date-time-trigger"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => { setOpen((current) => !current); setPopoverPosition(open ? null : { left: 0, top: 0, placement: "bottom" }); }}
         ref={buttonRef}
         type="button"
       >
@@ -285,7 +284,7 @@ function ReportsDateTimePicker({
           id={pickerId}
           ref={popoverRef}
           role="dialog"
-          style={{ left: popoverPosition.left, top: popoverPosition.top }}
+          style={{ left: popoverPosition.left, top: popoverPosition.top, visibility: popoverPosition.left === 0 ? "hidden" : "visible" }}
         >
           <div className="report-date-time-popover-head">
             <button aria-label="Previous month" onClick={() => setVisibleMonth(new Date(Date.UTC(visibleMonth.getUTCFullYear(), visibleMonth.getUTCMonth() - 1, 1)))} type="button">
@@ -336,30 +335,33 @@ function ReportsDateTimePicker({
 function ReportDurationCell({ duration }: { duration: ReportDurationInfo }) {
   const tooltipId = React.useId();
   const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+  const targetRef = React.useRef<HTMLElement | null>(null);
+  const tooltipRef = React.useRef<HTMLDivElement | null>(null);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!tooltipPosition) return undefined;
-    const hideTooltip = () => setTooltipPosition(null);
-    window.addEventListener("resize", hideTooltip);
-    window.addEventListener("scroll", hideTooltip, true);
-    return () => {
-      window.removeEventListener("resize", hideTooltip);
-      window.removeEventListener("scroll", hideTooltip, true);
+    const update = () => {
+      const target = targetRef.current;
+      const tooltip = tooltipRef.current;
+      if (!target || !tooltip) return;
+      const placement = placeOverlay(target.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.scrollHeight }, getUsableViewportBounds(), { gap: 10, alignment: "center" });
+      const center = placement.left + Math.min(tooltip.offsetWidth, placement.maxWidth) / 2;
+      setTooltipPosition((current) => current && (current.left !== center || current.top !== placement.top || current.placement !== placement.side)
+        ? { left: center, top: placement.top, placement: placement.side }
+        : current);
+      tooltip.style.maxWidth = `${placement.maxWidth}px`;
+      tooltip.style.maxHeight = `${placement.maxHeight}px`;
+      tooltip.style.overflow = "auto";
+      tooltip.style.pointerEvents = "auto";
+      tooltip.style.visibility = "visible";
     };
-  }, [tooltipPosition]);
+    return observeOverlayPlacement(targetRef.current, tooltipRef.current, update);
+  }, [Boolean(tooltipPosition)]);
 
   const showTooltip = (target: HTMLElement) => {
     if (!duration.tooltip) return;
-    const tooltipWidth = Math.min(240, window.innerWidth - 24);
-    const tooltipHeight = 72;
-    const rect = target.getBoundingClientRect();
-    const gap = 10;
-    const placement = rect.bottom + gap + tooltipHeight > window.innerHeight - 8 ? "top" : "bottom";
-    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
-    const top = placement === "bottom"
-      ? Math.min(window.innerHeight - tooltipHeight - 8, rect.bottom + gap)
-      : Math.max(8, rect.top - tooltipHeight - gap);
-    setTooltipPosition({ left, placement, top });
+    targetRef.current = target;
+    setTooltipPosition({ left: 0, top: 0, placement: "bottom" });
   };
 
   if (!duration.tooltip) {
@@ -376,7 +378,7 @@ function ReportDurationCell({ duration }: { duration: ReportDurationInfo }) {
         if (event.key === "Escape") setTooltipPosition(null);
       }}
       onMouseEnter={(event) => showTooltip(event.currentTarget)}
-      onMouseLeave={() => setTooltipPosition(null)}
+      onMouseLeave={(event) => { if (document.activeElement !== event.currentTarget) setTooltipPosition(null); }}
       type="button"
     >
       {duration.label}
@@ -384,8 +386,9 @@ function ReportDurationCell({ duration }: { duration: ReportDurationInfo }) {
         <div
           className={`iacs-tooltip report-duration-tooltip ${tooltipPosition.placement}`}
           id={tooltipId}
+          ref={tooltipRef}
           role="tooltip"
-          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top, visibility: tooltipPosition.left === 0 ? "hidden" : "visible" }}
         >
           <strong>{duration.tooltip}</strong>
           {duration.tooltipDetail ? <span>{duration.tooltipDetail}</span> : null}
@@ -399,30 +402,34 @@ function ReportDurationCell({ duration }: { duration: ReportDurationInfo }) {
 function ReportSnapshotThumb({ event, timezone }: { event: ReportSnapshotEvent; timezone: string }) {
   const tooltipId = React.useId();
   const [tooltipPosition, setTooltipPosition] = React.useState<TooltipPositionState | null>(null);
+  const targetRef = React.useRef<HTMLElement | null>(null);
+  const tooltipRef = React.useRef<HTMLDivElement | null>(null);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!tooltipPosition) return undefined;
-    const hideTooltip = () => setTooltipPosition(null);
-    window.addEventListener("resize", hideTooltip);
-    window.addEventListener("scroll", hideTooltip, true);
-    return () => {
-      window.removeEventListener("resize", hideTooltip);
-      window.removeEventListener("scroll", hideTooltip, true);
+    const update = () => {
+      const target = targetRef.current;
+      const tooltip = tooltipRef.current;
+      if (!target || !tooltip) return;
+      const placement = placeOverlay(target.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.scrollHeight }, getUsableViewportBounds(), { gap: 10, alignment: "center" });
+      const center = placement.left + Math.min(tooltip.offsetWidth, placement.maxWidth) / 2;
+      setTooltipPosition((current) => current && (current.left !== center || current.top !== placement.top || current.placement !== placement.side)
+        ? { left: center, top: placement.top, placement: placement.side }
+        : current);
+      tooltip.style.maxWidth = `${placement.maxWidth}px`;
+      tooltip.style.maxHeight = `${placement.maxHeight}px`;
+      tooltip.style.overflow = "auto";
+      tooltip.style.pointerEvents = "auto";
+      tooltip.style.visibility = "visible";
     };
-  }, [tooltipPosition]);
+    return observeOverlayPlacement(targetRef.current, tooltipRef.current, update);
+
+  }, [Boolean(tooltipPosition)]);
 
   const showTooltip = (target: HTMLElement) => {
     if (!event.snapshot_url) return;
-    const tooltipWidth = Math.min(360, window.innerWidth - 24);
-    const tooltipHeight = Math.round((tooltipWidth - 16) * 9 / 16) + 58;
-    const rect = target.getBoundingClientRect();
-    const gap = 10;
-    const placement = rect.bottom + gap + tooltipHeight > window.innerHeight - 8 ? "top" : "bottom";
-    const left = Math.max(12 + tooltipWidth / 2, Math.min(rect.left + rect.width / 2, window.innerWidth - tooltipWidth / 2 - 12));
-    const top = placement === "bottom"
-      ? Math.min(window.innerHeight - tooltipHeight - 8, rect.bottom + gap)
-      : Math.max(8, rect.top - tooltipHeight - gap);
-    setTooltipPosition({ left, placement, top });
+    targetRef.current = target;
+    setTooltipPosition({ left: 0, top: 0, placement: "bottom" });
   };
 
   if (!event.snapshot_url) {
@@ -444,7 +451,7 @@ function ReportSnapshotThumb({ event, timezone }: { event: ReportSnapshotEvent; 
         if (keyboardEvent.key === "Escape") setTooltipPosition(null);
       }}
       onMouseEnter={(mouseEvent) => showTooltip(mouseEvent.currentTarget)}
-      onMouseLeave={() => setTooltipPosition(null)}
+      onMouseLeave={(event) => { if (document.activeElement !== event.currentTarget) setTooltipPosition(null); }}
       type="button"
     >
       <img alt="" loading="lazy" src={event.snapshot_url} />
@@ -452,8 +459,9 @@ function ReportSnapshotThumb({ event, timezone }: { event: ReportSnapshotEvent; 
         <div
           className={`iacs-tooltip report-snapshot-tooltip ${tooltipPosition.placement}`}
           id={tooltipId}
+          ref={tooltipRef}
           role="tooltip"
-          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top, visibility: tooltipPosition.left === 0 ? "hidden" : "visible" }}
         >
           <img alt="" loading="lazy" src={event.snapshot_url} />
           <strong>{event.registration_number}</strong>

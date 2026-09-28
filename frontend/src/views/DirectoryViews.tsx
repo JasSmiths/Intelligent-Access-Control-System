@@ -1,3 +1,4 @@
+import { useModalFocus } from "../ui/useModalFocus";
 import {
 Camera,
 Car,
@@ -234,6 +235,8 @@ export function GroupModal({
   onSaved: () => Promise<void>;
   setPageError: (message: string) => void;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     name: group?.name ?? "",
     category: group?.category ?? "family",
@@ -291,7 +294,7 @@ export function GroupModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card group-modal" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Group" className="modal-card group-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Group" : "Add Group"}</h2>
@@ -808,6 +811,8 @@ export function PersonModal({
   setPageError: (message: string) => void;
   vehicles: Vehicle[];
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     first_name: person?.first_name ?? "",
     last_name: person?.last_name ?? "",
@@ -1081,7 +1086,7 @@ export function PersonModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card person-modal" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Person" className="modal-card person-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Person" : "Add Person"}</h2>
@@ -1753,6 +1758,8 @@ export function VehicleModal({
   setPageError: (message: string) => void;
   vehicle: Vehicle | null;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  useModalFocus(modalRef, true, () => { if (!submitting) onClose(); });
   const [form, setForm] = React.useState({
     registration_number: vehicle?.registration_number ?? "",
     vehicle_photo_data_url: vehicle?.vehicle_photo_data_url ?? "",
@@ -1994,7 +2001,7 @@ export function VehicleModal({
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-card vehicle-modal" onSubmit={submit}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Vehicle" className="modal-card vehicle-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Vehicle" : "Add Vehicle"}</h2>

@@ -23,7 +23,6 @@ from app.services.access_devices import get_access_device_service
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.automations import get_automation_service
-from app.services.dependency_updates import get_dependency_update_service
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
@@ -121,7 +120,6 @@ async def lifespan(app: FastAPI):
             # Register before start so a partially started service is also closed.
             for name, service in (
                 ("realtime", event_bus),
-                ("dependency_updates", get_dependency_update_service()),
                 ("notifications", get_notification_service()),
                 ("automations", get_automation_service()),
                 ("alfred_feedback", alfred_feedback_service),
@@ -176,12 +174,11 @@ app = FastAPI(
         {"name": "AI Agents", "description": "Provider discovery, agent tooling, chat, uploads, and chat realtime."},
         {"name": "Automations", "description": "System-wide trigger, condition, and action automation rules."},
         {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
-        {"name": "Dependency Updates", "description": "System-wide dependency enrollment, analysis, backups, update jobs, and rollback."},
         {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
         {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
         {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
         {"name": "Integrations", "description": "Home Assistant, Apprise, Discord, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
-        {"name": "UniFi Protect", "description": "UniFi Protect cameras, media, managed package updates, and backups."},
+        {"name": "UniFi Protect", "description": "UniFi Protect cameras and media."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},
         {"name": "Notifications", "description": "Notification workflow catalog, rules, previews, and tests."},

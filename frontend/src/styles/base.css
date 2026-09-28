@@ -27,6 +27,15 @@
   --shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
   --shadow-strong: 0 18px 45px rgba(15, 23, 42, 0.16);
   --app-viewport-height: 100vh;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --edge-space: 12px;
+  --edge-top: max(var(--edge-space), var(--safe-top));
+  --edge-right: max(var(--edge-space), var(--safe-right));
+  --edge-bottom: max(var(--edge-space), var(--safe-bottom));
+  --edge-left: max(var(--edge-space), var(--safe-left));
   --alfred-launcher-clearance: 104px;
 }
 
@@ -85,7 +94,6 @@
 }
 
 html {
-  min-width: 320px;
   background: var(--bg);
 }
 
@@ -135,7 +143,7 @@ h2 {
   position: fixed;
   inset: 0 auto 0 0;
   width: 258px;
-  padding: 24px 10px 18px;
+  padding: max(24px, var(--safe-top)) 10px max(18px, var(--safe-bottom)) max(10px, var(--safe-left));
   background: var(--sidebar);
   border-right: 1px solid var(--line);
   display: flex;
@@ -447,14 +455,13 @@ h2 {
   scroll-padding-bottom: var(--alfred-launcher-clearance);
 }
 
-.sidebar,
-.main {
-  transition: width 180ms ease, margin-left 180ms ease, transform 180ms ease;
+.sidebar {
+  transition: width 180ms ease, transform 180ms ease;
 }
 
 .sidebar-collapsed .sidebar {
-  width: 82px;
-  padding-inline: 10px;
+  width: calc(82px + var(--safe-left));
+  padding-inline: max(10px, var(--safe-left)) 10px;
 }
 
 .sidebar-collapsed .brand {
@@ -496,16 +503,16 @@ h2 {
 }
 
 .sidebar-collapsed .main {
-  margin-left: 82px;
+  margin-left: calc(82px + var(--safe-left));
 }
 
 .topbar {
-  height: 58px;
+  min-height: 58px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 24px 0 4px;
+  padding: var(--safe-top) max(24px, var(--safe-right)) 0 4px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
@@ -518,7 +525,7 @@ h2 {
 }
 
 .topbar-left {
-  min-width: 360px;
+  min-width: 0;
 }
 
 .topbar-actions {
@@ -632,7 +639,8 @@ h2 {
   top: calc(100% + 10px);
   right: 0;
   z-index: 95;
-  width: min(420px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  max-height: calc(var(--app-viewport-height) - var(--edge-top) - var(--edge-bottom));
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -764,12 +772,14 @@ h2 {
 
 .notification-toast-stack {
   position: fixed;
-  top: 78px;
-  right: 26px;
+  top: max(78px, var(--edge-top));
+  right: max(26px, var(--edge-right));
   z-index: 80;
   display: grid;
   gap: 10px;
-  width: min(430px, calc(100vw - 32px));
+  width: min(430px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  max-height: calc(var(--app-viewport-height) - max(78px, var(--edge-top)) - var(--edge-bottom));
+  overflow-y: auto;
   pointer-events: none;
 }
 
@@ -812,8 +822,8 @@ h2 {
 }
 
 .notification-toast-head .icon-button {
-  width: 28px;
-  min-height: 28px;
+  width: 36px;
+  min-height: 36px;
 }
 
 .notification-toast strong {

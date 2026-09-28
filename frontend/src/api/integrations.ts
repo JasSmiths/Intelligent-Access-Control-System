@@ -115,6 +115,7 @@ export type WhatsAppStatus = {
   visitor_pass_template_name: string; visitor_pass_template_language: string;
   admin_target_count: number; last_error: string | null;
 };
+export type DiscordBundle = { status: DiscordStatus; channels: DiscordChannel[]; identities: DiscordIdentity[] };
 export type UnifiProtectStatus = {
   configured: boolean; connected: boolean; last_error: string | null; camera_count: number;
   realtime_connected: boolean; realtime_error: string | null;
@@ -126,78 +127,6 @@ export type UnifiProtectEvent = {
   score: number; smart_detect_types: string[]; thumbnail_url: string; video_url: string | null;
 };
 export type UnifiProtectAnalysis = { camera_id: string; provider: string; text: string; snapshot_retained: boolean };
-export type UnifiProtectUpdateStatus = {
-  package: string; current_version: string; latest_version: string; update_available: boolean;
-  active_package: { mode: string; version?: string | null; path?: string | null; installed_at?: string | null };
-  installed_overlays: Array<{ version: string; path: string }>; latest_summary?: Record<string, unknown>;
-};
-export type UnifiProtectReleaseNotes = { source: string; title: string; body: string; published_at?: string | null; html_url?: string | null };
-export type UnifiProtectUpdateAnalysis = {
-  package: string; current_version: string; target_version: string; latest_version: string;
-  update_available: boolean; provider: string; analysis: string; release_notes: UnifiProtectReleaseNotes;
-};
-export type UnifiProtectBackup = {
-  id: string; created_at: string; reason: string; package_version: string;
-  settings_count: number; size_bytes: number; download_url: string;
-  active_package?: { mode: string; version?: string | null };
-};
-export type UnifiProtectUpdateApplyResult = {
-  ok: boolean; previous_version: string; current_version: string; target_version: string;
-  backup: UnifiProtectBackup; verification: { package_version?: string; camera_count?: number; snapshot_bytes?: number };
-};
-export type DependencyRiskStatus = "safe" | "warning" | "breaking" | "unknown";
-export type DependencyPackage = {
-  id: string; ecosystem: string; package_name: string; normalized_name: string;
-  current_version: string | null; latest_version: string | null; dependant_area: string;
-  manifest_path: string | null; manifest_section: string | null; requirement_spec: string | null;
-  is_direct: boolean; is_enabled: boolean; update_available: boolean;
-  risk_status: DependencyRiskStatus | string; last_checked_at: string | null;
-  metadata: Record<string, unknown>; latest_analysis: DependencyAnalysis | null;
-};
-export type DependencyAnalysis = {
-  id: string; dependency_id: string; target_version: string; provider: string; model: string | null;
-  verdict: DependencyRiskStatus | string; summary_markdown: string; changelog_source: string | null;
-  changelog_markdown: string | null; usage_summary: { reference_count?: number; references?: Array<{ path: string; line: number; text: string }> };
-  breaking_changes: Array<Record<string, unknown>>; verification_steps: string[]; suggested_diff: string | null; created_at: string;
-};
-export type DependencyBackup = {
-  id: string; dependency_id: string | null; package_name: string; ecosystem: string;
-  version: string | null; reason: string; archive_path: string; storage_root: string;
-  checksum_sha256: string; size_bytes: number; created_at: string; restored_at: string | null;
-  metadata: Record<string, unknown>;
-};
-export type DependencyJob = {
-  id: string; dependency_id: string | null; kind: string; status: string; phase: string | null;
-  actor: string; target_version: string | null; backup_id: string | null; stdout_log_path: string | null;
-  started_at: string | null; ended_at: string | null; result: Record<string, unknown>; error: string | null; trace_id: string | null;
-};
-export type DependencyCheckAllResult = {
-  ok: boolean; checked: number; failed: number; updates: number; direct_only: boolean;
-  errors: Array<{ dependency_id: string; error: string }>; packages?: DependencyPackage[];
-};
-export type DependencyStorageStatus = {
-  mode: "local" | "nfs" | "samba" | string; mount_source: string; mount_options: string;
-  mount_options_configured: boolean; mount_options_redacted: boolean; config_status: "active" | "pending_reboot" | "error" | string;
-  backup_root: string; exists: boolean; writable: boolean; free_bytes: number; min_free_bytes: number;
-  retention_days?: string; ok: boolean; detail: string;
-};
-export type DependencyFailureDiagnosis = {
-  category: string; title: string; summary: string; safe_state: string; retry_recommendation: string;
-  actions: string[]; affected_packages: string[]; command?: string; technical_detail?: string;
-};
-export type DependencyJobEvent = {
-  type: string; job_id?: string; created_at?: string; phase?: string;
-  message?: string; diagnosis?: DependencyFailureDiagnosis; result?: Record<string, unknown>;
-};
-export const DEPENDENCY_JOB_EVENT_LIMIT = 200;
-export const DEPENDENCY_JOB_MESSAGE_LIMIT = 2000;
-export function compactDependencyJobEvent(event: DependencyJobEvent): DependencyJobEvent {
-  if (typeof event.message !== "string" || event.message.length <= DEPENDENCY_JOB_MESSAGE_LIMIT) return event;
-  return { ...event, message: `${event.message.slice(0, DEPENDENCY_JOB_MESSAGE_LIMIT)}... [truncated]` };
-}
-export type DependencyConfirmAction = { kind: "apply" } | { kind: "restore"; backup: DependencyBackup };
-export type DiscordBundle = { status: DiscordStatus; channels: DiscordChannel[]; identities: DiscordIdentity[] };
-export type DependencyBundle = { packages: DependencyPackage[]; storage: DependencyStorageStatus };
 export const integrationsApi = {
   getAccessDevices: (kind: AccessDevice["kind"], options: ApiRequestOptions = {}) =>
     api.get<AccessDeviceEligibility[]>(`/api/v1/access-devices?kind=${kind}`, options),
@@ -243,15 +172,6 @@ export const integrationsApi = {
     return result.events;
   },
   analyzeProtectSnapshot: (cameraId: string, prompt: string) => api.post<UnifiProtectAnalysis>(`/api/v1/integrations/unifi-protect/cameras/${encodeURIComponent(cameraId)}/analyze`, { prompt }),
-  getProtectUpdateStatus: () => api.get<UnifiProtectUpdateStatus>("/api/v1/integrations/unifi-protect/update/status"),
-  getProtectUpdateData: async () => {
-    const [status, backupResult] = await Promise.all([
-      api.get<UnifiProtectUpdateStatus>("/api/v1/integrations/unifi-protect/update/status"),
-      api.get<{ backups: UnifiProtectBackup[] }>("/api/v1/integrations/unifi-protect/backups")
-    ]);
-    return { status, backups: backupResult.backups };
-  },
-  analyzeProtectUpdate: (targetVersion?: string) => api.post<UnifiProtectUpdateAnalysis>("/api/v1/integrations/unifi-protect/update/analyze", { target_version: targetVersion || undefined }),
   getICloudCalendar: () => api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts"),
   startICloudAuth: (appleId: string, password: string) => api.post<ICloudAuthStartResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/start", { apple_id: appleId, password }),
   verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
@@ -267,58 +187,6 @@ export const integrationsApi = {
   },
   updateDiscordIdentity: (identityId: string, body: { user_id: string | null; person_id: string | null }) => api.patch<DiscordIdentity>(`/api/v1/integrations/discord/identities/${identityId}`, body),
   getWhatsAppStatus: () => api.get<WhatsAppStatus>("/api/v1/integrations/whatsapp/status"),
-  getDependencyUpdates: async (): Promise<DependencyBundle> => {
-    const [packagesResult, storage] = await Promise.all([
-      api.get<{ packages: DependencyPackage[] }>("/api/v1/dependency-updates/packages"),
-      api.get<DependencyStorageStatus>("/api/v1/dependency-updates/storage/status")
-    ]);
-    return { packages: packagesResult.packages, storage };
-  },
-  syncDependencies: () => api.post("/api/v1/dependency-updates/sync", {}),
-  checkDependencies: () => api.post<DependencyCheckAllResult>("/api/v1/dependency-updates/check", { direct_only: false }),
-  getDependencyBackups: async (dependencyId: string) => {
-    const result = await api.get<{ backups: DependencyBackup[] }>(`/api/v1/dependency-updates/packages/${dependencyId}/backups`);
-    return result.backups;
-  },
-  getDependencyPackages: async () => {
-    const result = await api.get<{ packages: DependencyPackage[] }>("/api/v1/dependency-updates/packages");
-    return result.packages;
-  },
-  getDependencyJob: (jobId: string) => api.get<DependencyJob>(`/api/v1/dependency-updates/jobs/${jobId}`),
-  checkDependency: (dependencyId: string) => api.post<DependencyPackage>(`/api/v1/dependency-updates/packages/${dependencyId}/check`, {}),
-  analyzeDependency: (dependencyId: string, targetVersion?: string | null) => api.post<DependencyAnalysis>(`/api/v1/dependency-updates/packages/${dependencyId}/analyze`, { target_version: targetVersion || undefined }),
-  applyDependency: (dependencyId: string, targetVersion?: string | null) => {
-    const body = { target_version: targetVersion || undefined };
-    return confirmedPost<DependencyJob>(
-      `/api/v1/dependency-updates/packages/${dependencyId}/apply`,
-      "dependency_update.apply",
-      { dependency_id: dependencyId, ...body },
-      { target_entity: "ExternalDependency", target_id: dependencyId, target_label: "Dependency update", reason: "Apply dependency update" },
-      body
-    );
-  },
-  restoreDependencyBackup: (backupId: string) =>
-    confirmedPost<DependencyJob>(
-      `/api/v1/dependency-updates/backups/${backupId}/restore`,
-      "dependency_update.restore",
-      { backup_id: backupId },
-      { target_entity: "DependencyUpdateBackup", target_id: backupId, target_label: "Dependency backup", reason: "Restore dependency backup" },
-      {}
-    ),
-  saveDependencyStorage: (payload: Record<string, unknown>) =>
-    confirmedPost(
-      "/api/v1/dependency-updates/storage/config",
-      "dependency_update.storage.configure",
-      payload,
-      { target_entity: "DependencyUpdateStorage", target_label: "Update backup storage", reason: "Configure dependency backup storage" }
-    ),
-  validateDependencyStorage: () =>
-    confirmedPost(
-      "/api/v1/dependency-updates/storage/validate",
-      "dependency_update.storage.validate",
-      {},
-      { target_entity: "DependencyUpdateStorage", target_label: "Update backup storage", reason: "Validate dependency backup storage" }
-    ),
   getAppriseUrls: async () => {
     const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls");
     return result.urls;
@@ -435,37 +303,4 @@ export function testESPHomeDevice(device: ESPHomeDeviceSummary) {
     target_label: device.name,
     reason: "Test ESPHome access device"
   }, {});
-}
-export function createProtectBackup() {
-  return confirmedPost<UnifiProtectBackup>("/api/v1/integrations/unifi-protect/backups", "unifi_protect.backup.create", {}, {
-    target_entity: "UniFiProtect",
-    target_label: "UniFi Protect settings backup",
-    reason: "Create UniFi Protect backup"
-  }, {});
-}
-export function applyProtectUpdate(targetVersion: string) {
-  const payload = { target_version: targetVersion };
-  return confirmedPost<UnifiProtectUpdateApplyResult>("/api/v1/integrations/unifi-protect/update/apply", "unifi_protect.update.apply", payload, {
-    target_entity: "UniFiProtect",
-    target_label: targetVersion,
-    reason: "Apply UniFi Protect package update"
-  });
-}
-export function restoreProtectBackup(backup: UnifiProtectBackup) {
-  const payload = { backup_id: backup.id };
-  return confirmedPost(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}/restore`, "unifi_protect.backup.restore", payload, {
-    target_entity: "UniFiProtect",
-    target_id: backup.id,
-    target_label: backup.created_at || backup.id,
-    reason: "Restore UniFi Protect backup"
-  }, {});
-}
-export function deleteProtectBackup(backup: UnifiProtectBackup) {
-  const payload = { backup_id: backup.id };
-  return confirmedDelete(`/api/v1/integrations/unifi-protect/backups/${encodeURIComponent(backup.id)}`, "unifi_protect.backup.delete", payload, {
-    target_entity: "UniFiProtect",
-    target_id: backup.id,
-    target_label: backup.created_at || backup.id,
-    reason: "Delete UniFi Protect backup"
-  });
 }
