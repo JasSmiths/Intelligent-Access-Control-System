@@ -16,6 +16,7 @@ Warehouse
 } from "lucide-react";
 import React from "react";
 
+import { AccessPulse } from "../features/dashboard/AccessPulse";
 import { CommandReceiptHistory } from "../features/integrations/CommandReceiptHistory";
 import { api, ApiError, createActionConfirmation } from "../api/client";
 import { integrationsApi, coverTargetReceipt, isDeviceCommandReceipt, isGateCommandReceipt, type DeviceCommandReceipt, type GateCommandReceipt } from "../api/integrations";
@@ -513,8 +514,7 @@ function DashboardSession({
         </div>
 
         <div className="card chart-card">
-          <PanelHeader title="Daily Entries vs Exits" action="7 Days" actionKind="select" />
-          <DailyEntriesChart events={events} />
+          <AccessPulse events={events} now={now} onOpenEvents={() => navigateToView("events")} />
         </div>
       </div>
 
@@ -1133,57 +1133,6 @@ export function getDashboardAnomalies(anomalies: Anomaly[]): DashboardAnomaly[] 
     time: formatTime(item.last_seen_at || item.created_at),
     severity: item.severity
   }));
-}
-
-export function DailyEntriesChart({ events }: { events: AccessEvent[] }) {
-  const days = lastSevenDayBuckets(events);
-  const max = Math.max(...days.flatMap((item) => [item.entries, item.exits]), 1);
-
-  return (
-    <div className="daily-chart">
-      <div className="chart-grid-lines" aria-hidden="true">
-        <span>{max}</span>
-        <span>{Math.ceil(max * 0.66)}</span>
-        <span>{Math.ceil(max * 0.33)}</span>
-        <span>0</span>
-      </div>
-      <div className="chart-bars">
-        {days.map((item) => (
-          <div className="chart-day" key={item.day}>
-            <div className="chart-pair">
-              <span className="entry" style={{ height: `${(item.entries / max) * 100}%` }} />
-              <span className="exit" style={{ height: `${(item.exits / max) * 100}%` }} />
-            </div>
-            <small>{item.day}</small>
-          </div>
-        ))}
-      </div>
-      <div className="chart-legend">
-        <LegendDot className="residents" label="Entries" value="" />
-        <LegendDot className="exits" label="Exits" value="" />
-      </div>
-    </div>
-  );
-}
-
-export function lastSevenDayBuckets(events: AccessEvent[]) {
-  const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    const nextDate = new Date(date);
-    nextDate.setDate(date.getDate() + 1);
-    const dayEvents = events.filter((event) => {
-      const occurred = new Date(event.occurred_at);
-      return occurred >= date && occurred < nextDate;
-    });
-    return {
-      day: formatter.format(date),
-      entries: dayEvents.filter((event) => event.direction === "entry").length,
-      exits: dayEvents.filter((event) => event.direction === "exit").length
-    };
-  });
 }
 
 export function formatTime(value: string) {

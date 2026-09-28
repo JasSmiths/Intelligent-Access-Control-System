@@ -233,8 +233,7 @@
 }
 
 .status-metrics i,
-.presence-legend i,
-.chart-legend i {
+.presence-legend i {
   width: 8px;
   height: 8px;
   display: inline-block;
@@ -591,8 +590,7 @@
   background: var(--violet);
 }
 
-.presence-legend,
-.chart-legend {
+.presence-legend {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -602,8 +600,7 @@
   font-size: 12px;
 }
 
-.presence-legend span,
-.chart-legend span {
+.presence-legend span {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -887,95 +884,6 @@
   margin-top: 12px;
   color: #dc4b16;
   text-align: center;
-}
-
-.daily-chart {
-  min-height: 248px;
-  position: relative;
-  padding: 8px 8px 0 42px;
-}
-
-.chart-grid-lines {
-  position: absolute;
-  inset: 12px 8px 58px 8px;
-  display: grid;
-  grid-template-rows: repeat(4, 1fr);
-  color: var(--muted);
-  font-size: 11px;
-  pointer-events: none;
-}
-
-.chart-grid-lines span {
-  position: relative;
-}
-
-.chart-grid-lines span::after {
-  content: "";
-  position: absolute;
-  left: 34px;
-  right: 0;
-  top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.chart-bars {
-  height: 178px;
-  display: grid;
-  grid-template-columns: repeat(7, minmax(24px, 1fr));
-  align-items: end;
-  gap: 11px;
-  position: relative;
-  z-index: 1;
-}
-
-.chart-day {
-  min-width: 0;
-  display: grid;
-  gap: 9px;
-  justify-items: center;
-}
-
-.chart-pair {
-  width: 34px;
-  height: 166px;
-  display: flex;
-  align-items: end;
-  gap: 6px;
-}
-
-.chart-pair span {
-  width: 14px;
-  min-height: 6px;
-  display: block;
-  border-radius: 3px 3px 0 0;
-}
-
-.chart-pair .entry {
-  background: var(--green);
-}
-
-.chart-pair .entry.projected {
-  background: transparent;
-  border: 2px dashed color-mix(in srgb, var(--green) 70%, transparent);
-}
-
-.chart-pair .exit {
-  background: #cbd5df;
-}
-
-.chart-day small {
-  color: var(--muted-strong);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.chart-legend {
-  justify-content: center;
-  margin-top: 18px;
-}
-
-.chart-legend .exits {
-  background: #cbd5df;
 }
 
 .metric-card {
