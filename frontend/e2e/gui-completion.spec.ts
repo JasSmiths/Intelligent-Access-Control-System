@@ -128,6 +128,69 @@ test("scrolls a lower active Settings destination into the sidebar viewport", as
   expect(unexpected).toEqual([]);
 });
 
+test("shows a complete touch navigation drawer at iPhone landscape size", async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ baseURL: "http://127.0.0.1:5174", viewport: { width: 956, height: 440 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    const unexpected = await installFixtures(page);
+    await page.goto("/settings/alfred-training");
+    await page.evaluate(() => {
+      const root = document.documentElement;
+      root.style.setProperty("--safe-top", "12px");
+      root.style.setProperty("--safe-bottom", "12px");
+      root.style.setProperty("--safe-left", "62px");
+      root.style.setProperty("--safe-right", "38px");
+    });
+    const toggle = page.getByRole("button", { name: "Expand navigation sidebar" });
+    await expect(toggle).toBeInViewport();
+    await toggle.click();
+    const sidebar = page.getByRole("dialog", { name: "Site navigation" });
+    await expect(sidebar).toBeVisible();
+    await expect.poll(async () => Math.round((await sidebar.boundingBox())?.x ?? -1)).toBe(0);
+    const active = sidebar.getByRole("button", { name: "Alfred Training" });
+    await expect(active).toBeInViewport();
+    await expect(sidebar.getByRole("button", { name: "Close navigation" })).toBeInViewport();
+    await expect(sidebar.getByRole("button", { name: "Account menu for Alex Operator" })).toBeInViewport();
+    const navigationList = sidebar.getByRole("navigation", { name: "Main navigation" });
+    expect(await navigationList.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+    const bounds = await Promise.all([sidebar.boundingBox(), active.locator("svg").boundingBox(), active.locator("span").boundingBox()]);
+    expect(bounds.every(Boolean)).toBe(true);
+    const [rail, icon, label] = bounds as Array<{ x: number; y: number; width: number; height: number }>;
+    for (const item of [icon, label]) {
+      expect(item.x).toBeGreaterThanOrEqual(rail.x);
+      expect(item.x + item.width).toBeLessThanOrEqual(rail.x + rail.width);
+    }
+    await page.screenshot({ path: testInfo.outputPath("iphone-landscape-settings-drawer-956x440-after.png"), fullPage: false });
+    await navigationList.evaluate((node) => { node.scrollTop = 0; });
+    await expect(sidebar.getByText("Operations", { exact: true })).toBeInViewport();
+    await active.scrollIntoViewIfNeeded();
+    await expect(active).toBeInViewport();
+    await page.keyboard.press("Escape");
+    await expect(sidebar).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty("--safe-left", "0px");
+      document.documentElement.style.setProperty("--safe-right", "0px");
+    });
+    await toggle.click();
+    await expect(sidebar).toBeVisible();
+    await expect(active).toBeInViewport();
+    await page.setViewportSize({ width: 956, height: 440 });
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty("--safe-left", "62px");
+      document.documentElement.style.setProperty("--safe-right", "38px");
+    });
+    await expect(active).toBeInViewport();
+    await expect(sidebar.getByRole("button", { name: "Account menu for Alex Operator" })).toBeInViewport();
+    await sidebar.getByRole("button", { name: "Close navigation" }).click();
+    await expect(sidebar).toHaveCount(0);
+    expect(unexpected).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
 test("keeps long directory labels and missing avatars usable with enlarged text", async ({ page }) => {
   const unexpected = await installFixtures(page);
   const longName = "Residents with extended access for multiple homes and shared deliveries";

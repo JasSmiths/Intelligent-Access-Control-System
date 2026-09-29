@@ -172,11 +172,11 @@ test("keeps the dashboard within the viewport matrix without reloading", async (
   expect(network.unexpected).toEqual([]);
 });
 
-test("keeps navigation available as width crosses 719, 720 and 721 pixels", async ({ page }) => {
+test("keeps navigation available across the 720px content and 980px drawer boundaries", async ({ page }) => {
   const network = await mockOperationalNetwork(page);
   await openDashboard(page);
 
-  for (const width of [719, 720]) {
+  for (const width of [719, 720, 721, 979, 980]) {
     await page.setViewportSize({ width, height: 640 });
     const navToggle = page.getByRole("button", { name: /navigation sidebar/i });
     await expect(navToggle).toBeVisible();
@@ -184,15 +184,45 @@ test("keeps navigation available as width crosses 719, 720 and 721 pixels", asyn
     await navToggle.click();
     await expect(page.getByRole("navigation", { name: "Main navigation" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Dashboard" })).toBeVisible();
-    if (await page.getByRole("button", { name: "Close navigation" }).count()) {
-      await page.getByRole("button", { name: "Close navigation" }).click();
-    }
+    await page.getByRole("button", { name: "Close navigation" }).click();
   }
-  await page.setViewportSize({ width: 721, height: 640 });
+  await page.setViewportSize({ width: 981, height: 640 });
   await expect(page.getByRole("button", { name: /navigation sidebar/i })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reports" })).toBeVisible();
-  await page.setViewportSize({ width: 900, height: 640 });
+  await page.setViewportSize({ width: 1100, height: 640 });
   await expect(page.getByRole("button", { name: "Reports" })).toBeVisible();
+  expect(network.unexpected).toEqual([]);
+});
+
+test("restores the desktop sidebar preference after visiting drawer width", async ({ page }) => {
+  const network = await mockOperationalNetwork(page);
+  const preferenceUpdates: boolean[] = [];
+  await page.route("**/api/v1/auth/me/preferences", async (route) => {
+    const body = route.request().postDataJSON() as { sidebarCollapsed: boolean };
+    preferenceUpdates.push(body.sidebarCollapsed);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...account, preferences: body })
+    });
+  });
+  await page.setViewportSize({ width: 1100, height: 640 });
+  await openDashboard(page);
+
+  await page.getByRole("button", { name: "Collapse navigation sidebar" }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/sidebar-collapsed/);
+  await expect.poll(() => preferenceUpdates).toEqual([true]);
+
+  await page.setViewportSize({ width: 956, height: 440 });
+  await expect(page.locator(".app-shell")).not.toHaveClass(/sidebar-collapsed/);
+  await expect(page.getByRole("dialog", { name: "Site navigation" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Expand navigation sidebar" }).click();
+  await expect(page.getByRole("dialog", { name: "Site navigation" })).toBeVisible();
+  await page.getByRole("button", { name: "Close navigation" }).click();
+
+  await page.setViewportSize({ width: 981, height: 640 });
+  await expect(page.locator(".app-shell")).toHaveClass(/sidebar-collapsed/);
+  expect(preferenceUpdates).toEqual([true]);
   expect(network.unexpected).toEqual([]);
 });
 
@@ -220,6 +250,7 @@ test("keeps the floating profile menu reachable through resize and Escape", asyn
   const network = await mockOperationalNetwork(page);
   await openDashboard(page);
   await page.setViewportSize({ width: 900, height: 800 });
+  await page.getByRole("button", { name: "Expand navigation sidebar" }).click();
   await page.getByRole("button", { name: /Alex Operator/ }).click();
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
@@ -237,6 +268,10 @@ test("keeps the floating profile menu reachable through resize and Escape", asyn
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Alex Operator/ })).toBeFocused();
+  await expect(page.getByRole("dialog", { name: "Site navigation" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Site navigation" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Expand navigation sidebar" })).toBeFocused();
   expect(network.unexpected).toEqual([]);
 });
 

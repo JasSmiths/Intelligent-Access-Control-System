@@ -61,15 +61,23 @@ export function App() {
   const [profileMenuOpen, setProfileMenuOpen] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
   const [isMobileNavigation, setIsMobileNavigation] = React.useState(() =>
-    typeof window !== "undefined" ? window.matchMedia("(max-width: 720px)").matches : false
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 980px)").matches : false
   );
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
   const sidebarRef = React.useRef<HTMLElement | null>(null);
-  useModalFocus(sidebarRef, isMobileNavigation && mobileNavOpen, () => setMobileNavOpen(false));
+  const navigationButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const alertsButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const alertsTrayRef = React.useRef<HTMLDivElement | null>(null);
   const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
   const profileButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  useModalFocus(sidebarRef, isMobileNavigation && mobileNavOpen, () => {
+    if (profileMenuOpen) {
+      setProfileMenuOpen(false);
+      profileButtonRef.current?.focus({ preventScroll: true });
+    } else {
+      setMobileNavOpen(false);
+    }
+  });
   const setRealtimeStatus = React.useCallback((status: RealtimeConnectionStatus, detail: string) => {
     setRealtimeConnection(realtimeStatus(status, detail));
   }, []);
@@ -181,7 +189,7 @@ export function App() {
     onStatus: setRealtimeStatus
   });
   React.useEffect(() => {
-    const media = window.matchMedia("(max-width: 720px)");
+    const media = window.matchMedia("(max-width: 980px)");
     const syncMobileNavigation = () => {
       setIsMobileNavigation(media.matches);
       if (!media.matches) {
@@ -228,11 +236,12 @@ export function App() {
   }, [isMobileNavigation, navigateToView]);
   const toggleNavigation = React.useCallback(() => {
     if (isMobileNavigation) {
+      if (!mobileNavOpen) navigationButtonRef.current?.focus({ preventScroll: true });
       setMobileNavOpen((current) => !current);
       return;
     }
     setProfilePreferences({ sidebarCollapsed: !sidebarCollapsed });
-  }, [isMobileNavigation, setProfilePreferences, sidebarCollapsed]);
+  }, [isMobileNavigation, mobileNavOpen, setProfilePreferences, sidebarCollapsed]);
   const handleLogout = React.useCallback(async () => {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -290,17 +299,23 @@ export function App() {
   }, [view]);
   React.useEffect(() => {
     if (!settingsExpanded && !isMobileNavigation) return;
-    const frame = window.requestAnimationFrame(() => {
-      const sidebar = sidebarRef.current;
-      const list = sidebar?.querySelector<HTMLElement>(".nav-list");
-      const active = sidebar?.querySelector<HTMLElement>(".nav-item.nested.active") ?? sidebar?.querySelector<HTMLElement>(".nav-item.active");
-      if (!list || !active) return;
-      const listBounds = list.getBoundingClientRect();
-      const activeBounds = active.getBoundingClientRect();
-      if (activeBounds.bottom > listBounds.bottom) list.scrollTop += activeBounds.bottom - listBounds.bottom + 8;
-      else if (activeBounds.top < listBounds.top) list.scrollTop -= listBounds.top - activeBounds.top + 8;
-    });
-    return () => window.cancelAnimationFrame(frame);
+    let frame = 0;
+    const scrollActiveIntoView = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const sidebar = sidebarRef.current;
+        const list = sidebar?.querySelector<HTMLElement>(".nav-list");
+        const active = sidebar?.querySelector<HTMLElement>(".nav-item.nested.active") ?? sidebar?.querySelector<HTMLElement>(".nav-item.active");
+        if (!list || !active) return;
+        const listBounds = list.getBoundingClientRect();
+        const activeBounds = active.getBoundingClientRect();
+        if (activeBounds.bottom > listBounds.bottom) list.scrollTop += activeBounds.bottom - listBounds.bottom + 8;
+        else if (activeBounds.top < listBounds.top) list.scrollTop -= listBounds.top - activeBounds.top + 8;
+      });
+    };
+    scrollActiveIntoView();
+    window.addEventListener("resize", scrollActiveIntoView);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("resize", scrollActiveIntoView); };
   }, [view, settingsExpanded, isMobileNavigation, mobileNavOpen, authStatus?.authenticated]);
   React.useEffect(() => {
     if (!alertsOpen) return undefined;
@@ -481,6 +496,7 @@ export function App() {
               aria-expanded={navigationExpanded}
               aria-label={navigationExpanded ? "Collapse navigation sidebar" : "Expand navigation sidebar"}
               onClick={toggleNavigation}
+              ref={navigationButtonRef}
             >
               <Menu size={20} />
             </button>

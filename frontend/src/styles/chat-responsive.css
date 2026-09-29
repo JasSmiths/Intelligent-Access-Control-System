@@ -1525,55 +1525,6 @@
 }
 
 @media (max-width: 980px) {
-  .sidebar {
-    width: calc(82px + var(--safe-left));
-    padding-inline: max(10px, var(--safe-left)) 10px;
-  }
-
-  .brand {
-    justify-content: center;
-    padding-inline: 0;
-  }
-
-  .brand div:last-child,
-  .brand-copy,
-  .nav-item span,
-  .profile-switcher span:not(.profile-photo),
-  .profile-switcher > svg:last-child,
-  .sidebar-status .sidebar-status-copy {
-    display: none;
-  }
-
-  .nav-item {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .profile-switcher {
-    grid-template-columns: 1fr;
-    justify-items: center;
-    min-height: 58px;
-    padding: 8px;
-  }
-
-  .profile-menu {
-    left: 0;
-    right: auto;
-    width: 180px;
-  }
-
-  .sidebar-status {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .main {
-    margin-left: calc(82px + var(--safe-left));
-    width: calc(100vw - 82px - var(--safe-left));
-    max-width: calc(100vw - 82px - var(--safe-left));
-    overflow-x: hidden;
-  }
-
   .topbar {
     gap: 12px;
     padding: var(--safe-top) max(18px, var(--safe-right)) 0 max(4px, var(--safe-left));
@@ -1654,6 +1605,55 @@
   .span-2,
   .span-3 {
     grid-column: span 2;
+  }
+}
+
+/* Navigation becomes a drawer before the content switches to its phone layout. */
+@media (max-width: 980px) {
+  html,
+  body,
+  .app-shell {
+    overflow-x: hidden;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(calc(310px + var(--safe-left)), calc(100vw - var(--safe-right)));
+    max-width: 100%;
+    height: var(--app-viewport-height);
+    padding: max(16px, var(--safe-top)) 10px max(18px, var(--safe-bottom)) max(10px, var(--safe-left));
+    overflow: hidden;
+    transform: translateX(-100%);
+    visibility: hidden;
+    z-index: 70;
+  }
+
+  .mobile-nav-open .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .sidebar-close-button {
+    width: 34px;
+    min-height: 34px;
+    display: inline-flex;
+    margin-left: auto;
+  }
+
+  .nav-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .main,
+  .sidebar-collapsed .main {
+    margin-left: 0;
+    width: 100%;
+    max-width: 100vw;
+    overflow-x: hidden;
   }
 }
 
