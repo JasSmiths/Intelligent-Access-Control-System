@@ -1,3 +1,5 @@
+import { useModalFocus } from "../ui/useModalFocus";
+import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 AlertTriangle,
 Bell,
@@ -8,16 +10,13 @@ Search
 } from "lucide-react";
 import React from "react";
 
-import { api, isAbortError } from "../api/client";
+import { api } from "../api/client";
 import { alertSeverityLabel, alertSeverityTone, formatDate, isActionableAlert, titleCase } from "../lib/format";
-import { Badge, EmptyState, MetricCard, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, Toolbar } from "../ui/primitives";
 import type { AlertSeverity, Anomaly } from "../api/types";
+import { useHistoryPage } from "./useHistoryPage";
 
 
-
-export function alertIdFromLocation() {
-  return new URLSearchParams(window.location.search).get("alert") ?? "";
-}
 
 export function alertMatchesFocus(alert: Anomaly, focusedAlertId: string) {
   return Boolean(focusedAlertId && (alert.id === focusedAlertId || alert.alert_ids.includes(focusedAlertId)));
@@ -32,71 +31,50 @@ export type AlertActionTarget = {
   action: "resolve" | "reopen";
 };
 
-export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboard: () => Promise<void>; refreshToken: number }) {
-  const [alerts, setAlerts] = React.useState<Anomaly[]>([]);
+export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetId }: { refreshDashboard: () => Promise<void>; refreshToken: number; resetToken: number; targetId: string | null }) {
+  const [focused, setFocused] = React.useState<Anomaly | null>(null);
   const [statusFilter, setStatusFilter] = React.useState<"open" | "resolved" | "all">("open");
   const [severityFilter, setSeverityFilter] = React.useState<"all" | AlertSeverity>("all");
   const [typeFilter, setTypeFilter] = React.useState("all");
   const [query, setQuery] = React.useState("");
-  const [focusedAlertId, setFocusedAlertId] = React.useState(() => alertIdFromLocation());
-  const [loading, setLoading] = React.useState(true);
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
+  const focusedAlertId = targetId ?? "";
   const [error, setError] = React.useState("");
   const [actionTarget, setActionTarget] = React.useState<AlertActionTarget | null>(null);
   const [resolutionNote, setResolutionNote] = React.useState("");
   const [actionLoading, setActionLoading] = React.useState(false);
-  const lastRefreshTokenRef = React.useRef(refreshToken);
-  const loadSequenceRef = React.useRef(0);
-  const loadAbortRef = React.useRef<AbortController | null>(null);
+  const actionInFlightRef = React.useRef(false);
+  const modalRef = React.useRef<HTMLFormElement>(null);
+  const dismissResolution = useEditorDismiss(() => { setActionTarget(null); setResolutionNote(""); },
+    Boolean(resolutionNote.trim()), actionLoading, "resolution note");
+  useModalFocus(modalRef, actionTarget?.action === "resolve", dismissResolution);
+  const deferredQuery = React.useDeferredValue(query);
+  const params = new URLSearchParams({ status: statusFilter });
+  if (severityFilter !== "all") params.set("severity", severityFilter);
+  if (typeFilter !== "all") params.set("type", typeFilter);
+  if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const history = useHistoryPage<Anomaly>("/api/v1/alerts/history", params, refreshToken, resetToken);
+  const alerts = focused && !history.items.some((alert) => alertMatchesFocus(alert, focusedAlertId))
+    ? [focused, ...history.items] : history.items;
 
-  const loadAlerts = React.useCallback(async () => {
-    const sequence = loadSequenceRef.current + 1;
-    loadSequenceRef.current = sequence;
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    setLoading(true);
-    setError("");
-    try {
-      const params = new URLSearchParams({ status: statusFilter, limit: "200" });
-      if (severityFilter !== "all") params.set("severity", severityFilter);
-      if (typeFilter !== "all") params.set("type", typeFilter);
-      if (query.trim()) params.set("q", query.trim());
-      const rows = await api.get<Anomaly[]>(`/api/v1/alerts?${params}`, { signal: controller.signal });
-      if (loadSequenceRef.current === sequence && !controller.signal.aborted) {
-        setAlerts(rows);
-      }
-    } catch (loadError) {
-      if (!isAbortError(loadError) && loadSequenceRef.current === sequence) {
-        setError(loadError instanceof Error ? loadError.message : "Unable to load alerts");
-      }
-    } finally {
-      if (loadSequenceRef.current === sequence) {
-        setLoading(false);
-        if (loadAbortRef.current === controller) loadAbortRef.current = null;
-      }
+  React.useEffect(() => {
+    if (history.loading) return;
+    if (!focusedAlertId || history.items.some((alert) => alertMatchesFocus(alert, focusedAlertId))) {
+      setFocused(null);
+      return;
     }
-  }, [query, severityFilter, statusFilter, typeFilter]);
-
-  React.useEffect(() => () => loadAbortRef.current?.abort(), []);
-
-  React.useEffect(() => {
-    loadAlerts().catch(() => undefined);
-  }, [loadAlerts]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadAlerts().catch(() => undefined);
-  }, [loadAlerts, refreshToken]);
+    let active = true;
+    void api.get<Anomaly>(`/api/v1/alerts/${encodeURIComponent(focusedAlertId)}`)
+      .then((item) => { if (active) setFocused(item); })
+      .catch((focusError: unknown) => { if (active) setError(focusError instanceof Error ? focusError.message : "Alert unavailable."); });
+    return () => { active = false; };
+  }, [focusedAlertId, history.items, history.loading]);
 
   React.useEffect(() => {
-    const updateFocusedAlert = () => setFocusedAlertId(alertIdFromLocation());
-    window.addEventListener("popstate", updateFocusedAlert);
-    return () => window.removeEventListener("popstate", updateFocusedAlert);
-  }, []);
-
-  React.useEffect(() => {
-    if (!focusedAlertId || loading) return;
+    if (!focusedAlertId || history.loading) return;
     const target = alerts.find((alert) => alertMatchesFocus(alert, focusedAlertId));
     if (!target) return;
     window.requestAnimationFrame(() => {
@@ -104,55 +82,72 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
       node?.focus({ preventScroll: true });
     });
-  }, [alerts, focusedAlertId, loading]);
+  }, [alerts, focusedAlertId, history.loading]);
 
   const actOnAlert = async (target: AlertActionTarget, note?: string) => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setActionLoading(true);
     setError("");
     try {
-      await api.patch("/api/v1/alerts/action", {
-        alert_ids: target.alert.alert_ids,
-        action: target.action,
-        note: note ?? null
-      });
+      const cleanedNote = note?.trim() || null;
+      if (target.alert.grouped) {
+        if (!target.alert.member_hash) throw new Error("This group must be refreshed before resolving.");
+        const confirmation = await api.post<{ confirmation_token: string; count: number }>("/api/v1/alerts/groups/confirmation", {
+          group_id: target.alert.id, as_of: target.alert.as_of || history.asOf,
+          member_hash: target.alert.member_hash, count: target.alert.count, note: cleanedNote
+        });
+        if (confirmation.count !== target.alert.count) throw new Error("Alert group changed. Refresh and review it again.");
+        await api.patch("/api/v1/alerts/action", {
+          group_id: target.alert.id, confirmation_token: confirmation.confirmation_token,
+          action: target.action, note: cleanedNote
+        });
+      } else {
+        await api.patch("/api/v1/alerts/action", {
+          alert_ids: target.alert.alert_ids, action: target.action, note: cleanedNote
+        });
+      }
       setActionTarget(null);
       setResolutionNote("");
-      await Promise.all([loadAlerts(), refreshDashboard()]);
+      history.refresh();
+      try { await refreshDashboard(); } catch { setError("Alert saved, but dashboard refresh is unavailable."); }
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Unable to update alert");
     } finally {
+      actionInFlightRef.current = false;
       setActionLoading(false);
     }
   };
 
-  const openCount = alerts.filter((alert) => alert.status === "open").length;
-  const actionableCount = alerts.filter(isActionableAlert).length;
+  const openCount = history.items.filter((alert) => alert.status === "open").length;
+  const actionableCount = history.items.filter(isActionableAlert).length;
+  const resolvedCount = history.items.filter((alert) => alert.status === "resolved").length;
 
   return (
     <section className="view-stack alerts-page">
-      <Toolbar title="Alerts" count={alerts.length} icon={Bell}>
-        <button className="secondary-button" onClick={() => loadAlerts().catch(() => undefined)} type="button">
+      <Toolbar title="Alerts" icon={Bell}>
+        <button className="secondary-button" onClick={history.refresh} disabled={history.loading} type="button">
           <RefreshCcw size={15} /> Refresh
         </button>
       </Toolbar>
 
-      <div className="alerts-summary-grid">
-        <MetricCard icon={AlertTriangle} label="Action Needed" value={String(actionableCount)} detail="warning and critical" tone={actionableCount ? "amber" : "gray"} />
-        <MetricCard icon={Bell} label="Open Alerts" value={String(openCount)} detail="including informational" tone={openCount ? "blue" : "green"} />
-        <MetricCard icon={CheckCircle2} label="Resolved View" value={statusFilter === "resolved" ? String(alerts.length) : "available"} detail="audit trail retained" tone="green" />
-      </div>
+      {!history.loading && !history.error ? <div className="alerts-count-strip" aria-label="Alert group counts on this page">
+        <span><strong>{actionableCount}</strong> need action</span>
+        <span><strong>{openCount}</strong> open</span>
+        <span><strong>{resolvedCount}</strong> resolved</span>
+      </div> : null}
 
       <div className="alerts-controls">
         <div className="alert-status-tabs" role="tablist" aria-label="Alert status">
           {(["open", "resolved", "all"] as const).map((value) => (
-            <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)} type="button">
+            <button className={statusFilter === value ? "active" : ""} aria-selected={statusFilter === value} role="tab" key={value} onClick={() => setStatusFilter(value)} type="button">
               {titleCase(value)}
             </button>
           ))}
         </div>
         <label className="search alerts-search">
           <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search plate, message, or context..." />
+          <input aria-label="Search alerts" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search plate, message, or context..." />
         </label>
         <select value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value as typeof severityFilter)} aria-label="Filter by severity">
           <option value="all">All severities</option>
@@ -167,16 +162,24 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
           <option value="duplicate_entry">Duplicate entry</option>
           <option value="duplicate_exit">Duplicate exit</option>
         </select>
+        <label className="history-date-field">From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+        <label className="history-date-field">Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+        {(query || from || to || severityFilter !== "all" || typeFilter !== "all" || statusFilter !== "open") ? <button className="secondary-button" type="button" onClick={() => { setQuery(""); setFrom(""); setTo(""); setSeverityFilter("all"); setTypeFilter("all"); setStatusFilter("open"); }}>Clear filters</button> : null}
+        <p className="history-date-hint">Dates use the site timezone. Before excludes the selected date.</p>
       </div>
 
+      {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
+      {history.error ? <div className="error-banner" role="alert">Alerts unavailable: {history.error}</div> : null}
       {error ? <div className="error-banner">{error}</div> : null}
-      {loading ? (
+      {focused ? <div className="callout">Showing the selected alert from outside this page.</div> : null}
+      {history.loading ? (
         <div className="loading-panel">Loading alerts</div>
       ) : alerts.length ? (
         <div className="alerts-list">
           {alerts.map((alert) => (
             <AlertReviewRow
               alert={alert}
+              disabled={actionLoading}
               focused={alertMatchesFocus(alert, focusedAlertId)}
               key={alert.id}
               onReopen={() => actOnAlert({ alert, action: "reopen" })}
@@ -188,12 +191,17 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
           ))}
         </div>
       ) : (
-        <EmptyState icon={CheckCircle2} label="No alerts match this view" />
+        !history.error ? <EmptyState icon={CheckCircle2} label={query || from || to || severityFilter !== "all" || typeFilter !== "all" || statusFilter !== "open" ? "No alerts match these filters." : "No alerts recorded yet."} /> : null
       )}
+      {(history.items.length || history.index) ? <div className="history-pagination" aria-label="Alerts pagination">
+        <span>{history.items.length ? `${history.index * 50 + 1}-${history.index * 50 + history.items.length}` : "0"} groups or alerts on this page{history.nextCursor ? "; more available" : ""}</span>
+        <div><button className="secondary-button" type="button" disabled={history.index === 0 || history.loading} onClick={history.previous}>Previous</button><span>Page {history.index + 1}</span><button className="secondary-button" type="button" disabled={!history.nextCursor || history.loading} onClick={history.next}>Next</button></div>
+      </div> : null}
 
       {actionTarget?.action === "resolve" ? (
-        <div className="modal-backdrop" role="presentation">
+        <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) dismissResolution(); }}>
           <form
+            ref={modalRef}
             className="modal-card alert-resolution-modal"
             onSubmit={(event) => {
               event.preventDefault();
@@ -212,7 +220,7 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
               <textarea value={resolutionNote} onChange={(event) => setResolutionNote(event.target.value)} placeholder="Optional note for the audit trail" rows={4} />
             </label>
             <div className="modal-actions">
-              <button className="secondary-button" disabled={actionLoading} onClick={() => setActionTarget(null)} type="button">
+              <button className="secondary-button" disabled={actionLoading} onClick={dismissResolution} type="button">
                 Cancel
               </button>
               <button className="primary-button" disabled={actionLoading} type="submit">
@@ -230,11 +238,13 @@ export function AlertsView({ refreshDashboard, refreshToken }: { refreshDashboar
 export function AlertReviewRow({
   alert,
   focused,
+  disabled,
   onResolve,
   onReopen
 }: {
   alert: Anomaly;
   focused: boolean;
+  disabled: boolean;
   onResolve: () => void;
   onReopen: () => void;
 }) {
@@ -288,9 +298,9 @@ export function AlertReviewRow({
         </div>
         <div className="alert-review-actions">
           {isResolved ? (
-            <button className="secondary-button" onClick={onReopen} type="button">Reopen</button>
+            <button className="secondary-button" disabled={disabled} onClick={onReopen} type="button">Reopen</button>
           ) : (
-            <button className="primary-button" onClick={onResolve} type="button">
+            <button className="primary-button" disabled={disabled} onClick={onResolve} type="button">
               <Check size={15} /> Resolve
             </button>
           )}

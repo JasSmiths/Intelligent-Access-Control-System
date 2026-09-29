@@ -2,6 +2,7 @@ import { CalendarDays, ClipboardPaste, Copy, Trash2, X } from "lucide-react";
 import React from "react";
 import type { ScheduleTimeBlocks } from "../../api/types";
 import { scheduleDays } from "../../lib/format";
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "../../lib/viewportPlacement";
 import type { ScheduleCellPoint, ScheduleCopiedBlock } from "./model";
 import { addSlotRange, formatScheduleBlockLabel, formatSlotLabel, scheduleBlocksToSlots, scheduleSlotCount, scheduleSlotKey, scheduleSummary, selectedSlotRange, slotsToScheduleBlocks } from "./model";
 
@@ -53,6 +54,8 @@ export function WeeklyScheduleGrid({
   });
   const [copiedBlock, setCopiedBlock] = React.useState<ScheduleCopiedBlock | null>(null);
   const [contextMenu, setContextMenu] = React.useState<ScheduleContextMenu | null>(null);
+  const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const contextPointRef = React.useRef({ x: 0, y: 0 });
 
   React.useEffect(() => {
     setSelectedSlots(scheduleBlocksToSlots(value));
@@ -179,19 +182,33 @@ export function WeeklyScheduleGrid({
     if (!contextMenu) return undefined;
     const closeMenu = () => setContextMenu(null);
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeMenu();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMenu();
+      }
     };
     window.addEventListener("pointerdown", closeMenu);
-    window.addEventListener("resize", closeMenu);
-    window.addEventListener("scroll", closeMenu, true);
-    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", closeOnEscape, true);
     return () => {
       window.removeEventListener("pointerdown", closeMenu);
-      window.removeEventListener("resize", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
-      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("keydown", closeOnEscape, true);
     };
-  }, [contextMenu]);
+  }, [contextMenu?.kind]);
+
+  React.useLayoutEffect(() => {
+    if (!contextMenu) return undefined;
+    const update = () => {
+      const menu = contextMenuRef.current;
+      if (!menu) return;
+      const { x, y } = contextPointRef.current;
+      const placement = placeOverlay({ left: x, right: x, top: y, bottom: y }, { width: menu.offsetWidth, height: menu.scrollHeight }, getUsableViewportBounds(), { gap: 0 });
+      setContextMenu((current) => current && (current.x !== placement.left || current.y !== placement.top) ? { ...current, x: placement.left, y: placement.top } : current);
+      menu.style.maxWidth = `${placement.maxWidth}px`;
+      menu.style.maxHeight = `${placement.maxHeight}px`;
+    };
+    return observeOverlayPlacement(null, contextMenuRef.current, update);
+  }, [contextMenu?.kind, contextMenu?.x === -1]);
 
   const startPaint = (day: number, slot: number, event: React.PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) return;
@@ -216,7 +233,8 @@ export function WeeklyScheduleGrid({
     dragRef.current.active = false;
     stopAutoScroll();
 
-    const point = scheduleContextMenuPoint(event.clientX, event.clientY);
+    contextPointRef.current = { x: event.clientX, y: event.clientY };
+    const point = { x: -1, y: -1 };
     const key = scheduleSlotKey(day, slot);
     if (selectedSlots.has(key)) {
       const range = selectedSlotRange(selectedSlots, day, slot);
@@ -295,6 +313,7 @@ export function WeeklyScheduleGrid({
         </div>
       </div>
 
+      <p className="schedule-swipe-hint">Swipe horizontally to see all seven days.</p>
       <div className="schedule-calendar" onDragStart={(event) => event.preventDefault()} ref={calendarRef}>
         <div className="schedule-calendar-head">
           <span />
@@ -342,8 +361,9 @@ export function WeeklyScheduleGrid({
           className="schedule-context-menu"
           onContextMenu={(event) => event.preventDefault()}
           onPointerDown={(event) => event.stopPropagation()}
+          ref={contextMenuRef}
           role="menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={{ left: contextMenu.x, top: contextMenu.y, overflowY: "auto", visibility: contextMenu.x < 0 ? "hidden" : "visible" }}
         >
           {contextMenu.kind === "selected" ? (
             <>
@@ -437,13 +457,4 @@ function scheduleCellFromPoint(
   const day = Math.max(0, Math.min(scheduleDays.length - 1, rawDay));
   const slot = Math.max(0, Math.min(scheduleSlotCount - 1, rawSlot));
   return { day, slot };
-}
-
-function scheduleContextMenuPoint(clientX: number, clientY: number) {
-  const menuWidth = 244;
-  const menuHeight = 292;
-  return {
-    x: Math.max(12, Math.min(clientX, window.innerWidth - menuWidth - 12)),
-    y: Math.max(12, Math.min(clientY, window.innerHeight - menuHeight - 12))
-  };
 }

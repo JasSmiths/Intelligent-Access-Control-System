@@ -1,5 +1,9 @@
 # Canonical repository after recovery cutover
 
+> Historical repository-state record. Its updater status is superseded: both
+> updater systems were removed. Follow the [current architecture guide](../architecture.md)
+> and [updater retirement note](../releases/remove-dependency-updaters.md).
+
 The current development source is `/Users/jas/Documents/Intelligent Access System`.
 The 655 release-manifest files were consolidated here and verified against the
 running release source on 2026-09-13. Source fingerprint:

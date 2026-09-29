@@ -637,3 +637,28 @@ async def test_failed_attempt_checkpoint_makes_zero_provider_calls(monkeypatch):
     row = await service.run_store.get(identity)
     assert row.status == "queued" and row.delivery_plan[0]["state"] == "pending"
     assert calls == []
+
+
+async def test_enriched_facts_and_plan_survive_reclaim(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    service = NotificationService()
+    lookup = AsyncMock(return_value=SimpleNamespace(make="FORD", colour="BLUE"))
+    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", lookup)
+    payload = owner.notification_context_payload(NotificationContext(
+        event_type="unauthorized_plate", subject="AB12CDE", severity="warning",
+        facts={"access_event_id": str(uuid.uuid4()), "registration_number": "AB12CDE"},
+    ))
+    overrides = rules(1)
+    overrides[0]["trigger_event"] = "unauthorized_plate"
+    overrides[0]["actions"][0]["message_template"] = "@VehicleColour @VehicleMake @Registration"
+    identity = await service.run_store.create(payload, rules_override=overrides)
+    claimed = await service.run_store.claim(identity)
+    plan = await service.prepare_delivery_plan(claimed)
+    await service.run_store.save_plan(identity, claimed.claim_token, plan, facts=claimed.context["facts"])
+    await service.run_store.interrupt(identity, claimed.claim_token)
+    recovered = await service.run_store.claim(identity)
+    assert recovered.context["facts"]["vehicle_make"] == "FORD"
+    assert recovered.context["facts"]["vehicle_colour"] == "BLUE"
+    assert recovered.delivery_plan[0]["action"]["message"] == "BLUE FORD AB12CDE"
+    lookup.assert_awaited_once()

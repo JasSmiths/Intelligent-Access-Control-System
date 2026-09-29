@@ -2275,16 +2275,12 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
     expected_tool_names = {
         "analyze_alert_snapshot",
         "analyze_camera_snapshot",
-        "analyze_dependency_update",
-        "apply_dependency_update",
         "assign_schedule_to_entity",
         "backfill_access_event_from_protect",
         "calculate_absence_duration",
         "calculate_visit_duration",
         "cancel_visitor_pass",
-        "check_dependency_updates",
         "command_device",
-        "configure_dependency_backup_storage",
         "create_automation",
         "create_notification_workflow",
         "create_schedule",
@@ -2323,9 +2319,6 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "query_automation_catalog",
         "query_automations",
         "query_auth_secret_status",
-        "query_dependency_backups",
-        "query_dependency_update_job",
-        "query_dependency_updates",
         "query_device_states",
         "query_integration_health",
         "query_leaderboard",
@@ -2341,7 +2334,6 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "query_visitor_passes",
         "read_chat_attachment",
         "resolve_human_entity",
-        "restore_dependency_backup",
         "rotate_auth_secret",
         "summarize_access_rhythm",
         "test_integration_connection",
@@ -2355,18 +2347,13 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "update_notification_workflow",
         "update_schedule",
         "update_visitor_pass",
-        "validate_dependency_backup_storage",
         "verify_schedule_access",
     }
     state_changing_tools = {
-        "analyze_dependency_update",
-        "apply_dependency_update",
         "assign_schedule_to_entity",
         "backfill_access_event_from_protect",
         "cancel_visitor_pass",
-        "check_dependency_updates",
         "command_device",
-        "configure_dependency_backup_storage",
         "create_automation",
         "create_notification_workflow",
         "create_schedule",
@@ -2383,7 +2370,6 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "open_device",
         "open_gate",
         "override_schedule",
-        "restore_dependency_backup",
         "rotate_auth_secret",
         "test_integration_connection",
         "test_notification_workflow",
@@ -2396,7 +2382,6 @@ def test_alfred_tool_registry_preserves_public_tool_surface() -> None:
         "update_notification_workflow",
         "update_schedule",
         "update_visitor_pass",
-        "validate_dependency_backup_storage",
     }
 
     assert set(tools) == expected_tool_names
@@ -2468,9 +2453,6 @@ async def test_query_integration_health_includes_access_event_worker_status(monk
         async def status(self, **_kwargs):
             return self.payload
 
-    class FakeDependencyUpdateService:
-        async def storage_status(self):
-            return {"status": "ok"}
 
     monkeypatch.setattr(alfred_system_operations_handlers, "get_runtime_config", fake_runtime_config)
     monkeypatch.setattr(
@@ -2490,7 +2472,6 @@ async def test_query_integration_health_includes_access_event_worker_status(monk
     monkeypatch.setattr(alfred_system_operations_handlers, "get_unifi_protect_service", lambda: AsyncStatusService({"configured": False}))
     monkeypatch.setattr(alfred_system_operations_handlers, "get_discord_messaging_service", lambda: AsyncStatusService({"configured": False}))
     monkeypatch.setattr(alfred_system_operations_handlers, "get_whatsapp_delivery_service", lambda: AsyncStatusService({"enabled": False}))
-    monkeypatch.setattr(alfred_system_operations_handlers, "get_dependency_update_service", lambda: FakeDependencyUpdateService())
 
     result = await alfred_system_operations_handlers.query_integration_health({"integration": "access_events"})
 

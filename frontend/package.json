@@ -7,12 +7,10 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@monaco-editor/react": "^4.7.0",
-    "@tanstack/react-virtual": "3.14.12",
-    "jsondiffpatch": "^0.7.3",
     "lucide-react": "1.45.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
@@ -24,11 +22,9 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "jsdom": "30.0.1",
+    "playwright": "1.62.1",
     "typescript": "7.0.2",
     "vite": "8.3.0",
     "vitest": "5.0.0"
-  },
-  "overrides": {
-    "dompurify": "3.4.15"
   }
 }

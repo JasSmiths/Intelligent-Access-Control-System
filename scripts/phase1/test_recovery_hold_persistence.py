@@ -32,7 +32,7 @@ from app.core import recovery_hold as hold_policy
 from app.db.session import AsyncSessionLocal, engine
 from app.models import (
     AccessDeviceCommandRecord, AlfredApproval, AlfredFeedback, AutomationRun,
-    ChatSession, DependencyUpdateJob, GateCommandRecord, NotificationRun,
+    ChatSession, GateCommandRecord, NotificationRun,
     ProcessedMessagingMessage, RevokedAuthToken, User,
 )
 from app.models.enums import GateCommandState, UserRole
@@ -42,7 +42,7 @@ from app.services.gate_commands import GateCommandCoordinator
 
 pytestmark = pytest.mark.asyncio
 PASSWORD = "Synthetic-hold-password-only-123!"
-EXTRA_TABLES = "processed_messaging_messages, dependency_update_jobs, alfred_feedback"
+EXTRA_TABLES = "processed_messaging_messages, alfred_feedback"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -196,11 +196,7 @@ async def retained():
         feedback = [AlfredFeedback(rating="down", actor_user_id=admin.id, actor_role="admin", session_id=chat.id,
             status=state, original_user_prompt="Synthetic question", original_assistant_response="Synthetic answer",
             reason="Synthetic retained review", created_at=old, updated_at=old) for state in ("queued", "analyzing")]
-        jobs = [DependencyUpdateJob(kind="apply", status=state, actor="Synthetic Admin", actor_user_id=admin.id,
-            phase="retained", started_at=old if state == "running" else None,
-            result={"manifest_transaction_id": "synthetic-retained-promotion"},
-            created_at=old, updated_at=old) for state in ("queued", "running")]
-        session.add_all([*approvals.values(), *commands.values(), *notifications, *automations, *incoming, *feedback, *jobs])
+        session.add_all([*approvals.values(), *commands.values(), *notifications, *automations, *incoming, *feedback])
         await session.commit()
     tokens = {name: (await auth.create_access_token(user))[0] for name, user in users.items()}
     async with AsyncSessionLocal() as session:
@@ -313,7 +309,7 @@ async def test_hold_blocks_actual_ingress_mutations_and_websockets_without_chang
                 ("POST", "/api/v1/webhooks/ubiquiti/lpr"), ("POST", "/api/v1/webhooks/whatsapp"),
                 ("POST", "/api/v1/automations/webhooks/synthetic"),
                 ("GET", "/api/v1/integrations/gate/status"), ("GET", "/api/v1/visitor-passes"),
-                ("GET", "/api/v1/ai/agent/status"), ("GET", "/api/v1/dependency-updates/status"),
+                ("GET", "/api/v1/ai/agent/status"),
             ):
                 response = await client.request(method, path, json={})
                 assert response.status_code == 503 and response.json()["recovery_hold"] is True

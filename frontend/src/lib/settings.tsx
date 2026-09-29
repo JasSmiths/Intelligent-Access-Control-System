@@ -138,12 +138,16 @@ export function useSettings(category?: string, refreshToken = 0) {
     return () => loadAbortRef.current?.abort();
   }, [load, refreshToken]);
   const save = React.useCallback(async (updates: Record<string, unknown>, options: { confirmationToken?: string } = {}) => {
-    await api.patch<SystemSetting[]>("/api/v1/settings", {
+    const savedRows = await api.patch<SystemSetting[]>("/api/v1/settings", {
       values: updates,
       ...(options.confirmationToken ? { confirmation_token: options.confirmationToken } : {})
     });
-    await load();
-  }, [load]);
+    loadAbortRef.current?.abort();
+    loadSequenceRef.current += 1;
+    setSettingsRows(savedRows);
+    setError("");
+    setLoading(false);
+  }, []);
   return {
     rows: settingsRows,
     values,

@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api/client";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
-import { shellDataKeysForView, type ShellDataKey } from "./navigation";
+import { criticalShellDataKeysForView, shellDataKeysForView, type ShellDataKey } from "./navigation";
 import { REALTIME_REFRESH_MIN_INTERVAL_MS } from "./realtimeEvents";
 import { refreshSelectionForEvent } from "./realtimeRefresh";
 import { createRefreshCoordinator, type RefreshSelection } from "./refreshCoordinator";
@@ -23,14 +23,18 @@ const paths: Record<ShellDataKey, string> = {
 
 export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters: Setters) {
   const [loading, setLoading] = React.useState(true);
+  const [readState, setReadState] = React.useState<"ready" | "unavailable" | "stale">("ready");
+  const [failedKeys, setFailedKeys] = React.useState<ShellDataKey[]>([]);
   const [dataRefreshToken, setDataRefreshToken] = React.useState(0);
   const settersRef = React.useRef(setters);
   settersRef.current = setters;
   const owner = React.useMemo(() => {
     const required = shellDataKeysForView(view, user);
+    const critical = new Set(criticalShellDataKeysForView(view));
     function createSession() {
       const controller = new AbortController();
       const loaded = new Set<ShellDataKey>();
+      const failures = new Set<ShellDataKey>();
       const coordinator = createRefreshCoordinator(async ({ keys, route }) => {
         if ([...keys].some((key) => !loaded.has(key))) setLoading(true);
         async function fetchKey<Key extends ShellDataKey>(key: Key) {
@@ -40,9 +44,17 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
           loaded.add(key);
         }
         // Wait for every read even if one fails; never overlap with the next batch.
-        const results = await Promise.allSettled([...keys].map(fetchKey));
+        const requestedKeys = [...keys];
+        const results = await Promise.allSettled(requestedKeys.map(fetchKey));
         if (controller.signal.aborted) return;
         setLoading(false);
+        requestedKeys.forEach((key, index) => {
+          if (results[index].status === "rejected") failures.add(key);
+          else failures.delete(key);
+        });
+        const stillFailed = [...failures];
+        setFailedKeys(stillFailed);
+        setReadState(stillFailed.length ? stillFailed.some((key) => critical.has(key) && !loaded.has(key)) ? "unavailable" : "stale" : "ready");
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected") throw failure.reason;
         if (route) setDataRefreshToken((token) => token + 1);
@@ -51,7 +63,7 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
     }
     let session: ReturnType<typeof createSession> | null = null;
     return {
-      activate() { session = createSession(); setLoading(true); },
+      activate() { session = createSession(); setLoading(true); setReadState("ready"); setFailedKeys([]); },
       selection(event: RealtimeMessage) { return refreshSelectionForEvent(event, view, required); },
       refresh: () => session?.coordinator.request({ keys: required, route: true }) ?? Promise.resolve(),
       initial: () => session?.coordinator.request({ keys: required, route: false }) ?? Promise.resolve(),
@@ -63,5 +75,5 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
     owner.activate();
     return () => owner.dispose();
   }, [owner]);
-  return { loading, dataRefreshToken, refresh: owner.refresh, initialRefresh: owner.initial, refreshRealtime: owner.realtime, selectionForEvent: owner.selection, resetRefresh: owner.dispose };
+  return { loading, readState, failedKeys, dataRefreshToken, refresh: owner.refresh, initialRefresh: owner.initial, refreshRealtime: owner.realtime, selectionForEvent: owner.selection, resetRefresh: owner.dispose };
 }

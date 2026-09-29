@@ -38,6 +38,7 @@ import type { MaintenanceStatus, SettingsMap, UserAccount } from "../api/types";
 import type { LlmProviderKey } from "../lib/format";
 import { type ChatAttachment, uploadChatAttachment } from "../api/chat";
 import { useApprovalRecovery } from "../features/alfred/useApprovalRecovery";
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "../lib/viewportPlacement";
 
 
 
@@ -512,18 +513,32 @@ function ChatSessionWidget({
 
   React.useEffect(() => {
     if (!open) return;
-    if (!window.matchMedia("(max-width: 720px)").matches) return;
-    const scrollY = window.scrollY;
-    const originalOverflow = document.body.style.overflow;
-    const originalHtmlOverflow = document.documentElement.style.overflow;
-    document.body.classList.add("alfred-chat-open");
-    document.body.style.overflow = "hidden";
-    document.documentElement.style.overflow = "hidden";
+    const compact = window.matchMedia("(max-width: 720px)");
+    let unlock: (() => void) | null = null;
+    const syncScrollLock = () => {
+      if (compact.matches && !unlock) {
+        const scrollY = window.scrollY;
+        const originalOverflow = document.body.style.overflow;
+        const originalHtmlOverflow = document.documentElement.style.overflow;
+        document.body.classList.add("alfred-chat-open");
+        document.body.style.overflow = "hidden";
+        document.documentElement.style.overflow = "hidden";
+        unlock = () => {
+          document.body.classList.remove("alfred-chat-open");
+          document.body.style.overflow = originalOverflow;
+          document.documentElement.style.overflow = originalHtmlOverflow;
+          window.scrollTo(0, scrollY);
+        };
+      } else if (!compact.matches && unlock) {
+        unlock();
+        unlock = null;
+      }
+    };
+    syncScrollLock();
+    compact.addEventListener("change", syncScrollLock);
     return () => {
-      document.body.classList.remove("alfred-chat-open");
-      document.body.style.overflow = originalOverflow;
-      document.documentElement.style.overflow = originalHtmlOverflow;
-      window.scrollTo(0, scrollY);
+      compact.removeEventListener("change", syncScrollLock);
+      unlock?.();
     };
   }, [open]);
 
@@ -1784,14 +1799,24 @@ export function ChatCopyMenu({
   menu: ChatCopyMenuState;
   onCopy: () => void;
 }) {
-  const left = Math.max(8, Math.min(menu.x, window.innerWidth - 112));
-  const top = Math.max(8, Math.min(menu.y, window.innerHeight - 48));
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = React.useState<{ left: number; top: number; maxWidth: number; maxHeight: number } | null>(null);
+  React.useLayoutEffect(() => {
+    const update = () => {
+      const element = menuRef.current;
+      if (!element) return;
+      const placement = placeOverlay({ left: menu.x, right: menu.x, top: menu.y, bottom: menu.y }, { width: element.offsetWidth, height: element.scrollHeight }, getUsableViewportBounds(), { gap: 0 });
+      setPosition((current) => current?.left === placement.left && current.top === placement.top && current.maxWidth === placement.maxWidth && current.maxHeight === placement.maxHeight ? current : placement);
+    };
+    return observeOverlayPlacement(null, menuRef.current, update);
+  }, [menu.x, menu.y]);
   return (
     <div
       className="chat-copy-menu"
       onClick={(event) => event.stopPropagation()}
+      ref={menuRef}
       role="menu"
-      style={{ left, top }}
+      style={{ left: position?.left ?? 0, top: position?.top ?? 0, maxWidth: position?.maxWidth, maxHeight: position?.maxHeight, overflowY: "auto", visibility: position ? "visible" : "hidden" }}
     >
       <button onClick={onCopy} role="menuitem" type="button">
         <Copy size={14} />

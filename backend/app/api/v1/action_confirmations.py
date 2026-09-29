@@ -30,6 +30,8 @@ async def create_confirmation(
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    if request.action.strip() == "alert.group.resolve":
+        raise HTTPException(status_code=403, detail="Alert groups require a server-issued member target.")
     try:
         metadata = {key: value for key, value in request.metadata.items() if key != "hardware_plan"}
         if request.action == "gate.open":

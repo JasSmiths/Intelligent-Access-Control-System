@@ -12,6 +12,7 @@ PERSISTENCE_TESTS = [
     'backend/tests/test_access_device_command_journal.py',
     'scripts/phase1/test_persistence.py',
     'scripts/phase1/test_schedule_operations.py',
+    'scripts/phase1/test_history_persistence.py',
     'scripts/phase1/test_feature_operations.py',
     'scripts/phase1/test_notification_recovery.py',
     'scripts/phase1/test_access_pipeline.py',
@@ -43,8 +44,6 @@ PERSISTENCE_TESTS = [
     'scripts/phase1/test_feedback_recovery.py',
     'scripts/phase1/test_recovery_discovery.py',
     'scripts/phase1/test_recovery_hold_persistence.py',
-    'scripts/phase1/test_release_recovery.py',
-    'scripts/phase1/test_release_restore_rehearsal.py',
     'scripts/phase1/test_delivery_schema_compatibility.py',
 ]
 DIAGNOSTIC_TESTS = ['scripts/phase1/test_recovery_boundaries.py']

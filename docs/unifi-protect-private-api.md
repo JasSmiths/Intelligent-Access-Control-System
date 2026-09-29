@@ -13,26 +13,10 @@ viewers unless IACS starts depending on them.
 
 ## Current Runtime
 
-The repository pins `uiprotect==15.12.2` in `backend/pyproject.toml`. The
-running backend also uses the managed overlay mechanism, with the active
-overlay kept at the same version so a container rebuild cannot silently
-downgrade the live integration.
-
-Current running backend state:
-
-```text
-current_unifi_protect_version=15.12.2
-active_state.mode=overlay
-active_state.version=15.12.2
-uiprotect_file=/app/data/unifi-protect-package/versions/15.12.2/uiprotect/__init__.py
-client_file=/app/data/unifi-protect-package/versions/15.12.2/uiprotect/api.py
-```
-
-Local source mirror:
-
-```text
-data/backend/unifi-protect-package/versions/15.12.2/uiprotect/
-```
+IACS uses image-installed `uiprotect==16.10.0`. There is no runtime updater or
+disk package overlay; container rebuilds use the reviewed image dependency.
+This document's older private-API observations are retained as reference, not a
+procedure for changing package versions.
 
 Command used to verify:
 
@@ -41,15 +25,9 @@ docker compose exec -T backend sh -lc 'cd /workspace/backend && /app/.venv/bin/p
 from importlib import metadata
 from pathlib import Path
 import inspect
-from app.modules.unifi_protect.package import activate_unifi_protect_package_overlay, current_unifi_protect_version, read_active_package_state
-
-activate_unifi_protect_package_overlay()
-print("current_unifi_protect_version=" + str(current_unifi_protect_version()))
-state = read_active_package_state()
-print("active_state.mode=" + str(state.mode))
-print("active_state.version=" + str(state.version))
 import uiprotect
 from uiprotect import ProtectApiClient
+print("uiprotect_version=" + metadata.version("uiprotect"))
 print("uiprotect_file=" + str(Path(uiprotect.__file__)))
 print("client_file=" + str(Path(inspect.getsourcefile(ProtectApiClient) or "")))
 PY'
@@ -703,7 +681,7 @@ or raw payloads. Log endpoint names and status/error summaries only.
 
 If a newer `uiprotect` release removes or breaks one of these wrappers:
 
-1. Confirm the active package version and overlay state from the running
+1. Confirm the image-installed package version from the running
    backend.
 2. Identify which IACS wrapper failed, not just the frontend symptom.
 3. Check whether the direct private endpoint still exists on the Protect
@@ -715,7 +693,6 @@ If a newer `uiprotect` release removes or breaks one of these wrappers:
 6. Run targeted tests around:
    - `backend/tests/test_unifi_protect.py`
    - `backend/tests/test_unifi_protect_client.py`
-   - `backend/tests/test_unifi_protect_updates.py`
    - `backend/tests/test_lpr_timing.py`
    - `backend/tests/test_vehicle_visual_detections.py`
    - `backend/tests/test_restart_backfill.py`
@@ -726,7 +703,7 @@ Recommended smoke checks after any replacement:
 
 ```bash
 docker compose exec -T backend sh -lc 'cd /workspace/backend && /app/.venv/bin/python -m compileall -q app'
-./scripts/backend-pytest tests/test_unifi_protect.py tests/test_lpr_timing.py tests/test_vehicle_visual_detections.py tests/test_restart_backfill.py
+python3 scripts/phase1/validate.py
 curl -fsS http://localhost:8089/api/v1/health
 curl -fsS http://localhost:8089/api/v1/integrations/unifi-protect/status
 ```

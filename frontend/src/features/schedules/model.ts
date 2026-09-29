@@ -122,3 +122,7 @@ export function scheduleSummary(blocks: ScheduleTimeBlocks) {
   ).filter(Boolean).length;
   return `${hours % 1 === 0 ? hours : hours.toFixed(1)}h across ${days} day${days === 1 ? "" : "s"}`;
 }
+
+export function scheduleIntervalLabels(blocks: ScheduleTimeBlocks) {
+  return scheduleDays.flatMap((day, index) => (blocks[String(index)] ?? []).map((block) => `${day}: ${block.start}–${block.end}`));
+}

@@ -1,5 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
+import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "./lib/viewportPlacement";
 
 type NotificationVariable = {
   name: string;
@@ -11,6 +12,7 @@ type NotificationVariableWithGroup = NotificationVariable & { group: string };
 type SuggestionState = { query: string; from: number; to: number };
 type MenuLayout = {
   maxHeight: number;
+  maxWidth: number;
   placement: "top-start" | "bottom-start";
   ready: boolean;
   x: number;
@@ -35,6 +37,7 @@ function VariableRichTextEditor({
   const [activeIndex, setActiveIndex] = React.useState(0);
   const [menuLayout, setMenuLayout] = React.useState<MenuLayout>({
     maxHeight: 256,
+    maxWidth: 360,
     placement: "top-start",
     ready: false,
     x: 0,
@@ -161,37 +164,19 @@ function VariableRichTextEditor({
 
     const updatePosition = () => {
       const rect = caretRectForOffset(editor, suggestion.to);
-      const menuWidth = menu.offsetWidth || 320;
-      const menuHeight = Math.min(menu.offsetHeight || 256, 256);
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-      const gap = 8;
-      const spaceAbove = Math.max(0, rect.top - gap);
-      const spaceBelow = Math.max(0, viewportHeight - rect.bottom - gap);
-      const placeAbove = spaceAbove >= Math.min(menuHeight, 180) || spaceAbove > spaceBelow;
-      const maxHeight = Math.max(48, Math.min(256, Math.floor((placeAbove ? spaceAbove : spaceBelow) - gap)));
-      const x = clamp(rect.left, gap, Math.max(gap, viewportWidth - menuWidth - gap));
-      const rawY = placeAbove ? rect.top - menuHeight - gap : rect.bottom + gap;
-      const y = clamp(rawY, gap, Math.max(gap, viewportHeight - Math.min(menuHeight, maxHeight) - gap));
+      const placement = placeOverlay(rect, { width: menu.offsetWidth, height: Math.min(menu.scrollHeight, 256) }, getUsableViewportBounds());
 
       setMenuLayout({
-        maxHeight,
-        placement: placeAbove ? "top-start" : "bottom-start",
+        maxHeight: Math.min(256, placement.maxHeight),
+        maxWidth: placement.maxWidth,
+        placement: placement.side === "top" ? "top-start" : "bottom-start",
         ready: true,
-        x,
-        y
+        x: placement.left,
+        y: placement.top
       });
     };
 
-    const frame = window.requestAnimationFrame(updatePosition);
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-    };
+    return observeOverlayPlacement(editor, menu, updatePosition);
   }, [filtered.length, filteredSignature, suggestion]);
 
   const handleInput = React.useCallback(() => {
@@ -280,6 +265,7 @@ function VariableRichTextEditor({
         role="listbox"
         style={{
           "--variable-menu-max-height": `${menuLayout.maxHeight}px`,
+          maxWidth: menuLayout.maxWidth,
           left: menuLayout.x,
           top: menuLayout.y,
           visibility: menuLayout.ready ? "visible" : "hidden"
@@ -519,8 +505,4 @@ function escapeHtml(value: string) {
 
 function escapeAttribute(value: string) {
   return escapeHtml(value).replace(/"/g, "&quot;");
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
 }

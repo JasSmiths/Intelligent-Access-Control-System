@@ -42,7 +42,6 @@ class RecoveryProfileTests(unittest.TestCase):
             'test_confirmed_notifications.py', 'test_movement_admission.py',
             'test_visitor_reservation_recovery.py', 'test_automation_admission_order.py',
             'test_incoming_messages.py', 'test_whatsapp_inbox.py', 'test_feedback_recovery.py',
-            'test_release_restore_rehearsal.py', 'test_recovery_hold_persistence.py',
             'test_delivery_schema_compatibility.py', 'test_access_device_command_journal.py',
         }
         self.assertTrue(required <= {Path(path).name for path in selected})

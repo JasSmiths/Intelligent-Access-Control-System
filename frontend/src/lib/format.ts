@@ -100,7 +100,7 @@ export function movementSagaDisplay(summary: MovementSagaSummary | null | undefi
   if (["observed", "direction_resolved", "physical_command_pending", "physical_command_accepted"].includes(state)) {
     return { label: "Pending", tone: "blue" };
   }
-  if (state === "completed" || state === "presence_committed" || summary.presence_committed) {
+  if (state === "completed" || state === "presence_committed") {
     return { label: "Confirmed", tone: "green" };
   }
   return { label: titleCase(state), tone: "gray" };

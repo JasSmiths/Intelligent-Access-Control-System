@@ -26,7 +26,7 @@ DOMAIN_SUMMARIES = {
     "Notifications": "Notification catalogs, workflows, previews, and tests.",
     "Reports_Files": "Attachments and generated CSV/PDF reports.",
     "Schedules": "Schedules, assignments, and temporary overrides.",
-    "System_Operations": "Settings, provider health, auth-secret status, and dependency update operations.",
+    "System_Operations": "Settings, provider health, auth-secret status, and runtime diagnostics.",
     "Users_Settings": "User and settings context.",
     "Visitor_Passes": "Visitor Pass creation, update, cancellation, and visit questions.",
 }

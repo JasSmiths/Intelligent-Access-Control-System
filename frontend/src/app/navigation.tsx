@@ -47,35 +47,50 @@ export function shellDataKeysForView(view: ViewKey, currentUser: UserAccount | n
   }
   return keys;
 }
-export const primaryNavItems: Array<{ key: Exclude<ViewKey, "users">; label: string; icon: React.ElementType }> = [
-  { key: "dashboard", label: "Dashboard", icon: Home },
-  { key: "people", label: "People", icon: UserRound },
-  { key: "schedules", label: "Schedules", icon: Clock3 },
-  { key: "passes", label: "Passes", icon: ClipboardPaste },
-  { key: "vehicles", label: "Vehicles", icon: Car },
-  { key: "top_charts", label: "Top Charts", icon: Trophy },
-  { key: "events", label: "Events", icon: CalendarDays },
-  { key: "movements", label: "Movements", icon: MoveHorizontal },
-  { key: "reports", label: "Reports", icon: BarChart3 },
-  { key: "settings", label: "Settings", icon: Settings }
+export function criticalShellDataKeysForView(view: ViewKey): ShellDataKey[] {
+  if (["people", "groups", "vehicles", "schedules", "settings_gates", "settings_garage_doors", "settings_automations", "settings_notifications"].includes(view)) {
+    return ROUTE_SHELL_DATA_KEYS[view];
+  }
+  return [];
+}
+export type NavigationItem = { key: ViewKey; label: string; icon: React.ElementType; group: "Operations" | "Access" | "Insights" | "Settings"; adminOnly?: boolean };
+export const primaryNavItems: NavigationItem[] = [
+  { key: "dashboard", label: "Dashboard", icon: Home, group: "Operations" },
+  { key: "events", label: "Events", icon: CalendarDays, group: "Operations" },
+  { key: "movements", label: "Movements", icon: MoveHorizontal, group: "Operations" },
+  { key: "alerts", label: "Alerts", icon: Bell, group: "Operations" },
+  { key: "people", label: "People", icon: UserRound, group: "Access" },
+  { key: "groups", label: "Groups", icon: Users, group: "Access" },
+  { key: "vehicles", label: "Vehicles", icon: Car, group: "Access" },
+  { key: "schedules", label: "Schedules", icon: Clock3, group: "Access" },
+  { key: "passes", label: "Passes", icon: ClipboardPaste, group: "Access" },
+  { key: "reports", label: "Reports", icon: BarChart3, group: "Insights" },
+  { key: "top_charts", label: "Top Charts", icon: Trophy, group: "Insights" },
+  { key: "logs", label: "Investigations", icon: FileText, group: "Insights", adminOnly: true },
+  { key: "settings", label: "Settings", icon: Settings, group: "Settings" }
 ];
 export const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.ElementType; adminOnly?: boolean }> = [
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
-  { key: "groups", label: "Groups", icon: Users },
   { key: "settings_gates", label: "Gates", icon: DoorOpen },
   { key: "settings_garage_doors", label: "Garage Doors", icon: Warehouse },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
-  { key: "integrations", label: "API & Integrations", icon: PlugZap },
-  { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true },
-  { key: "settings_automations", label: "Automations", icon: GitBranch },
-  { key: "settings_notifications", label: "Notifications", icon: Bell },
-  { key: "alerts", label: "Alerts", icon: Bell },
+  { key: "integrations", label: "API & Integrations", icon: PlugZap, adminOnly: true },
+  { key: "settings_automations", label: "Automations", icon: GitBranch, adminOnly: true },
+  { key: "settings_notifications", label: "Notifications", icon: Bell, adminOnly: true },
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "settings_zones", label: "Zones", icon: MapPinned },
-  { key: "logs", label: "Investigations", icon: FileText, adminOnly: true },
-  { key: "users", label: "Users", icon: Users, adminOnly: true }
+  { key: "users", label: "Users", icon: Users, adminOnly: true },
+  { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true }
 ];
 export const settingsNavViewKeys = new Set<ViewKey>(settingsNavItems.map((item) => item.key));
+export const navigationItems: NavigationItem[] = [...primaryNavItems, ...settingsNavItems.map((item) => ({ ...item, group: "Settings" as const }))];
+export function canAccessView(view: ViewKey, user: UserAccount | null) {
+  const item = navigationItems.find((candidate) => candidate.key === view);
+  return !item?.adminOnly || user?.role === "admin";
+}
+export function viewLabel(view: ViewKey) {
+  return navigationItems.find((item) => item.key === view)?.label ?? "Dashboard";
+}
 export const viewPaths: Record<ViewKey, string> = {
   dashboard: "/",
   people: "/people",
@@ -106,9 +121,6 @@ const pathViews = Object.entries(viewPaths).reduce<Record<string, ViewKey>>((acc
   acc[path] = viewKey as ViewKey;
   return acc;
 }, {});
-function isViewKey(value: string | null): value is ViewKey {
-  return Boolean(value && Object.prototype.hasOwnProperty.call(viewPaths, value));
-}
 export function viewFromPath(pathname: string): ViewKey | null {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   return pathViews[normalized] ?? null;
@@ -116,6 +128,5 @@ export function viewFromPath(pathname: string): ViewKey | null {
 export function initialViewFromLocation(): ViewKey {
   const routeView = viewFromPath(window.location.pathname);
   if (routeView) return routeView;
-  const storedView = localStorage.getItem("iacs-active-view");
-  return isViewKey(storedView) ? storedView : "dashboard";
+  return "dashboard";
 }

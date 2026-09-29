@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.api.dependencies import current_user
-from app.api.v1 import dependency_updates, integrations, maintenance, settings, unifi_protect
+from app.api.v1 import integrations, maintenance, settings, unifi_protect
 from app.db.session import get_db_session
 from app.models import ActionConfirmation, User
 from app.models.enums import UserRole
@@ -185,7 +185,6 @@ async def test_consume_action_confirmation_rejects_replay_and_payload_mismatch(m
 
 def app_for_user(user: User) -> FastAPI:
     app = FastAPI()
-    app.include_router(dependency_updates.router, prefix="/api/v1/dependency-updates")
     app.include_router(integrations.router, prefix="/api/v1/integrations")
     app.include_router(maintenance.router, prefix="/api/v1/maintenance")
     app.include_router(settings.router, prefix="/api/v1/settings")
@@ -222,6 +221,51 @@ async def test_real_world_action_routes_deny_standard_users(path: str, body: dic
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Admin access required"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/dependency-updates/packages",
+        "/api/v1/integrations/unifi-protect/update/status",
+        "/api/v1/integrations/unifi-protect/backups",
+    ],
+)
+async def test_retired_updater_routes_are_not_registered(path: str) -> None:
+    from app.api.router import api_router
+
+    app = FastAPI()
+    app.include_router(api_router, prefix="/api/v1")
+
+    async def override_current_user() -> User:
+        return user_with_role(UserRole.ADMIN)
+
+    app.dependency_overrides[current_user] = override_current_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path)
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/dependency-updates/packages/00000000-0000-0000-0000-000000000001/apply",
+        "/api/v1/dependency-updates/check",
+        "/api/v1/integrations/unifi-protect/update/apply",
+    ],
+)
+async def test_retired_updater_mutation_routes_are_not_registered(path: str) -> None:
+    from app.api.router import api_router
+
+    app = FastAPI()
+    app.include_router(api_router, prefix="/api/v1")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(path, json={})
+
+    assert response.status_code == 404
 
 
 async def test_gate_open_requires_server_confirmation_for_admin(monkeypatch) -> None:
@@ -307,72 +351,6 @@ async def test_maintenance_toggle_succeeds_with_admin_and_consumed_confirmation(
     assert consumed["confirmation_token"] == "server-token"
 
 
-async def test_dependency_apply_requires_server_confirmation_for_admin(monkeypatch) -> None:
-    class FailingDependencyService:
-        async def start_apply_job(self, *_args, **_kwargs):
-            raise AssertionError("Dependency apply must not start without server confirmation.")
-
-    monkeypatch.setattr(dependency_updates, "get_dependency_update_service", lambda: FailingDependencyService())
-    dependency_id = uuid.uuid4()
-    transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(f"/api/v1/dependency-updates/packages/{dependency_id}/apply", json={})
-
-    assert response.status_code == 428
-    assert response.json()["detail"] == "Server-side confirmation is required for this action."
-
-
-async def test_dependency_apply_consumes_confirmation(monkeypatch) -> None:
-    consumed = {}
-    dependency_id = uuid.uuid4()
-
-    async def consume(_session, **kwargs) -> None:
-        consumed.update(kwargs)
-
-    class FakeDependencyService:
-        async def start_apply_job(self, package_id, **kwargs):
-            return {"id": "job-1", "dependency_id": str(package_id), "confirmed": kwargs["confirmed"]}
-
-    monkeypatch.setattr(dependency_updates, "require_confirmed_action", consume)
-    monkeypatch.setattr(dependency_updates, "get_dependency_update_service", lambda: FakeDependencyService())
-    transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            f"/api/v1/dependency-updates/packages/{dependency_id}/apply",
-            json={"target_version": "1.2.3", "confirmation_token": "server-token"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["confirmed"] is True
-    assert consumed["action"] == "dependency_update.apply"
-    assert consumed["payload"] == {"dependency_id": str(dependency_id), "target_version": "1.2.3"}
-    assert consumed["confirmation_token"] == "server-token"
-
-
-async def test_dependency_storage_validate_consumes_body_confirmation(monkeypatch) -> None:
-    consumed = {}
-
-    async def consume(_session, **kwargs) -> None:
-        consumed.update(kwargs)
-
-    class FakeDependencyService:
-        async def validate_storage(self):
-            return {"ok": True}
-
-    monkeypatch.setattr(dependency_updates, "require_confirmed_action", consume)
-    monkeypatch.setattr(dependency_updates, "get_dependency_update_service", lambda: FakeDependencyService())
-    transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/dependency-updates/storage/validate",
-            json={"confirmation_token": "server-token"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert consumed["action"] == "dependency_update.storage.validate"
-    assert consumed["payload"] == {}
-    assert consumed["confirmation_token"] == "server-token"
 
 
 async def test_auth_secret_rotation_consumes_confirmation(monkeypatch) -> None:
@@ -398,35 +376,3 @@ async def test_auth_secret_rotation_consumes_confirmation(monkeypatch) -> None:
     assert consumed["action"] == "auth_secret.rotate"
     assert consumed["payload"] == {"new_secret_provided": True}
     assert consumed["confirmation_token"] == "server-token"
-
-
-async def test_unifi_protect_apply_consumes_confirmation_not_client_boolean(monkeypatch) -> None:
-    consumed = {}
-    audit_rows: list[dict[str, Any]] = []
-
-    async def consume(_session, **kwargs) -> None:
-        consumed.update(kwargs)
-
-    async def audit(_session, **kwargs) -> None:
-        audit_rows.append(kwargs)
-
-    class FakeProtectUpdateService:
-        async def apply(self, **kwargs):
-            return {"applied": True, "confirmed": kwargs["confirmed"], "target_version": kwargs["target_version"]}
-
-    monkeypatch.setattr(unifi_protect, "require_unifi_confirmation", consume)
-    monkeypatch.setattr(unifi_protect, "write_unifi_audit", audit)
-    monkeypatch.setattr(unifi_protect, "get_unifi_protect_update_service", lambda: FakeProtectUpdateService())
-    transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/integrations/unifi-protect/update/apply",
-            json={"target_version": "6.0.0", "confirmed": False, "confirmation_token": "server-token"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["confirmed"] is True
-    assert consumed["action"] == "unifi_protect.update.apply"
-    assert consumed["payload"] == {"target_version": "6.0.0"}
-    assert consumed["confirmation_token"] == "server-token"
-    assert audit_rows[0]["action"] == "unifi_protect.update.apply"

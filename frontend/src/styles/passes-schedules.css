@@ -10,12 +10,25 @@
 
 .schedules-page {
   max-width: 1540px;
+  container-type: inline-size;
 }
 
 .schedule-card-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+@container (max-width: 1000px) {
+  .schedule-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (max-width: 620px) {
+  .schedule-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .users-hero.schedules-hero {
@@ -31,6 +44,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
 }
 
@@ -426,9 +440,12 @@
 .iacs-tooltip {
   position: fixed;
   z-index: 260;
-  width: min(320px, calc(100vw - 24px));
+  width: min(320px, calc(100vw - var(--edge-left) - var(--edge-right)));
+  max-height: calc(var(--app-viewport-height) - var(--edge-top) - var(--edge-bottom));
   display: grid;
   gap: 5px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -477,8 +494,8 @@
 }
 
 .visitor-pass-detail-modal {
-  width: min(860px, calc(100vw - 32px));
-  max-height: calc(var(--app-viewport-height) - 36px);
+  width: min(860px, 100%);
+  max-height: 100%;
   overflow: auto;
   display: grid;
 }
@@ -571,8 +588,8 @@
 }
 
 .visitor-pass-whatsapp-thread {
-  min-height: 360px;
-  max-height: min(560px, calc(var(--app-viewport-height) - 310px));
+  min-height: min(360px, max(160px, calc(var(--app-viewport-height) - 310px)));
+  max-height: min(560px, max(160px, calc(var(--app-viewport-height) - 310px)));
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -984,7 +1001,7 @@
 }
 
 .visitor-pass-detail-modal {
-  width: min(980px, calc(100vw - 48px));
+  width: min(980px, 100%);
   gap: 18px;
   padding: 26px 30px 24px;
   border-radius: 14px;
@@ -1274,8 +1291,8 @@
 }
 
 .visitor-pass-whatsapp-thread {
-  min-height: 430px;
-  max-height: min(540px, calc(var(--app-viewport-height) - 280px));
+  min-height: min(430px, max(160px, calc(var(--app-viewport-height) - 280px)));
+  max-height: min(540px, max(160px, calc(var(--app-viewport-height) - 280px)));
   gap: 14px;
   padding: 14px;
   border-radius: 14px;
@@ -1429,7 +1446,7 @@
 }
 
 .visitor-pass-log-panel {
-  max-height: min(540px, calc(var(--app-viewport-height) - 280px));
+  max-height: min(540px, max(160px, calc(var(--app-viewport-height) - 280px)));
   padding-left: 26px;
 }
 

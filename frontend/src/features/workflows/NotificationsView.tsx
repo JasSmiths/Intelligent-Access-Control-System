@@ -1,9 +1,12 @@
+import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Bell, Play, Plus, Split, X, Zap } from "lucide-react";
 import React from "react";
 import type { Person, Schedule, UserAccount } from "../../api/types";
 import type { NotificationRule, NotificationTriggerGroup } from "../../api/workflows";
 import { workflowApi } from "../../api/workflows";
 import { notificationEventLabel } from "../../lib/format";
+import { notificationChannelMeta } from "../../lib/notifications";
 import { Toolbar } from "../../ui/primitives";
 import { NotificationConfigChip, WorkflowRuleList, WorkflowStatusFilters } from "./components";
 import { useNotificationCameras, usePendingWorkflowIds, useTransientRuleStatusFeedback, useWorkflowData, useWorkflowRuleFilters } from "./hooks";
@@ -19,6 +22,13 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   const [draft, setDraft] = React.useState<NotificationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [selectorDirty, setSelectorDirty] = React.useState(false);
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  const baseline = React.useRef("");
+  const dismissDraft = useEditorDismiss(() => { setDraft(null); setModal(null); }, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "notification changes");
+  const requestClose = () => { if (saving) return; if (modal) { if (modal === "action" && selectorDirty && !window.confirm("Discard notification action selection?")) return; setModal(null); setSelectorDirty(false); } else dismissDraft(); };
+  useModalFocus(modalRef, Boolean(draft), requestClose);
   const [testing, setTesting] = React.useState(false);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
   const [togglingRuleIds, setRuleToggling] = usePendingWorkflowIds();
@@ -47,7 +57,9 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
 
 
   const selectRule = (rule: NotificationRule) => {
-    setDraft(cloneNotificationRule(rule));
+    const next = cloneNotificationRule(rule);
+    baseline.current = JSON.stringify(next);
+    setDraft(next);
     setModal(null);
     setFeedback(null);
   };
@@ -58,6 +70,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
 
   const addWorkflow = () => {
     const next = createWorkflowDraft();
+    baseline.current = JSON.stringify(next);
     setDraft(next);
     setModal(null);
     setFeedback(null);
@@ -114,7 +127,9 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     try {
       const created = await workflowApi.duplicateNotificationRule(payload);
       await load();
-      setDraft(cloneNotificationRule(created));
+      const next = cloneNotificationRule(created);
+      baseline.current = JSON.stringify(next);
+      setDraft(next);
       setModal(null);
       setFeedback({ tone: "success", text: "Notification workflow duplicated and paused for review." });
     } catch (duplicateError) {
@@ -123,7 +138,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   };
 
   const save = async () => {
-    if (!activeDraft) return;
+    if (!activeDraft || saving) return;
     if (!activeDraft.trigger_event) {
       setFeedback({ tone: "error", text: "Add a trigger before saving this workflow." });
       return;
@@ -137,9 +152,10 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     const payload = workflowRulePayload(activeDraft);
     try {
       const saved = await workflowApi.saveNotificationRule(activeDraft, payload);
+      setRules((current) => current.some((item) => item.id === saved.id) ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current]);
       setDraft(null);
       setModal(null);
-      await load();
+      void load();
       setRuleStatusFeedback({
         nonce: Date.now(),
         ruleId: saved.id,
@@ -216,9 +232,11 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
       />
 
       {activeDraft ? (
-        <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
+        <div className="modal-backdrop workflow-editor-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
           <div
-            className={workflowModalMode === "editor" ? "modal-card workflow-editor-modal" : "modal-card workflow-editor-modal selector-mode"}
+            className={`modal-card workflow-editor-modal${workflowModalMode === "editor" ? "" : " selector-mode"}${previewOpen ? " preview-open" : ""}`}
+            ref={modalRef}
+            aria-label="Notification editor"
             role="dialog"
             aria-modal="true"
             aria-labelledby={workflowModalMode === "editor" ? "workflow-editor-title" : "two-pane-selection-title"}
@@ -252,6 +270,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                     integrations={catalog?.integrations ?? []}
                     people={people}
                     onClose={() => setModal(null)}
+                    onDirtyChange={setSelectorDirty}
                     onSelect={(action) => {
                       updateDraft((rule) => ({ ...rule, actions: [...rule.actions, action] }));
                       setModal(null);
@@ -264,9 +283,9 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                         <h2 id="workflow-editor-title">{activeDraft.id.startsWith("draft-") ? "Add Notification" : "Edit Notification"}</h2>
                         <p>Build the trigger, conditions, and delivery actions for this workflow.</p>
                       </div>
-                      <button className="icon-button" onClick={() => { setDraft(null); setModal(null); }} type="button" aria-label="Close notification editor">
+                      <div className="workflow-header-actions"><button className="secondary-button workflow-preview-toggle" aria-expanded={previewOpen} aria-controls="workflow-preview" onClick={() => setPreviewOpen((open) => !open)} type="button">Preview</button><button className="icon-button" onClick={requestClose} type="button" aria-label="Close notification editor">
                         <X size={16} />
-                      </button>
+                      </button></div>
                     </div>
                     <NotificationWorkflowEditor
                       cameras={cameras}
@@ -284,7 +303,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                       variables={variables}
                       onAddAction={() => setModal("action")}
                       onAddCondition={() => setModal("condition")}
-                      onCancel={() => { setDraft(null); setModal(null); }}
+                      onCancel={requestClose}
                       onDelete={() => deleteRule(activeDraft)}
                       onSave={save}
                       onSendTest={sendTest}
@@ -326,7 +345,7 @@ function NotificationWorkflowList({
       ariaLabel="Notification workflows"
       groupedRules={groupedRules}
       kind="notification"
-      renderConfigChips={(rule) => (<><NotificationConfigChip count={1} icon={Zap} label="Triggers" /><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /><NotificationConfigChip count={rule.actions.length} icon={Play} label="Actions" /></>)}
+      renderConfigChips={(rule) => (<><span className="workflow-flow-summary">When {notificationEventLabel(rule.trigger_event)} → {rule.actions.map((action) => notificationChannelMeta[action.type]?.label ?? action.type).join(", ") || "no action"}</span><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /></>)}
       ruleStatusFeedback={ruleStatusFeedback}
       statusFilter={statusFilter}
       summaryAriaLabel="Workflow summary"

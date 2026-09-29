@@ -2,7 +2,7 @@
   min-height: var(--app-viewport-height);
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: max(24px, var(--safe-top)) max(24px, var(--safe-right)) max(24px, var(--safe-bottom)) max(24px, var(--safe-left));
   background: var(--bg);
 }
 
@@ -15,6 +15,7 @@
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+  overflow-wrap: anywhere;
 }
 
 .auth-card.compact {
@@ -1177,11 +1178,13 @@
 
 .modal-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--overlay-viewport-top, 0px) 0 auto;
+  height: var(--overlay-viewport-height, var(--app-viewport-height));
   z-index: 90;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
-  padding: 20px;
+  padding: max(20px, var(--safe-top)) max(20px, var(--safe-right)) max(20px, var(--safe-bottom)) max(20px, var(--safe-left));
   background: rgba(15, 23, 42, 0.28);
 }
 
@@ -1192,7 +1195,9 @@
 
 .modal-card {
   width: min(620px, 100%);
-  max-height: calc(var(--app-viewport-height) - 40px);
+  max-width: 100%;
+  min-width: 0;
+  max-height: 100%;
   overflow: auto;
   display: grid;
   gap: 16px;
@@ -1204,7 +1209,7 @@
 }
 
 .gate-confirm-modal {
-  width: min(430px, calc(100vw - 32px));
+  width: min(430px, 100%);
 }
 
 .gate-confirm-title {
@@ -1252,7 +1257,7 @@
 }
 
 .integration-modal {
-  width: min(1080px, calc(100vw - 32px));
+  width: min(1080px, 100%);
   gap: 14px;
   padding: 22px;
 }
@@ -1332,9 +1337,9 @@
 }
 
 .modal-card.schedule-modal {
-  width: min(1600px, calc(100vw - 32px));
-  height: min(980px, calc(var(--app-viewport-height) - 32px));
-  max-height: calc(var(--app-viewport-height) - 32px);
+  width: min(1600px, 100%);
+  height: min(980px, 100%);
+  max-height: 100%;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   overflow: hidden;
@@ -1397,6 +1402,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 14px;
 }
 

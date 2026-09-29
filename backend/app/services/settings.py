@@ -33,11 +33,10 @@ SECRET_KEYS = {
     "openai_api_key",
     "gemini_api_key",
     "anthropic_api_key",
-    "dependency_update_backup_mount_options",
     "lpr_webhook_token",
 }
 
-CLEARABLE_SECRET_KEYS = {"apprise_urls", "dependency_update_backup_mount_options"}
+CLEARABLE_SECRET_KEYS = {"apprise_urls"}
 
 
 class UnknownDynamicSettingsError(ValueError):
@@ -251,36 +250,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "anthropic_base_url": ("llm", settings.anthropic_base_url, "Anthropic API base URL."),
     "ollama_base_url": ("llm", settings.ollama_base_url, "Ollama API base URL."),
     "ollama_model": ("llm", "llama3", "Ollama model."),
-    "dependency_update_backup_storage_mode": (
-        "updates",
-        "local",
-        "Update backup storage mode. Use local, nfs, or samba.",
-    ),
-    "dependency_update_backup_mount_source": (
-        "updates",
-        "",
-        "NFS export or Samba share used by the generated Docker backup volume.",
-    ),
-    "dependency_update_backup_mount_options": (
-        "updates",
-        "",
-        "Docker local volume mount options for NFS/CIFS update backup storage.",
-    ),
-    "dependency_update_backup_retention_days": (
-        "updates",
-        "",
-        "Optional retention period for update backup archives.",
-    ),
-    "dependency_update_backup_min_free_bytes": (
-        "updates",
-        1073741824,
-        "Minimum free bytes required before creating update backups.",
-    ),
-    "dependency_update_backup_config_status": (
-        "updates",
-        "active",
-        "Current backup storage configuration state.",
-    ),
 }
 
 
@@ -371,12 +340,6 @@ class RuntimeConfig:
     anthropic_base_url: str
     ollama_base_url: str
     ollama_model: str
-    dependency_update_backup_storage_mode: str
-    dependency_update_backup_mount_source: str
-    dependency_update_backup_mount_options: str
-    dependency_update_backup_retention_days: str
-    dependency_update_backup_min_free_bytes: int
-    dependency_update_backup_config_status: str
 
 
 _RUNTIME_CONFIG_CACHE: RuntimeConfig | None = None
@@ -684,20 +647,6 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         anthropic_base_url=str(values["anthropic_base_url"]),
         ollama_base_url=str(values["ollama_base_url"]),
         ollama_model=str(values["ollama_model"]),
-        dependency_update_backup_storage_mode=(
-            str(values["dependency_update_backup_storage_mode"]).strip().lower()
-            if str(values["dependency_update_backup_storage_mode"]).strip().lower() in {"local", "nfs", "samba"}
-            else "local"
-        ),
-        dependency_update_backup_mount_source=str(values["dependency_update_backup_mount_source"] or ""),
-        dependency_update_backup_mount_options=str(values["dependency_update_backup_mount_options"] or ""),
-        dependency_update_backup_retention_days=str(values["dependency_update_backup_retention_days"] or ""),
-        dependency_update_backup_min_free_bytes=int(values["dependency_update_backup_min_free_bytes"] or 1073741824),
-        dependency_update_backup_config_status=(
-            str(values["dependency_update_backup_config_status"]).strip().lower()
-            if str(values["dependency_update_backup_config_status"]).strip().lower() in {"active", "pending_reboot", "error"}
-            else "active"
-        ),
     )
     return config
 

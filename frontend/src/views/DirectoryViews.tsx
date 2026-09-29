@@ -1,3 +1,5 @@
+import { useModalFocus } from "../ui/useModalFocus";
+import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 Camera,
 Car,
@@ -121,6 +123,7 @@ export function GroupsView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedGroup, setSelectedGroup] = React.useState<Group | null>(null);
   const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
   const peopleByGroup = React.useMemo(() => {
     const counts = new Map<string, number>();
     for (const person of people) {
@@ -163,6 +166,7 @@ export function GroupsView({
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       <div className="card users-card groups-card">
         <PanelHeader title="Group Directory" action={`${filtered.length} groups`} actionKind="select" />
@@ -209,8 +213,9 @@ export function GroupsView({
           mode={selectedGroup ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
-            await refresh();
             closeModal();
+            setSaved("Group saved.");
+            try { await refresh(); } catch { setError("Group saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           setPageError={setError}
         />
@@ -234,6 +239,7 @@ export function GroupModal({
   onSaved: () => Promise<void>;
   setPageError: (message: string) => void;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
   const [form, setForm] = React.useState({
     name: group?.name ?? "",
     category: group?.category ?? "family",
@@ -242,11 +248,17 @@ export function GroupModal({
   });
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
+  const originalForm = React.useRef(JSON.stringify(form));
+  const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== originalForm.current, submitting, "group changes");
+  useModalFocus(modalRef, true, requestClose);
 
   const update = (field: keyof typeof form, value: string) => setForm((current) => ({ ...current, [field]: value }));
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setError("");
     setPageError("");
     setSubmitting(true);
@@ -285,19 +297,20 @@ export function GroupModal({
       setError(message);
       setPageError(message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-card group-modal" onSubmit={submit}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Group" className="modal-card group-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Group" : "Add Group"}</h2>
             <p>{mode === "edit" ? "Update group details and review assigned members." : "Define a membership bucket for access schedules and directory profiles."}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -355,7 +368,7 @@ export function GroupModal({
           </div>
         ) : null}
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
             {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Group"}
@@ -657,6 +670,7 @@ export function PeopleView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const availableGarageDoors = React.useMemo(() => activeManagedCovers(garageDoors), [garageDoors]);
   const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
@@ -701,6 +715,7 @@ export function PeopleView({
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       <div className="card users-card people-card">
         {filtered.length ? (
@@ -721,6 +736,7 @@ export function PeopleView({
                       key={person.id}
                       onClick={() => openEdit(person)}
                       onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
                           openEdit(person);
@@ -770,10 +786,12 @@ export function PeopleView({
           mode={selectedPerson ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
-            await refresh();
             closeModal();
+            setSaved("Person saved.");
+            try { await refresh(); } catch { setError("Person saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           person={selectedPerson}
+          people={people}
           schedules={schedules}
           setPageError={setError}
           vehicles={vehicles}
@@ -792,6 +810,7 @@ export function PersonModal({
   onClose,
   onSaved,
   person,
+  people,
   schedules,
   setPageError,
   vehicles
@@ -804,10 +823,12 @@ export function PersonModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
   person: Person | null;
+  people: Person[];
   schedules: Schedule[];
   setPageError: (message: string) => void;
   vehicles: Vehicle[];
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
   const [form, setForm] = React.useState({
     first_name: person?.first_name ?? "",
     last_name: person?.last_name ?? "",
@@ -840,8 +861,13 @@ export function PersonModal({
   const [haTestFeedback, setHaTestFeedback] = React.useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
   const [sendingHaTest, setSendingHaTest] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
+  const [dirty, setDirty] = React.useState(false);
+  const [vehicleQuery, setVehicleQuery] = React.useState("");
+  const requestClose = useEditorDismiss(onClose, dirty, submitting, "person changes");
+  useModalFocus(modalRef, true, requestClose);
 
-  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => { setDirty(true); setForm((current) => ({ ...current, [field]: value })); };
 
     const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -996,6 +1022,8 @@ export function PersonModal({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setError("");
     setPageError("");
     setSubmitting(true);
@@ -1049,6 +1077,7 @@ export function PersonModal({
       setError(message);
       setPageError(message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -1080,14 +1109,14 @@ export function PersonModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-card person-modal" onSubmit={submit}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Person" className="modal-card person-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Person" : "Add Person"}</h2>
             <p>{mode === "edit" ? "Update the profile, group, and vehicle assignments." : "Create a directory profile and assign registered vehicles."}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -1213,10 +1242,12 @@ export function PersonModal({
         </label>
         <div className="field">
           <span>Vehicles</span>
+          <input aria-label="Search vehicle assignments" className="assignment-search" placeholder="Search plates or vehicles" value={vehicleQuery} onChange={(event) => setVehicleQuery(event.target.value)} />
           <div className="vehicle-picker">
-            {vehicles.length ? vehicles.map((vehicle) => {
+            {vehicles.length ? vehicles.filter((vehicle) => matches(`${vehicle.registration_number} ${vehicle.description ?? ""} ${vehicle.make ?? ""} ${vehicle.model ?? ""}`, vehicleQuery)).map((vehicle) => {
               const selected = form.vehicle_ids.includes(vehicle.id);
               const assigned = assignedVehicleIds.has(vehicle.id) && !selected;
+              const owners = people.filter((owner) => owner.id !== person?.id && owner.vehicles.some((owned) => owned.id === vehicle.id)).map((owner) => owner.display_name);
               return (
                 <label className={selected ? "vehicle-option selected" : "vehicle-option"} key={vehicle.id}>
                   <input checked={selected} onChange={() => toggleVehicle(vehicle.id)} type="checkbox" />
@@ -1224,7 +1255,7 @@ export function PersonModal({
                     <strong>{vehicle.registration_number}</strong>
                     <small>{vehicle.description ?? ([vehicle.make, vehicle.model].filter(Boolean).join(" ") || "Registered vehicle")}</small>
                   </span>
-                  {selected ? <Badge tone="blue">Selected</Badge> : assigned ? <Badge tone="amber">Assigned</Badge> : <Badge tone="gray">Available</Badge>}
+                  {selected ? <Badge tone="blue">Selected</Badge> : assigned ? <Badge tone="amber">{owners.length ? `Assigned to ${owners.join(", ")}` : "Assigned"}</Badge> : <Badge tone="gray">Available</Badge>}
                 </label>
               );
             }) : <div className="empty-state compact">No vehicles available</div>}
@@ -1276,7 +1307,7 @@ export function PersonModal({
           </div>
         </section>
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             {mode === "edit" ? <Check size={16} /> : <UserPlus size={16} />}
             {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Person"}
@@ -1480,6 +1511,7 @@ export function VehiclesView({
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
+  const [saved, setSaved] = React.useState("");
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const peopleById = React.useMemo(() => new Map(people.map((person) => [person.id, person])), [people]);
   const peopleByVehicleId = React.useMemo(() => indexPeopleByVehicleId(people), [people]);
@@ -1553,6 +1585,7 @@ export function VehiclesView({
       </div>
 
       {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       <div className="card users-card vehicles-card">
         {filtered.length ? (
@@ -1573,6 +1606,7 @@ export function VehiclesView({
                       key={vehicle.id}
                       onClick={() => openEdit(vehicle)}
                       onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
                           openEdit(vehicle);
@@ -1620,8 +1654,9 @@ export function VehiclesView({
           mode={selectedVehicle ? "edit" : "create"}
             onClose={closeModal}
             onSaved={async () => {
-              await refresh();
               closeModal();
+              setSaved("Vehicle saved.");
+              try { await refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
             }}
             people={people}
             refreshVehicles={refresh}
@@ -1670,7 +1705,9 @@ export function VehiclePeoplePicker({
     ];
   }, [groups, people]);
   const [activeGroupId, setActiveGroupId] = React.useState("all");
+  const [personQuery, setPersonQuery] = React.useState("");
   const activeGroup = groupSections.find((section) => section.id === activeGroupId) ?? groupSections[0];
+  const visiblePeople = activeGroup.items.filter((person) => matches(`${person.display_name} ${person.group ?? ""}`, personQuery));
 
   React.useEffect(() => {
     if (!groupSections.some((section) => section.id === activeGroupId)) {
@@ -1692,6 +1729,7 @@ export function VehiclePeoplePicker({
           )) : <span className="vehicle-person-empty">No people assigned</span>}
         </div>
         <div className="vehicle-person-browser">
+          <input aria-label="Search people to assign" className="assignment-search" placeholder="Search people" value={personQuery} onChange={(event) => setPersonQuery(event.target.value)} />
           <div className="vehicle-person-groups" role="tablist" aria-label="Person groups">
             {groupSections.map((section) => (
               <button
@@ -1710,7 +1748,7 @@ export function VehiclePeoplePicker({
             ))}
           </div>
           <div className="vehicle-person-list">
-            {activeGroup.items.length ? activeGroup.items.map((person) => {
+            {visiblePeople.length ? visiblePeople.map((person) => {
               const selected = selectedPersonIdSet.has(person.id);
               return (
                 <label className={selected ? "vehicle-person-row selected" : "vehicle-person-row"} key={person.id}>
@@ -1722,7 +1760,7 @@ export function VehiclePeoplePicker({
                   </span>
                 </label>
               );
-            }) : <div className="empty-state compact">No people in this group</div>}
+            }) : <div className="empty-state compact">{personQuery ? "No people match this search" : "No people in this group"}</div>}
           </div>
         </div>
       </div>
@@ -1753,6 +1791,7 @@ export function VehicleModal({
   setPageError: (message: string) => void;
   vehicle: Vehicle | null;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
   const [form, setForm] = React.useState({
     registration_number: vehicle?.registration_number ?? "",
     vehicle_photo_data_url: vehicle?.vehicle_photo_data_url ?? "",
@@ -1775,6 +1814,10 @@ export function VehicleModal({
   const vehiclePhotoPreview = form.vehicle_photo_data_url || (!vehiclePhotoChanged ? existingVehiclePhotoSource : "");
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
+  const [dirty, setDirty] = React.useState(false);
+  const requestClose = useEditorDismiss(onClose, dirty, submitting, "vehicle changes");
+  useModalFocus(modalRef, true, requestClose);
   const [complianceRefreshing, setComplianceRefreshing] = React.useState(false);
   const [dvlaLookup, setDvlaLookup] = React.useState<{ status: "idle" | "loading" | "found" | "error"; message: string }>({
     status: "idle",
@@ -1784,7 +1827,7 @@ export function VehicleModal({
   const lastLookupRegistrationRef = React.useRef("");
   const initialRegistrationRef = React.useRef(vehicle?.registration_number ?? "");
 
-  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [field]: value }));
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => { setDirty(true); setForm((current) => ({ ...current, [field]: value })); };
 
   const toggleAssignedPerson = (personId: string) => {
     update(
@@ -1910,6 +1953,8 @@ export function VehicleModal({
 
     const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setError("");
     setPageError("");
     setSubmitting(true);
@@ -1961,6 +2006,7 @@ export function VehicleModal({
       setError(message);
       setPageError(message);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -1993,14 +2039,14 @@ export function VehicleModal({
     const taxStatus = form.tax_status || null;
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-card vehicle-modal" onSubmit={submit}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label="Vehicle" className="modal-card vehicle-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "edit" ? "Edit Vehicle" : "Add Vehicle"}</h2>
             <p>{mode === "edit" ? "Update vehicle details and assignments." : "Register a vehicle and assign it to people."}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -2126,7 +2172,7 @@ export function VehicleModal({
           </div>
         </div>
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
             {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Vehicle"}

@@ -1,0 +1,47 @@
+.access-pulse { min-width: 0; }
+.access-pulse-header { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.access-pulse-header h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.access-pulse-header p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+.access-pulse-range { display: flex; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+.access-pulse-range button { border: 0; border-radius: 4px; background: transparent; color: var(--muted-strong); min-width: 32px; min-height: 28px; font: inherit; font-size: 12px; cursor: pointer; }
+.access-pulse-range button[aria-pressed="true"] { background: var(--blue-soft); color: var(--blue); font-weight: 700; }
+.access-pulse-visual { max-width: 280px; margin: -3px auto -2px; background: radial-gradient(ellipse at center, color-mix(in srgb, var(--blue) 7%, transparent), transparent 66%); }
+.access-pulse-visual svg { display: block; width: 100%; overflow: visible; }
+.access-pulse-orbit { fill: none; stroke: var(--line); stroke-width: .8; }
+.access-pulse-orbit-outer { stroke-dasharray: 1 5; }
+.access-pulse-tick { fill: none; stroke: var(--muted); stroke-width: .7; opacity: .55; }
+.access-pulse-track { fill: var(--surface-soft); stroke: var(--line); stroke-width: .5; }
+.access-pulse-band { stroke: var(--surface); stroke-width: .6; }
+.access-pulse-band.entry { fill: var(--green); }
+.access-pulse-band.exit { fill: var(--blue); }
+.access-pulse-band.denied { fill: var(--amber); }
+.access-pulse-band.unknown { fill: var(--muted); }
+.access-pulse-hit { fill: transparent; stroke: transparent; stroke-width: 2; cursor: pointer; }
+.access-pulse-hit:hover { fill: color-mix(in srgb, var(--blue) 10%, transparent); }
+.access-pulse-hit[aria-pressed="true"], .access-pulse-hit:focus-visible { stroke: var(--text); outline: none; }
+.access-pulse-centre { text-anchor: middle; pointer-events: none; }
+.access-pulse-centre text { fill: var(--muted-strong); font-size: 11px; }
+.access-pulse-centre .access-pulse-number { fill: var(--text); font-size: 40px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -2px; }
+.access-pulse-centre .access-pulse-window { fill: var(--muted); font-size: 8px; letter-spacing: 1.1px; }
+.access-pulse-axis { fill: var(--muted); text-anchor: middle; font-size: 10px; }
+.access-pulse-counts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 19px; padding: 0 0 14px; }
+.access-pulse-counts > div { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted-strong); }
+.access-pulse-counts strong { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.access-pulse-counts .entry svg { color: var(--green-strong); }
+.access-pulse-counts .exit svg { color: var(--blue); }
+.access-pulse-counts .denied svg { color: var(--amber); }
+.access-pulse-detail { border-top: 1px solid var(--line); padding-top: 12px; font-size: 11px; }
+.access-pulse-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.access-pulse-detail-heading strong { font-weight: 600; }
+.access-pulse-detail-heading > span { color: var(--muted); }
+.access-pulse-detail p { margin: 7px 0 0; color: var(--muted-strong); line-height: 1.5; overflow-wrap: anywhere; }
+.access-pulse-detail b { font-weight: 600; }
+.access-pulse-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; }
+.access-pulse-footer p { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 0; }
+.access-pulse-footer button, .access-pulse-detail button { border: 0; background: transparent; color: var(--blue); font: inherit; font-size: 11px; min-height: 28px; padding: 0 3px; cursor: pointer; }
+.access-pulse-footer button { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.access-pulse button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+@media (max-width: 719px) {
+  .access-pulse-range button { min-height: 36px; min-width: 36px; }
+  .access-pulse-footer button, .access-pulse-detail button { min-height: 36px; }
+}

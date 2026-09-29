@@ -14,7 +14,6 @@ from sqlalchemy import select
 from app.ai.tool_groups._shared import (
     _bounded_int,
     _require_admin_user,
-    _uuid_from_value,
 )
 from app.db.session import AsyncSessionLocal
 from app.models import AuditLog
@@ -23,10 +22,6 @@ from app.services.auth_secret_management import (
     AuthSecretRotationError,
     auth_secret_security_status,
     rotate_auth_secret,
-)
-from app.services.dependency_updates import (
-    DependencyUpdateError,
-    get_dependency_update_service,
 )
 from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
@@ -60,9 +55,6 @@ async def query_integration_health(arguments: dict[str, Any]) -> dict[str, Any]:
             "gemini_configured": bool(runtime.gemini_api_key),
             "anthropic_configured": bool(runtime.anthropic_api_key),
             "ollama_configured": bool(runtime.ollama_base_url),
-        },
-        "dependency_updates": {
-            "backup_storage": await get_dependency_update_service().storage_status(),
         },
     }
     if requested and requested != "all":
@@ -236,168 +228,3 @@ async def query_alfred_runtime_events(arguments: dict[str, Any]) -> dict[str, An
         "timezone": config.site_timezone,
         "redacted": True,
     }
-
-
-async def query_dependency_updates(arguments: dict[str, Any]) -> dict[str, Any]:
-    update_only = bool(arguments.get("update_only"))
-    packages = await get_dependency_update_service().list_packages(update_only=update_only)
-    return {"packages": packages, "count": len(packages), "update_only": update_only}
-
-
-async def check_dependency_updates(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency update checks")
-    if isinstance(admin, dict):
-        return admin
-    if not bool(arguments.get("confirm")):
-        return {
-            "checked": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Updates",
-            "detail": "Check configured dependencies against package registries?",
-        }
-    try:
-        return await get_dependency_update_service().check_all_packages(
-            direct_only=bool(arguments.get("direct_only")),
-            user=admin,
-            source="alfred",
-        )
-    except DependencyUpdateError as exc:
-        return {"checked": False, "error": str(exc)}
-
-
-async def analyze_dependency_update(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency update analysis")
-    if isinstance(admin, dict):
-        return admin
-    dependency_id = _uuid_from_value(arguments.get("dependency_id"))
-    if not dependency_id:
-        return {"analyzed": False, "error": "dependency_id is required."}
-    if not bool(arguments.get("confirm")):
-        return {
-            "analyzed": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Analysis",
-            "detail": "Analyze this dependency update using release metadata and the configured LLM provider?",
-        }
-    try:
-        return await get_dependency_update_service().analyze_package(
-            dependency_id,
-            target_version=str(arguments.get("target_version") or "") or None,
-            provider=str(arguments.get("provider") or "") or None,
-            user=admin,
-        )
-    except DependencyUpdateError as exc:
-        return {"analyzed": False, "error": str(exc)}
-
-
-async def apply_dependency_update(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency update apply jobs")
-    if isinstance(admin, dict):
-        return admin
-    dependency_id = _uuid_from_value(arguments.get("dependency_id"))
-    if not dependency_id:
-        return {"started": False, "error": "dependency_id is required."}
-    if not bool(arguments.get("confirm")):
-        return {
-            "started": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Apply Job",
-            "detail": "Apply this dependency update? Alfred will use the existing backup and job pipeline, not shell commands.",
-        }
-    try:
-        return await get_dependency_update_service().start_apply_job(
-            dependency_id,
-            target_version=str(arguments.get("target_version") or "") or None,
-            confirmed=True,
-            user=admin,
-        )
-    except DependencyUpdateError as exc:
-        return {"started": False, "error": str(exc)}
-
-
-async def query_dependency_backups(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency backup reads")
-    if isinstance(admin, dict):
-        return admin
-    dependency_id = _uuid_from_value(arguments.get("dependency_id"))
-    backups = await get_dependency_update_service().list_backups(dependency_id)
-    return {"backups": backups, "count": len(backups)}
-
-
-async def restore_dependency_backup(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency backup restore jobs")
-    if isinstance(admin, dict):
-        return admin
-    backup_id = _uuid_from_value(arguments.get("backup_id"))
-    if not backup_id:
-        return {"started": False, "error": "backup_id is required."}
-    if not bool(arguments.get("confirm")):
-        return {
-            "started": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Restore Job",
-            "detail": "Restore this dependency backup? This uses the existing restore job pipeline.",
-        }
-    try:
-        return await get_dependency_update_service().start_restore_job(backup_id, confirmed=True, user=admin)
-    except DependencyUpdateError as exc:
-        return {"started": False, "error": str(exc)}
-
-
-async def query_dependency_update_job(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency job reads")
-    if isinstance(admin, dict):
-        return admin
-    job_id = _uuid_from_value(arguments.get("job_id"))
-    if not job_id:
-        return {"found": False, "error": "job_id is required."}
-    try:
-        return await get_dependency_update_service().job_status(job_id)
-    except DependencyUpdateError as exc:
-        return {"found": False, "error": str(exc)}
-
-
-async def configure_dependency_backup_storage(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency backup storage configuration")
-    if isinstance(admin, dict):
-        return admin
-    payload = {
-        "mode": arguments.get("mode"),
-        "mount_source": arguments.get("mount_source"),
-        "retention_days": arguments.get("retention_days"),
-        "min_free_bytes": arguments.get("min_free_bytes"),
-    }
-    if "mount_options" in arguments:
-        payload["mount_options"] = arguments.get("mount_options")
-    if not bool(arguments.get("confirm")):
-        return {
-            "configured": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Backup Storage",
-            "detail": "Update dependency backup storage? Sensitive mount options stay redacted.",
-            "mount_options_configured": bool(arguments.get("mount_options")),
-        }
-    try:
-        return await get_dependency_update_service().save_storage_config(payload, user=admin)
-    except DependencyUpdateError as exc:
-        return {"configured": False, "error": str(exc)}
-
-
-async def validate_dependency_backup_storage(arguments: dict[str, Any]) -> dict[str, Any]:
-    admin = await _require_admin_user("dependency backup storage validation")
-    if isinstance(admin, dict):
-        return admin
-    if not bool(arguments.get("confirm")):
-        return {
-            "validated": False,
-            "requires_confirmation": True,
-            "confirmation_field": "confirm",
-            "target": "Dependency Backup Storage",
-            "detail": "Validate backup storage writability and free space?",
-        }
-    return await get_dependency_update_service().validate_storage()

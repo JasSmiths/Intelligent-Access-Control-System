@@ -1874,7 +1874,7 @@ class FakeRunStore:
     async def get(self, identity):
         return self.rows[identity]
 
-    async def save_plan(self, identity, token, plan):
+    async def save_plan(self, identity, token, plan, *, facts=None):
         self.rows[identity].delivery_plan = plan
 
     async def begin_action(self, identity, token, index, *, authorize_origin=None, refresh_authorization=None):

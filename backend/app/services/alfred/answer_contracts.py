@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -144,20 +143,6 @@ def select_answer_artifacts(artifacts: list[AnswerArtifact]) -> list[AnswerArtif
     return [first_artifact]
 
 
-def rendered_answer_draft(text: str, artifacts: list[AnswerArtifact]) -> AnswerDraft:
-    return AnswerDraft(
-        answer_text=text,
-        fact_ids_used=[
-            fact.id
-            for artifact in artifacts
-            for fact in [artifact.primary_fact, *artifact.supporting_facts]
-            if fact and fact.must_appear
-        ],
-        style="safe_renderer",
-        confidence=1.0,
-        needs_clarification=False,
-        clarification_question=None,
-    )
 
 
 def parse_answer_draft(text: str) -> AnswerDraft | None:
@@ -250,9 +235,6 @@ def render_answer_artifact(artifact: AnswerArtifact) -> str:
 def answer_artifacts_for_prompt(artifacts: list[AnswerArtifact]) -> list[dict[str, Any]]:
     return [artifact.model_dump(mode="json", exclude_none=True) for artifact in artifacts]
 
-
-def renderer_fact_payload(fact: AnswerFact | None) -> dict[str, Any] | None:
-    return fact.model_dump(mode="json", exclude_none=True) if fact else None
 
 
 def _fact(value: dict[str, Any] | AnswerFact | None) -> AnswerFact | None:
@@ -377,8 +359,3 @@ def _first_json_object(text: str) -> Any:
         except json.JSONDecodeError:
             continue
     return None
-
-
-def timestamp_id(prefix: str) -> str:
-    now = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S%f")
-    return f"{prefix}_{now}"

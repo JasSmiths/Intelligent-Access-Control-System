@@ -1,3 +1,5 @@
+import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import {
   Activity,
   AlertTriangle,
@@ -37,8 +39,6 @@ import {
   addAppriseUrl,
   addESPHomeDevice,
   confirmIntegrationAction,
-  DependencyPackage,
-  DependencyStorageStatus,
   DiscordChannel,
   DiscordIdentity,
   DiscordStatus,
@@ -55,12 +55,10 @@ import {
   testESPHomeDevice,
   testIntegrationSettings,
   UnifiProtectStatus,
-  UnifiProtectUpdateStatus,
   WhatsAppStatus
 } from "../../api/integrations";
 import { IntegrationDefinition, IntegrationFeedback, integrationInitialValues, ProtectIntegrationTab } from "./catalog";
-import { DependencyUpdatePanel, dependencyIsActionableUpdate } from "./dependencyUpdates";
-import { UnifiProtectExposesPanel, UnifiProtectUpdatesPanel } from "./unifiProtect";
+import { UnifiProtectExposesPanel } from "./unifiProtect";
 import { IncomingMessageRecovery } from "./IncomingMessageRecovery";
 function streamStatusForDevice(
   device: ESPHomeDeviceSummary,
@@ -113,11 +111,8 @@ export function IntegrationModal({
   protectError,
   protectLoading,
   protectStatus,
-  protectUpdateStatus,
   accessDeviceStatus,
   homeAssistantStatus,
-  dependencyPackages,
-  dependencyStorage,
   icloudError,
   icloudLoading,
   icloudPayload,
@@ -134,7 +129,6 @@ export function IntegrationModal({
   onDiscordChanged,
   onWhatsAppChanged,
   onICloudChanged,
-  onProtectUpdateChanged,
   onProtectRefresh,
   onSettingsChanged,
   onAccessDeviceStatusChanged,
@@ -149,11 +143,8 @@ export function IntegrationModal({
   protectError?: string;
   protectLoading?: boolean;
   protectStatus?: UnifiProtectStatus | null;
-  protectUpdateStatus?: UnifiProtectUpdateStatus | null;
   accessDeviceStatus?: IntegrationStatus | null;
   homeAssistantStatus?: IntegrationStatus | null;
-  dependencyPackages: DependencyPackage[];
-  dependencyStorage: DependencyStorageStatus | null;
   icloudError?: string;
   icloudLoading?: boolean;
   icloudPayload?: ICloudCalendarPayload;
@@ -170,17 +161,20 @@ export function IntegrationModal({
   onDiscordChanged?: () => Promise<void>;
   onWhatsAppChanged?: () => Promise<void>;
   onICloudChanged?: () => Promise<void>;
-  onProtectUpdateChanged?: () => Promise<void>;
   onProtectRefresh?: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
   onAccessDeviceStatusChanged?: (status: IntegrationStatus) => void;
   onSaved: (updates: Record<string, unknown>, confirmationToken?: string) => Promise<void>;
 }) {
+  const modalRef = React.useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
   const [form, setForm] = React.useState<Record<string, string>>(() => integrationInitialValues(definition, values));
   const [testing, setTesting] = React.useState(false);
   const [sendingTest, setSendingTest] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const initialForm = React.useRef(JSON.stringify(form));
+  const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== initialForm.current, saving, "integration changes");
+  useModalFocus(modalRef, true, requestClose);
   const [feedback, setFeedback] = React.useState<IntegrationFeedback | null>(null);
   const [haDiscovery, setHaDiscovery] = React.useState<HomeAssistantDiscovery | null>(null);
   const [haDiscoveryError, setHaDiscoveryError] = React.useState("");
@@ -198,9 +192,10 @@ export function IntegrationModal({
   const isDiscord = definition.key === "discord";
   const isWhatsApp = definition.key === "whatsapp";
   const canManage = currentUser.role === "admin";
-  const hasDependencyUpdates = dependencyPackages.length > 0;
   React.useEffect(() => {
-    setForm(integrationInitialValues(definition, values));
+    const next = integrationInitialValues(definition, values);
+    initialForm.current = JSON.stringify(next);
+    setForm(next);
     setActiveTab(initialTab);
     setFeedback(null);
     setHaDiscovery(null);
@@ -439,16 +434,16 @@ export function IntegrationModal({
     }
   };
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="modal-card integration-modal">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <div ref={modalRef} className="modal-card integration-modal" role="dialog" aria-modal="true" aria-label={definition.title}>
         <div className="modal-header">
           <div>
             <h2>{definition.title}</h2>
             <p>{loading ? "Loading settings..." : definition.description}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close"><X size={16} /></button>
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close"><X size={16} /></button>
         </div>
-        {isUnifiProtect || hasDependencyUpdates ? (
+        {isUnifiProtect ? (
           <div className="integration-modal-tabs" role="tablist" aria-label={`${definition.title} settings sections`}>
             <button
               aria-selected={activeTab === "general"}
@@ -460,17 +455,6 @@ export function IntegrationModal({
               <Settings size={15} /> General
             </button>
             <button
-              aria-selected={activeTab === "updates"}
-              className={activeTab === "updates" ? "integration-modal-tab active" : "integration-modal-tab"}
-              onClick={() => setActiveTab("updates")}
-              role="tab"
-              type="button"
-            >
-              <RefreshCcw size={15} /> Updates
-              {dependencyPackages.some(dependencyIsActionableUpdate) ? <Badge tone="amber">{dependencyPackages.filter(dependencyIsActionableUpdate).length}</Badge> : null}
-            </button>
-            {isUnifiProtect ? (
-            <button
               aria-selected={activeTab === "exposes"}
               className={activeTab === "exposes" ? "integration-modal-tab active" : "integration-modal-tab"}
               onClick={() => setActiveTab("exposes")}
@@ -479,25 +463,9 @@ export function IntegrationModal({
             >
               <Activity size={15} /> Exposes
             </button>
-            ) : null}
           </div>
         ) : null}
-        {activeTab === "updates" ? (
-          dependencyPackages.length ? (
-            <DependencyUpdatePanel
-              packages={dependencyPackages}
-              storage={dependencyStorage}
-              onChanged={onProtectUpdateChanged ?? onSettingsChanged}
-            />
-          ) : isUnifiProtect ? (
-            <UnifiProtectUpdatesPanel
-              status={protectUpdateStatus ?? null}
-              onChanged={onProtectUpdateChanged ?? onSettingsChanged}
-            />
-          ) : (
-            <div className="empty-state">No enrolled dependencies are linked to this integration yet</div>
-          )
-        ) : isICloudCalendar ? (
+        {isICloudCalendar ? (
           <ICloudCalendarModal
             error={icloudError ?? ""}
             loading={Boolean(icloudLoading)}
@@ -622,7 +590,7 @@ export function IntegrationModal({
             {testing ? "Testing..." : "Test Connection"}
           </button>
           {isApprise || isESPHome ? (
-            <button className="primary-button" onClick={onClose} type="button">Done</button>
+            <button className="primary-button" onClick={requestClose} type="button">Done</button>
           ) : (
             <button className="primary-button" disabled={!canManage || saving} type="submit">
               {saving ? "Saving..." : "Save"}

@@ -2,6 +2,7 @@ import { DoorOpen, Gauge, Lock, MapPinned, SlidersHorizontal, Warehouse } from "
 import React from "react";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
+import type { ThemeMode } from "./theme";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
 const GroupsView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.GroupsView })));
 const PeopleView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.PeopleView })));
@@ -25,8 +26,10 @@ const ZonesSettingsView = React.lazy(() => import("../views/SettingsViews").then
 const UsersView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.UsersView })));
 function RouteLoading() {
   return <div className="loading-panel">Loading view</div>;
-}export function View(props: {
+}
+export function View(props: {
   view: ViewKey;
+  locationSearch: string;
   search: string;
   presence: Presence[];
   expectedPresence: ExpectedPresenceSummary | null;
@@ -40,8 +43,11 @@ function RouteLoading() {
   maintenanceStatus: MaintenanceStatus | null;
   latestRealtime: RealtimeMessage | null;
   dataRefreshToken: number;
+  historyResetToken: number;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
+  theme: ThemeMode;
+  setTheme: (mode: ThemeMode) => void;
   navigateToView: NavigateToView;
   onCurrentUserUpdated: (user: UserAccount) => void;
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
@@ -67,13 +73,13 @@ function RouteLoading() {
       content = <TopChartsView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "events":
-      content = <EventsView events={props.events} query={props.search} />;
+      content = <EventsView refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("event")} />;
       break;
     case "movements":
-      content = <MovementsView query={props.search} refreshToken={props.dataRefreshToken} />;
+      content = <MovementsView refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("movement")} />;
       break;
     case "alerts":
-      content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} />;
+      content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
       break;
     case "reports":
       content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
@@ -85,7 +91,7 @@ function RouteLoading() {
       content = <LogsView currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_general":
-      content = <DynamicSettingsView category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:general`} category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_gates":
       content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
@@ -94,12 +100,12 @@ function RouteLoading() {
       content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
     case "settings_auth":
-      content = <DynamicSettingsView category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "alfred_training":
       content = props.currentUser.role === "admin"
         ? <AlfredTrainingView refreshToken={props.dataRefreshToken} />
-        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
+        : <div className="permission-state" role="alert">Administrator access required for Alfred Training.</div>;
       break;
     case "settings_automations":
       content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
@@ -108,18 +114,18 @@ function RouteLoading() {
       content = <NotificationsView currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
     case "settings_lpr":
-      content = <DynamicSettingsView category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:lpr`} category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
     case "settings_zones":
       content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} currentUser={props.currentUser} />;
       break;
     case "settings":
-      content = <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <SettingsView currentUser={props.currentUser} theme={props.theme} setTheme={props.setTheme} navigateToView={props.navigateToView} />;
       break;
     case "users":
       content = props.currentUser.role === "admin"
         ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} refreshToken={props.dataRefreshToken} />
-        : <SettingsView currentUser={props.currentUser} groups={props.groups} schedules={props.schedules} vehicles={props.vehicles} />;
+        : <div className="permission-state" role="alert">Administrator access required for Users.</div>;
       break;
     default:
       content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;

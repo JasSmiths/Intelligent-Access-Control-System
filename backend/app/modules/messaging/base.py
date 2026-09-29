@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any
 import uuid
 
 
@@ -66,24 +66,3 @@ class MessagingBridgeResult:
     response_text: str
     pending_action: dict[str, Any] | None = None
     actor: MessagingActor | None = None
-
-
-class MessagingProvider(Protocol):
-    provider_name: str
-
-    async def start(self) -> None:
-        """Start provider I/O."""
-
-    async def stop(self) -> None:
-        """Stop provider I/O."""
-
-    async def send_message(
-        self,
-        provider_channel_id: str,
-        text: str,
-        *,
-        embeds: list[Any] | None = None,
-        view: Any | None = None,
-        files: list[Any] | None = None,
-    ) -> None:
-        """Send a provider-specific message."""

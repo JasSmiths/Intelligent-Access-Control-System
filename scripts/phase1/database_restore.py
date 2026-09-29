@@ -164,18 +164,12 @@ async def normalized_schema(connection, raw):
 
 async def prepare(connection):
     """Seed linked records plus uncertainty that must survive restoration intact."""
-    for name in ("users", "dependency_update_backups", "dependency_update_jobs", "processed_messaging_messages", "access_device_command_records"):
+    for name in ("users", "processed_messaging_messages", "access_device_command_records"):
         if await connection.fetchval(f'SELECT count(*) FROM "{name}"'):
             raise ValueError("Restore rehearsal requires a fresh synthetic base database")
-    actor, backup, job, message, command, target = [uuid.uuid4() for _ in range(6)]
+    actor, message, command, target = [uuid.uuid4() for _ in range(4)]
     await connection.execute("""INSERT INTO users(id,username,first_name,last_name,full_name,password_hash,role,is_active)
         VALUES($1,'synthetic-restore-actor','Synthetic','Admin','Synthetic Restore Admin','unused','ADMIN',true)""", actor)
-    await connection.execute("""INSERT INTO dependency_update_backups
-        (id,package_name,ecosystem,reason,archive_path,storage_root,checksum_sha256,size_bytes,created_by_user_id,metadata)
-        VALUES($1,'synthetic-system','system','restore-rehearsal','/synthetic/never-read.tar.zst','/synthetic',repeat('a',64),1,$2,
-        '{"deployment":"not_performed","synthetic":true}'::jsonb)""", backup, actor)
-    await connection.execute("""INSERT INTO dependency_update_jobs(id,kind,status,actor,actor_user_id,backup_id,result)
-        VALUES($1,'restore','completed','Synthetic Restore Admin',$2,$3,'{"synthetic":true}'::jsonb)""", job, actor, backup)
     await connection.execute("""INSERT INTO processed_messaging_messages
         (id,provider,provider_message_id,provider_channel_id,author_provider_id,recovery_version,state,envelope,routing_context,
          available_at,claimed_at,reply_plan,review_reason)

@@ -91,6 +91,8 @@ type AlertResolver = {
 export type Anomaly = {
   id: string;
   alert_ids: string[];
+  member_hash?: string | null;
+  as_of?: string;
   grouped: boolean;
   event_id?: string | null;
   type: string;

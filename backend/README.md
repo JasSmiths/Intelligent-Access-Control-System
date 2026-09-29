@@ -17,6 +17,11 @@ handoff. Schedules now have shared CRUD, assignment and override operations;
 see [their ownership guide](../docs/agent/backend.md#schedule-operations). Extend
 that pattern to other features instead of copying API/Alfred business rules.
 
+Runtime dependency and UniFi Protect package updates are retired. The backend
+uses image-installed `uiprotect==16.10.0`; it has no package overlay or updater
+API. Apply dependency changes through the reviewed repository build and release
+workflow.
+
 ### Feature mutations and Alfred execution
 
 VisitorPassService and AutomationService own their shared mutation rules/audit;

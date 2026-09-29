@@ -1,3 +1,5 @@
+import { useModalFocus } from "../ui/useModalFocus";
+import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 CalendarDays,
 Camera,
@@ -29,52 +31,33 @@ import { displayUserName, formatDate } from "../lib/format";
 import { fileToDataUrl, mediaSource, UserAvatar } from "../lib/media";
 import { coerceSettingsPayload, SettingField, stringifySetting, useSettings } from "../lib/settings";
 import { Badge, CardHeader, PanelHeader, Toolbar } from "../ui/primitives";
-import type { AccessDevice, Group, MaintenanceStatus, Person, Schedule, UnifiProtectCamera, UserAccount, UserRole, Vehicle } from "../api/types";
+import type { AccessDevice, Group, MaintenanceStatus, NavigateToView, Person, Schedule, UnifiProtectCamera, UserAccount, UserRole, Vehicle } from "../api/types";
 import type { SettingFieldDefinition } from "../lib/settings";
+import { settingsNavItems } from "../app/navigation";
+import type { ThemeMode } from "../app/theme";
 
 
 
 export function SettingsView({
   currentUser,
-  groups,
-  schedules,
-  vehicles
+  theme,
+  setTheme,
+  navigateToView
 }: {
   currentUser: UserAccount;
-  groups: Group[];
-  schedules: Schedule[];
-  vehicles: Vehicle[];
+  theme: ThemeMode;
+  setTheme: (mode: ThemeMode) => void;
+  navigateToView: NavigateToView;
 }) {
-  const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
+  const visibleItems = settingsNavItems.filter((item) => !item.adminOnly || currentUser.role === "admin");
   return (
-    <section className="dashboard-grid settings-grid">
-      <div className="card span-2">
-        <CardHeader icon={SlidersHorizontal} title="Appearance" />
-        <div className="settings-list">
-          <SettingRow label="Default mode" value="System" />
-          <SettingRow label="Status palette" value="Blue, green, gray, amber, red" />
-          <SettingRow label="Card radius" value="8px" />
-        </div>
+    <section className="view-stack settings-home">
+      <div className="toolbar"><div className="card-title"><SlidersHorizontal size={18} /><h1>Settings</h1></div></div>
+      <div className="card settings-appearance">
+        <div><h2>Appearance</h2><p>Choose how this console appears on this device.</p></div>
+        <fieldset className="settings-theme-choices"><legend>Theme</legend>{(["system", "light", "dark"] as ThemeMode[]).map((mode) => <label key={mode}><input type="radio" name="settings-theme" value={mode} checked={theme === mode} onChange={() => setTheme(mode)} />{mode[0].toUpperCase() + mode.slice(1)}</label>)}</fieldset>
       </div>
-      <div className="card">
-        <CardHeader icon={Users} title="User Accounts" />
-        <div className="compact-row">
-          <UserAvatar user={currentUser} />
-          <div>
-            <strong>{displayUserName(currentUser)}</strong>
-            <span>{currentUser.role === "admin" ? "Administrator" : "Standard access"}</span>
-          </div>
-          <Badge tone="green">protected</Badge>
-        </div>
-      </div>
-      <div className="card span-3">
-        <CardHeader icon={Database} title="Operational Data" action={<Badge tone="blue">current</Badge>} />
-        <div className="settings-list">
-          <SettingRow label="Access schedules" value={String(schedules.length)} />
-          <SettingRow label="Access groups" value={String(groups.length)} />
-          <SettingRow label="Active vehicles" value={`${activeVehicles}/${vehicles.length}`} />
-        </div>
-      </div>
+      <div className="settings-hub-list" aria-label="Settings pages">{visibleItems.map((item) => { const Icon = item.icon; return <button className="settings-hub-link" key={item.key} type="button" onClick={() => navigateToView(item.key)}><Icon size={19} /><span>{item.label}</span><span aria-hidden="true">›</span></button>; })}</div>
     </section>
   );
 }
@@ -275,6 +258,7 @@ export function ZonesSettingsView({
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {modeError || lprSettings.error ? <div className="auth-error inline-error">{modeError || lprSettings.error}</div> : null}
       {modeMessage ? <div className="success-note">{modeMessage}</div> : null}
+      <p className="zone-filter-explainer">Zone filter results describe only the camera zone check. Final access decisions are shown separately with the event time; passing this filter does not grant entry.</p>
       <div className="table-card zone-shadow-table-card">
         <table className="zone-shadow-table">
           <thead>
@@ -284,8 +268,8 @@ export function ZonesSettingsView({
               <th>Zone</th>
               <th>Status</th>
               <th>Level</th>
-              <th>Decision</th>
-              <th>Time</th>
+              <th>Zone filter result</th>
+              <th>Observed / access decision</th>
             </tr>
           </thead>
           <tbody>
@@ -322,7 +306,7 @@ export function ZonesSettingsView({
               </tr>
             )) : (
               <tr>
-                <td colSpan={7}><span className="table-muted-line">No zone shadow observations yet</span></td>
+                <td colSpan={7}><span className="table-muted-line">{error ? "Zone observations unavailable" : "No zone shadow observations yet"}</span></td>
               </tr>
             )}
           </tbody>
@@ -361,11 +345,11 @@ function zoneDecisionTone(item: LprZoneShadowObservation): "green" | "gray" | "a
 }
 
 function zoneDecisionLabel(value: string) {
-  if (value === "allowed") return "Allowed";
-  if (value === "suppressed") return "Suppressed";
+  if (value === "allowed") return "Zone filter passed";
+  if (value === "suppressed") return "Zone filter suppressed";
   if (value === "skipped_missing_zone_status") return "Skipped: missing zone/status";
   if (value === "shadow_only") return "Shadow only";
-  if (value === "would_allow") return "Allowed";
+  if (value === "would_allow") return "Would pass zone filter";
   if (value === "would_suppress") return "Shadow only";
   if (value === "would_review") return "Shadow only";
   return zoneTitle(value);
@@ -410,6 +394,9 @@ export function DynamicSettingsView({
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
   const [submitError, setSubmitError] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const savingRef = React.useRef(false);
+  const dirtyFields = React.useRef(new Set<string>());
   const fields = settingsFields(category);
   const isAdmin = currentUser?.role === "admin";
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
@@ -428,7 +415,7 @@ export function DynamicSettingsView({
     for (const field of fields) {
       next[field.key] = secretKeys.has(field.key) ? "" : stringifySetting(values[field.key]);
     }
-    setForm(next);
+    setForm((current) => ({ ...next, ...Object.fromEntries([...dirtyFields.current].map((key) => [key, current[key] ?? ""])) }));
   }, [values, category, secretKeys]);
 
   React.useEffect(() => {
@@ -439,12 +426,15 @@ export function DynamicSettingsView({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (savingRef.current || loading || error || !rows.length) return;
     setSaved("");
     setSubmitError("");
     if (!isAdmin) {
       setSubmitError("Administrator access is required to save settings.");
       return;
     }
+    savingRef.current = true;
+    setSaving(true);
     try {
       const updates = coerceSettingsPayload(form);
       const confirmationPayload = { values: updates };
@@ -454,9 +444,13 @@ export function DynamicSettingsView({
         reason: "Update dynamic settings"
       });
       await save(updates, { confirmationToken: confirmation.confirmation_token });
+      dirtyFields.current.clear();
       setSaved("Settings saved.");
     } catch (saveError) {
       setSubmitError(saveError instanceof Error ? saveError.message : "Unable to save settings.");
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
@@ -465,7 +459,7 @@ export function DynamicSettingsView({
       <Toolbar title={title} count={fields.length} icon={Icon} />
       <form className="dashboard-grid settings-grid" onSubmit={submit}>
         <div className="card span-2">
-          <CardHeader icon={Icon} title={title} action={<Badge tone={loading ? "gray" : "green"}>{loading ? "loading" : "database"}</Badge>} />
+          <CardHeader icon={Icon} title={title} action={<Badge tone={loading ? "gray" : error ? "amber" : rows.length ? "green" : "gray"}>{loading ? "Loading" : error ? "Unavailable" : rows.length ? "Loaded" : "No settings"}</Badge>} />
           {category === "general" ? (
             <MaintenanceModeSettings
               currentUser={currentUser}
@@ -473,9 +467,9 @@ export function DynamicSettingsView({
               onStatusChanged={onMaintenanceStatusChanged}
             />
           ) : null}
-          <div className="settings-form-grid">
+          <fieldset className="settings-form-grid settings-form-fieldset" disabled={saving || loading || Boolean(error) || !isAdmin}>
             {fields.map((field) => {
-              const onChange = (value: string) => setForm((current) => ({ ...current, [field.key]: value }));
+              const onChange = (value: string) => { dirtyFields.current.add(field.key); setForm((current) => ({ ...current, [field.key]: value })); setSaved(""); };
               if (category === "lpr" && field.key === "lpr_allowed_smart_zones") {
                 return (
                   <GateLprSmartZoneField
@@ -497,22 +491,15 @@ export function DynamicSettingsView({
                 />
               );
             })}
-          </div>
+          </fieldset>
           {submitError || error ? <div className="auth-error inline-error">{submitError || error}</div> : null}
+          {!loading && !error && !rows.length ? <p className="integration-state-note">No settings were returned for this section. Saving is unavailable until configuration loads.</p> : null}
           {saved ? <div className="success-note">{saved}</div> : null}
           <div className="modal-actions">
-            <button className="primary-button" disabled={!isAdmin} type="submit">Save Settings</button>
+            <button className="primary-button" disabled={!isAdmin || saving || loading || Boolean(error) || !rows.length} type="submit">{saving ? "Saving…" : "Save Settings"}</button>
           </div>
         </div>
-        {category === "auth" ? <AuthSecretSecurityPanel refreshToken={refreshToken} /> : null}
-        <div className="card">
-          <CardHeader icon={Database} title="Source" />
-          <div className="settings-list">
-            <SettingRow label="Storage" value="Database" />
-            <SettingRow label="Secrets" value="Encrypted at rest" />
-            <SettingRow label="Bootstrap" value="Secret file + env override" />
-          </div>
-        </div>
+        {category === "auth" && isAdmin ? <AuthSecretSecurityPanel refreshToken={refreshToken} /> : null}
       </form>
     </section>
   );
@@ -554,6 +541,8 @@ export function AccessDevicesSettingsView({
   const [homeAssistantCovers, setHomeAssistantCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
   const [esphomeCovers, setEsphomeCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
   const accessSettings = useSettings("access");
+  const dirtyDeviceIds = React.useRef(new Set<string>());
+  const savingKeyRef = React.useRef("");
   const lastRefreshTokenRef = React.useRef(refreshToken);
   const isAdmin = currentUser.role === "admin";
 
@@ -562,7 +551,7 @@ export function AccessDevicesSettingsView({
     setError("");
     try {
       const saved = await integrationsApi.getAccessDevices(kind);
-      setDevices(saved);
+      setDevices((current) => saved.map((device) => dirtyDeviceIds.current.has(device.id) ? current.find((item) => item.id === device.id) ?? device : device));
       // Choices are server-validated saved devices, independent of unsaved editor drafts.
       setAdmissionChoices(saved.filter((device) => device.admission_eligible === true).map(({ key, name }) => ({ key, name })));
     } catch (loadError) {
@@ -611,10 +600,12 @@ export function AccessDevicesSettingsView({
   const deviceNounPlural = kind === "gate" ? "gates" : "garage doors";
 
   const updateDevice = (deviceId: string, patch: Partial<AccessDevice>) => {
+    dirtyDeviceIds.current.add(deviceId);
     setDevices((current) => current.map((device) => device.id === deviceId ? { ...device, ...patch } : device));
   };
 
   const updateBinding = (deviceId: string, provider: string, selection: string) => {
+    dirtyDeviceIds.current.add(deviceId);
     setDevices((current) => current.map((device) => {
       if (device.id !== deviceId) return device;
       const options = provider === "esphome" ? esphomeCovers : homeAssistantCovers;
@@ -671,10 +662,12 @@ export function AccessDevicesSettingsView({
   };
 
   const saveDevice = async (device: AccessDevice) => {
+    if (savingKeyRef.current) return;
     if (!isAdmin) {
       setError("Administrator access is required to save access devices.");
       return;
     }
+    savingKeyRef.current = device.id;
     setSavingKey(device.id);
     setMessage("");
     setError("");
@@ -723,11 +716,13 @@ export function AccessDevicesSettingsView({
         });
       }
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
+      dirtyDeviceIds.current.delete(saved.id);
       setMessage("Device saved.");
       await loadDevices(false);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
     } finally {
+      savingKeyRef.current = "";
       setSavingKey("");
     }
   };
@@ -997,7 +992,7 @@ function AccessDeviceEditor({
           <span className="access-device-symbol"><DeviceIcon size={18} /></span>
           <div>
             <h3>{device.name || "Unnamed device"}</h3>
-            <span>{device.key || "No internal key set"}</span>
+            <details className="access-device-technical"><summary>Technical identifier</summary><span>{device.key || "No internal key set"}</span></details>
           </div>
         </div>
         <div className="access-device-badges">
@@ -1015,7 +1010,7 @@ function AccessDeviceEditor({
           </div>
           <div className="settings-form-grid access-device-fields">
             <SettingField field={{ key: "name", label: "Display name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
-            <SettingField field={{ key: "key", label: "Internal key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} />
+            <details className="access-device-technical"><summary>Edit technical identifier</summary><SettingField field={{ key: "key", label: "Internal key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} /></details>
           </div>
         </div>
 
@@ -1199,14 +1194,13 @@ export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number
 
   return (
     <div className="card auth-secret-panel">
-      <CardHeader icon={ShieldCheck} title="Auth Secret" action={<Badge tone={status?.rotation_required ? "amber" : "green"}>{status?.rotation_required ? "rotate" : "ready"}</Badge>} />
+      <CardHeader icon={ShieldCheck} title="Auth Secret" action={<Badge tone={loading ? "gray" : error || !status ? "amber" : status.rotation_required ? "amber" : "green"}>{loading ? "Checking" : error || !status ? "Unavailable" : status.rotation_required ? "Rotation needed" : "Ready"}</Badge>} />
       {loading ? (
         <div className="compact-row"><Loader2 size={16} /> Loading security status...</div>
       ) : status ? (
         <div className="settings-list">
           <SettingRow label="Source" value={sourceLabel} />
           <SettingRow label="Environment" value={status.environment} />
-          <SettingRow label="File" value={status.file_path} />
           <SettingRow label="UI rotation" value={status.ui_rotation_available ? "Available" : "Env managed"} />
         </div>
       ) : null}
@@ -1371,8 +1365,23 @@ export function UsersView({
     setModal(null);
     setSelectedUser(null);
   };
+  const [pendingUserIds, setPendingUserIds] = React.useState<Set<string>>(() => new Set());
+  const pendingUserIdsRef = React.useRef(new Set<string>());
+  const [copyFeedback, setCopyFeedback] = React.useState("");
+  const beginUserAction = (id: string) => {
+    if (pendingUserIdsRef.current.has(id)) return false;
+    pendingUserIdsRef.current.add(id);
+    setPendingUserIds(new Set(pendingUserIdsRef.current));
+    return true;
+  };
+  const endUserAction = (id: string) => {
+    pendingUserIdsRef.current.delete(id);
+    setPendingUserIds(new Set(pendingUserIdsRef.current));
+  };
 
   const deleteUser = async (user: UserAccount) => {
+    if (!beginUserAction(user.id)) return;
+    try {
     if (!window.confirm(`Delete ${displayUserName(user)}?`)) return;
     setError("");
     try {
@@ -1383,13 +1392,16 @@ export function UsersView({
         reason: "Delete user"
       });
       await api.delete(`/api/v1/users/${user.id}`, { confirmation_token: confirmation.confirmation_token });
+      setUsers((current) => current.filter((item) => item.id !== user.id));
       await loadUsers();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete user");
     }
+    } finally { endUserAction(user.id); }
   };
 
   const toggleActive = async (user: UserAccount) => {
+    if (!beginUserAction(user.id)) return;
     setError("");
     try {
       const payload = { is_active: !user.is_active };
@@ -1403,13 +1415,15 @@ export function UsersView({
       if (savedUser.id === currentUser.id) {
         onCurrentUserUpdated(savedUser);
       }
+      setUsers((current) => current.map((item) => item.id === savedUser.id ? savedUser : item));
       await loadUsers();
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : "Unable to update user");
-    }
+    } finally { endUserAction(user.id); }
   };
 
   const resetPassword = async (user: UserAccount) => {
+    if (!beginUserAction(user.id)) return;
     setError("");
     try {
       const confirmationPayload = { user_id: user.id, generate_password: true };
@@ -1427,7 +1441,7 @@ export function UsersView({
       setTemporaryPassword(result.temporary_password);
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : "Unable to reset password");
-    }
+    } finally { endUserAction(user.id); }
   };
 
   return (
@@ -1450,9 +1464,10 @@ export function UsersView({
             <strong>Temporary password for {selectedUser ? displayUserName(selectedUser) : "user"}</strong>
             <span>{temporaryPassword}</span>
           </div>
-          <button className="secondary-button" onClick={() => navigator.clipboard?.writeText(temporaryPassword)} type="button">
+          <button className="secondary-button" onClick={async () => { try { if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable"); await navigator.clipboard.writeText(temporaryPassword); setCopyFeedback("Copied temporary password."); } catch { setCopyFeedback("Could not copy. Select the password above to copy it manually."); } }} type="button">
             Copy
           </button>
+          {copyFeedback ? <span role="status">{copyFeedback}</span> : null}
         </div>
       ) : null}
 
@@ -1478,10 +1493,10 @@ export function UsersView({
                 <time>{user.last_login_at ? formatDate(user.last_login_at) : "Never signed in"}</time>
                 {isAdmin ? (
                   <div className="user-actions">
-                    <button className="secondary-button" onClick={() => openEdit(user)} type="button">Edit</button>
-                    <button className="secondary-button" onClick={() => resetPassword(user)} type="button">Reset</button>
-                    <button className="secondary-button" onClick={() => toggleActive(user)} type="button">{user.is_active ? "Deactivate" : "Activate"}</button>
-                    <button className="icon-button danger" onClick={() => deleteUser(user)} type="button" aria-label={`Delete ${displayUserName(user)}`}>
+                    <button className="secondary-button" disabled={pendingUserIds.has(user.id)} onClick={() => openEdit(user)} type="button">Edit</button>
+                    <button className="secondary-button" disabled={pendingUserIds.has(user.id)} onClick={() => resetPassword(user)} type="button">{pendingUserIds.has(user.id) ? "Working…" : "Reset"}</button>
+                    <button className="secondary-button" disabled={pendingUserIds.has(user.id)} onClick={() => toggleActive(user)} type="button">{user.is_active ? "Deactivate" : "Activate"}</button>
+                    <button className="icon-button danger" disabled={pendingUserIds.has(user.id)} onClick={() => deleteUser(user)} type="button" aria-label={`Delete ${displayUserName(user)}`}>
                       <Trash2 size={16} />
                     </button>
                   </div>
@@ -1503,8 +1518,8 @@ export function UsersView({
             if (savedUser?.id === currentUser.id) {
               onCurrentUserUpdated(savedUser);
             }
-            await loadUsers();
             closeModal();
+            try { await loadUsers(); } catch { setError("User saved, but the list could not be refreshed. Refresh to see the latest data."); }
             setSelectedUser(savedUser ?? null);
           }}
         />
@@ -1526,6 +1541,7 @@ export function UserModal({
   onClose: () => void;
   onSaved: (temporaryPassword: string | null, savedUser?: UserAccount) => Promise<void>;
 }) {
+  const modalRef = React.useRef<HTMLFormElement>(null);
   const [form, setForm] = React.useState({
     username: user?.username ?? "",
     first_name: user?.first_name ?? "",
@@ -1544,6 +1560,9 @@ export function UserModal({
   const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const initialForm = React.useRef(JSON.stringify(form));
+  const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== initialForm.current, submitting, "user changes");
+  useModalFocus(modalRef, true, requestClose);
 
   const update = (field: keyof typeof form, value: string | boolean) => setForm((current) => ({ ...current, [field]: value }));
 
@@ -1625,14 +1644,14 @@ export function UserModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-card" onSubmit={submit}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <form ref={modalRef} role="dialog" aria-modal="true" aria-label={mode === "create" ? "Add User" : "Edit User"} className="modal-card" onSubmit={submit}>
         <div className="modal-header">
           <div>
             <h2>{mode === "create" ? "Add User" : "Edit User"}</h2>
             <p>{mode === "create" ? "Create a dashboard login." : "Update account access."}</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close">
+          <button className="icon-button" onClick={requestClose} type="button" aria-label="Close">
             <X size={16} />
           </button>
         </div>
@@ -1759,7 +1778,7 @@ export function UserModal({
           </>
         ) : null}
         <div className="modal-actions">
-          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
           <button className="primary-button" disabled={submitting} type="submit">
             {submitting ? "Saving..." : "Save User"}
           </button>

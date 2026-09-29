@@ -7,14 +7,11 @@ import type { LlmProviderKey } from "../../lib/format";
 import type { SettingFieldDefinition } from "../../lib/settings";
 import type { BadgeTone } from "../../ui/primitives";
 import {
-  DependencyPackage,
   DiscordStatus,
   ICloudCalendarAccount,
   UnifiProtectStatus,
-  UnifiProtectUpdateStatus,
   WhatsAppStatus
 } from "../../api/integrations";
-import { dependencyIsActionableUpdate } from "./dependencyUpdates";
 export function LlmProviderSelector({
   saving,
   values,
@@ -59,10 +56,8 @@ export type IntegrationDefinition = {
   statusTone: BadgeTone;
   notificationChannels?: NotificationChannelId[];
   oauth?: boolean;
-  updateAvailable?: boolean;
 };
-export type ProtectIntegrationTab = "general" | "exposes" | "updates";
-export type IntegrationsPageTab = "integrations" | "updates";
+export type ProtectIntegrationTab = "general" | "exposes";
 export type IntegrationFeedback = {
   tone: "progress" | "success" | "error" | "info";
   title: string;
@@ -95,34 +90,6 @@ export const integrationCategories: Array<{
     description: "LLM providers used by chat, summaries, and analysis."
   }
 ];
-export function dependenciesForIntegration(definition: IntegrationDefinition, dependencies: DependencyPackage[]) {
-  return dependenciesForIntegrationKey(definition.key, dependencies);
-}
-function dependenciesForIntegrationKey(key: string, dependencies: DependencyPackage[]) {
-  const labels: Record<string, string[]> = {
-    home_assistant: ["home assistant", "home-assistant"],
-    icloud_calendar: ["icloud", "pyicloud"],
-    apprise: ["apprise", "notifications"],
-    discord: ["discord", "discord.py", "discord messaging"],
-    whatsapp: ["whatsapp"],
-    dvla: ["dvla"],
-    unifi_protect: ["unifi", "uiprotect"],
-    openai: ["openai"],
-    gemini: ["gemini"],
-    anthropic: ["anthropic", "claude"],
-    ollama: ["ollama"]
-  };
-  const needles = labels[key] ?? [key.replace(/_/g, " ")];
-  return dependencies.filter((dependency) => {
-    const haystack = [
-      dependency.package_name,
-      dependency.normalized_name,
-      dependency.dependant_area,
-      dependency.manifest_path
-    ].join(" ").toLowerCase();
-    return needles.some((needle) => haystack.includes(needle.toLowerCase()));
-  });
-}
 const integrationFieldSets: Record<string, SettingFieldDefinition[]> = {
   home_assistant: [
     { key: "home_assistant_url", label: "URL" },
@@ -193,40 +160,36 @@ export function integrationDefinitions(
   status: IntegrationStatus | null,
   values: SettingsMap,
   protectStatus: UnifiProtectStatus | null,
-  protectUpdateStatus: UnifiProtectUpdateStatus | null,
   icloudAccounts: ICloudCalendarAccount[],
   icloudError: string,
   discordStatus: DiscordStatus | null,
   discordError: string,
   whatsappStatus: WhatsAppStatus | null,
-  whatsappError: string,
-  dependencies: DependencyPackage[] = []
+  whatsappError: string
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
-    if (activeProvider === key) return { statusLabel: "Active", statusTone: "green" };
+    if (activeProvider === key) return { statusLabel: "Selected", statusTone: "blue" };
     if (secretKey && values[secretKey]) return { statusLabel: "Configured", statusTone: "blue" };
     if (key === "ollama" && values.ollama_base_url) return { statusLabel: "Configured", statusTone: "blue" };
     return { statusLabel: "Not Configured", statusTone: "gray" };
   };
-  const hasDependencyUpdate = (key: string) => dependenciesForIntegrationKey(key, dependencies).some(dependencyIsActionableUpdate);
   const activeIcloudAccounts = icloudAccounts.filter((account) => account.is_active);
   const icloudNeedsAttention = activeIcloudAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
   const homeAssistantConfigured = Boolean(status?.configured || values.home_assistant_url || values.home_assistant_token);
   const homeAssistantDegraded = Boolean(homeAssistantConfigured && (status?.degraded || status?.connected === false || status?.last_error));
-  const protectUpdateAvailable = Boolean(protectStatus?.connected && protectUpdateStatus?.update_available) || hasDependencyUpdate("unifi_protect");
   const protectRealtimeDegraded = Boolean(
     protectStatus?.connected && (protectStatus.realtime_connected === false || protectStatus.realtime_error)
   );
   const base: IntegrationDefinition[] = [
-    { key: "home_assistant", title: "Home Assistant", description: "Gate control, mobile app notifications, TTS announcements, and state sync.", category: "access", icon: Home, fields: integrationFieldSets.home_assistant, statusLabel: status?.connected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured", statusTone: status?.connected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray", updateAvailable: hasDependencyUpdate("home_assistant"), notificationChannels: ["mobile", "voice"] },
-    { key: "esphome", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray", updateAvailable: hasDependencyUpdate("esphome") },
-    { key: "icloud_calendar", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} Connected` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "green" : "gray", updateAvailable: hasDependencyUpdate("icloud_calendar") },
-    { key: "apprise", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "green" : "gray", updateAvailable: hasDependencyUpdate("apprise"), notificationChannels: ["mobile"] },
-    { key: "discord", title: "Discord", description: "Bidirectional Alfred chat and Discord notification channels.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.discord, statusLabel: discordError ? "Error" : discordStatus?.connected ? "Connected" : discordStatus?.configured || values.discord_bot_token ? "Configured" : "Not Configured", statusTone: discordError ? "red" : discordStatus?.connected ? "green" : discordStatus?.configured || values.discord_bot_token ? "blue" : "gray", updateAvailable: hasDependencyUpdate("discord"), notificationChannels: ["discord"] },
-    { key: "whatsapp", title: "WhatsApp", description: "Bidirectional Alfred chat and WhatsApp notification messages.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.whatsapp, statusLabel: whatsappError ? "Error" : whatsappStatus?.enabled && whatsappStatus?.configured ? "Enabled" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "Configured" : "Not Configured", statusTone: whatsappError ? "red" : whatsappStatus?.enabled && whatsappStatus?.configured ? "green" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "blue" : "gray", updateAvailable: hasDependencyUpdate("whatsapp"), notificationChannels: ["whatsapp"] },
-    { key: "dvla", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "green" : "gray", updateAvailable: hasDependencyUpdate("dvla") },
-    { key: "unifi_protect", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectUpdateAvailable ? `Update ${protectUpdateStatus?.latest_version}` : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectUpdateAvailable ? "amber" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray", updateAvailable: protectUpdateAvailable }
+    { key: "home_assistant", title: "Home Assistant", description: "Gate control, mobile app notifications, TTS announcements, and state sync.", category: "access", icon: Home, fields: integrationFieldSets.home_assistant, statusLabel: status?.connected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured", statusTone: status?.connected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray", notificationChannels: ["mobile", "voice"] },
+    { key: "esphome", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
+    { key: "icloud_calendar", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
+    { key: "apprise", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
+    { key: "discord", title: "Discord", description: "Bidirectional Alfred chat and Discord notification channels.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.discord, statusLabel: discordError ? "Error" : discordStatus?.connected ? "Connected" : discordStatus?.configured || values.discord_bot_token ? "Configured" : "Not Configured", statusTone: discordError ? "red" : discordStatus?.connected ? "green" : discordStatus?.configured || values.discord_bot_token ? "blue" : "gray", notificationChannels: ["discord"] },
+    { key: "whatsapp", title: "WhatsApp", description: "Bidirectional Alfred chat and WhatsApp notification messages.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.whatsapp, statusLabel: whatsappError ? "Error" : whatsappStatus?.enabled && whatsappStatus?.configured ? "Enabled" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "Configured" : "Not Configured", statusTone: whatsappError ? "red" : whatsappStatus?.enabled && whatsappStatus?.configured ? "blue" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "blue" : "gray", notificationChannels: ["whatsapp"] },
+    { key: "dvla", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },
+    { key: "unifi_protect", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray" }
   ];
   return base.concat([
     { key: "openai", title: "OpenAI", description: "Responses API provider for tool-capable chat.", icon: Bot, secret: "openai_api_key", oauth: true },
@@ -234,7 +197,7 @@ export function integrationDefinitions(
     { key: "anthropic", title: "Anthropic", description: "Claude provider.", icon: MessageCircle, secret: "anthropic_api_key" },
     { key: "ollama", title: "Ollama", description: "Local model endpoint.", icon: Database }
   ].map(({ key, title, description, icon, secret, oauth }) => ({
-    key, title, description, icon, oauth, category: "ai", fields: integrationFieldSets[key], ...providerStatus(key, secret), updateAvailable: hasDependencyUpdate(key)
+    key, title, description, icon, oauth, category: "ai", fields: integrationFieldSets[key], ...providerStatus(key, secret)
   } as IntegrationDefinition)));
 }
 export function integrationInitialValues(definition: IntegrationDefinition, values: SettingsMap) {

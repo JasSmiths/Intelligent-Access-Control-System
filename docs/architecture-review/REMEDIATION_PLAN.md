@@ -1,5 +1,9 @@
 # Executable architectural recovery plan
 
+> Historical proposal. Its updater preservation requirements are superseded by
+> the [current architecture guide](../architecture.md) and
+> [updater retirement note](../releases/remove-dependency-updaters.md).
+
 Future work only. No package below was implemented by this audit. Findings and current evidence: [AUDIT.md](AUDIT.md). Proposed ownership/interfaces: [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). Starting baseline is dirty `main` at `69f9d8cfc1f77417a57105223f4e0772ae62de5d`, with substantial milestone 1–6 changes already present. **Rebaseline the actual worktree at the start of every package; never restore HEAD over those changes.**
 
 ## Recommended first authorization

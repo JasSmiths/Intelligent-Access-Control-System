@@ -1,3 +1,5 @@
+import { useModalFocus } from "../../ui/useModalFocus";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { GitBranch, Play, Plus, Save, Split, Trash2, X, Zap } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount, Vehicle } from "../../api/types";
@@ -10,6 +12,7 @@ import { NotificationConfigChip, WorkflowBlock, WorkflowRuleList, WorkflowStatus
 import { usePendingWorkflowIds, useTransientRuleStatusFeedback, useWorkflowData, useWorkflowRuleFilters } from "./hooks";
 import type { NotificationStatusFilter, WorkflowFeedback, WorkflowRuleStatusFeedback } from "./model";
 import { renderWorkflowTemplate } from "./model";
+import { titleCase } from "../../lib/format";
 import { AutomationRunHistory } from "./AutomationRunHistory";
 
 export function AutomationsView({ currentUser, people, refreshToken, vehicles }: { currentUser: UserAccount; people: Person[]; refreshToken: number; vehicles: Vehicle[] }) {
@@ -19,6 +22,12 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
   const [draft, setDraft] = React.useState<AutomationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  const baseline = React.useRef("");
+  const dismissDraft = useEditorDismiss(() => setDraft(null), Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "automation changes");
+  const requestClose = () => { if (saving) return; if (modal) setModal(null); else dismissDraft(); };
+  useModalFocus(modalRef, Boolean(draft), requestClose);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
   const [togglingRuleIds, setRuleToggling] = usePendingWorkflowIds();
   const [ruleStatusFeedback, setRuleStatusFeedback] = useTransientRuleStatusFeedback();
@@ -45,14 +54,16 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
   };
 
   const addAutomation = () => {
-    setDraft(createAutomationDraft());
+    const next = createAutomationDraft();
+    baseline.current = JSON.stringify(next);
+    setDraft(next);
     setModal(null);
     setFeedback(null);
     setDryRun(null);
   };
 
   const save = async () => {
-    if (!draft) return;
+    if (!draft || saving) return;
     if (!draft.triggers.length) {
       setFeedback({ tone: "error", text: "Add at least one trigger before saving." });
       return;
@@ -66,8 +77,8 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
     try {
       const payload = automationRulePayload(draft);
       const saved = await workflowApi.saveAutomationRule(draft, payload);
-      await load();
-      setRules((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setRules((current) => current.some((item) => item.id === saved.id) ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current]);
+      void load();
       setDraft(null);
       setModal(null);
       setDryRun(null);
@@ -193,7 +204,9 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
         togglingRuleIds={togglingRuleIds}
         onDelete={deleteRule}
         onSelect={(rule) => {
-          setDraft(cloneAutomationRule(rule));
+          const next = cloneAutomationRule(rule);
+          baseline.current = JSON.stringify(next);
+          setDraft(next);
           setDryRun(null);
           setFeedback(null);
         }}
@@ -201,8 +214,8 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
       />
 
       {draft ? (
-        <div className="modal-backdrop workflow-editor-backdrop" role="presentation">
-          <div className={modal ? "modal-card workflow-editor-modal selector-mode" : "modal-card workflow-editor-modal"} role="dialog" aria-modal="true">
+        <div className="modal-backdrop workflow-editor-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+          <div ref={modalRef} aria-label="Automation editor" className={`modal-card workflow-editor-modal${modal ? " selector-mode" : ""}${previewOpen ? " preview-open" : ""}`} role="dialog" aria-modal="true">
             <>
               <div
                 className={modal ? "workflow-modal-panel selector" : "workflow-modal-panel editor"}
@@ -231,7 +244,7 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                         <h2>{draft.id.startsWith("draft-") ? "Add Automation" : "Edit Automation"}</h2>
                         <p>Build the Trigger, If, and Then flow for autonomous system actions.</p>
                       </div>
-                      <button className="icon-button" onClick={() => { setDraft(null); setModal(null); }} type="button" aria-label="Close automation editor"><X size={16} /></button>
+                      <div className="workflow-header-actions"><button className="secondary-button workflow-preview-toggle" aria-expanded={previewOpen} aria-controls="workflow-preview" onClick={() => setPreviewOpen((open) => !open)} type="button">Preview</button><button className="icon-button" onClick={requestClose} type="button" aria-label="Close automation editor"><X size={16} /></button></div>
                     </div>
                     <div className="workflow-editor-modal-grid">
                       <div className="workflow-editor-column">
@@ -309,12 +322,12 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                           <div className="modal-actions workflow-editor-footer">
                             {feedback ? <div className={`notification-feedback workflow-editor-feedback ${feedback.tone}`} role="status">{feedback.text}</div> : null}
                             <button className="secondary-button" onClick={runDryRun} type="button"><Play size={15} /> Dry Run</button>
-                            <button className="secondary-button" onClick={() => setDraft(null)} type="button">Cancel</button>
+                            <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
                             <button className="primary-button" onClick={save} disabled={saving} type="button"><Save size={15} /> {saving ? "Saving..." : "Save"}</button>
                           </div>
                         </section>
                       </div>
-                      <AutomationPreviewPanel actions={renderedReasons} dryRun={dryRun} />
+                      <div id="workflow-preview" className="workflow-preview-wrapper"><AutomationPreviewPanel actions={renderedReasons} dryRun={dryRun} /></div>
                     </div>
                   </>
                 )}
@@ -339,7 +352,7 @@ function AutomationWorkflowList({
       ariaLabel="Automation rules"
       groupedRules={groupedRules}
       kind="automation"
-      renderConfigChips={(rule) => (<><NotificationConfigChip count={rule.triggers.length} icon={Zap} label="Triggers" /><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /><NotificationConfigChip count={rule.actions.length} icon={Play} label="Actions" /></>)}
+      renderConfigChips={(rule) => (<><span className="workflow-flow-summary">When {rule.triggers.map((node) => titleCase(node.type.replaceAll("_", " "))).join(", ") || "no trigger"} → {rule.actions.map((node) => titleCase(node.type.replaceAll("_", " "))).join(", ") || "no action"}</span><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /></>)}
       ruleStatusFeedback={ruleStatusFeedback}
       statusFilter={statusFilter}
       summaryAriaLabel="Automation summary"

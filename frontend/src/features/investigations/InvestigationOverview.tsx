@@ -37,6 +37,7 @@ function RepeatItem({ item, onSelect, timezone }: { item: OverviewRepeat; onSele
 
 export function InvestigationOverview({ overview, onSelect }: { overview: OverviewType; onSelect: (id: string) => void }) {
   const problems = [...overview.recent_problems, ...overview.incomplete_runs.filter((item) => !overview.recent_problems.some((problem) => problem.episode_id === item.episode_id))];
+  const hasStartingPoints = Boolean(problems.length || overview.repeated_problems.length || overview.important_activity.length);
   return (
     <section className="investigation-overview" aria-labelledby="investigation-overview-title">
       <div className="investigation-section-heading">
@@ -46,19 +47,17 @@ export function InvestigationOverview({ overview, onSelect }: { overview: Overvi
         </div>
         <span>Last 24 hours · {overview.site_timezone}</span>
       </div>
+      {!hasStartingPoints ? <div className="investigation-overview-empty compact"><CircleCheck aria-hidden="true" size={18} /> No recent problems or repeated failures were recorded in the last 24 hours. Review the activity timeline below for routine events.</div> : null}
+      {hasStartingPoints ? <>
       <div className="investigation-overview-grid">
-        <section aria-labelledby="investigation-problems-title" className="investigation-overview-block problems">
+        {problems.length ? <section aria-labelledby="investigation-problems-title" className="investigation-overview-block problems">
           <h3 id="investigation-problems-title"><AlertTriangle aria-hidden="true" size={15} /> Problems and blocked actions</h3>
-          {problems.length ? (
-            <ol>{problems.slice(0, 6).map((episode) => <OverviewEpisode episode={episode} key={episode.episode_id} onSelect={onSelect} timezone={overview.site_timezone} />)}</ol>
-          ) : (
-            <div className="investigation-overview-empty"><CircleCheck aria-hidden="true" size={18} /> No recent problems or incomplete runs were recorded.</div>
-          )}
-        </section>
-        <section aria-labelledby="investigation-repeated-title" className="investigation-overview-block repeated">
+          <ol>{problems.slice(0, 6).map((episode) => <OverviewEpisode episode={episode} key={episode.episode_id} onSelect={onSelect} timezone={overview.site_timezone} />)}</ol>
+        </section> : null}
+        {overview.repeated_problems.length ? <section aria-labelledby="investigation-repeated-title" className="investigation-overview-block repeated">
           <h3 id="investigation-repeated-title"><Repeat2 aria-hidden="true" size={15} /> Repeated problems</h3>
-          {overview.repeated_problems.length ? <ol>{overview.repeated_problems.slice(0, 5).map((item) => <RepeatItem item={item} key={item.key} onSelect={onSelect} timezone={overview.site_timezone} />)}</ol> : <div className="investigation-overview-empty">No repeated failure pattern was found.</div>}
-        </section>
+          <ol>{overview.repeated_problems.slice(0, 5).map((item) => <RepeatItem item={item} key={item.key} onSelect={onSelect} timezone={overview.site_timezone} />)}</ol>
+        </section> : null}
       </div>
       {overview.important_activity.length ? (
         <section aria-labelledby="investigation-important-title" className="investigation-important-strip">
@@ -66,6 +65,7 @@ export function InvestigationOverview({ overview, onSelect }: { overview: Overvi
           <ol>{overview.important_activity.slice(0, 4).map((episode) => <OverviewEpisode episode={episode} key={episode.episode_id} onSelect={onSelect} timezone={overview.site_timezone} />)}</ol>
         </section>
       ) : null}
+      </> : null}
     </section>
   );
 }

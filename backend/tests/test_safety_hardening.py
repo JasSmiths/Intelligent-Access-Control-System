@@ -57,7 +57,6 @@ def app_for_user(user: User) -> FastAPI:
         ("POST", "/api/v1/access-devices", {"key": "gate_1", "kind": "gate", "name": "Gate"}),
         ("POST", "/api/v1/integrations/esphome/devices", {"name": "Gate", "host": "127.0.0.1"}),
         ("POST", "/api/v1/simulation/arrival/STD123", {}),
-        ("GET", "/api/v1/integrations/unifi-protect/backups", None),
     ],
 )
 async def test_standard_users_are_denied_access_policy_mutations(method: str, path: str, body: dict | None) -> None:
