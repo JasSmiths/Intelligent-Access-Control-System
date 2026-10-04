@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +31,7 @@ from app.services.access.reads import (
     GATE_CAMERA_IDENTIFIER,
     _external_admission_direction_resolution,
     _gate_malfunction_from_read,
+    _is_exact_known_vehicle_plate_match,
     _visitor_pass_candidate_kind,
     _visitor_pass_plate_match_from_read,
 )
@@ -77,7 +79,8 @@ def _read_fingerprint(read: PlateRead) -> str:
 
 class CameraEvidenceRequired(Exception):
     """A read-only probe must end its transaction before optional vendor I/O."""
-    def __init__(self, person: Person):
+    def __init__(self, person: Person, *, recovery: bool = False):
+        self.recovery = recovery
         self.person_id = person.id
         self.display_name = person.display_name
 
@@ -118,7 +121,24 @@ class AccessEvidenceResolver:
         # Only immutable identifying presentation crosses this seam; the final
         # transaction resolves identity, permissions and presence again.
         person = SimpleNamespace(id=request.person_id, display_name=request.display_name)
-        decision = await self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace)
+        started = time.monotonic()
+        if request.recovery:
+            task = asyncio.create_task(self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace))
+            done, _ = await asyncio.wait({task}, timeout=5)
+            if task in done:
+                decision = task.result()
+            else:
+                task.cancel()
+                # Discard all late provider results; cancellation cleanup cannot
+                # lengthen this recovery decision's five-second authority window.
+                def discard_result(completed):
+                    if not completed.cancelled():
+                        completed.exception()
+                task.add_done_callback(discard_result)
+                decision = {"direction": "unknown", "confidence": 0.0, "reason": "camera_timeout"}
+        else:
+            decision = await self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace)
+        decision["elapsed_ms"] = round((time.monotonic()-started)*1000, 2)
         return PreparedCameraEvidence.for_read(request.person_id, direction_read, decision)
 
     async def resolve(
@@ -172,6 +192,22 @@ class AccessEvidenceResolver:
             visitor_pass_matched=bool(visitor_pass),
             external_admission_matched=bool(external_admission),
         )
+        recovery: dict[str, Any] | None = None
+        if (not external_admission and person and vehicle
+                and getattr(runtime, "missed_exit_recovery_enabled", False)
+                and getattr(person, "missed_exit_recovery_enabled", False)):
+            from app.services.resident_recovery import evaluate_phone, has_conflict
+            candidate_presence = await self._presence_state_for_person(session, person)
+            observation_state = coerce_gate_state(gate_observation_from_read(direction_read).get("state"))
+            from app.services.movement_fsm import DEPARTURE_GATE_STATES
+            ordinary_departure = (observation_state in DEPARTURE_GATE_STATES and candidate_presence == PresenceState.PRESENT
+                and explicit_direction_from_read(direction_read) != AccessDirection.ENTRY)
+            if not ordinary_departure and await has_conflict(session, person, vehicle, read.captured_at):
+                ready, reason, checks = (await evaluate_phone(session, person=person, vehicle=vehicle,
+                    read=direction_read, config=runtime, claim=not probe_camera) if allowed else
+                    (False, "schedule_or_identity_denied", {"exact_plate": _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number}))
+                recovery = {"ready": ready, "reason": reason, "checks": checks, "method": "none",
+                            "approval_eligible": False}
         direction_span = trace.start_span(
             "Direction Classification",
             attributes={
@@ -188,6 +224,42 @@ class AccessEvidenceResolver:
                 direction_read,
                 external_admission,
             )
+        elif recovery is not None and person is not None and vehicle is not None:
+            explicit = explicit_direction_from_read(direction_read)
+            camera = (camera_evidence.decision if camera_evidence and camera_evidence.person_id == person.id
+                and camera_evidence.read_fingerprint == _read_fingerprint(direction_read) else {})
+            clear_camera = self._camera_tiebreaker_is_clear(camera)
+            from sqlalchemy import func
+
+            from app.services.resident_recovery import blockers
+            safety_block = await blockers(session, now=await session.scalar(select(func.clock_timestamp())))
+            if safety_block:
+                recovery["ready"], recovery["reason"] = False, safety_block
+            if explicit == AccessDirection.EXIT:
+                direction = AccessDirection.EXIT
+                recovery["reason"] = "departure_evidence"
+            elif recovery["ready"] and allowed:
+                direction = AccessDirection.ENTRY
+                recovery["method"] = "phone_automatic"
+            elif probe_camera and allowed and not safety_block and _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number:
+                raise CameraEvidenceRequired(person, recovery=True)
+            elif clear_camera and coerce_access_direction(camera.get("direction")) == AccessDirection.EXIT:
+                direction = AccessDirection.EXIT
+                recovery["reason"] = "camera_confirmed_departure"
+            elif clear_camera and coerce_access_direction(camera.get("direction")) == AccessDirection.ENTRY and allowed and not safety_block and _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number:
+                direction = AccessDirection.ENTRY
+                recovery["method"], recovery["reason"] = "camera_automatic", "camera_confirmed_entry"
+            else:
+                direction = AccessDirection.ENTRY
+                recovery["approval_eligible"] = bool(allowed and _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number
+                    and recovery["reason"] not in {"maintenance_mode", "gate_malfunction", "unresolved_gate_command",
+                         "unresolved_entry", "departure_evidence"})
+                allowed = False
+            recovery["camera_elapsed_ms"] = camera.get("elapsed_ms")
+            recovery["checks"].update(camera_direction=camera.get("direction"), camera_clear=clear_camera,
+                                      camera_elapsed_ms=camera.get("elapsed_ms"))
+            direction_resolution = {"reason": recovery["reason"], "gate_observation": gate_observation_from_read(direction_read),
+                                    "missed_exit_recovery": recovery}
         else:
             try:
                 direction, direction_resolution = await self._resolve_direction(

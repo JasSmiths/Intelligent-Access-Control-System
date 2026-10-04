@@ -2,10 +2,11 @@
 @import "./styles/dashboard.css";
 @import "./styles/data-views.css";
 @import "./styles/search-palette.css";
-@import "./styles/integrations.css";
 @import "./styles/passes-schedules.css";
-@import "./styles/workflows.css";
-@import "./styles/investigations.css";
+@import "./styles/shared-controls.css";
 @import "./styles/auth-directory-modals.css";
 @import "./styles/chat-responsive.css";
 @import "./styles/gui-completion.css";
+@import "./styles/missed-exit-recovery.css";
+@import "./styles/states.css";
+@import "./styles/motion.css";

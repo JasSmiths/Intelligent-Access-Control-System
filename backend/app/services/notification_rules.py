@@ -15,13 +15,17 @@ from app.services.telemetry import (
     write_audit_log,
 )
 from app.services.workflows.notification_payloads import normalize_rule_payload
+from app.services.workflows.template_recipients import TemplateRecipientError
 
 
 def rule_values(payload: dict[str, Any]) -> dict[str, Any]:
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
         raise MutationError("invalid_rule", "Workflow name must contain 1–160 characters.")
-    normalized = normalize_rule_payload({**payload, "name": name.strip()})
+    try:
+        normalized = normalize_rule_payload({**payload, "name": name.strip()})
+    except TemplateRecipientError as exc:
+        raise MutationError("invalid_variable_recipients", str(exc)) from exc
     if not normalized["trigger_event"]:
         raise MutationError("invalid_rule", "A notification trigger is required.")
     if not normalized["actions"]:

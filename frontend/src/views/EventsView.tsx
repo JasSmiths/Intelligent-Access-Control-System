@@ -10,13 +10,13 @@ import React from "react";
 import { api } from "../api/client";
 import { formatDate, movementSagaDisplay, visitorEventDisplayName } from "../lib/format";
 import { mediaVariantUrl } from "../lib/media";
-import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState, Toolbar } from "../ui/primitives";
 import type { AccessEvent } from "../api/types";
 import { useHistoryPage } from "./useHistoryPage";
 
 
 
-export const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event }: { event: AccessEvent }) {
+const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event }: { event: AccessEvent }) {
   const thumbRef = React.useRef<HTMLSpanElement | null>(null);
   const [thumbVisible, setThumbVisible] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
@@ -101,6 +101,8 @@ export function EventsView({ refreshToken, resetToken, targetId }: { refreshToke
   const visible = focused ? [focused, ...history.items.filter((item) => item.id !== focused.id)] : history.items;
   const firstItem = history.index * 50 + 1;
   const lastItem = history.index * 50 + history.items.length;
+  const hasFilters = Boolean(query || from || to || decision);
+  const clearFilters = () => { setQuery(""); setFrom(""); setTo(""); setDecision(""); };
 
   return (
     <section className="view-stack">
@@ -112,11 +114,11 @@ export function EventsView({ refreshToken, resetToken, targetId }: { refreshToke
         <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
         <label>Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
         <label>Decision<select value={decision} onChange={(event) => setDecision(event.target.value)}><option value="">All decisions</option><option value="granted">Granted</option><option value="denied">Denied</option></select></label>
-        {(query || from || to || decision) ? <button className="secondary-button" type="button" onClick={() => { setQuery(""); setFrom(""); setTo(""); setDecision(""); }}>Clear filters</button> : null}
+        {hasFilters ? <button className="secondary-button" type="button" onClick={clearFilters}>Clear filters</button> : null}
         <p className="history-date-hint">Dates use the site timezone. Before excludes the selected date.</p>
       </div>
       {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
-      {history.error ? <div className="callout danger" role="alert">Events unavailable: {history.error}</div> : null}
+      {history.error ? <ErrorState title="Events unavailable" description={history.error} onRetry={history.refresh} retrying={history.loading} /> : null}
       {focusError ? <div className="callout danger" role="alert">{focusError}</div> : null}
       {focused ? <div className="callout">Showing the selected event from outside this page.</div> : null}
       <div className="table-card events-table-card">
@@ -186,8 +188,8 @@ export function EventsView({ refreshToken, resetToken, targetId }: { refreshToke
             </div>
           </div>
         ) : null}
-        {history.loading ? <div className="loading-panel">Loading events…</div> : null}
-        {!history.loading && !history.error && !visible.length ? <EmptyState icon={Clock3} label={query || from || to || decision ? "No events match these filters." : "No events recorded yet."} /> : null}
+        {history.loading ? <LoadingState label="Loading events…" compact={visible.length > 0} /> : null}
+        {!history.loading && !history.error && !visible.length ? <EmptyState icon={Clock3} label={hasFilters ? "No events match these filters." : "No events recorded yet."} description={hasFilters ? "Try another plate, a wider date range, or clear your filters." : "Recorded access events will appear here with their decisions and camera evidence."} /> : null}
       </div>
     </section>
   );

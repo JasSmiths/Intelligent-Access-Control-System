@@ -1,0 +1,95 @@
+/* Motion describes hierarchy, navigation and an action's state. No timers or framework. */
+@keyframes console-reveal {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes console-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes console-dialog {
+  from { opacity: 0; transform: translateY(16px) scale(.975); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes console-modal-in {
+  from { opacity: 0; transform: translateY(24px) scale(.94); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes console-modal-out {
+  from { opacity: var(--modal-exit-opacity, 1); transform: var(--modal-exit-transform, none); }
+  to { opacity: 0; transform: translateY(10px) scale(.98); }
+}
+@keyframes console-backdrop-out {
+  from { opacity: var(--modal-backdrop-opacity, 1); }
+  to { opacity: 0; }
+}
+@keyframes console-indicator {
+  from { transform: scaleY(.25); opacity: .3; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+@keyframes console-ring {
+  from { opacity: 0; transform: scale(.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Keeping this region mounted lets native grid sizing animate both directions. */
+.nav-submenu-region { display: grid; grid-template-rows: 0fr; visibility: hidden; }
+.nav-submenu-region.open { grid-template-rows: 1fr; visibility: visible; }
+.nav-submenu-region > .nav-submenu { min-height: 0; overflow: hidden; padding-block: 0; }
+.nav-item { position: relative; }
+.nav-item.active { box-shadow: none; }
+.nav-item.active::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--blue); }
+.refresh-button[aria-busy="true"] { border-color: var(--blue); background: var(--blue-soft); color: var(--blue-strong); opacity: 1; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .view-stack, .settings-grid { animation: console-reveal 400ms var(--ease-out); }
+  .dashboard-intro, .topbar-page { animation: console-reveal 420ms var(--ease-out); }
+  .dashboard-grid > .card, .settings-home-group { animation: console-reveal 540ms var(--ease-out) backwards; }
+  .dashboard-grid > .card:nth-child(2), .settings-home-group:nth-child(2) { animation-delay: 55ms; }
+  .dashboard-grid > .card:nth-child(3), .settings-home-group:nth-child(3) { animation-delay: 110ms; }
+  .dashboard-grid > .card:nth-child(4) { animation-delay: 165ms; }
+  .dashboard-grid > .card:nth-child(5) { animation-delay: 200ms; }
+  .dashboard-grid > .card:nth-child(n+6) { animation-delay: 235ms; }
+  .status-metrics strong, .presence-stat > strong { animation: console-reveal 650ms var(--ease-out) backwards; animation-delay: 120ms; }
+  .access-pulse-band { transform-box: view-box; transform-origin: 50% 53%; animation: console-ring 700ms var(--ease-out) backwards; }
+  .mobile-nav-scrim { animation: console-fade 220ms ease-out; }
+  .modal-backdrop, .search-palette-backdrop, .workflow-recipient-modal::backdrop { animation: console-fade 280ms ease-out; }
+  .modal-card, .search-palette, .workflow-recipient-modal { animation: console-modal-in 480ms var(--ease-out) backwards; }
+  .alert-tray, .profile-menu, .notification-toast, .chat-panel { animation: console-dialog 320ms var(--ease-out); }
+  .nav-submenu-region { transition: grid-template-rows 320ms var(--ease-out), visibility 0s 320ms; }
+  .nav-submenu-region.open { transition-delay: 0s; }
+  .nav-submenu { transition: opacity 200ms ease-out, transform 320ms var(--ease-out); }
+  .nav-submenu-region:not(.open) > .nav-submenu { opacity: 0; transform: translateY(-6px); }
+  .nav-item.active::before { animation: console-indicator 360ms var(--ease-out); }
+  :is(.nav-item, .nav-disclosure, .icon-button, .primary-button, .secondary-button, .danger-button, .panel-link, .profile-switcher, .settings-home-destination, .chat-pill, .badge-action) {
+    transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast), box-shadow 220ms, transform 240ms var(--ease-out);
+  }
+  :is(.icon-button, .primary-button, .secondary-button, .danger-button, .chat-pill, .badge-action):not(:disabled):active { transform: scale(.96); }
+  .nav-item > svg, .nav-disclosure svg, .settings-home-destination-arrow { transition: transform 280ms var(--ease-out), color 180ms; }
+  .nav-item.active > svg { animation: console-ring 380ms var(--ease-out); }
+  .settings-home-destination:hover .settings-home-destination-arrow { transform: translateX(4px); }
+  :is(input, select, textarea) { transition: border-color 180ms, box-shadow 220ms; }
+  .presence-bar > *, .mini-bars i { transition: width 600ms var(--ease-out), height 600ms var(--ease-out); }
+  .event-feed-row, .gate-row, .anomaly-feed-row { transition: background-color 180ms; }
+  @media (max-width: 980px) {
+    .sidebar { transition: transform 360ms var(--ease-out), visibility 0s 360ms; }
+    .mobile-nav-open .sidebar { transition-delay: 0s; }
+  }
+  @media (hover: hover) {
+    .nav-item:hover > svg { transform: translateX(2px); }
+    .chat-pill:hover { transform: translateY(-2px); box-shadow: 0 10px 24px color-mix(in srgb, var(--action-blue) 25%, transparent); }
+  }
+}
+.modal-backdrop[data-closing], .search-palette-backdrop[data-closing], .workflow-recipient-modal[data-closing]::backdrop { animation: console-backdrop-out 200ms ease-in both; }
+.modal-backdrop[data-closing] > .modal-card, .search-palette-backdrop[data-closing] > .search-palette, .workflow-recipient-modal[data-closing] { animation: console-modal-out 200ms ease-in both; }
+@media (hover: hover) {
+  .icon-button:not(:disabled):hover, .secondary-button:not(:disabled):hover { background: var(--surface-soft); border-color: var(--line-strong); }
+  .primary-button:not(:disabled):hover { background: color-mix(in srgb, var(--action-blue), black 12%); border-color: var(--action-blue); box-shadow: 0 4px 10px color-mix(in srgb, var(--blue) 20%, transparent); }
+  .danger-button:not(:disabled):hover { filter: brightness(.94); }
+  .global-search-trigger:hover { border-color: var(--line-strong); background: var(--surface-soft); }
+  .event-feed-row.has-snapshot:hover, .gate-row:has(.badge-action:hover) { background: var(--surface-soft); }
+}
+/* The accessibility preference also covers legacy feature animations. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0ms !important; scroll-behavior: auto !important; }
+}

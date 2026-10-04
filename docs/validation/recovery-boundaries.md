@@ -1,107 +1,60 @@
-# Inert recovery boundary diagnostics
+# Recovery boundary diagnostics
 
-This is future-recovery characterization, separate from the passing regression
-suite. `scripts/phase1/test_recovery_boundaries.py` contains real failing safety
-assertions: no xfail, expected-failure inversion, skips, or application fixes.
-The fixture data in `scripts/phase1/fixtures/recovery_boundaries/scenarios.json`
-is synthetic. Failing diagnostics block the affected recovery release until its
-implementation makes the invariant pass. A diagnostic failure does not mean its
-entire existing subsystem is broken.
+`scripts/phase1/test_recovery_boundaries.py` exercises six recovery boundaries
+with synthetic records, real disposable PostgreSQL transactions and inert
+provider transports. It is a required full-mode suite in
+`scripts/phase1/recovery_checks.py`. Its assertions are current regression
+contracts; a dated failure or pass does not describe the current checkout.
 
-## Safe execution
+## Run through the isolated harness
 
-Use the existing phase1 backend environment, **serially**, after the lead has
-prepared a disposable PostgreSQL schema. This script does not migrate, bootstrap,
-start workers, install dependencies, contact live IACS, or invoke Docker. It
-truncates its explicit synthetic table set with cascades before each test; it is
-not suitable for a shared test database or production data.
+Follow [the validation guide](phase1.md) for dependency preparation, execution and
+evidence. A full run includes these diagnostics automatically; `--diagnostic`
+adds other reviewed suites rather than replacing the mandatory checks.
 
-Collection refuses before IACS imports unless all of these hold:
-
-- Linux has only the loopback network interface and no Docker socket.
-- Source snapshot contains no root `.env`, `data`, or `logs`; cwd has no `.env`.
-- `IACS_RECOVERY_PROBES=synthetic-only` and `IACS_ENVIRONMENT=testing`.
-- `IACS_AUTO_CREATE_SCHEMA=false`, `IACS_SEED_DEMO_DATA=false`.
-- DB URL is the existing phase1 synthetic principal/password at
-  `127.0.0.1:5432`, with database name beginning `iacs_p1_` or `iacs_recovery_`.
-- Auth root is exactly the phase1 synthetic root. Integration credential
-  environment variables are absent/empty. The disposable DB has no persisted
-  runtime settings.
-
-The test fixture then rejects every socket except that PostgreSQL endpoint and
-rejects real HTTP transports. HTTP tests use only `MockTransport` or
-`ASGITransport`. Event publication, optional traces/memory, and command/message
-provider sinks are inert. The database name is verified before truncation. No
-production credentials, payloads, identities, settings or logs are fixture input.
-
-Inside that prepared environment, from the snapshot repository root:
-
-```bash
-IACS_RECOVERY_PROBES=synthetic-only PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=backend \
-  python -m pytest -q -p no:cacheprovider scripts/phase1/test_recovery_boundaries.py
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/phase1/validate.py \
+  --mode full --reuse-dependencies /absolute/path/to/trusted-prior-evidence-run \
+  --evidence-root /private/tmp/iacs-validation-evidence
 ```
 
-Use `-k probe_01` through `-k probe_06` for bounded diagnosis. Do not use xdist or
-parallel execution against one DB. Keep original test output, exit status,
-runtime/lock identity and source hashes. Add both new source and JSON fixture to
-the existing harness snapshot manifest while untracked. Do not run
-`scripts/backend-pytest` or the full Docker harness merely to execute this file.
+The harness runs PostgreSQL suites serially with a separate migrated database
+clone and Redis database per file. This diagnostic also truncates its explicit
+table set with `CASCADE` before each test. Never run it against a shared test
+database or production, or run its tests concurrently against one database.
 
-## What each probe establishes
+Collection fails before IACS imports unless the Linux namespace has only loopback,
+no Docker socket or copied runtime files, synthetic test credentials, disabled
+schema bootstrap/demo seeding and the isolated PostgreSQL database identity. The
+fixture rejects persisted runtime settings, unmocked HTTP transports and sockets
+other than its PostgreSQL connection. It stubs event publication, optional
+telemetry/memory and command/message transports. It does not start the application
+lifespan or workers, invoke production endpoints or send hardware commands.
 
-| Probe | Real boundary | Inert substitutions | Intended assertion / supporting cases |
-|---|---|---|---|
-| 01 | Gate adapter → coordinator → PostgreSQL command ledger | Device-owner results | Target order cannot manufacture aggregate physical verification; partial acceptance remains reconcilable. All-verified/all-rejected controls. No selected-target product policy is assumed. |
-| 02 | HA HTTP request/error translation → HA provider → device failover | HTTP MockTransport; fallback command sink; immediate synthetic verification result | A POST accepted before response loss cannot be sent again through fallback. Successful POST plus failed state read remains accepted/unverified. Definitely-unsent connection failure retains configured fallback. This injects delivery ambiguity; it does not measure network performance. |
-| 03 | Coordinator → real PostgreSQL lease → fresh coordinator/reconciler | Gate sink held after simulated acceptance by asyncio events | Expiry must not repeat one intent. Retry-before-reconciler and reconciler-before-retry expose ordering dependence. Completed duplicate identity is a positive control. |
-| 04 | Persisted rule → real recognition event bridge → rule selection/action loop/registered WhatsApp action | Audited command-owner/provider sinks and WhatsApp delivery sink | Unknown denied input cannot actuate either gate or garage, regardless of action order; safe messaging still executes. Known authorized, historical skip flags and dry-run controls. Seeded existing rules ensure configuration rejection cannot conceal an execution bypass. |
-| 05 | Actual HTTP confirm route → real session/pending JSON reads/writes → catalogue/schema/definitive tool execution | Current synthetic actor dependency, registered tool's inert handler, optional memory and provider | Concurrent confirmation invokes the stored action once; preview and sequential replay controls. A barrier schedules both real reads before clear; no fake pending store or same-widget guard supplies atomicity. |
-| 06 | Restart presence wrapper → latest-event query; registered Alfred historical handler → real event/presence/audit writes | Synthetic historical candidate instead of Protect acquisition | Failed/pending grants cannot become committed presence; stale Alfred history cannot rewind newer presence. Newer historical repair remains a control and requests no actuation/replayed notification. |
+## What the probes establish
 
-All tests use bounded watchdogs; race ordering uses events/barriers, not sleeps.
-The original task is always released and joined even when a lease assertion
-fails. Fresh session factories remain the application's real factories.
+| Probe | Boundary and assertion |
+| --- | --- |
+| `probe_01` | Adapter, coordinator and command ledger preserve each selected target receipt. Aggregate verification is independent of target order; partial/uncertain delivery stays truthful and replay does not issue another command. |
+| `probe_02` | Home Assistant response loss or failed post-command state reads cannot trigger fallback after possible transmission. A definitely unsent connection failure retains configured fallback. |
+| `probe_03` | An expired command lease cannot execute the same intent again, regardless of whether retry or reconciliation happens first. Completed duplicates also remain inert. |
+| `probe_04` | Persisted recognition-triggered rules retain the originating authorization. Unknown denied input cannot actuate gates or garages in either action order, while safe messaging remains possible. Authorized, historical and dry-run controls constrain the result. |
+| `probe_05` | Concurrent calls through the real Alfred V3 confirmation route claim one persisted approval and execute it once. Preview and sequential replay are inert. |
+| `probe_06` | Historical admission does not promote an incomplete/failed gate grant or overwrite newer committed presence. Alfred historical repair preserves ordering and suppresses hardware, automation and notification actions. |
 
-Probe 05 characterizes current API actor binding and the approval race, not a
-complete authentication or WebSocket security audit. Its dependency override
-loads an actual synthetic current User per request but deliberately avoids token
-issuance. Optional chat memory is excluded to avoid unrelated background tasks.
-After replacing pending storage, port its scheduling seam to the new claim
-boundary while retaining the two concurrent real requests and one-effect
-assertion; do not preserve the old private helper just for this test.
+The fixture scenarios live in
+`scripts/phase1/fixtures/recovery_boundaries/scenarios.json`. Owner implementations
+are mapped in [the backend guide](../agent/backend.md); hardware policy is in
+[the hardware guide](../agent/hardware-safety.md).
 
-Probe 06 isolates historical write policy from recognition evidence quality.
-It does not choose visitor consumption, equal-time ordering, maximum live-event
-age, or physical-passage policy. The multi-target probe does not choose which
-subset of gates admission should require: it only rejects a misleading global
-physical-success assertion and loss of accepted partial work.
+## Interpret results
 
-## Result recording
+Retain the run manifest, exact commands, source/lock identities, JUnit XML and
+logs. A failure is a failed contract; do not hide it with `xfail`, expected-failure
+inversion or baseline acceptance. Distinguish a failed safety assertion from
+collection, fixture, migration or dependency failure before diagnosing a hazard.
+Use the probe names to locate bounded failures in the retained suite output.
 
-The lead executed the captured diagnostic source in the isolated full run
-`/private/tmp/iacs-recovery-7ggriel9/evidence/iacs-phase1-j23gc90q` on 12 September
-2026. Its `diagnostic-1.log` and `diagnostic-1.xml` record **14 failed, 18 passed in
-9.16 seconds**. Every failure reached the intended invariant assertion; there
-were no collection or fixture failures. This is a red diagnostic baseline, not
-a passing release gate.
-
-| Probe | Failing invariants | Supporting passes |
-|---|---:|---:|
-| 01 multi-target result | 3 | 3 |
-| 02 HA response loss | 1 | 2 |
-| 03 expired lease/reconciler order | 1 | 2 |
-| 04 recognition-to-automation authority | 4 | 9 |
-| 05 concurrent V3 approval | 1 | 1 |
-| 06 historical presence | 4 | 1 |
-
-Lease expiry used actual persisted timestamps and `clock_timestamp()` in a
-fresh transaction. Approval expiry came from the actual pending-action store.
-The fixed fixture date was used only for synthetic observation/history ordering,
-not lease or approval timing. A separate host-side syntax/JSON/guard check also
-confirmed that collection without the explicit opt-in refuses before any IACS
-module import. No dependencies were installed by the diagnostic author.
-
-Infrastructure/fixture failures in future runs must be corrected or reported as
-blocked before claiming an observed architectural hazard. Supporting controls
-must pass before interpreting each hazard failure. No application repair,
-schema change, live test, deployment, commit or push is part of these files.
+These synthetic checks establish software behavior under injected outcomes.
+They do not establish production deployment status, provider reliability, physical
+vehicle passage, live backup/restore readiness or permission for live testing.

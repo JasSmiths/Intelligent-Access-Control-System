@@ -12,7 +12,7 @@ import React from "react";
 
 import { api, isAbortError } from "../api/client";
 import { formatDate, movementSagaDisplay, titleCase } from "../lib/format";
-import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState, Toolbar } from "../ui/primitives";
 import { useModalFocus } from "../ui/useModalFocus";
 import type { BadgeTone } from "../ui/primitives";
 import { useHistoryPage } from "./useHistoryPage";
@@ -229,7 +229,7 @@ export function MovementsView({ refreshToken, resetToken, targetId }: { refreshT
       </div>
 
       {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
-      {history.error ? <div className="callout danger" role="alert"><AlertTriangle size={16} /> Movements unavailable: {history.error}</div> : null}
+      {history.error ? <ErrorState title="Movements unavailable" description={history.error} onRetry={history.refresh} retrying={history.loading} /> : null}
       {selected && !visibleMovements.some((item) => item.id === selected.id) ? <div className="callout">Showing the selected movement from outside this page.</div> : null}
 
       <div className="movement-layout">
@@ -297,8 +297,8 @@ export function MovementsView({ refreshToken, resetToken, targetId }: { refreshT
               </div>
             </div>
           ) : null}
-          {history.loading ? <div className="loading-panel">Loading movements…</div> : null}
-          {!history.loading && !history.error && !visibleMovements.length ? <EmptyState icon={Clock3} label={query || from || to || filter !== "all" ? "No movements match these filters." : "No movements recorded yet."} /> : null}
+          {history.loading ? <LoadingState label="Loading movements…" compact={visibleMovements.length > 0} /> : null}
+          {!history.loading && !history.error && !visibleMovements.length ? <EmptyState icon={Clock3} label={query || from || to || filter !== "all" ? "No movements match these filters." : "No movements recorded yet."} description={query || from || to || filter !== "all" ? "Try a wider date range or clear the filters to see more activity." : "Movement decisions and command outcomes will appear here as vehicles arrive and leave."} /> : null}
         </div>
 
         <MovementDetail
@@ -337,7 +337,7 @@ function MovementDetail({
   if (!movement) {
     return (
       <aside className="movement-detail-panel movement-detail-empty">
-        <EmptyState icon={MoveHorizontal} label="Select a movement." />
+        <EmptyState icon={MoveHorizontal} label="Select a movement." description="Choose a plate to inspect its access decision, evidence, and command history." />
       </aside>
     );
   }

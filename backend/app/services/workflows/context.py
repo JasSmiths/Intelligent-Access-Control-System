@@ -4,15 +4,24 @@ import re
 from typing import Any
 
 AT_TOKEN_PATTERN = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)")
+AT_TOKEN_TRAILING_SPACE_PATTERN = re.compile(r"(@[A-Za-z][A-Za-z0-9_]*)[ \t]+(?=[,.;:!?])")
 
 
 def canonical_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
+def normalize_template_token_spacing(template: str) -> str:
+    """Remove a token's editor-added separator before punctuation."""
+    return AT_TOKEN_TRAILING_SPACE_PATTERN.sub(r"\1", template)
+
+
 def render_template(template: str, variables: dict[str, str]) -> str:
     by_canonical = {canonical_key(key): value for key, value in variables.items()}
-    return AT_TOKEN_PATTERN.sub(lambda match: by_canonical.get(canonical_key(match.group(1)), ""), template).strip()
+    return AT_TOKEN_PATTERN.sub(
+        lambda match: by_canonical.get(canonical_key(match.group(1)), ""),
+        normalize_template_token_spacing(template),
+    ).strip()
 
 
 def referenced_variable_names(value: Any) -> set[str]:

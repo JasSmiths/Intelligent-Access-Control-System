@@ -112,7 +112,7 @@ export function useRealtimeConnection({ sessionKey, onMessage, onRefresh, onStat
       clearProbeTimer();
       setRealtimeStatus(
         "live",
-        message.type === "connection.pong" ? "Stream verified just now" : "Server accepted stream"
+        message.type === "connection.pong" ? "Just Now" : "Server accepted stream"
       );
       if (firstVerificationForSocket) {
         if (hasVerifiedSocket || refreshOnVerification) {

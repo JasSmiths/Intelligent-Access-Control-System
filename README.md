@@ -1,12 +1,16 @@
 # Intelligent Access Control System
 
-AI-ready access control and presence system with modular LPR/gate integrations,
-Home Assistant support, Apprise notifications, multi-provider LLM tooling, and
-a realtime React dashboard.
+IACS turns license-plate reads into durable access and movement decisions,
+presence, alerts, and audited gate/garage operations. It includes Home Assistant
+and UniFi Protect integrations, notification workflows, Alfred conversational
+operations, and a realtime React console.
 
-Future AI agents should read [AGENTS.md](AGENTS.md) before making changes.
+Use the [documentation index](docs/README.md) for current guides and
+[AGENTS.md](AGENTS.md) for repository-specific agent instructions.
 
-## Run
+## Development setup
+
+For a new local development instance:
 
 ```bash
 cp .env.example .env
@@ -14,147 +18,77 @@ mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backen
 docker compose up --build
 ```
 
-On first development start, the backend creates `data/backend/auth-secret.key`
-with a random root secret. This key signs sessions and encrypts dynamic
-secrets. Keep it backed up, do not commit it, and use Settings -> Auth to rotate
-it. Production/non-development environments must provide either that file or a
-non-default `IACS_AUTH_SECRET_KEY` before startup.
+Review the example configuration before starting. Normal startup runs migrations
+when `IACS_AUTO_CREATE_SCHEMA=true` and starts background integrations. An existing
+installation's Compose stack is operational infrastructure; deployment and
+production migration are separate authorized tasks. Use the isolated harness
+below for regression work.
 
-Backend health endpoints:
+| Service | Default host address | Container port |
+| --- | --- | --- |
+| React console / API proxy | `http://localhost:8089` | 80 |
+| Backend API | `http://localhost:8088/api/v1` | 8000 |
+| PostgreSQL | `127.0.0.1:5432` | 5432 |
+| Redis | `127.0.0.1:6379` | 6379 |
 
-- `GET http://localhost:8088/`
-- `GET http://localhost:8088/health`
-- `GET http://localhost:8088/api/v1/health`
+Ports are configured in `.env`; Compose uses host bind mounts only. The backend
+mounts `backend/app` read-only at `/app/app` and the repository at `/workspace`
+for workspace log inspection. Frontend assets are built into its image, so UI
+source edits require a new frontend build to appear in Compose.
 
-Frontend app:
+On first development start, the backend generates `data/backend/auth-secret.key`.
+It signs sessions and protects stored dynamic secrets. Back it up, keep it out of
+Git, and use Settings → Auth for supported rotation. Non-development startup
+requires an existing secret file or a non-default `IACS_AUTH_SECRET_KEY`.
+Complete the first-run Admin setup through the console.
 
-- `http://localhost:8089`
-- LAN: `http://<host-ip>:8089`
-- NPM target: `http://<docker-host-ip>:8089`
+For Nginx Proxy Manager, target `http://<docker-host-ip>:8089`, enable WebSocket
+support, and retain forwarded headers. The frontend proxies `/api/*` and
+WebSocket upgrades to the backend. Use `/api/v1` for application integrations.
+Backend port `8088` is available for direct API debugging.
 
-The backend container listens on port `8000` internally, while the host-facing
-port defaults to `8088` to avoid common conflicts. Change `BACKEND_PORT` in
-`.env` if needed. The service binds to `0.0.0.0`, so it is reachable on the LAN
-at `http://<host-ip>:8088`.
-
-For Nginx Proxy Manager, proxy to `http://<docker-host-ip>:8089`, enable
-WebSocket support, and keep the standard forwarded headers enabled. The
-frontend Nginx service serves the React app and proxies `/api/*` plus WebSocket
-upgrades to the backend container. Use backend port `8088` only for API-only
-debugging.
-
-## Tests
-
-Use the isolated regression harness for development and architectural changes.
-It snapshots the current source and runs against disposable resources without
-production credentials, data or provider access:
-
-```bash
-python3 scripts/phase1/validate.py
-```
-
-See [isolated validation](docs/validation/phase1.md) for source inclusion,
-focused checks, dependency reuse and retained evidence. The full harness includes
-backend/persistence tests and the locked frontend tests/build. The older
-`scripts/backend-pytest` wrapper may select the running Compose backend and must
-not be used for an isolated regression run.
-
-Schema changes are managed through Alembic. Normal Compose startup runs
-`alembic upgrade head` when `IACS_AUTO_CREATE_SCHEMA=true`. The old runtime
-bootstrap compatibility path has been removed. Test migrations only in disposable
-databases; production migration and deployment require a separate instruction.
-
-The application does not update dependencies or UniFi Protect packages at runtime.
-Use the repository's reviewed build and release workflow. Release notes for the
-retirement migration, retained disk files, and rollback limit are in
-[the updater retirement note](docs/releases/remove-dependency-updaters.md).
-
-## Architecture Shape
-
-- `backend/app/core`: configuration, logging, lifecycle wiring.
-- `backend/app/api`: HTTP and WebSocket API routers.
-- `backend/app/modules`: swappable hardware and service integrations.
-- `backend/app/services`: core orchestration services that depend on module interfaces.
-- `backend/app/db`: SQLAlchemy session and migration-ready database wiring.
-- `backend/app/workers`: reserved package; current background services start from the FastAPI lifespan.
-- `backend/app/simulation`: scenario tests and synthetic event injection. Arrival
-  and misread endpoints enter the access pipeline and can actuate hardware;
-  synthetic input alone does not make a call hardware-free. Use isolated fixtures.
-- `backend/app/ai`: Alfred tool registry, domain tool groups, and provider boundaries.
-
-Docker storage uses host bind mounts only. No Docker named volumes are declared.
-The backend mounts the repository at `/workspace` for telemetry's read-only
-workspace log inspection. Dependency updates are performed through the reviewed
-repository build and release process, not from the running application.
-
-## Access API
-
-- `POST /api/v1/webhooks/ubiquiti/lpr`
-- `POST /api/v1/simulation/arrival/{registration_number}`
-- `POST /api/v1/simulation/misread-sequence/{registration_number}`
-- `POST /api/v1/simulation/e2e/full-access-flow` (retired; returns HTTP 410, full-flow scenarios run only through isolated tests)
-- `GET /api/v1/events`
-- `GET /api/v1/alerts`
-- `PATCH /api/v1/alerts/action`
-- `GET /api/v1/alerts/{alert_id}/snapshot`
-- `GET /api/v1/presence`
-- `GET /api/v1/access/movements`
-- `GET /api/v1/access/gate-commands`
-- `WS /api/v1/realtime/ws`
-
-See [docs/phase-2.md](docs/phase-2.md)
-for the current data model and movement-session behavior.
-
-## Phase 3 Integrations
-
-- `GET /api/v1/integrations/home-assistant/status`
-- `POST /api/v1/integrations/gate/open`
-- `POST /api/v1/integrations/announcements/say`
-- `POST /api/v1/integrations/notifications/test`
-
-See the [backend integration owners](docs/agent/backend.md)
-for Home Assistant, TTS, presence sync, and notification implementation guidance.
-
-## Alfred V3
-
-- `GET /api/v1/ai/providers`
-- `GET /api/v1/ai/tools`
-- `POST /api/v1/ai/chat`
-- `WS /api/v1/ai/chat/ws`
-
-See [Alfred V3 ownership](docs/agent/backend.md#alfred-v3)
-for provider contracts, agent tools, and conversational memory guidance.
-The [architecture recovery guide](docs/architecture.md) defines extension and
-retirement rules; [isolated validation](docs/validation/phase1.md) verifies changes
-without using the production stack.
-
-## Smoke Checks
-
-Anonymous:
+Anonymous read-only checks:
 
 ```bash
 curl -fsS http://localhost:8089/api/v1/health
 curl -fsS http://localhost:8089/api/v1/auth/status
 ```
 
-Dashboard routes such as `/api/v1/maintenance/status`, `/api/v1/leaderboard`,
-`/api/v1/presence`, and `/api/v1/events` require an authenticated Admin session
-after first-run setup.
+Operational data and mutations use authenticated routes. Gate commands,
+announcements, notification sends/tests, and other privileged actions require
+Admin confirmation and durable audit. Simulation arrival/misread endpoints can
+actuate hardware; use isolated fixtures for tests. See
+[hardware safety](docs/agent/hardware-safety.md) before live integration work.
 
-## Phase 5 Frontend
+## Development and validation
 
-The frontend is served by the `frontend` Docker service on port `8089` and
-proxies API/WebSocket traffic to the backend.
+Backend entrypoints and owners are in the [backend guide](docs/agent/backend.md);
+routes, typed clients, and styling are in the [frontend guide](docs/agent/frontend.md).
+Use [architecture](docs/architecture.md) when changing service boundaries or
+retiring features. API routing is defined in `backend/app/api/router.py` and
+`backend/app/api/v1/`; frontend contracts live in `frontend/src/api/`.
 
-See [docs/phase-5.md](docs/phase-5.md)
-for UI routes, NPM setup, and verification notes.
+The [isolated harness](docs/validation/phase1.md) snapshots working-tree source,
+including new first-party files, and uses disposable resources without production
+credentials or provider access. Its full mode includes backend and frontend
+checks, migrations, persistence, recovery diagnostics, and database restore:
 
-## Agent guide
+```bash
+docker build --target development -t iacs-validation-tooling:local backend
+PHASE1_BACKEND_IMAGE=iacs-validation-tooling:local \
+  python3 scripts/phase1/validate.py --mode full --allow-downloads \
+  --evidence-root /private/tmp/iacs-validation-evidence
+```
 
-Future implementation work should start with
-[AGENTS.md](AGENTS.md), which
-documents the architecture, modular I/O rules, API surface, UI design language,
-reverse-proxy expectations, and safe extension points for future AI agents.
+The build prepares Python/uv tooling without starting application services; the
+explicit tag avoids depending on the local Compose project name. This permits
+image downloads and exact-lock dependency installation. Use
+`--reuse-dependencies /absolute/path/to/prior-run` instead when a matching trusted
+preparation exists. Source-only checks use `--mode snapshot`; they do not validate
+application behavior. The `scripts/backend-pytest` wrapper can select the running
+Compose backend and is unsuitable for isolated regression.
 
-Historical milestone evidence remains in [docs/validation](docs/validation/); use
-[AGENTS.md](AGENTS.md) and the focused guides for current instructions.
+Schema changes use Alembic; there is no runtime compatibility schema bootstrap.
+The application also does not update its own dependencies or UniFi packages.
+The [updater retirement note](docs/releases/remove-dependency-updaters.md) retains
+migration and rollback constraints.

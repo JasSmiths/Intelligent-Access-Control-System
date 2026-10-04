@@ -25,7 +25,11 @@ it("uses bounded, deduplicated recent events and treats denials separately from 
 
 it("supports keyboard inspection, reset, changing time windows, and opening events", () => {
   const onOpenEvents = vi.fn();
-  render(<AccessPulse now={now} events={[event("RECENT", 2), event("EARLIER", 120)]} onOpenEvents={onOpenEvents} />);
+  render(<AccessPulse now={now} events={[event("RECENT", 2), event("EARLIER", 120), event("OLDER", 600), event("OUTSIDE", 721)]} onOpenEvents={onOpenEvents} />);
+  expect(screen.getByRole("button", { name: "6h" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", { name: "1h" })).toBeNull();
+  expect(screen.getByLabelText("Time window event counts").textContent).toContain("2Entry");
+  expect(screen.getByText("30-min slices")).toBeTruthy();
   const timeline = screen.getByRole("group", { name: /activity timeline/ });
   const slices = within(timeline).getAllByRole("button");
   slices[0].focus();
@@ -36,6 +40,13 @@ it("supports keyboard inspection, reset, changing time windows, and opening even
   expect(screen.getByLabelText("Selected slice event counts").textContent).toContain("1Entry");
   fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   expect(slices[11].getAttribute("aria-pressed")).toBe("false");
+  fireEvent.keyDown(slices[11], { key: "Enter" });
+  fireEvent.click(screen.getByRole("button", { name: "12h" }));
+  expect(slices[11].getAttribute("aria-pressed")).toBe("false");
+  expect(screen.getByRole("button", { name: "12h" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("group", { name: "12-hour activity timeline; select a time slice" })).toBeTruthy();
+  expect(screen.getByLabelText("Time window event counts").textContent).toContain("3Entry");
+  expect(screen.getByText("60-min slices")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "6h" }));
   expect(screen.getByLabelText("Time window event counts").textContent).toContain("2Entry");
   fireEvent.click(screen.getByRole("button", { name: "Events" }));

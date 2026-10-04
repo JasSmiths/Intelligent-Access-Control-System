@@ -1,5 +1,6 @@
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 Activity,
@@ -37,7 +38,7 @@ import { createPortal } from "react-dom";
 
 import { api, createActionConfirmation, isAbortError } from "../api/client";
 import { formatDate, fromDateTimeLocal, isRecord, levelTone, matches, numberPayload, scheduleDays, stringPayload, titleCase, toDateTimeLocal } from "../lib/format";
-import { EmptyState } from "../ui/primitives";
+import { EmptyState, ErrorState, LoadingState } from "../ui/primitives";
 import type { AuditLog, RealtimeMessage } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
 
@@ -102,13 +103,13 @@ export type VisitorPassLogEntry = AuditLog & {
   actor_user_label: string | null;
 };
 
-export const visitorPassStatuses: VisitorPassStatus[] = ["active", "scheduled", "used", "expired", "cancelled"];
+const visitorPassStatuses: VisitorPassStatus[] = ["active", "scheduled", "used", "expired", "cancelled"];
 
-export const visitorPassTypes: VisitorPassType[] = ["one-time", "duration"];
+const visitorPassTypes: VisitorPassType[] = ["one-time", "duration"];
 
-export const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "scheduled"]);
+const defaultVisitorPassFilters = new Set<VisitorPassStatus>(["active", "scheduled"]);
 
-export const visitorPassWindowOptions = [30, 60, 90, 120, 180];
+const visitorPassWindowOptions = [30, 60, 90, 120, 180];
 
 function usePrefersReducedMotion() {
   const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(() =>
@@ -276,7 +277,6 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
         confirmation_token: confirmation.confirmation_token
       });
       setPasses((current) => current.filter((item) => item.id !== visitorPass.id));
-      setDetailPass(null);
       await loadPasses();
       return true;
     } catch (deleteError) {
@@ -312,18 +312,16 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
 
       <div className="passes-toolbar card">
         <PassFilterBar counts={counts} filters={filters} onChange={setFilters} />
-        <button className="secondary-button" onClick={() => loadPasses()} type="button">
+        <button className="secondary-button" onClick={() => loadPasses()} disabled={loading} type="button">
           <RefreshCw size={15} /> Refresh
         </button>
       </div>
 
-      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {error ? <ErrorState title="Visitor passes need attention" description={error} onRetry={() => void loadPasses()} retrying={loading} /> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       {loading ? (
-        <div className="card passes-loading">
-          <Loader2 className="spin" size={18} /> Loading Visitor Passes
-        </div>
+        <LoadingState label="Loading Visitor Passes" />
       ) : visiblePasses.length ? (
         <div className="visitor-pass-grid">
           <>
@@ -336,11 +334,11 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
             ))}
           </>
         </div>
-      ) : (
+      ) : !error ? (
         <div className="card passes-empty-card">
-          <EmptyState icon={ClipboardPaste} label="No Visitor Passes match this view" />
+          <EmptyState icon={ClipboardPaste} label="No Visitor Passes match this view" description="Change the search or status filters to find a pass, or prepare a new visitor's arrival." action={<button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create visitor pass</button>} />
         </div>
-      )}
+      ) : null}
 
       {modalOpen ? (
         <VisitorPassModal
@@ -373,7 +371,7 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
   );
 }
 
-export function PassFilterBar({
+function PassFilterBar({
   filters,
   counts,
   onChange
@@ -413,7 +411,7 @@ export function PassFilterBar({
   );
 }
 
-export function VisitorPassCard({
+function VisitorPassCard({
   visitorPass,
   onOpen
 }: {
@@ -494,7 +492,7 @@ export function VisitorPassCard({
   );
 }
 
-export function VisitorPassStatusPill({
+function VisitorPassStatusPill({
   status,
   visitorPass,
   showIcon = true
@@ -506,14 +504,14 @@ export function VisitorPassStatusPill({
   const Icon = status === "scheduled" || status === "active" ? Clock3 : status === "used" ? CheckCircle2 : status === "cancelled" ? X : CircleDot;
   const tone = visitorPass ? visitorPassStatusPillTone(visitorPass) : visitorPassBaseStatusTone(status);
   return (
-    <span className={`visitor-pass-status-pill ${status} tone-${tone}`}>
+    <span className={`visitor-pass-status-pill tone-${tone}`}>
       {showIcon ? <Icon size={18} /> : null}
       <span className="visitor-pass-status-label">{titleCase(status)}</span>
     </span>
   );
 }
 
-export function VisitorPassAvatar({ visitorPass }: { visitorPass: VisitorPass }) {
+function VisitorPassAvatar({ visitorPass }: { visitorPass: VisitorPass }) {
   const initials = visitorPassInitials(visitorPass.visitor_name);
   return (
     <span className="visitor-pass-avatar" aria-hidden="true">
@@ -522,7 +520,7 @@ export function VisitorPassAvatar({ visitorPass }: { visitorPass: VisitorPass })
   );
 }
 
-export function VisitorPassDetailTile({
+function VisitorPassDetailTile({
   icon: Icon,
   tone,
   label,
@@ -549,7 +547,7 @@ export function VisitorPassDetailTile({
   );
 }
 
-export function WhatsAppIcon({ size = 24, ...props }: React.SVGProps<SVGSVGElement> & { size?: number | string }) {
+function WhatsAppIcon({ size = 24, ...props }: React.SVGProps<SVGSVGElement> & { size?: number | string }) {
   return (
     <svg
       aria-hidden="true"
@@ -569,7 +567,7 @@ export function WhatsAppIcon({ size = 24, ...props }: React.SVGProps<SVGSVGEleme
   );
 }
 
-export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass }) {
+function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass }) {
   const state = visitorPassMoreInfoState(visitorPass);
   const tooltip = visitorPassWhatsAppStatusTooltip(visitorPass);
   const tooltipId = React.useId();
@@ -642,11 +640,11 @@ export function VisitorPassMoreInfo({ visitorPass }: { visitorPass: VisitorPass 
   );
 }
 
-export function VisitorPassDetailsModal({
+function VisitorPassDetailsModal({
   visitorPass,
   latestRealtime,
-  onClose,
-  onEdit,
+  onClose: finishClose,
+  onEdit: finishEdit,
   onCancel,
   onDelete,
   onUpdated
@@ -660,7 +658,8 @@ export function VisitorPassDetailsModal({
   onUpdated: (visitorPass: VisitorPass) => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLDivElement>(null);
-  useModalFocus(modalRef, true, () => { onClose(); });
+  const onClose = useModalClose(modalRef, finishClose);
+  const onEdit = useModalClose(modalRef, finishEdit);
   const [activeTab, setActiveTab] = React.useState<"details" | "whatsapp" | "log">("details");
   const [messages, setMessages] = React.useState<VisitorPassWhatsAppMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = React.useState(false);
@@ -677,6 +676,9 @@ export function VisitorPassDetailsModal({
   const [visitorUnblockError, setVisitorUnblockError] = React.useState("");
   const [action, setAction] = React.useState<"cancel" | "delete" | null>(null);
   const [confirmAction, setConfirmAction] = React.useState<"cancel" | "delete" | null>(null);
+  const confirmationModalRef = React.useRef<HTMLDivElement>(null);
+  const closeConfirmation = useModalClose(confirmationModalRef, () => setConfirmAction(null));
+  useModalFocus(modalRef, true, () => { if (action === null) onClose(); });
   const threadRef = React.useRef<HTMLDivElement | null>(null);
   const latestMessageCountRef = React.useRef(0);
   const shouldStickToLatestRef = React.useRef(true);
@@ -865,12 +867,12 @@ export function VisitorPassDetailsModal({
   }, []);
 
   const confirmVisitorPassAction = async () => {
-    if (!confirmAction) return;
+    if (!confirmAction || action !== null) return;
     setAction(confirmAction);
     try {
       if (confirmAction === "cancel") {
         await onCancel(visitorPass);
-        setConfirmAction(null);
+        await closeConfirmation();
         return;
       }
       const deleted = await onDelete(visitorPass);
@@ -878,6 +880,8 @@ export function VisitorPassDetailsModal({
         setAction(null);
         return;
       }
+      await closeConfirmation();
+      await onClose();
     } finally {
       if (confirmAction === "cancel") setAction(null);
     }
@@ -1115,6 +1119,7 @@ export function VisitorPassDetailsModal({
         <VisitorPassActionConfirmModal
           action={confirmAction}
           loading={action === confirmAction}
+          modalRef={confirmationModalRef}
           onCancel={() => setConfirmAction(null)}
           onConfirm={confirmVisitorPassAction}
           visitorPass={visitorPass}
@@ -1124,7 +1129,7 @@ export function VisitorPassDetailsModal({
   );
 }
 
-export function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWhatsAppMessage }) {
+function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWhatsAppMessage }) {
   const outbound = message.direction === "outbound";
   if (message.direction === "status") {
     return (
@@ -1157,20 +1162,24 @@ export function VisitorPassWhatsAppBubble({ message }: { message: VisitorPassWha
   );
 }
 
-export function VisitorPassActionConfirmModal({
+function VisitorPassActionConfirmModal({
   action,
   visitorPass,
   loading,
-  onCancel,
+  modalRef: providedRef,
+  onCancel: finishCancel,
   onConfirm
 }: {
   action: "cancel" | "delete";
   visitorPass: VisitorPass;
   loading: boolean;
+  modalRef?: React.RefObject<HTMLDivElement | null>;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const modalRef = React.useRef<HTMLDivElement>(null);
+  const localRef = React.useRef<HTMLDivElement>(null);
+  const modalRef = providedRef ?? localRef;
+  const onCancel = useModalClose(modalRef, finishCancel);
   useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
   const isDelete = action === "delete";
   return createPortal(
@@ -1208,7 +1217,7 @@ export function VisitorPassActionConfirmModal({
   );
 }
 
-export function VisitorPassLogTimeline({ logs, visitorPass }: { logs: VisitorPassLogEntry[]; visitorPass: VisitorPass }) {
+function VisitorPassLogTimeline({ logs, visitorPass }: { logs: VisitorPassLogEntry[]; visitorPass: VisitorPass }) {
   return (
     <div className="visitor-pass-log-list">
       {logs.map((log) => {
@@ -1245,11 +1254,11 @@ export function VisitorPassLogTimeline({ logs, visitorPass }: { logs: VisitorPas
   );
 }
 
-export function VisitorPassModal({
+function VisitorPassModal({
   mode,
   visitorPass,
-  onClose,
-  onSaved
+  onClose: finishClose,
+  onSaved: finishSaved
 }: {
   mode: "create" | "edit";
   visitorPass: VisitorPass | null;
@@ -1257,6 +1266,8 @@ export function VisitorPassModal({
   onSaved: () => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onSaved = useModalClose(modalRef, finishSaved);
   const [visitorName, setVisitorName] = React.useState(visitorPass?.visitor_name ?? "");
   const [passType, setPassType] = React.useState<VisitorPassType>(visitorPass?.pass_type ?? "one-time");
   const [visitorPhone, setVisitorPhone] = React.useState(visitorPass?.visitor_phone ? `+${visitorPass.visitor_phone}` : "");
@@ -1454,7 +1465,7 @@ export function VisitorPassModal({
   );
 }
 
-export function VisitorDateTimePicker({ value, onChange }: { value: Date; onChange: (value: Date) => void }) {
+function VisitorDateTimePicker({ value, onChange }: { value: Date; onChange: (value: Date) => void }) {
   const [visibleMonth, setVisibleMonth] = React.useState(() => new Date(value.getFullYear(), value.getMonth(), 1));
   const days = visitorCalendarDays(visibleMonth);
   const selectedKey = visitorDateKey(value);
@@ -1510,7 +1521,7 @@ export function VisitorDateTimePicker({ value, onChange }: { value: Date; onChan
   );
 }
 
-export function visitorPassMatches(visitorPass: VisitorPass, query: string) {
+function visitorPassMatches(visitorPass: VisitorPass, query: string) {
   return (
     matches(visitorPass.visitor_name, query) ||
     matches(visitorPass.number_plate ?? "", query) ||
@@ -1523,11 +1534,11 @@ export function visitorPassMatches(visitorPass: VisitorPass, query: string) {
   );
 }
 
-export function visitorPassMatchesStatus(visitorPass: VisitorPass, filters: Set<VisitorPassStatus>) {
+function visitorPassMatchesStatus(visitorPass: VisitorPass, filters: Set<VisitorPassStatus>) {
   return !filters.size || filters.size === visitorPassStatuses.length || filters.has(visitorPass.status);
 }
 
-export function isVisitorPassRealtimeEvent(event: RealtimeMessage) {
+function isVisitorPassRealtimeEvent(event: RealtimeMessage) {
   return event.type.startsWith("visitor_pass.");
 }
 
@@ -1545,7 +1556,7 @@ function isVisitorPassAuditLogEvent(event: RealtimeMessage, visitorPassId: strin
   return targetId === visitorPassId || (!targetId && targetEntity === "visitorpass" && action.startsWith("visitor_pass."));
 }
 
-export function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
+function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | null {
   const candidate = event.payload.visitor_pass;
   if (!isRecord(candidate)) return null;
   const status = stringPayload(candidate.status) as VisitorPassStatus;
@@ -1589,7 +1600,7 @@ export function visitorPassFromRealtime(event: RealtimeMessage): VisitorPass | n
   };
 }
 
-export function visitorPassWhatsAppMessageFromApi(candidate: unknown): VisitorPassWhatsAppMessage {
+function visitorPassWhatsAppMessageFromApi(candidate: unknown): VisitorPassWhatsAppMessage {
   const row = isRecord(candidate) ? candidate : {};
   const direction = stringPayload(row.direction);
   const normalizedDirection = direction === "inbound" || direction === "outbound" || direction === "status" ? direction : "status";
@@ -1606,7 +1617,7 @@ export function visitorPassWhatsAppMessageFromApi(candidate: unknown): VisitorPa
   };
 }
 
-export function visitorPassWhatsAppMessagesEqual(left: VisitorPassWhatsAppMessage[], right: VisitorPassWhatsAppMessage[]) {
+function visitorPassWhatsAppMessagesEqual(left: VisitorPassWhatsAppMessage[], right: VisitorPassWhatsAppMessage[]) {
   if (left.length !== right.length) return false;
   return left.every((message, index) => {
     const other = right[index];
@@ -1618,14 +1629,14 @@ export function visitorPassWhatsAppMessagesEqual(left: VisitorPassWhatsAppMessag
   });
 }
 
-export function visitorPassWhatsAppMessagesWithMessage(messages: VisitorPassWhatsAppMessage[], message: VisitorPassWhatsAppMessage) {
+function visitorPassWhatsAppMessagesWithMessage(messages: VisitorPassWhatsAppMessage[], message: VisitorPassWhatsAppMessage) {
   const next = messages.filter((item) => item.id !== message.id);
   next.push(message);
   next.sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
   return next;
 }
 
-export function visitorPassLogsEqual(left: VisitorPassLogEntry[], right: VisitorPassLogEntry[]) {
+function visitorPassLogsEqual(left: VisitorPassLogEntry[], right: VisitorPassLogEntry[]) {
   if (left.length !== right.length) return false;
   return left.every((log, index) => {
     const other = right[index];
@@ -1647,14 +1658,14 @@ export type VisitorPassMoreInfoState = {
   spinning?: boolean;
 };
 
-export function visitorPassBaseStatusTone(status: VisitorPassStatus): VisitorPassTone {
+function visitorPassBaseStatusTone(status: VisitorPassStatus): VisitorPassTone {
   if (status === "active" || status === "used") return "green";
   if (status === "scheduled") return "blue";
   if (status === "cancelled") return "red";
   return "gray";
 }
 
-export function visitorPassStatusPillTone(visitorPass: VisitorPass): VisitorPassTone {
+function visitorPassStatusPillTone(visitorPass: VisitorPass): VisitorPassTone {
   const moreInfo = visitorPassMoreInfoState(visitorPass);
   if (!moreInfo) return visitorPassBaseStatusTone(visitorPass.status);
   if (moreInfo.tone === "red") return "red";
@@ -1664,7 +1675,7 @@ export function visitorPassStatusPillTone(visitorPass: VisitorPass): VisitorPass
   return moreInfo.tone;
 }
 
-export function visitorPassMoreInfoState(visitorPass: VisitorPass): VisitorPassMoreInfoState | null {
+function visitorPassMoreInfoState(visitorPass: VisitorPass): VisitorPassMoreInfoState | null {
   if (visitorPass.pass_type !== "duration" || !visitorPass.visitor_phone) return null;
   const status = (visitorPass.whatsapp_status || "").trim();
   const label = (visitorPass.whatsapp_status_label || "").trim();
@@ -1699,17 +1710,17 @@ export function visitorPassMoreInfoState(visitorPass: VisitorPass): VisitorPassM
   return { label: "Awaiting Visitor Reply", tone: "orange", icon: MessageCircle };
 }
 
-export function visitorPassWindowLabel(visitorPass: VisitorPass) {
+function visitorPassWindowLabel(visitorPass: VisitorPass) {
   if (visitorPass.pass_type === "duration") return "Duration";
   return visitorPass.creation_source === "icloud_calendar" ? "Calendar Sync" : `+/- ${visitorPass.window_minutes}m`;
 }
 
-export function visitorPassSourceLabel(source: string) {
+function visitorPassSourceLabel(source: string) {
   if (source === "icloud_calendar") return "iCloud Calendar";
   return titleCase(source);
 }
 
-export function visitorPassInitials(name: string) {
+function visitorPassInitials(name: string) {
   return name
     .trim()
     .split(/\s+/)
@@ -1718,14 +1729,14 @@ export function visitorPassInitials(name: string) {
     .join("");
 }
 
-export function visitorPassPassDurationLabel(visitorPass: VisitorPass) {
+function visitorPassPassDurationLabel(visitorPass: VisitorPass) {
   const start = new Date(visitorPass.window_start).getTime();
   const end = new Date(visitorPass.window_end).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
   return formatDurationSeconds(Math.round((end - start) / 1000));
 }
 
-export function visitorPassVisitDurationLabel(visitorPass: VisitorPass) {
+function visitorPassVisitDurationLabel(visitorPass: VisitorPass) {
   if (visitorPass.duration_human) return visitorPass.duration_human;
   if (visitorPass.duration_on_site_seconds !== null) return formatDurationSeconds(visitorPass.duration_on_site_seconds);
   if (visitorPass.arrival_time && visitorPass.departure_time) {
@@ -1745,7 +1756,7 @@ export function visitorPassVisitDurationLabel(visitorPass: VisitorPass) {
   return null;
 }
 
-export function formatDurationSeconds(seconds: number) {
+function formatDurationSeconds(seconds: number) {
   const normalized = Math.max(0, Math.round(seconds));
   const days = Math.floor(normalized / 86400);
   const hours = Math.floor((normalized % 86400) / 3600);
@@ -1758,12 +1769,12 @@ export function formatDurationSeconds(seconds: number) {
   return "0m";
 }
 
-export function visitorPassVehicleSummary(visitorPass: VisitorPass) {
+function visitorPassVehicleSummary(visitorPass: VisitorPass) {
   const vehicle = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ");
   return [vehicle, visitorPass.number_plate].filter(Boolean).join(" - ");
 }
 
-export function visitorPassWhatsAppDetailLabel(visitorPass: VisitorPass) {
+function visitorPassWhatsAppDetailLabel(visitorPass: VisitorPass) {
   const status = (visitorPass.whatsapp_status || "").trim().toLowerCase();
   const label = (visitorPass.whatsapp_status_label || "").trim();
   if (status === "complete" || status === "timeframe_approved" || label.toLowerCase().startsWith("complete")) {
@@ -1772,7 +1783,7 @@ export function visitorPassWhatsAppDetailLabel(visitorPass: VisitorPass) {
   return label.replace(/\s*-\s*Vehicle Registration:.*$/i, "") || "Not started";
 }
 
-export function visitorPassWhatsAppAbuseCooldown(visitorPass: VisitorPass): { until: string; reason: string } | null {
+function visitorPassWhatsAppAbuseCooldown(visitorPass: VisitorPass): { until: string; reason: string } | null {
   if (!isRecord(visitorPass.source_metadata)) return null;
   const until = stringPayload(visitorPass.source_metadata.whatsapp_abuse_muted_until);
   if (!until) return null;
@@ -1784,7 +1795,7 @@ export function visitorPassWhatsAppAbuseCooldown(visitorPass: VisitorPass): { un
   };
 }
 
-export function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: VisitorPass): {
+function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: VisitorPass): {
   title: string;
   description: string;
   tone: BadgeTone;
@@ -1900,7 +1911,7 @@ export function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: Vis
   };
 }
 
-export function visitorPassLogIcon(action: string): React.ElementType {
+function visitorPassLogIcon(action: string): React.ElementType {
   if (action === "visitor_pass.create") return UserPlus;
   if (action === "visitor_pass.vehicle_plate_update") return Car;
   if (action.includes("timeframe") || action === "visitor_pass.update") return Clock3;
@@ -1910,7 +1921,7 @@ export function visitorPassLogIcon(action: string): React.ElementType {
   return ClipboardPaste;
 }
 
-export function visitorPassLogActor(log: VisitorPassLogEntry) {
+function visitorPassLogActor(log: VisitorPassLogEntry) {
   const actor = log.actor_user_label || log.actor || "IACS";
   if (log.actor === "Alfred_AI") return `${log.actor_user_label || "Jason"} via Alfred`;
   if (log.actor === "Visitor Concierge" || log.action === "visitor_pass.timeframe_change_requested") return "Visitor via WhatsApp";
@@ -1922,7 +1933,7 @@ export function visitorPassLogActor(log: VisitorPassLogEntry) {
   return `${actor} in UI`;
 }
 
-export function visitorPassLogChangedFields(oldValue: Record<string, unknown>, newValue: Record<string, unknown>) {
+function visitorPassLogChangedFields(oldValue: Record<string, unknown>, newValue: Record<string, unknown>) {
   const labels: Record<string, string> = {
     expected_time: "Expected Time",
     window_minutes: "Window",
@@ -1943,7 +1954,7 @@ export function visitorPassLogChangedFields(oldValue: Record<string, unknown>, n
   });
 }
 
-export function visitorPassLogFieldValue(key: string, value: unknown) {
+function visitorPassLogFieldValue(key: string, value: unknown) {
   const text = stringPayload(value);
   if (text && ["expected_time", "valid_from", "valid_until", "arrival_time", "departure_time"].includes(key)) {
     return formatDate(text);
@@ -1954,14 +1965,14 @@ export function visitorPassLogFieldValue(key: string, value: unknown) {
   return text;
 }
 
-export function visitorPassWindowFromValues(start: unknown, end: unknown) {
+function visitorPassWindowFromValues(start: unknown, end: unknown) {
   const startText = stringPayload(start);
   const endText = stringPayload(end);
   if (!startText || !endText) return "";
   return `${formatDate(startText)} to ${formatDate(endText)}`;
 }
 
-export function visitorPassWhatsAppStatusTooltip(visitorPass: VisitorPass): { title: string; body: string } | null {
+function visitorPassWhatsAppStatusTooltip(visitorPass: VisitorPass): { title: string; body: string } | null {
   const status = visitorPass.whatsapp_status || "";
   const metadataError = isRecord(visitorPass.source_metadata) ? stringPayload(visitorPass.source_metadata.whatsapp_last_error) : "";
   const rawDetail = [visitorPass.whatsapp_status_detail || "", metadataError].filter(Boolean).join(" ");
@@ -1973,7 +1984,7 @@ export function visitorPassWhatsAppStatusTooltip(visitorPass: VisitorPass): { ti
   };
 }
 
-export function visitorPassFriendlyWhatsAppError(status: string, rawDetail: string) {
+function visitorPassFriendlyWhatsAppError(status: string, rawDetail: string) {
   const detail = rawDetail.toLowerCase();
   if (status === "timeframe_denied") {
     return "The requested time change was denied. The visitor can still use the current approved pass window.";
@@ -1999,7 +2010,7 @@ export function visitorPassFriendlyWhatsAppError(status: string, rawDetail: stri
   return "WhatsApp could not send this message. Check the visitor's phone number and the WhatsApp integration settings, then try again.";
 }
 
-export function nextVisitorPassDate() {
+function nextVisitorPassDate() {
   const next = new Date();
   next.setMinutes(Math.ceil(next.getMinutes() / 15) * 15, 0, 0);
   if (next.getMinutes() === 60) {
@@ -2008,11 +2019,11 @@ export function nextVisitorPassDate() {
   return next;
 }
 
-export function visitorDateKey(value: Date) {
+function visitorDateKey(value: Date) {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 }
 
-export function visitorCalendarDays(month: Date) {
+function visitorCalendarDays(month: Date) {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
   const mondayOffset = (first.getDay() + 6) % 7;
   const start = new Date(first);
@@ -2024,7 +2035,7 @@ export function visitorCalendarDays(month: Date) {
   });
 }
 
-export function visitorTimeOptions(selected?: string) {
+function visitorTimeOptions(selected?: string) {
   const options = Array.from({ length: 96 }, (_, index) => {
     const minutes = index * 15;
     return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;

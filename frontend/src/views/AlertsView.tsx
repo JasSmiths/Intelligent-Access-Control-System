@@ -1,4 +1,5 @@
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 AlertTriangle,
@@ -12,17 +13,17 @@ import React from "react";
 
 import { api } from "../api/client";
 import { alertSeverityLabel, alertSeverityTone, formatDate, isActionableAlert, titleCase } from "../lib/format";
-import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState, Toolbar } from "../ui/primitives";
 import type { AlertSeverity, Anomaly } from "../api/types";
 import { useHistoryPage } from "./useHistoryPage";
 
 
 
-export function alertMatchesFocus(alert: Anomaly, focusedAlertId: string) {
+function alertMatchesFocus(alert: Anomaly, focusedAlertId: string) {
   return Boolean(focusedAlertId && (alert.id === focusedAlertId || alert.alert_ids.includes(focusedAlertId)));
 }
 
-export function alertDomId(alertId: string) {
+function alertDomId(alertId: string) {
   return `alert-row-${alertId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
@@ -46,7 +47,8 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
   const [actionLoading, setActionLoading] = React.useState(false);
   const actionInFlightRef = React.useRef(false);
   const modalRef = React.useRef<HTMLFormElement>(null);
-  const dismissResolution = useEditorDismiss(() => { setActionTarget(null); setResolutionNote(""); },
+  const closeResolution = useModalClose(modalRef, () => { setActionTarget(null); setResolutionNote(""); });
+  const dismissResolution = useEditorDismiss(closeResolution,
     Boolean(resolutionNote.trim()), actionLoading, "resolution note");
   useModalFocus(modalRef, actionTarget?.action === "resolve", dismissResolution);
   const deferredQuery = React.useDeferredValue(query);
@@ -107,8 +109,7 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
           alert_ids: target.alert.alert_ids, action: target.action, note: cleanedNote
         });
       }
-      setActionTarget(null);
-      setResolutionNote("");
+      await closeResolution();
       history.refresh();
       try { await refreshDashboard(); } catch { setError("Alert saved, but dashboard refresh is unavailable."); }
     } catch (actionError) {
@@ -122,6 +123,18 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
   const openCount = history.items.filter((alert) => alert.status === "open").length;
   const actionableCount = history.items.filter(isActionableAlert).length;
   const resolvedCount = history.items.filter((alert) => alert.status === "resolved").length;
+  const hasFilters = Boolean(query || from || to || severityFilter !== "all" || typeFilter !== "all" || statusFilter !== "open");
+  const statusOptions = ["open", "resolved", "all"] as const;
+  const handleStatusKey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const index = statusOptions.indexOf(statusFilter);
+    const nextIndex = event.key === "ArrowRight" ? (index + 1) % statusOptions.length
+      : event.key === "ArrowLeft" ? (index + statusOptions.length - 1) % statusOptions.length
+      : event.key === "Home" ? 0 : event.key === "End" ? statusOptions.length - 1 : null;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    setStatusFilter(statusOptions[nextIndex]);
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[nextIndex]?.focus();
+  };
 
   return (
     <section className="view-stack alerts-page">
@@ -139,8 +152,8 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
 
       <div className="alerts-controls">
         <div className="alert-status-tabs" role="tablist" aria-label="Alert status">
-          {(["open", "resolved", "all"] as const).map((value) => (
-            <button className={statusFilter === value ? "active" : ""} aria-selected={statusFilter === value} role="tab" key={value} onClick={() => setStatusFilter(value)} type="button">
+          {statusOptions.map((value) => (
+            <button className={statusFilter === value ? "active" : ""} aria-selected={statusFilter === value} aria-controls="alert-results" id={`alert-status-${value}`} tabIndex={statusFilter === value ? 0 : -1} role="tab" key={value} onClick={() => setStatusFilter(value)} onKeyDown={handleStatusKey} type="button">
               {titleCase(value)}
             </button>
           ))}
@@ -162,18 +175,21 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
           <option value="duplicate_entry">Duplicate entry</option>
           <option value="duplicate_exit">Duplicate exit</option>
         </select>
+        <div className="history-date-range">
         <label className="history-date-field">From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
         <label className="history-date-field">Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+        </div>
         {(query || from || to || severityFilter !== "all" || typeFilter !== "all" || statusFilter !== "open") ? <button className="secondary-button" type="button" onClick={() => { setQuery(""); setFrom(""); setTo(""); setSeverityFilter("all"); setTypeFilter("all"); setStatusFilter("open"); }}>Clear filters</button> : null}
         <p className="history-date-hint">Dates use the site timezone. Before excludes the selected date.</p>
       </div>
 
+      <div className="alert-results" id="alert-results" role="tabpanel" aria-labelledby={`alert-status-${statusFilter}`}>
       {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
-      {history.error ? <div className="error-banner" role="alert">Alerts unavailable: {history.error}</div> : null}
-      {error ? <div className="error-banner">{error}</div> : null}
+      {history.error ? <ErrorState title="Alerts unavailable" description={history.error} onRetry={history.refresh} retrying={history.loading} /> : null}
+      {error ? <div className="error-banner" role="alert">{error}</div> : null}
       {focused ? <div className="callout">Showing the selected alert from outside this page.</div> : null}
       {history.loading ? (
-        <div className="loading-panel">Loading alerts</div>
+        <LoadingState label="Loading alerts" />
       ) : alerts.length ? (
         <div className="alerts-list">
           {alerts.map((alert) => (
@@ -191,12 +207,14 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
           ))}
         </div>
       ) : (
-        !history.error ? <EmptyState icon={CheckCircle2} label={query || from || to || severityFilter !== "all" || typeFilter !== "all" || statusFilter !== "open" ? "No alerts match these filters." : "No alerts recorded yet."} /> : null
+        !history.error ? <EmptyState icon={CheckCircle2} label={hasFilters ? "No alerts match these filters." : "No alerts recorded yet."} description={hasFilters ? "Try another status, a wider date range, or clear your filters." : "There are no open alerts to review. New alerts will appear here as they are detected."} /> : null
       )}
       {(history.items.length || history.index) ? <div className="history-pagination" aria-label="Alerts pagination">
         <span>{history.items.length ? `${history.index * 50 + 1}-${history.index * 50 + history.items.length}` : "0"} groups or alerts on this page{history.nextCursor ? "; more available" : ""}</span>
         <div><button className="secondary-button" type="button" disabled={history.index === 0 || history.loading} onClick={history.previous}>Previous</button><span>Page {history.index + 1}</span><button className="secondary-button" type="button" disabled={!history.nextCursor || history.loading} onClick={history.next}>Next</button></div>
       </div> : null}
+
+      </div>
 
       {actionTarget?.action === "resolve" ? (
         <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) dismissResolution(); }}>
@@ -235,7 +253,7 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
   );
 }
 
-export function AlertReviewRow({
+function AlertReviewRow({
   alert,
   focused,
   disabled,

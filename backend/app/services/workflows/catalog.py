@@ -43,6 +43,7 @@ VARIABLE_DEFINITIONS: tuple[WorkflowVariableDefinition, ...] = (
     V("VehicleId", "Vehicle ID", None, "vehicle"),
     V("VehicleName", "Friendly vehicle name", "Vehicle", "vehicle", "Vehicle display name"),
     V("VehicleDisplayName", "Vehicle display name", "Vehicle"),
+    V("VehicleTimeAway", "Time away (after …; arrivals only)", "Vehicle"),
     V("VehicleMake", "Vehicle make", "Vehicle", "vehicle"),
     V("VehicleType", "Vehicle type", "Vehicle"),
     V("VehicleModel", "Vehicle model", "Vehicle"),

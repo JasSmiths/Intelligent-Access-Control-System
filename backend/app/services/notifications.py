@@ -66,6 +66,8 @@ from app.services.workflows.catalog import (
     notification_variable_groups,
 )
 from app.services.workflows.context import canonical_key, normalize_string_list, render_template
+from app.services.workflows.vehicle_away import vehicle_time_away_label
+from app.services.workflows.template_recipients import content_for_recipient, recipient_content
 from app.services.workflows import notification_payloads
 
 logger = get_logger(__name__)
@@ -149,6 +151,7 @@ MOCK_FACTS = {
     "object_pronoun": "her",
     "possessive_determiner": "her",
     "direction": "entry",
+    "vehicle_time_away_seconds": "8400",
     "decision": "granted",
     "source": "Driveway LPR",
     "timing_classification": "normal",
@@ -560,6 +563,10 @@ class NotificationService:
         item=None,
     ) -> str | NotificationActionAuthorization | None:
         """Current originating domain authority joins the durable attempt transaction."""
+        if payload.get("resident_recovery_origin") is not None:
+            from app.services.resident_recovery import authorize_mobile_output
+            denial = await authorize_mobile_output(session, payload, run_id, action)
+            return NotificationActionAuthorization(action_skip=denial) if denial else None
         if payload.get("actionable_output_origin") is not None:
             denial = await get_actionable_notification_service().authorize_notification_output_in_session(
                 session,
@@ -622,6 +629,11 @@ class NotificationService:
         payload: dict[str, Any] | None = None,
         run_id: uuid.UUID | None = None,
     ):
+        if action is not None and action.get("resident_recovery_output") is not None:
+            from app.services.resident_recovery import authorize_mobile_output
+            denial = await authorize_mobile_output(session, payload or {}, run_id, action)
+            if denial:
+                return NotificationActionAuthorization(action_skip=denial)
         if action is not None and action.get("actionable_output") is not None:
             if payload is None or run_id is None:
                 return NotificationActionAuthorization(action_skip="actionable_output_origin_invalid")
@@ -731,10 +743,12 @@ class NotificationService:
         if action["type"] == "voice":
             await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), body, runtime_config=config)
         elif action["type"] == "mobile":
-            output_actions = await get_actionable_notification_service().resolve_notification_output_actions(
-                action,
-                target=target,
-            )
+            if action.get("resident_recovery_output") is not None:
+                from app.services.resident_recovery import resolve_mobile_actions
+                output_actions = await resolve_mobile_actions(action)
+            else:
+                output_actions = await get_actionable_notification_service().resolve_notification_output_actions(
+                    action, target=target)
             await HomeAssistantMobileAppNotifier().send(
                 HomeAssistantMobileAppTarget(target),
                 action["title"],
@@ -931,6 +945,10 @@ class NotificationService:
             else:
                 rendered_title = render_template(title_template, variables)
                 rendered_message = render_template(message_template, variables)
+            scoped_content = None
+            if action.get("variable_recipients"):
+                default_content, scoped_content = recipient_content(action, variables)
+                rendered_title, rendered_message = default_content["title"], default_content["message"]
             rendered_actions.append(
                 {
                     "id": str(action.get("id") or f"action-{len(rendered_actions) + 1}"),
@@ -945,6 +963,8 @@ class NotificationService:
                     "media": media,
                     "actionable": notification_payloads.normalize_actionable(action.get("actionable")),
                     "snapshot": snapshot_payload(media),
+                    **({"variable_recipients": action["variable_recipients"], "recipient_content": scoped_content}
+                       if scoped_content is not None else {}),
                 }
             )
         return {
@@ -1093,7 +1113,15 @@ class NotificationService:
         receipts: list[dict[str, str]] = []
         delivered_any = False
         try:
-            delivered_any = await self._send_mobile_apprise(action, context, urls, attachments, failures, receipts=receipts)
+            if "recipient_content" in action:
+                configured = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
+                for url in urls:
+                    endpoint = f"apprise:{configured.index(url)}"
+                    scoped_action = {**action, **content_for_recipient(action, endpoint, context.subject)}
+                    delivered_any = await self._send_mobile_apprise(scoped_action, context, [url], attachments,
+                        failures, receipts=receipts, receipt_target=endpoint) or delivered_any
+            else:
+                delivered_any = await self._send_mobile_apprise(action, context, urls, attachments, failures, receipts=receipts)
             delivered_any = (
                 await self._send_mobile_home_assistant(
                     action,
@@ -1157,31 +1185,31 @@ class NotificationService:
         urls: list[str],
         attachments: list[str],
         failures: list[str],
-        *, receipts: list[dict[str, str]] | None = None,
+        *, receipts: list[dict[str, str]] | None = None, receipt_target: str = "apprise",
     ) -> bool:
         if not urls:
             return False
         sender = AppriseNotificationSender(urls="\n".join(urls))
         try:
             await sender.send(
-                str(action.get("title") or context.subject),
+                content_for_recipient(action, receipt_target, context.subject)["title"],
                 str(action.get("message") or ""),
                 context,
                 attachments=attachments,
             )
             if receipts is not None:
-                receipts.append({"target": "apprise", "delivery": "accepted"})
+                receipts.append({"target": receipt_target, "delivery": "accepted"})
             return True
         except NotificationDeliveryError as exc:
             if receipts is not None:
-                receipts.append({"target": "apprise", "delivery": exc.delivery})
+                receipts.append({"target": receipt_target, "delivery": exc.delivery})
             if exc.delivery == "accepted":
                 return True
             failures.append(f"Apprise: {exc}")
             return False
         except Exception:  # noqa: BLE001 - no per-destination result is available.
             if receipts is not None:
-                receipts.append({"target": "apprise", "delivery": "unknown"})
+                receipts.append({"target": receipt_target, "delivery": "unknown"})
             failures.append("Apprise: delivery outcome unknown")
             return False
 
@@ -1220,6 +1248,7 @@ class NotificationService:
         delivered_any = False
         for target in targets:
             try:
+                copy = content_for_recipient(action, f"home_assistant_mobile:{target}", context.subject)
                 mobile_actions = await self._home_assistant_mobile_actions_for_target(
                     action,
                     context,
@@ -1229,8 +1258,8 @@ class NotificationService:
                 options = {"runtime_config": runtime_config} if runtime_config is not None else {}
                 await notifier.send(
                     HomeAssistantMobileAppTarget(target),
-                    str(action.get("title") or context.subject),
-                    str(action.get("message") or ""),
+                    copy["title"],
+                    copy["message"],
                     context,
                     image_url=image_url,
                     image_content_type=image_content_type,
@@ -1319,7 +1348,6 @@ class NotificationService:
         targets = action["frozen_voice_targets"] if frozen else await self._select_voice_targets(config, action)
         if not targets:
             raise NotificationDeliveryError("No Home Assistant media player is configured or selected.")
-        spoken_message = apply_vehicle_tts_phonetics(str(action.get("message") or ""))
         suppression = await self._voice_announcements_preflight(runtime_config=config) if frozen else await self._voice_announcements_preflight()
         if suppression:
             return suppression
@@ -1329,6 +1357,8 @@ class NotificationService:
         delivered_any = False
         for target in targets:
             try:
+                spoken_message = apply_vehicle_tts_phonetics(
+                    content_for_recipient(action, f"home_assistant_tts:{target}")["message"])
                 options = {"runtime_config": config} if frozen else {}
                 await announcer.announce(AnnouncementTarget(target), spoken_message, **options)
                 delivered_any = True
@@ -1911,6 +1941,7 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         ),
         "VehicleName": vehicle_name,
         "VehicleDisplayName": vehicle_name,
+        "VehicleTimeAway": vehicle_time_away_label(pick("vehicle_time_away_seconds")),
         "VehicleMake": pick("visitor_pass_vehicle_make", "vehicle_make", "make"),
         "VehicleType": pick("vehicle_type", "detected_vehicle_type", "observed_vehicle_type"),
         "VehicleModel": pick("vehicle_model", "model"),

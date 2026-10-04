@@ -1,6 +1,8 @@
 """SQLAlchemy models."""
 
 from app.models.core import (
+    ResidentRecoveryJourney,
+    MissedExitRecoveryAttempt,
     AccessEvent,
     AccessDevice,
     AccessDeviceCommandRecord,
@@ -55,6 +57,8 @@ from app.models.core import (
 )
 
 __all__ = [
+    "ResidentRecoveryJourney",
+    "MissedExitRecoveryAttempt",
     "AccessEvent",
     "AccessDevice",
     "AccessDeviceCommandRecord",

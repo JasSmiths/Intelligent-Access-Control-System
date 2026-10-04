@@ -1,164 +1,109 @@
-# Frontend Agent Notes
+# Frontend agent guide
 
-Use this when touching React, TypeScript, CSS, frontend tests, routing, app shell,
-API clients, integrations UI, workflow UI, or visual behavior.
+Use for React, typed clients, routes, styling, editors and browser validation.
+Paths below are relative to `frontend/src/`. Inspect the working tree first;
+current uncommitted features are part of the source under review.
 
-## Current V2 Structure
+## Find the owner
 
-- Bootstrap: `frontend/src/main.tsx`
-- App shell: `frontend/src/app/*`
-- Typed API modules: `frontend/src/api/*`
-- Domain-neutral primitives: `frontend/src/ui/*`
-- Reused helpers: `frontend/src/lib/*`
-- Feature owners: `frontend/src/features/*`
-- Route views: `frontend/src/views/*`
-- Styles: `frontend/src/styles.css` imports `frontend/src/styles/*`
+| Concern | Source of truth |
+| --- | --- |
+| Bootstrap and composition | `main.tsx` renders `app/App.tsx` and imports global styles. |
+| Routes, URLs, labels, roles and required shell data | `app/navigation.tsx`; lazy view composition in `app/routes.tsx`; `api/types.ts` owns `ViewKey`. |
+| Authentication and account lifetime | `app/auth.tsx`, `app/profile.ts`, `app/useShellRefresh.ts`. |
+| Realtime transport and refresh | `app/useRealtimeConnection.ts`, `realtimeEvents.ts`, `realtimeRefresh.ts`, `refreshCoordinator.ts`, `useShellRefresh.ts`. |
+| Search, theme, toasts and Alfred launcher | Matching modules under `app/`. |
+| HTTP, errors and confirmation requests | `api/client.ts`; domain contracts under `api/`; shared response types in `api/types.ts`. |
+| Common UI and editor lifecycle | `ui/primitives.tsx`, `ui/useModalFocus.ts`, `ui/useEditorDismiss.ts`, `ui/useModalClose.ts`. |
+| Formatting, media, settings and floating placement | `lib/format.ts`, `lib/media.tsx`, `lib/settings.tsx`, `lib/viewportPlacement.ts`. |
 
-`frontend/src/shared.tsx` was removed. Do not recreate a shared compatibility
-shim or route imports through one.
+Keep feature logic out of the shell. `shared.tsx`, aggregate schedule/workflow
+facades and compatibility exports are retired. `frontendOwnership.test.ts`
+enforces direct routes and acyclic schedule/workflow dependencies.
 
-## App Shell Ownership
+## Feature entrypoints
 
-`frontend/src/main.tsx` should only render `App` and import global styles.
+| Feature | Owner and related contracts |
+| --- | --- |
+| Dashboard and Access Pulse | `views/DashboardView.tsx`; `features/dashboard/AccessPulse.tsx` and its colocated CSS. |
+| People, Groups and Vehicles | `views/DirectoryViews.tsx`. |
+| Schedules | `features/schedules/SchedulesView.tsx`, `ScheduleEditor.tsx`, `WeeklyScheduleGrid.tsx`, pure `model.ts`; `api/schedules.ts`. |
+| Passes | `views/PassesView.tsx`. |
+| Events, Movements and Alerts | Matching `views/*View.tsx`, `views/useHistoryPage.ts`; `api/history.ts`. |
+| Reports and Top Charts | Matching views; `api/reports.ts`. |
+| Integrations and recovery panels | `views/IntegrationsView.tsx`, `features/integrations/`; `api/integrations.ts`, `api/incomingMessages.ts`. |
+| Investigations | `/logs` retains its URL and `logs` view key; `views/LogsView.tsx` composes `features/investigations/`; `api/investigations.ts`. |
+| Settings hub, device settings and Users | `views/SettingsViews.tsx`. |
+| Command History | `views/CommandHistoryView.tsx`, shared `features/integrations/CommandReceiptHistory.tsx` and `CommandReceiptDetails.tsx`; `api/integrations.ts`. |
+| Missed Exit Recovery | `features/missedExitRecovery/`; `api/missedExitRecovery.ts`; `/settings/missed-exit-recovery`. |
+| Automations and Notifications | Direct routes to `features/workflows/AutomationsView.tsx` and `NotificationsView.tsx`; `api/workflows.ts`. |
+| Alfred conversation, approvals and training | `views/ChatWidgetView.tsx`, `features/alfred/`, `views/AlfredTrainingView.tsx`; `api/chat.ts`. |
 
-`frontend/src/app/*` owns:
+Workflow editors own their specific draft/presentation models. Reuse
+`features/workflows/components.tsx`, `model.ts`, `hooks.ts` and `TemplateEditor.tsx`
+without importing a concrete editor into those shared modules.
+`VariableRichTextEditor.tsx` and `lib/templateRecipients.ts` handle template UI.
+Backend integration/workflow catalogs remain authoritative; do not invent
+fallback catalogs in React.
 
-- `App.tsx`: app composition
-- `auth.tsx`: login/setup/session behavior
-- `routes.tsx`: route registry/composition
-- `navigation.tsx`: sidebar/nav metadata
-- `realtimeEvents.ts`: compact realtime event interpretation
-- `realtimeRefresh.ts`: event impact and relevant resource/route selection
-- `useShellRefresh.ts`: typed shell reads and route/account request lifetime
-- `refreshCoordinator.ts`: serialized batches, burst coalescing and trailing invalidations
-- `searchPalette.tsx`: global search UI/state
-- `theme.tsx`: light/dark/system theme behavior
-- `toasts.tsx`: toast state/UI
-- `chatLauncher.tsx`: Alfred launcher wiring
-- `alerts.tsx`: app-level alert/status helpers
-- `profile.ts`: profile helpers
+## Contracts to preserve
 
-Do not move feature-specific logic into `app`.
+- Use relative `/api/v1` URLs and existing typed API modules. Low-level `fetch`
+  belongs in `api/client.ts`; direct feature fetches need explicit justification.
+- Preserve Admin gates and server confirmation contracts. Read the
+  [hardware guide](hardware-safety.md) before changing command or live-test UI.
+  Configuration, provider connectivity, command acceptance and verified outcome
+  are distinct states.
+- Keep initial critical-read failure distinct from empty data; retain usable
+  data with an explicit stale state after a later refresh failure.
+- Preserve dirty drafts during refresh/resize, prevent dismissal and duplicate
+  submission while saving, and restore focus after close. Use shared lifecycle
+  helpers rather than independent Escape/backdrop handlers.
+- Centered dialogs share motion in `styles/motion.css`. Wrap accepted close/save
+  callbacks with `useModalClose`; run dirty/pending guards before that callback
+  and complete mutations before animating a successful close. Keep focus ownership
+  in `useModalFocus` (or native `<dialog>`), including throughout the exit.
+- Preserve request/account lifetime checks so stale reads cannot overwrite a
+  completed mutation. Load camera choices only for editors that use them.
+- Extend realtime impact tests for affected and unaffected routes. Reconnect and
+  manual refresh still refresh the active route; avoid a second refresh for
+  views already consuming compact events.
+- Keep durable cursor history, direct-record links and expired-history refresh
+  behavior separate from recent realtime feeds.
 
-## API Ownership
+## Layout and styles
 
-Low-level fetch belongs in `frontend/src/api/client.ts`.
+`styles.css` imports global/shell styles. Some features load CSS with their lazy
+entrypoints, including integrations, workflows, investigations, Alfred and
+Access Pulse. Inspect imports and selector consumers before removing styles.
 
-Typed resource owners include:
+The navigation drawer boundary is **980px** in `app/App.tsx` and responsive CSS;
+the compact content/editor boundary remains **720px**. Keep them distinct and
+test both through resize. Use per-edge safe-area variables from `styles/base.css`
+and `lib/viewportPlacement.ts` for floating controls.
 
-- `frontend/src/api/integrations.ts`
-- `frontend/src/api/workflows.ts`
-- `frontend/src/api/schedules.ts`
-- `frontend/src/api/search.ts`
-- `frontend/src/api/chat.ts`
-- `frontend/src/api/types.ts`
+Keep the console dense and readable with restrained radii, status badges and
+light/dark/system themes. Use existing lucide action icons. Avoid nested cards,
+text clipping and document overflow; allow deliberate table/calendar scrolling.
+Keep `.badge` inline-flex and scope title styles instead of broad span rules.
+The sample design under `prototypes/premium-dashboard/` is a separate app,
+not the source of production routes or contracts.
 
-Rules:
+## Validation
 
-- Use relative API URLs for LAN/Nginx compatibility.
-- Feature views should use typed API owners instead of direct `fetch`.
-- Direct `fetch(` outside `frontend/src/api/*` needs explicit justification.
-- Do not introduce a second API client pattern.
+From the repository root:
 
-## Feature Ownership
-
-Integrations:
-
-- Route view: `frontend/src/views/IntegrationsView.tsx`
-- Feature modules: `frontend/src/features/integrations/*`
-- Shared provider primitives live in the feature folder unless truly domain-neutral.
-- Backend metadata/config/status is the source of truth; do not recreate frontend fallback catalogs.
-
-Schedules:
-
-- Direct lazy route: `features/schedules/SchedulesView.tsx`.
-- Form/dependencies: `ScheduleEditor.tsx`; weekly interactions: `WeeklyScheduleGrid.tsx`.
-- Interval conversion and summaries: `features/schedules/model.ts`.
-- CRUD and confirmation HTTP contracts: `api/schedules.ts`.
-- Default-policy persistence remains under `lib/settings.tsx`.
-
-Workflows:
-
-- Direct lazy entries: `features/workflows/AutomationsView.tsx` and `NotificationsView.tsx`.
-- Automation node editing: `AutomationEditor.tsx`; draft/presentation helpers: `automationModel.tsx`.
-- Notification editing: `NotificationEditor.tsx`, `NotificationActionCard.tsx`, `NotificationSelection.tsx`; draft/presentation helpers: `notificationModel.tsx`.
-- Common lists/selection blocks: `components.tsx`; rich text: `TemplateEditor.tsx`.
-- Shared model and state/read ownership: `model.ts`, `hooks.ts`.
-- The aggregate WorkflowFeature and WorkflowViews paths were retired; do not recreate aliases.
-- API owner: `frontend/src/api/workflows.ts`
-- Backend workflow catalogs are the source of truth.
-- Keep automation and notification builders sharing primitives where concepts overlap. Shared modules must not import a concrete editor.
-- Use the shared request hook; do not let stale reads replace a completed mutation. Load camera choices only for an editor that can use them.
-- Do not reintroduce frontend fallback workflow/notification catalogs.
-
-## UI And Helpers
-
-- Domain-neutral UI primitives live in `frontend/src/ui/primitives.tsx`.
-- Formatting/date/value helpers live in `frontend/src/lib/format.ts`.
-- Media helpers live in `frontend/src/lib/media.tsx`.
-- Notification metadata helpers live in `frontend/src/lib/notifications.tsx`.
-- Settings form helpers live in `frontend/src/lib/settings.tsx`.
-- Keep domain-specific helpers near the feature or route that owns them.
-
-## Styling Rules
-
-- Operational console, not a marketing/landing page.
-- Fixed desktop sidebar, dense readable cards/tables, status badges, light/dark/system theme.
-- Use lucide icons for tool/action buttons where available.
-- Card radius should stay restrained, usually `8px`.
-- No nested cards.
-- Text must not overflow or overlap on mobile or desktop.
-- Do not broad-style badge spans. Keep `.badge` inline-flex.
-- Scope integration header span styles to title selectors.
-- Delete CSS only after checking selector usage by search/build context.
-
-## Route Notes
-
-Current routes include:
-
-- Dashboard
-- People
-- Groups
-- Schedules
-- Passes
-- Vehicles
-- Movements
-- Top Charts
-- Events
-- Alerts
-- Reports
-- API & Integrations
-- Logs/Telemetry/Audit
-- Settings
-- Alfred Training
-
-Non-shell routes are lazy chunks. Do not move route bodies back into `main.tsx`
-or raise Vite chunk limits just to hide growth.
-
-## Frontend Validation
-
-```bash
-cd frontend && npm run build
-cd frontend && npm test
-git diff --check
+```sh
+cd frontend
+npm run build
+npm test
 ```
 
-Search checks:
-
-```bash
-rg "from ['\"].*/shared|shared.tsx|frontend/src/shared" frontend/src
-rg "fetch\\(" frontend/src
-```
-
-
-## Ownership and retirement checks
-
-`frontendOwnership.test.ts` enforces direct route ownership and acyclic feature
-imports. Schedule tests live in `features/schedules/`; workflow tests in
-`features/workflows/`; confirmation contracts in `api/mutationContracts.test.ts`.
-Refresh selection, batching and lifetime tests live beside their `app/` owners.
-
-Add event impact entries with tests for affected and unaffected routes. Preserve
-full active-route refresh on reconnect/manual refresh. Do not double-refresh routes
-that already consume compact events. Check dynamic/responsive CSS consumers before
-removing selectors. See [milestone 6](../validation/milestone6-frontend.md).
+Run `git diff --check` from the root. For layout, interaction, route or role-gate
+changes also follow [browser validation](../validation/gui-completion.md) and
+[responsive validation](../validation/frontend-responsive.md). Relevant unit
+tests live beside owners; `api/mutationContracts.test.ts` verifies confirmations,
+and `frontendGuardrails.test.ts`/`frontendOwnership.test.ts` enforce boundaries.
+For backend-contract changes use the [Phase 1 validator](../validation/phase1.md).
+Report the actual dependency environment and result; old pass counts are not
+evidence for the current tree.

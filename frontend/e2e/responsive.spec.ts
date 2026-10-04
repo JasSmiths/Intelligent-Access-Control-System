@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Locator, type Page } from "playwright/test";
 
 const viewportMatrix = [
   [280, 900], [320, 480], [640, 320], [768, 1024], [1024, 640],
@@ -242,7 +242,234 @@ test("preserves snapshot state and keyboard activation across a resize", async (
   await page.setViewportSize({ width: 560, height: 800 });
   await snapshot.focus();
   await page.keyboard.press("Space");
-  await expect(page.locator(".dashboard-event-snapshot-preview img")).toHaveCount(0);
+  await expect(page.locator(".dashboard-event-snapshot-preview img")).toBeHidden();
+  expect(network.unexpected).toEqual([]);
+});
+
+async function sampleSnapshotTransition(preview: Locator, property: string, finish = true) {
+  return preview.evaluate((element, options) => {
+    const transition = element.getAnimations().find((animation) =>
+      "transitionProperty" in animation && animation.transitionProperty === options.property);
+    if (!transition?.effect) return null;
+    const duration = Number(transition.effect.getTiming().duration);
+    transition.pause();
+    transition.currentTime = duration / 2;
+    const style = getComputedStyle(element);
+    const sample = { duration, opacity: Number(style.opacity), visibility: style.visibility, height: element.getBoundingClientRect().height };
+    if (options.finish) transition.finish();
+    return sample;
+  }, { property, finish });
+}
+
+test("animates snapshot hover entry and interrupted exit while Escape closes under the pointer", async ({ page }) => {
+  const network = await mockOperationalNetwork(page);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openDashboard(page);
+  const row = page.getByRole("button", { name: "Toggle Snapshot for Snapshot Guest" });
+  const preview = row.locator(".dashboard-event-snapshot-preview");
+  await expect(preview).toHaveAttribute("aria-hidden", "true");
+  await expect(preview.locator("img")).toHaveCount(0);
+
+  await row.hover();
+  const entry = await sampleSnapshotTransition(preview, "opacity");
+  expect(entry).not.toBeNull();
+  expect(entry!.duration).toBeGreaterThan(0);
+  expect(entry!.opacity).toBeGreaterThan(0);
+  expect(entry!.opacity).toBeLessThan(1);
+  await expect(preview).toHaveCSS("opacity", "1");
+  const image = await preview.locator("img").elementHandle();
+
+  await page.mouse.move(0, 0);
+  const exit = await sampleSnapshotTransition(preview, "opacity", false);
+  expect(exit).not.toBeNull();
+  expect(exit!.visibility).toBe("visible");
+  expect(exit!.opacity).toBeGreaterThan(0);
+  expect(exit!.opacity).toBeLessThan(1);
+  await row.hover();
+  await expect(preview).toHaveCSS("opacity", "1");
+  expect(await image!.evaluate((element) => element.isConnected)).toBe(true);
+
+  await row.focus();
+  await page.keyboard.press("Escape");
+  await expect(row).toHaveAttribute("aria-expanded", "false");
+  await expect(preview).toHaveCSS("visibility", "hidden");
+  await expect(preview.locator("img")).toBeHidden();
+  expect(await row.evaluate((element) => element.matches(":hover"))).toBe(true);
+  expect(network.unexpected).toEqual([]);
+});
+
+test("animates inline snapshot expansion and collapse on touch and disables motion when requested", async ({ browser }) => {
+  const context = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 }, reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const network = await mockOperationalNetwork(page);
+  try {
+    await openDashboard(page);
+    const row = page.getByRole("button", { name: "Toggle Snapshot for Snapshot Guest" });
+    const preview = row.locator(".dashboard-event-snapshot-preview");
+    await expect.poll(async () => (await preview.boundingBox())?.height ?? 0).toBe(0);
+    await row.tap();
+    const entry = await sampleSnapshotTransition(preview, "grid-template-rows");
+    expect(entry).not.toBeNull();
+    expect(entry!.height).toBeGreaterThan(0);
+    await expect(preview).toHaveCSS("opacity", "1");
+    const fullHeight = (await preview.boundingBox())!.height;
+    expect(entry!.height).toBeLessThan(fullHeight);
+    const image = await preview.locator("img").elementHandle();
+
+    await row.tap();
+    const exit = await sampleSnapshotTransition(preview, "grid-template-rows", false);
+    expect(exit).not.toBeNull();
+    expect(exit!.height).toBeGreaterThan(0);
+    expect(exit!.height).toBeLessThan(fullHeight);
+    await row.tap();
+    await expect(row).toHaveAttribute("aria-expanded", "true");
+    await expect.poll(async () => (await preview.boundingBox())?.height ?? 0).toBeCloseTo(fullHeight, 1);
+    expect(await image!.evaluate((element) => element.isConnected)).toBe(true);
+    await row.tap();
+    await expect(preview.locator("img")).toBeHidden();
+    await expect.poll(async () => (await preview.boundingBox())?.height ?? 0).toBe(0);
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await row.tap();
+    await expect(preview.locator("img")).toBeVisible();
+    const duration = await preview.evaluate((element) => Math.max(...getComputedStyle(element).transitionDuration.split(",").map(parseFloat)));
+    expect(duration).toBeLessThanOrEqual(.001);
+    await row.tap();
+    await expect(preview.locator("img")).toBeHidden();
+    await expect.poll(async () => (await preview.boundingBox())?.height ?? 0).toBe(0);
+    expect(network.unexpected).toEqual([]);
+  } finally { await context.close(); }
+});
+
+async function sampleDialogMotion(dialog: Locator) {
+  return dialog.evaluate((element) => {
+    const container = element.closest(".modal-backdrop, .search-palette-backdrop") ?? element;
+    for (const animation of container.getAnimations({ subtree: true })) {
+      animation.pause();
+      animation.currentTime = Number(animation.effect!.getTiming().duration) / 2;
+    }
+    const animation = element.getAnimations()[0];
+    const style = getComputedStyle(element);
+    return { duration: Number(animation?.effect?.getTiming().duration ?? 0), opacity: Number(style.opacity), transform: style.transform };
+  });
+}
+
+async function finishDialogMotion(dialog: Locator) {
+  await dialog.evaluate((element) => {
+    const container = element.closest(".modal-backdrop, .search-palette-backdrop") ?? element;
+    for (const animation of container.getAnimations({ subtree: true })) animation.finish();
+  });
+}
+
+async function expectClosingDialog(page: Page, dialog: Locator) {
+  await expect(dialog).toBeFocused();
+  const controls = dialog.locator("button, input, select, textarea");
+  expect(await controls.evaluateAll((elements) => elements.every((element) => Boolean(element.closest("[inert]"))))).toBe(true);
+  await controls.first().evaluate((element) => (element as HTMLElement).focus());
+  await expect(dialog).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog).toBeFocused();
+}
+
+test("animates access confirmation entry and safe dismissal on desktop and mobile", async ({ page }) => {
+  const network = await mockOperationalNetwork(page);
+  await page.route("**/api/v1/integrations/gate/status", async (route) => {
+    if (route.request().method() !== "GET") { await route.fallback(); return; }
+    await route.fulfill({ json: {
+      configured: true, connected: true, gate_entity_id: null,
+      default_media_player: null, last_gate_state: "closed",
+      gate_entities: [{ entity_id: "fixture-gate", name: "Fixture Gate", state: "closed", enabled: true }],
+      garage_door_entities: [{ entity_id: "fixture-garage", name: "Fixture Garage", state: "closed", enabled: true }]
+    } });
+  });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openDashboard(page);
+
+  for (const scenario of [
+    { label: "Fixture Gate", width: 1440, dismiss: "cancel" },
+    { label: "Fixture Garage", width: 390, dismiss: "escape" }
+  ]) {
+    await page.setViewportSize({ width: scenario.width, height: 900 });
+    const trigger = page.locator(".gate-row").filter({ hasText: scenario.label }).getByRole("button", { name: "Closed", exact: true });
+    // Explicit focus also models keyboard activation on Safari, where pointer clicks need not focus buttons.
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: `Open ${scenario.label}?` });
+    const entry = await sampleDialogMotion(dialog);
+    expect(entry.duration).toBeGreaterThan(0);
+    expect(entry.opacity).toBeGreaterThan(0);
+    expect(entry.opacity).toBeLessThan(1);
+    expect(entry.transform).not.toBe("none");
+    await finishDialogMotion(dialog);
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    const confirm = dialog.getByRole("button", { name: `Open ${scenario.label}`, exact: true });
+    await expect(cancel).toBeFocused();
+    await expect(confirm).toBeEnabled();
+    if (scenario.dismiss === "cancel") await cancel.click();
+    else await page.keyboard.press("Escape");
+
+    const exit = await sampleDialogMotion(dialog);
+    expect(exit.duration).toBeGreaterThan(0);
+    expect(exit.opacity).toBeGreaterThan(0);
+    expect(exit.opacity).toBeLessThan(1);
+    await expect(page.locator(".modal-backdrop")).toHaveAttribute("data-closing", "true");
+    await expectClosingDialog(page, dialog);
+    expect(await trigger.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(true);
+    await finishDialogMotion(dialog);
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    expect(await trigger.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(false);
+  }
+
+  const garage = page.locator(".gate-row").filter({ hasText: "Fixture Garage" }).getByRole("button", { name: "Closed", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Open Fixture Garage?" });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await garage.focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toHaveCSS("animation-name", "none");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(garage).toBeFocused();
+
+  // Changing the preference during dismissal must complete the exit lifecycle too.
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(dialog).toHaveCount(0);
+  await expect(garage).toBeFocused();
+  expect(network.unexpected).toEqual([]);
+});
+
+test("animates global search dismissal through Escape and its backdrop", async ({ page }) => {
+  const network = await mockOperationalNetwork(page);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openDashboard(page);
+  const trigger = page.getByRole("button", { name: "Search anything", exact: true });
+  for (const dismissal of ["escape", "backdrop"]) {
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Global search" });
+    const entry = await sampleDialogMotion(dialog);
+    expect(entry.duration).toBeGreaterThan(0);
+    expect(entry.opacity).toBeGreaterThan(0);
+    expect(entry.opacity).toBeLessThan(1);
+    await finishDialogMotion(dialog);
+    await expect(dialog.getByRole("combobox")).toBeFocused();
+    if (dismissal === "escape") await page.keyboard.press("Escape");
+    else await page.locator(".search-palette-backdrop").click({ position: { x: 4, y: 4 } });
+    const exit = await sampleDialogMotion(dialog);
+    expect(exit.opacity).toBeGreaterThan(0);
+    expect(exit.opacity).toBeLessThan(1);
+    await expect(page.locator(".search-palette-backdrop")).toHaveAttribute("data-closing", "true");
+    await expectClosingDialog(page, dialog);
+    expect(await trigger.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(true);
+    await finishDialogMotion(dialog);
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  }
   expect(network.unexpected).toEqual([]);
 });
 
@@ -277,6 +504,7 @@ test("keeps the floating profile menu reachable through resize and Escape", asyn
 
 test("keeps a group form draft through resize and contains/restores modal focus", async ({ page }) => {
   const network = await mockOperationalNetwork(page);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.setViewportSize({ width: 900, height: 700 });
   await page.goto("/groups");
   await expect(page.getByRole("heading", { name: "Groups" })).toBeVisible();
@@ -285,6 +513,10 @@ test("keeps a group form draft through resize and contains/restores modal focus"
   await page.keyboard.press("Enter");
 
   const dialog = page.getByRole("dialog", { name: "Group" });
+  const entry = await sampleDialogMotion(dialog);
+  expect(entry.opacity).toBeGreaterThan(0);
+  expect(entry.opacity).toBeLessThan(1);
+  await finishDialogMotion(dialog);
   const groupName = dialog.getByLabel("Group name");
   await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
   await page.keyboard.press("Tab");
@@ -341,8 +573,16 @@ test("keeps a group form draft through resize and contains/restores modal focus"
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   await expect(groupName).toHaveValue("A long access group name for responsive checks");
+  await expect(page.locator(".modal-backdrop")).not.toHaveAttribute("data-closing", "true");
+  expect(await groupName.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(false);
   page.once("dialog", (confirmation) => confirmation.accept());
   await page.keyboard.press("Escape");
+  const exit = await sampleDialogMotion(dialog);
+  expect(exit.opacity).toBeGreaterThan(0);
+  expect(exit.opacity).toBeLessThan(1);
+  await expectClosingDialog(page, dialog);
+  expect(await addGroup.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(true);
+  await finishDialogMotion(dialog);
   await expect(dialog).toHaveCount(0);
   await expect(addGroup).toBeFocused();
   expect(network.unexpected).toEqual([]);
@@ -432,7 +672,8 @@ test("applies unequal safe-area tokens and mirrored edge values without overflow
         height: document.documentElement.clientHeight,
         navigation: rect(".topbar-menu"),
         alerts: rect(".notification-button"),
-        launcher: rect(".chat-pill")
+        launcher: rect(".chat-pill"),
+        topbar: rect(".topbar")
       };
     });
     expect(measured.top).toBe(`${edges.top}px`);
@@ -452,7 +693,8 @@ test("applies unequal safe-area tokens and mirrored edge values without overflow
       expect(measured.launcher.right).toBeLessThanOrEqual(measured.width - edges.right);
       expect(measured.launcher.bottom).toBeLessThanOrEqual(measured.height - edges.bottom);
       expect(measured.width - measured.launcher.right).toBeLessThanOrEqual(edges.right + 32);
-      expect(measured.height - measured.launcher.bottom).toBeLessThanOrEqual(edges.bottom + 32);
+      expect(measured.launcher.top).toBeGreaterThanOrEqual(edges.top);
+      expect(measured.launcher.bottom).toBeLessThanOrEqual(measured.topbar!.bottom);
     }
   }
   expect(network.unexpected).toEqual([]);
@@ -471,7 +713,8 @@ test("supports coarse-pointer form controls at 280px and 320px", async ({ browse
     await expect(page.getByRole("heading", { name: "Groups" })).toBeVisible();
     const addGroup = page.getByRole("button", { name: "Add Group" });
     const addGroupBounds = await addGroup.boundingBox();
-    expect(addGroupBounds?.height ?? 0).toBeGreaterThanOrEqual(44);
+    // WebKit can report 44 CSS pixels as 43.9999847 after a transform.
+    expect(Math.round((addGroupBounds?.height ?? 0) * 100) / 100).toBeGreaterThanOrEqual(44);
     await addGroup.tap();
     const groupName = page.getByRole("dialog", { name: "Group" }).getByLabel("Group name");
     const inputFontSize = await groupName.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
@@ -487,4 +730,43 @@ test("supports coarse-pointer form controls at 280px and 320px", async ({ browse
   } finally {
     await context.close();
   }
+});
+
+test("keeps collapsed navigation inaccessible and respects reduced motion with a compact mobile launcher", async ({ page }) => {
+  const network = await mockOperationalNetwork(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await openDashboard(page);
+  const submenu = page.locator("#settings-submenu");
+  await expect(submenu).toHaveJSProperty("inert", true);
+  await expect(page.getByRole("button", { name: "General", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Expand Settings" }).click();
+  await expect(submenu).toHaveJSProperty("inert", false);
+  await expect(page.getByRole("button", { name: "General", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Collapse Settings" }).click();
+  await expect(submenu).toHaveJSProperty("inert", true);
+  await expect.poll(async () => (await submenu.boundingBox())?.height ?? 0).toBeLessThanOrEqual(1);
+  const duration = await submenu.evaluate((element) => Math.max(...getComputedStyle(element).transitionDuration.split(",").map(parseFloat)));
+  expect(duration).toBeLessThanOrEqual(.001);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const launcher = page.getByRole("button", { name: "Open Alfred" });
+  await expect(launcher).toBeVisible();
+  await expect.poll(async () => {
+    const box = await launcher.boundingBox();
+    return box ? [box.width, box.height] : null;
+  }).toEqual([44, 44]);
+  const bounds = await launcher.boundingBox();
+  expect(bounds?.width).toBeCloseTo(44, 1);
+  expect(bounds?.height).toBeCloseTo(44, 1);
+  await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
+  const header = await page.locator(".topbar").boundingBox();
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(header!.y + header!.height);
+  await launcher.click();
+  await expect(page.getByPlaceholder("Ask Alfred...")).toBeVisible();
+  await page.getByPlaceholder("Ask Alfred...").fill("Keep this draft when the launcher returns to the header");
+  await page.getByRole("button", { name: "Close Alfred" }).click();
+  await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
+  await page.getByRole("button", { name: "Open Alfred" }).click();
+  await expect(page.getByPlaceholder("Ask Alfred...")).toHaveValue("Keep this draft when the launcher returns to the header");
+  expect(network.unexpected).toEqual([]);
 });

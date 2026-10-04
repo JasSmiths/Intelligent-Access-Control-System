@@ -1,13 +1,14 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
-import { Bell, Play, Plus, Split, X, Zap } from "lucide-react";
+import { Bell, Plus, Split, X } from "lucide-react";
 import React from "react";
 import type { Person, Schedule, UserAccount } from "../../api/types";
 import type { NotificationRule, NotificationTriggerGroup } from "../../api/workflows";
 import { workflowApi } from "../../api/workflows";
 import { notificationEventLabel } from "../../lib/format";
 import { notificationChannelMeta } from "../../lib/notifications";
-import { Toolbar } from "../../ui/primitives";
+import { ErrorState, LoadingState, Toolbar } from "../../ui/primitives";
 import { NotificationConfigChip, WorkflowRuleList, WorkflowStatusFilters } from "./components";
 import { useNotificationCameras, usePendingWorkflowIds, useTransientRuleStatusFeedback, useWorkflowData, useWorkflowRuleFilters } from "./hooks";
 import type { NotificationStatusFilter, WorkflowFeedback, WorkflowRuleStatusFeedback } from "./model";
@@ -26,7 +27,8 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   const [selectorDirty, setSelectorDirty] = React.useState(false);
   const modalRef = React.useRef<HTMLDivElement>(null);
   const baseline = React.useRef("");
-  const dismissDraft = useEditorDismiss(() => { setDraft(null); setModal(null); }, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "notification changes");
+  const closeDraft = useModalClose(modalRef, () => { setDraft(null); setModal(null); });
+  const dismissDraft = useEditorDismiss(closeDraft, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "notification changes");
   const requestClose = () => { if (saving) return; if (modal) { if (modal === "action" && selectorDirty && !window.confirm("Discard notification action selection?")) return; setModal(null); setSelectorDirty(false); } else dismissDraft(); };
   useModalFocus(modalRef, Boolean(draft), requestClose);
   const [testing, setTesting] = React.useState(false);
@@ -78,8 +80,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
 
   const deleteRule = async (rule: NotificationRule) => {
     if (rule.id.startsWith("draft-")) {
-      setDraft(null);
-      setModal(null);
+      await closeDraft();
       return;
     }
     if (!window.confirm(`Delete ${rule.name}?`)) return;
@@ -87,8 +88,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     try {
       await workflowApi.deleteNotificationRule(rule);
       await load();
-      setDraft(null);
-      setModal(null);
+      await closeDraft();
       setFeedback({ tone: "success", text: "Notification workflow deleted." });
     } catch (deleteError) {
       setFeedback({ tone: "error", text: deleteError instanceof Error ? deleteError.message : "Unable to delete notification workflow." });
@@ -153,8 +153,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     try {
       const saved = await workflowApi.saveNotificationRule(activeDraft, payload);
       setRules((current) => current.some((item) => item.id === saved.id) ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current]);
-      setDraft(null);
-      setModal(null);
+      await closeDraft();
       void load();
       setRuleStatusFeedback({
         nonce: Date.now(),
@@ -190,13 +189,17 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
     }
   };
 
-  if (loading) {
+  if (loading || (!data && !error)) {
     return (
       <section className="view-stack notifications-page workflow-notifications-page">
-        <Toolbar title="Notifications" count={0} icon={Bell} />
-        <div className="loading-panel">Loading notification workflows</div>
+        <Toolbar title="Notifications" icon={Bell} />
+        <LoadingState label="Loading notification workflows" />
       </section>
     );
+  }
+
+  if (!data) {
+    return <section className="view-stack notifications-page workflow-notifications-page"><Toolbar title="Notifications" icon={Bell} /><ErrorState title="Notifications unavailable" description={error} onRetry={() => void load()} /></section>;
   }
 
   return (
@@ -207,7 +210,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
         </button>
       </Toolbar>
 
-      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {error ? <ErrorState title="Notifications unavailable" description={error} onRetry={() => void load()} /> : null}
       {feedback && !activeDraft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
 
       <WorkflowStatusFilters

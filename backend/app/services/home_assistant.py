@@ -80,6 +80,8 @@ class HomeAssistantIntegrationService:
                 await task
             except asyncio.CancelledError:
                 pass
+        from app.services.resident_recovery import invalidate_connection
+        invalidate_connection()
         self._listener = None
         self._state_refresh_task = None
         if hasattr(self._client, "close"):
@@ -180,8 +182,21 @@ class HomeAssistantIntegrationService:
 
     async def _listen(self) -> None:
         while True:
+            from app.services.resident_recovery import invalidate_connection, observe_tracker
+            invalidate_connection()
             try:
                 async for message in self._client.subscribe_state_changed():
+                    if message.get("type") == "iacs_connection":
+                        connected = message.get("connected") is True
+                        invalidate_connection(connected=connected,
+                            connection_binding=message.get("configuration_fingerprint"))
+                        previous_status = (self._connected, self._last_error)
+                        if connected:
+                            self._mark_connected()
+                        else:
+                            self._mark_unhealthy("Home Assistant connection interrupted.")
+                        await self._publish_connection_status_if_changed(previous_status)
+                        continue
                     previous_status = (self._connected, self._last_error)
                     self._mark_connected()
                     await self._publish_connection_status_if_changed(previous_status)
@@ -211,6 +226,8 @@ class HomeAssistantIntegrationService:
                         last_changed=last_changed,
                         last_updated=last_updated,
                     )
+                    if str(entity_id).startswith("device_tracker."):
+                        await observe_tracker(str(entity_id), new_state, data.get("old_state") or {})
                     config = await get_runtime_config()
                     gate_entities = normalize_cover_entities(
                         config.home_assistant_gate_entities,
@@ -264,7 +281,10 @@ class HomeAssistantIntegrationService:
         if not action_id:
             return
         from app.services.messaging.whatsapp_helpers import parse_visitor_pass_timeframe_button_id
-        from app.services.visitor_conversations import HomeAssistantTimeframeAction, get_visitor_conversation_service
+        from app.services.visitor_conversations import (
+            HomeAssistantTimeframeAction,
+            get_visitor_conversation_service,
+        )
 
         decision = parse_visitor_pass_timeframe_button_id(action_id)
         if decision:
@@ -581,7 +601,10 @@ class HomeAssistantIntegrationService:
         if not self._last_error or previous_error:
             return
         from app.modules.notifications.base import NotificationContext
-        from app.services.notifications import INTEGRATION_DEGRADED_EVENT_TYPE, get_notification_service
+        from app.services.notifications import (
+            INTEGRATION_DEGRADED_EVENT_TYPE,
+            get_notification_service,
+        )
 
         reason = self._last_error
         occurred_at = self._last_failure_at or datetime.now(tz=UTC)

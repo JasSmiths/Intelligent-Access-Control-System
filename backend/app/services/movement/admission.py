@@ -144,6 +144,10 @@ async def finalize_in_session(
         from app.services.access.delivery import reserve_verified_arrival_notification
 
         await reserve_verified_arrival_notification(session, event)
+    if ((event.raw_payload or {}).get("resident_recovery") or
+            ((event.raw_payload or {}).get("direction_resolution") or {}).get("missed_exit_recovery")):
+        from app.services.resident_recovery import record_admission_in_session
+        await record_admission_in_session(session, event=event, saga=saga, status=status, receipt=gate_receipt)
     await session.flush()
     return AdmissionResult(event, saga, status, evidence, transition.changed, transition.result,
                            reconciliation, changed)

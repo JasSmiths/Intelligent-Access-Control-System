@@ -41,6 +41,7 @@ from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enq
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.recovery_tracker_discovery import RecoveryTrackerDiscovery, discover_recovery_trackers
 from app.services.notifications import get_notification_service
 from app.services.settings import get_runtime_config, normalize_esphome_device_id, update_settings
 from app.services.telemetry import (
@@ -343,6 +344,14 @@ async def esphome_entities(device_id: str | None = None, _: User = Depends(admin
             if entity.kind == "garage_door"
         ],
     }
+
+
+@router.get("/home-assistant/recovery-trackers", response_model=RecoveryTrackerDiscovery)
+async def home_assistant_recovery_trackers(
+    _: User = Depends(admin_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> RecoveryTrackerDiscovery:
+    return await discover_recovery_trackers(session, _home_assistant_client())
 
 
 @router.get("/home-assistant/entities")

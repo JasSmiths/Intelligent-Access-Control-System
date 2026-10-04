@@ -1,3 +1,4 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { AlertTriangle, Check, Plus, Search, Smartphone, Sparkles, Trash2, Users, X } from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
@@ -5,7 +6,7 @@ import type { UnifiProtectCamera } from "../../api/types";
 import type { NotificationAction, NotificationActionableOption, NotificationEndpoint, NotificationGateMalfunctionStage, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationVariable } from "../../api/workflows";
 import { notificationChannelMeta } from "../../lib/notifications";
 import { matchesSearchText } from "./model";
-import { concreteNotificationEndpoints, normalizeGateMalfunctionStages, normalizeNotificationActionable, normalizeNotificationMedia, notificationActionTargetChips } from "./notificationModel";
+import { concreteNotificationEndpoints, normalizeGateMalfunctionStages, normalizeNotificationActionable, normalizeNotificationMedia, notificationActionTargetChips, variableRecipientChoices } from "./notificationModel";
 import { PlainTemplateEditor, SafeVariableRichTextEditor } from "./TemplateEditor";
 
 export function NotificationActionCard({
@@ -35,6 +36,15 @@ export function NotificationActionCard({
   const supportsMessageTemplate = !isGateMalfunctionWorkflow;
   const supportsMedia = action.type === "mobile" || action.type === "in_app" || action.type === "discord";
   const supportsActionable = action.type === "mobile" && actionableOptions.length > 0;
+  const variableRecipients = action.type === "in_app" ? undefined : variableRecipientChoices(action, integration);
+  const updateTemplate = (field: "title_template" | "message_template", value: string, restrictions?: import("../../api/workflows").VariableRecipientRestriction[]) => {
+    const visibility = {...action.variable_recipients};
+    if (restrictions !== undefined) {
+      if (restrictions.length) visibility[field] = restrictions;
+      else delete visibility[field];
+    }
+    onChange({...action, [field]: value, variable_recipients: Object.keys(visibility).length ? visibility : undefined});
+  };
   const actionMedia = normalizeNotificationMedia(action.media);
   const actionActionable = normalizeNotificationActionable(action.actionable);
   const selectedActionable = actionableOptions.find((item) => item.value === actionActionable.action) ?? actionableOptions[0];
@@ -190,7 +200,9 @@ export function NotificationActionCard({
           label="Title"
           value={action.title_template}
           variables={variables}
-          onChange={(title_template) => onChange({ ...action, title_template })}
+          recipients={variableRecipients}
+          variableRecipients={action.variable_recipients?.title_template}
+          onChange={(title_template, restrictions) => updateTemplate("title_template", title_template, restrictions)}
         />
       ) : null}
       {supportsMessageTemplate ? (
@@ -199,7 +211,9 @@ export function NotificationActionCard({
           multiline
           value={action.message_template}
           variables={variables}
-          onChange={(message_template) => onChange({ ...action, message_template })}
+          recipients={variableRecipients}
+          variableRecipients={action.variable_recipients?.message_template}
+          onChange={(message_template, restrictions) => updateTemplate("message_template", message_template, restrictions)}
         />
       ) : (
         <div className="workflow-generated-copy">
@@ -270,12 +284,14 @@ export function NotificationActionCard({
   );
 }
 
-function NotificationRecipientModal({ endpoints, onClose, onAdd }: {
+function NotificationRecipientModal({ endpoints, onClose: finishClose, onAdd: finishAdd }: {
   endpoints: NotificationEndpoint[];
   onClose: () => void;
   onAdd: (ids: string[]) => void;
 }) {
   const dialogRef = React.useRef<HTMLDialogElement>(null);
+  const onClose = useModalClose(dialogRef, finishClose);
+  const onAdd = useModalClose(dialogRef, finishAdd);
   const titleId = React.useId();
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState<string[]>([]);

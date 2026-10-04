@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import lru_cache
@@ -13,6 +15,12 @@ from app.core.logging import get_logger
 from app.services.settings import RuntimeConfig, get_runtime_config
 
 logger = get_logger(__name__)
+
+
+def home_assistant_connection_fingerprint(config: Any) -> str:
+    """Opaque provenance for the actual authenticated socket configuration."""
+    material = [str(config.home_assistant_url).rstrip("/"), str(config.home_assistant_token)]
+    return hashlib.sha256(json.dumps(material, separators=(",", ":")).encode()).hexdigest()
 
 
 class HomeAssistantError(RuntimeError):
@@ -82,8 +90,8 @@ class HomeAssistantClient:
             last_updated=data.get("last_updated"),
         )
 
-    async def list_states(self) -> list[HomeAssistantState]:
-        data = await self._request("GET", "/api/states")
+    async def list_states(self, *, runtime_config: RuntimeConfig | None = None) -> list[HomeAssistantState]:
+        data = await self._request("GET", "/api/states", runtime_config=runtime_config)
         if not isinstance(data, list):
             raise HomeAssistantError("Home Assistant returned an unexpected states payload.")
         return [
@@ -98,8 +106,8 @@ class HomeAssistantClient:
             if isinstance(item, dict) and item.get("entity_id")
         ]
 
-    async def list_services(self) -> list[HomeAssistantService]:
-        data = await self._request("GET", "/api/services")
+    async def list_services(self, *, runtime_config: RuntimeConfig | None = None) -> list[HomeAssistantService]:
+        data = await self._request("GET", "/api/services", runtime_config=runtime_config)
         if not isinstance(data, list):
             raise HomeAssistantError("Home Assistant returned an unexpected services payload.")
 
@@ -127,6 +135,85 @@ class HomeAssistantClient:
                 )
         return services
 
+    async def normalize_mobile_app_service_names(
+        self, names: list[str], *, runtime_config: RuntimeConfig | None = None,
+    ) -> list[str]:
+        """Ask the installed HA slugify filter using a constant read-only template.
+
+        Names are variables, never interpolated template code. This uses the
+        server's actual Unicode normalization without adding a local approximation.
+        """
+        if len(names) > 1000 or any(
+            not isinstance(name, str) or not name or len(name) > 255 for name in names
+        ):
+            raise HomeAssistantError("Home Assistant device name normalization is unavailable.", delivery="not_sent")
+        if not names:
+            return []
+        try:
+            values = await self._request("POST", "/api/template", json={
+                "template": "{{ names | map('slugify') | list | to_json }}",
+                "variables": {"names": [f"mobile_app_{name}" for name in names]},
+            }, runtime_config=runtime_config)
+            if not isinstance(values, list) or len(values) != len(names) or any(
+                not isinstance(value, str) or len(value) > 255
+                or re.fullmatch(r"mobile_app_[a-z0-9_]+", value) is None for value in values
+            ):
+                raise ValueError("Invalid normalized names")
+            return [f"notify.{value}" for value in values]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise HomeAssistantError("Home Assistant device name normalization is unavailable.", delivery="not_sent") from exc
+
+    async def list_recovery_registries(
+        self, *, runtime_config: RuntimeConfig | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """One authenticated, bounded, read-only socket; never subscribe or retry.
+
+        Registry metadata stays within discovery and is never logged or returned
+        directly by the API. A failure invalidates both registry lists.
+        """
+        config = runtime_config if runtime_config is not None else await self.config()
+        if not (config.home_assistant_url and config.home_assistant_token):
+            raise HomeAssistantError("Home Assistant registry discovery is unavailable.", delivery="not_sent")
+        try:
+            async with asyncio.timeout(8):
+                async with websockets.connect(
+                    self._websocket_url(config.home_assistant_url),
+                    proxy=None, open_timeout=5, close_timeout=1,
+                    max_size=4 * 1024 * 1024, max_queue=4,
+                ) as websocket:
+                    greeting = json.loads(await websocket.recv())
+                    if not isinstance(greeting, dict) or greeting.get("type") != "auth_required":
+                        raise ValueError("Unexpected authentication greeting")
+                    await websocket.send(json.dumps({"type": "auth", "access_token": config.home_assistant_token}))
+                    authenticated = json.loads(await websocket.recv())
+                    if not isinstance(authenticated, dict) or authenticated.get("type") != "auth_ok":
+                        raise ValueError("Authentication refused")
+                    results = []
+                    for request_id, command in enumerate((
+                        "config/entity_registry/list", "config/device_registry/list",
+                    ), start=1):
+                        await websocket.send(json.dumps({"id": request_id, "type": command}))
+                        response = json.loads(await websocket.recv())
+                        if not isinstance(response, dict) or (
+                            response.get("type") != "result" or response.get("id") != request_id
+                            or response.get("success") is not True
+                        ):
+                            raise ValueError("Registry request failed")
+                        rows = response.get("result")
+                        if not isinstance(rows, list) or len(rows) > 20000 or any(
+                            not isinstance(row, dict) for row in rows
+                        ):
+                            raise ValueError("Invalid registry result")
+                        results.append(rows)
+                    return results[0], results[1]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Deliberately discard vendor diagnostics (which can contain secrets).
+            raise HomeAssistantError("Home Assistant registry discovery is unavailable.", delivery="not_sent") from exc
+
     async def subscribe_state_changed(self) -> AsyncIterator[dict[str, Any]]:
         config = await self.config()
         if not (config.home_assistant_url and config.home_assistant_token):
@@ -149,6 +236,10 @@ class HomeAssistantClient:
                     if '"auth_ok"' not in auth_response:
                         raise HomeAssistantError("Home Assistant WebSocket authentication failed.")
 
+                    # Explicit vendor lifecycle fences cached journey evidence even
+                    # though this generator reconnects internally.
+                    yield {"type": "iacs_connection", "connected": True,
+                           "configuration_fingerprint": home_assistant_connection_fingerprint(config)}
                     for event_type in ("state_changed", "mobile_app_notification_action"):
                         await websocket.send(
                             json.dumps(
@@ -163,9 +254,11 @@ class HomeAssistantClient:
 
                     async for message in websocket:
                         yield json.loads(message)
+                    yield {"type": "iacs_connection", "connected": False}
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                yield {"type": "iacs_connection", "connected": False}
                 logger.warning("home_assistant_ws_reconnect", extra={"error": str(exc)})
                 await asyncio.sleep(5)
 

@@ -1,4 +1,5 @@
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 Camera,
@@ -175,34 +176,28 @@ export function GroupsView({
             {filtered.map((group) => {
               const peopleCount = group.people_count ?? peopleByGroup.get(group.id) ?? 0;
               return (
-                <article
-                  className="user-row group-row group-row-button"
+                <button
+                  className="user-row group-row directory-row-button"
                   key={group.id}
                   onClick={() => openEdit(group)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      openEdit(group);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
+                  aria-label={`Edit group ${group.name}`}
+                  type="button"
                 >
                   <span className={`group-mark ${group.category}`}>
                     <Users size={17} />
                   </span>
-                  <div>
+                  <span className="directory-row-copy">
                     <strong>{group.name}</strong>
                     <span>{group.subtype || group.description || "General access group"}</span>
-                  </div>
+                  </span>
                   <Badge tone={groupCategoryTone(group.category)}>{titleCase(group.category)}</Badge>
                   <span className="member-count">{peopleCount} {peopleCount === 1 ? "person" : "people"}</span>
-                </article>
+                </button>
               );
             })}
           </div>
         ) : (
-          <EmptyState icon={Users} label="No groups match this view" />
+          <EmptyState icon={Users} label="No groups match this view" description={query ? "Try another group name or category in search." : "Organise people into groups to keep access policies easier to manage."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create group</button> : undefined} />
         )}
       </div>
 
@@ -228,8 +223,8 @@ export function GroupModal({
   group,
   members,
   mode,
-  onClose,
-  onSaved,
+  onClose: finishClose,
+  onSaved: finishSaved,
   setPageError
 }: {
   group: Group | null;
@@ -240,6 +235,8 @@ export function GroupModal({
   setPageError: (message: string) => void;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onSaved = useModalClose(modalRef, finishSaved);
   const [form, setForm] = React.useState({
     name: group?.name ?? "",
     category: group?.category ?? "family",
@@ -731,27 +728,20 @@ export function PeopleView({
               >
                 <div className="users-table people-table">
                   {section.items.map((person) => (
-                    <article
-                      className="user-row person-row person-row-button"
+                    <button
+                      className="user-row person-row directory-row-button"
                       key={person.id}
                       onClick={() => openEdit(person)}
-                      onKeyDown={(event) => {
-                        if (event.target !== event.currentTarget) return;
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openEdit(person);
-                        }
-                      }}
-                      role="button"
-                      tabIndex={0}
+                      aria-label={`Edit person ${person.display_name}`}
+                      type="button"
                     >
                       <PersonAvatar person={person} />
-                      <div>
+                      <span className="directory-row-copy">
                         <strong>{person.display_name}</strong>
                         <span>{person.category ? titleCase(person.category) : "No category"}{person.group ? ` • ${person.group}` : ""}</span>
-                      </div>
+                      </span>
                       <Badge tone={person.is_active ? "green" : "gray"}>{person.is_active ? "Active" : "Inactive"}</Badge>
-                      <div className="vehicle-chip-list">
+                      <span className="vehicle-chip-list">
                         {person.schedule ? <span className="vehicle-chip schedule-chip">{person.schedule}</span> : null}
                         {person.vehicles.length ? person.vehicles.map((vehicle) => (
                           <span className="vehicle-chip" key={vehicle.id}>{vehicle.registration_number}</span>
@@ -765,15 +755,15 @@ export function PeopleView({
                             {person.home_assistant_presence_input_boolean_entity_ids.length} input_boolean
                           </span>
                         ) : null}
-                      </div>
-                    </article>
+                      </span>
+                    </button>
                   ))}
                 </div>
               </DirectoryGroupAccordion>
             ))}
           </div>
         ) : (
-          <EmptyState icon={Users} label="No people match this view" />
+          <EmptyState icon={Users} label="No people match this view" description={query ? "Try another name, group, or registration in search." : "Add people to connect their vehicles, schedules, and access preferences."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create person</button> : undefined} />
         )}
       </div>
 
@@ -807,8 +797,8 @@ export function PersonModal({
   garageDoors,
   groups,
   mode,
-  onClose,
-  onSaved,
+  onClose: finishClose,
+  onSaved: finishSaved,
   person,
   people,
   schedules,
@@ -829,6 +819,8 @@ export function PersonModal({
   vehicles: Vehicle[];
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onSaved = useModalClose(modalRef, finishSaved);
   const [form, setForm] = React.useState({
     first_name: person?.first_name ?? "",
     last_name: person?.last_name ?? "",
@@ -839,6 +831,8 @@ export function PersonModal({
     vehicle_ids: person?.vehicles.map((vehicle) => vehicle.id) ?? ([] as string[]),
     garage_door_entity_ids: person?.garage_door_entity_ids ?? ([] as string[]),
     home_assistant_mobile_app_notify_service: person?.home_assistant_mobile_app_notify_service ?? "",
+    missed_exit_recovery_enabled: person?.missed_exit_recovery_enabled ?? false,
+    missed_exit_recovery_tracker_entity_id: person?.missed_exit_recovery_tracker_entity_id ?? "",
     home_assistant_presence_input_boolean_entity_ids:
       person?.home_assistant_presence_input_boolean_entity_ids ?? ([] as string[]),
     home_assistant_presence_input_boolean_entry_action:
@@ -1036,6 +1030,8 @@ export function PersonModal({
       vehicle_ids: form.vehicle_ids,
       garage_door_entity_ids: form.garage_door_entity_ids,
       home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
+      missed_exit_recovery_enabled: form.missed_exit_recovery_enabled,
+      missed_exit_recovery_tracker_entity_id: form.missed_exit_recovery_tracker_entity_id.trim() || null,
       home_assistant_presence_input_boolean_entity_ids:
         form.home_assistant_presence_input_boolean_entity_ids,
       home_assistant_presence_input_boolean_entry_action:
@@ -1099,6 +1095,8 @@ export function PersonModal({
     notes: form.notes || null,
     garage_door_entity_ids: form.garage_door_entity_ids,
     home_assistant_mobile_app_notify_service: form.home_assistant_mobile_app_notify_service || null,
+    missed_exit_recovery_enabled: form.missed_exit_recovery_enabled,
+    missed_exit_recovery_tracker_entity_id: form.missed_exit_recovery_tracker_entity_id.trim() || null,
     home_assistant_presence_input_boolean_entity_ids:
       form.home_assistant_presence_input_boolean_entity_ids,
     home_assistant_presence_input_boolean_entry_action:
@@ -1235,6 +1233,11 @@ export function PersonModal({
               <span>Mobile match {Math.round(haSuggestion.mobile.confidence * 100)}%</span>
             </div>
           ) : null}
+        </section>
+        <section className="person-ha-section">
+          <strong>Missed Exit Recovery · Testing / debug</strong>
+          <label className="field"><span>Owner recovery opt-in</span><select value={String(form.missed_exit_recovery_enabled)} onChange={(event) => update("missed_exit_recovery_enabled", event.target.value === "true")}><option value="false">Disabled</option><option value="true">Enabled</option></select></label>
+          <label className="field"><span>Home Assistant phone tracker entity</span><input value={form.missed_exit_recovery_tracker_entity_id} onChange={(event) => update("missed_exit_recovery_tracker_entity_id", event.target.value)} placeholder="device_tracker.phone" pattern="device_tracker\.[a-z0-9_]+" /><small className="field-hint">Use an explicit device_tracker entity. Global recovery must also be enabled. Saving does not send a notification or command.</small></label>
         </section>
         <label className="field">
           <span>Operational notes</span>
@@ -1601,36 +1604,25 @@ export function VehiclesView({
               >
                 <div className="users-table vehicles-table">
                   {section.items.map((vehicle) => (
-                    <article
-                      className="user-row vehicle-row vehicle-row-button"
-                      key={vehicle.id}
-                      onClick={() => openEdit(vehicle)}
-                      onKeyDown={(event) => {
-                        if (event.target !== event.currentTarget) return;
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openEdit(vehicle);
-                        }
-                      }}
-                      role="button"
-                      tabIndex={0}
-                    >
+                    <article className="user-row vehicle-row" key={vehicle.id}>
+                      <button className="vehicle-row-open" onClick={() => openEdit(vehicle)} type="button" aria-label={`Edit vehicle ${vehicle.registration_number}`}>
                       <VehiclePhoto vehicle={vehicle} />
-                      <div className="vehicle-row-main">
+                      <span className="vehicle-row-main directory-row-copy">
                         <strong>{vehicle.registration_number}</strong>
                         <span>{vehicleTitle(vehicle)}</span>
-                      </div>
+                      </span>
                       <span className="vehicle-owner">{vehicleOwnerLabel(vehicle, peopleByVehicleId, peopleById)}</span>
-                      <span className={vehicle.schedule ? "vehicle-chip schedule-chip" : "vehicle-chip inherit-chip"}>
-                        {vehicle.schedule ?? "Inherit"}
+                      <span className="vehicle-row-schedule">
+                        <span className="directory-field-label">Schedule</span>
+                        <span className={vehicle.schedule ? "vehicle-chip schedule-chip" : "vehicle-chip inherit-chip"}>
+                          {vehicle.schedule ?? "Inherit"}
+                        </span>
                       </span>
                       <Badge tone={vehicle.is_active !== false ? "green" : "gray"}>{vehicle.is_active !== false ? "Active" : "Inactive"}</Badge>
+                      </button>
                       <button
-                        className="icon-button danger"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteVehicle(vehicle).catch(() => undefined);
-                        }}
+                        className="icon-button danger vehicle-delete"
+                        onClick={() => { deleteVehicle(vehicle).catch(() => undefined); }}
                         type="button"
                         aria-label={`Delete ${vehicle.registration_number}`}
                       >
@@ -1643,7 +1635,7 @@ export function VehiclesView({
             ))}
           </div>
         ) : (
-          <EmptyState icon={Car} label="No vehicles match this view" />
+          <EmptyState icon={Car} label="No vehicles match this view" description={query ? "Try another registration, owner, or vehicle name in search." : "Keep registration details and owners together for clear access records."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Register vehicle</button> : undefined} />
         )}
       </div>
 
@@ -1772,8 +1764,8 @@ export function VehicleModal({
   defaultPolicyOptionLabel,
   groups,
   mode,
-  onClose,
-  onSaved,
+  onClose: finishClose,
+  onSaved: finishSaved,
   people,
   refreshVehicles,
   schedules,
@@ -1792,6 +1784,8 @@ export function VehicleModal({
   vehicle: Vehicle | null;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onSaved = useModalClose(modalRef, finishSaved);
   const [form, setForm] = React.useState({
     registration_number: vehicle?.registration_number ?? "",
     vehicle_photo_data_url: vehicle?.vehicle_photo_data_url ?? "",

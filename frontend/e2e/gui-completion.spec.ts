@@ -38,6 +38,8 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/schedules/schedule-1/dependencies": body = { people: [person], vehicles: [vehicle], doors: [] }; break;
       case "/api/v1/visitor-passes": body = [pass]; break;
       case "/api/v1/integrations/gate/status": body = { configured: false, connected: false, gate_entity_id: null, default_media_player: null, last_gate_state: "unknown", garage_door_entities: [] }; break;
+      case "/api/v1/integrations/gate/commands": body = { items: [], next_cursor: null }; break;
+      case "/api/v1/missed-exit-recovery/attempts": body = { items: [], total: 0, offset: 0, limit: 25 }; break;
       case "/api/v1/integrations/home-assistant/status": body = { configured: false, connected: false }; break;
       case "/api/v1/integrations/unifi-protect/status": body = { configured: false, connected: false, realtime_connected: false }; break;
       case "/api/v1/integrations/unifi-protect/cameras": body = { cameras: [] }; break;
@@ -47,6 +49,7 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/integrations/discord/identities": body = { identities: [] }; break;
       case "/api/v1/integrations/whatsapp/status": body = { configured: false, enabled: false }; break;
       case "/api/v1/integrations/home-assistant/entities": body = { cover_entities: [] }; break;
+      case "/api/v1/integrations/home-assistant/recovery-trackers": body = { trackers: [], mappings: [], reason: "not_configured" }; break;
       case "/api/v1/integrations/esphome/entities": body = { cover_entities: [] }; break;
       case "/api/v1/access-devices": body = []; break;
       case "/api/v1/maintenance/status": body = { is_active: false, enabled_by: null, enabled_at: null, source: null, reason: null, duration_seconds: 0, duration_label: null }; break;
@@ -79,16 +82,34 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
 test("opens all route families with isolated loaded fixtures across viewport sizes", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const unexpected = await installFixtures(page);
-  const routes = ["/", "/events", "/movements", "/alerts", "/people", "/groups", "/vehicles", "/schedules", "/passes", "/reports", "/top-charts", "/logs", "/settings", "/settings/general", "/settings/gates", "/settings/garage-doors", "/settings/auth-security", "/integrations", "/settings/automations", "/settings/notifications", "/settings/lpr-tuning", "/settings/zones", "/settings/users", "/settings/alfred-training"];
+  const routes = ["/", "/events", "/movements", "/alerts", "/people", "/groups", "/vehicles", "/schedules", "/passes", "/reports", "/top-charts", "/logs", "/settings", "/settings/general", "/settings/gates", "/settings/garage-doors", "/settings/command-history", "/settings/missed-exit-recovery", "/settings/auth-security", "/integrations", "/settings/automations", "/settings/notifications", "/settings/lpr-tuning", "/settings/zones", "/settings/users", "/settings/alfred-training"];
   const viewports = [{ name: "desktop", width: 1440, height: 1000 }, { name: "tablet", width: 900, height: 1000 }, { name: "mobile", width: 390, height: 844 }, { name: "mobile-short", width: 390, height: 600 }];
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     for (const path of routes) {
       await page.goto(path);
       await expect(page.locator("main")).not.toContainText("This view could not be loaded.");
-      await expect(page.locator("main .loading-panel")).toHaveCount(0, { timeout: 4000 });
+      await expect(page.locator("main .loading-panel, main .loading-state")).toHaveCount(0, { timeout: 4000 });
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow, `${viewport.name} ${path} horizontal overflow`).toBeLessThanOrEqual(1);
+      const clippedPills = await page.locator("main .badge, main .vehicle-chip, main .schedule-dependency-pill, main .visitor-pass-status-pill").evaluateAll((elements) => elements.flatMap((element) => {
+        const bounds = element.getBoundingClientRect();
+        if (!bounds.width || !bounds.height || getComputedStyle(element).visibility === "hidden") return [];
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          if (!node.textContent?.trim()) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          for (const text of range.getClientRects()) {
+            if (text.left < bounds.left - 1 || text.right > bounds.right + 1 || text.top < bounds.top - 1 || text.bottom > bounds.bottom + 1) {
+              return [element.textContent?.trim()];
+            }
+          }
+        }
+        return [];
+      }));
+      expect(clippedPills, `${viewport.name} ${path} pill text must fit its container`).toEqual([]);
       if (viewport.name === "desktop" || viewport.name === "mobile") {
         const routeName = path === "/" ? "dashboard" : path.replace(/^\//, "").replaceAll("/", "-");
         await page.screenshot({ path: testInfo.outputPath(`${viewport.name}-${routeName}-after.png`), fullPage: false, animations: "disabled" });
@@ -106,7 +127,7 @@ test("keeps Settings state, search filters, role gates, and mobile dismissal in 
   await expect(page.getByRole("button", { name: "Expand Settings" })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole("button", { name: "Collapse Settings" })).toBeVisible();
-  await page.getByRole("button", { name: "Search Anything..." }).click();
+  await page.getByRole("button", { name: "Search anything" }).click();
   await page.getByRole("dialog", { name: "Global search" }).getByRole("combobox").fill("Ada");
   await page.getByRole("option", { name: /Ada Resident/ }).first().click();
   await page.getByRole("dialog", { name: "Global search" }).getByRole("button", { name: "Open" }).click();
@@ -350,7 +371,7 @@ test("clears search and account state across logout and another login", async ({
   await page.route("**/api/v1/auth/logout", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "logged_out" }) }));
   await page.route("**/api/v1/auth/login", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(account("standard")) }));
   await page.goto("/people");
-  await page.getByRole("button", { name: "Search Anything..." }).click();
+  await page.getByRole("button", { name: "Search anything" }).click();
   await page.getByRole("dialog", { name: "Global search" }).getByRole("combobox").fill("Ada");
   await page.getByRole("option", { name: /Ada Resident/ }).first().click();
   await page.getByRole("dialog", { name: "Global search" }).getByRole("button", { name: "Open" }).click();
@@ -412,18 +433,88 @@ test("shows movement detail without clipping on desktop and mobile", async ({ pa
   expect(unexpected).toEqual([]);
 });
 
-test("renders real Settings appearance controls in light, dark, and system modes", async ({ page }, testInfo) => {
+test("Settings hub adapts across screens and themes using the console theme control", async ({ page }, testInfo) => {
   const unexpected = await installFixtures(page);
-  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/settings");
-  await expect(page.getByRole("heading", { name: "Appearance" })).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("settings-desktop-light-after.png"), fullPage: false });
-  await page.getByRole("radio", { name: "Dark" }).check();
+  await page.getByRole("button", { name: "Dismiss chat prompt" }).click();
+  const hub = page.getByRole("region", { name: "Settings pages" });
+  await expect(hub.getByRole("button")).toHaveCount(13);
+  await expect(page.getByRole("heading", { name: "Appearance" })).toHaveCount(0);
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  const themeControl = page.getByRole("button", { name: "Theme", exact: true });
+
+  for (const [width, height, columns] of [[1440, 1000, 3], [1024, 900, 2], [390, 844, 1]]) {
+    await page.setViewportSize({ width, height });
+    let lightSurface = "";
+    let darkSurface = "";
+    for (const mode of ["Light", "Dark", "System"]) {
+      await themeControl.press("Enter");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", mode.toLowerCase());
+      await expect.poll(() => hub.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length)).toBe(columns);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+      const surface = await page.locator(".settings-home-group").first().evaluate((node) => getComputedStyle(node).backgroundColor);
+      if (mode === "Light") lightSurface = surface;
+      if (mode === "Dark") { darkSurface = surface; expect(darkSurface).not.toBe(lightSurface); }
+      if (mode === "System") await expect(page.locator(".settings-home-group").first()).toHaveCSS("background-color", darkSurface);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: testInfo.outputPath(`settings-hub-${width}-${mode.toLowerCase()}.png`), fullPage: true, animations: "disabled" });
+    }
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    const destinationBottom = await hub.getByRole("button").evaluateAll((nodes) => Math.max(...nodes.map((node) => node.getBoundingClientRect().bottom)));
+    const launcher = await page.getByRole("button", { name: "Open Alfred" }).boundingBox();
+    expect(launcher).not.toBeNull();
+    expect(destinationBottom).toBeGreaterThan(0);
+    if (width > 768) expect(destinationBottom).toBeLessThanOrEqual(launcher!.y);
+    else await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
+  }
+
+  await themeControl.press("Enter");
+  await themeControl.press("Enter");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect.poll(() => page.locator(".settings-appearance").evaluate((node) => getComputedStyle(node).backgroundColor)).toBe("rgb(21, 27, 36)");
-  await page.screenshot({ path: testInfo.outputPath("settings-desktop-dark-after.png"), fullPage: false, animations: "disabled" });
-  await page.getByRole("radio", { name: "System" }).check();
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "system");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(unexpected).toEqual([]);
+});
+
+test("Settings hub searches titles, descriptions and groups and navigates to a destination", async ({ page }) => {
+  const unexpected = await installFixtures(page);
+  await page.goto("/settings");
+  const hub = page.getByRole("region", { name: "Settings pages" });
+  const search = page.getByRole("searchbox", { name: "Find a setting" });
+  await search.fill("  gAtEs  ");
+  await expect(hub.getByRole("button", { name: "Gates", exact: true })).toBeVisible();
+  await expect(hub.getByRole("button")).toHaveCount(1);
+  await expect(page.locator(".settings-home-count")).toHaveText("1 result");
+  await search.fill("fine-tune");
+  await expect(hub.getByRole("button", { name: "LPR Tuning" })).toBeVisible();
+  await search.fill("Access & Detection");
+  await expect(hub.getByRole("button")).toHaveCount(5);
+  await expect(hub.getByRole("heading", { name: "Administration" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect(search).toBeFocused();
+  await expect(hub.getByRole("button")).toHaveCount(13);
+  await search.fill("no matching destination");
+  await expect(page.getByRole("heading", { name: "No settings found" })).toBeVisible();
+  await expect(page.locator(".settings-home-count")).toHaveText("0 results");
+  await page.getByRole("button", { name: "Show all settings" }).click();
+  await expect(search).toHaveValue("");
+  await expect(search).toBeFocused();
+  await hub.getByRole("button", { name: "General", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/general$/);
+  expect(unexpected).toEqual([]);
+});
+
+test("Settings hub filters restricted destinations before searching and counting", async ({ page }) => {
+  const unexpected = await installFixtures(page, "standard");
+  await page.goto("/settings");
+  const hub = page.getByRole("region", { name: "Settings pages" });
+  await expect(hub.getByRole("button")).toHaveCount(6);
+  await expect(page.locator(".settings-home-count")).toHaveText("6 settings");
+  await expect(hub.getByRole("heading", { name: "Automation & Connectivity" })).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Find a setting" }).fill("Missed Exit Recovery");
+  await expect(page.locator(".settings-home-count")).toHaveText("0 results");
+  await expect(hub.getByRole("button", { name: "Missed Exit Recovery" })).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });
 
@@ -434,5 +525,8 @@ test("explains restricted direct URLs without admin reads", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Automations" })).toHaveCount(0);
   await page.goto("/settings/users");
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
+  await page.goto("/settings/command-history");
+  await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Command History" })).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });

@@ -1,11 +1,12 @@
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import {
 CalendarDays,
 Camera,
+ChevronRight,
 CircleDot,
 Construction,
-Database,
 Home,
 Key,
 Loader2,
@@ -13,13 +14,13 @@ MessageCircle,
 PlugZap,
 Plus,
 RefreshCw,
+Search,
 ShieldCheck,
 SlidersHorizontal,
 Smartphone,
 Trash2,
 UserPlus,
 UserRound,
-Users,
 X,
 Zap
 } from "lucide-react";
@@ -31,40 +32,132 @@ import { displayUserName, formatDate } from "../lib/format";
 import { fileToDataUrl, mediaSource, UserAvatar } from "../lib/media";
 import { coerceSettingsPayload, SettingField, stringifySetting, useSettings } from "../lib/settings";
 import { Badge, CardHeader, PanelHeader, Toolbar } from "../ui/primitives";
-import type { AccessDevice, Group, MaintenanceStatus, NavigateToView, Person, Schedule, UnifiProtectCamera, UserAccount, UserRole, Vehicle } from "../api/types";
+import type { AccessDevice, MaintenanceStatus, NavigateToView, Person, Schedule, UnifiProtectCamera, UserAccount, UserRole, ViewKey } from "../api/types";
 import type { SettingFieldDefinition } from "../lib/settings";
 import { settingsNavItems } from "../app/navigation";
-import type { ThemeMode } from "../app/theme";
-
-
+const settingsHomeGroups: Array<{
+  key: string;
+  title: string;
+  description: string;
+  icon: React.ElementType;
+  items: Array<{ key: ViewKey; description: string }>;
+}> = [
+  {
+    key: "access",
+    title: "Access & Detection",
+    description: "Control entry and understand movement.",
+    icon: ShieldCheck,
+    items: [
+      { key: "settings_gates", description: "Configure entry gates and access behaviour." },
+      { key: "settings_garage_doors", description: "Manage garage doors and their controls." },
+      { key: "settings_zones", description: "Define the areas used for presence and access." },
+      { key: "settings_lpr", description: "Fine-tune number plate detection and decisions." },
+      { key: "settings_missed_exit_recovery", description: "Review and recover missed vehicle departures." }
+    ]
+  },
+  {
+    key: "automation",
+    title: "Automation & Connectivity",
+    description: "Connect your site and make it work for you.",
+    icon: Zap,
+    items: [
+      { key: "integrations", description: "Connect providers, devices, and external services." },
+      { key: "settings_automations", description: "Build the rules that keep your site running." },
+      { key: "settings_notifications", description: "Manage alerts, delivery channels, and messages." },
+      { key: "alfred_training", description: "Improve Alfred with feedback and training." }
+    ]
+  },
+  {
+    key: "administration",
+    title: "Administration",
+    description: "Manage the console with confidence.",
+    icon: SlidersHorizontal,
+    items: [
+      { key: "settings_general", description: "Set site preferences and maintenance options." },
+      { key: "settings_auth", description: "Manage sign-in and security settings." },
+      { key: "users", description: "Manage console accounts and permissions." },
+      { key: "settings_command_history", description: "Review audited gate and garage commands." }
+    ]
+  }
+];
 
 export function SettingsView({
   currentUser,
-  theme,
-  setTheme,
   navigateToView
 }: {
   currentUser: UserAccount;
-  theme: ThemeMode;
-  setTheme: (mode: ThemeMode) => void;
   navigateToView: NavigateToView;
 }) {
+  const [search, setSearch] = React.useState("");
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  const id = React.useId();
+  const query = search.trim().toLowerCase();
   const visibleItems = settingsNavItems.filter((item) => !item.adminOnly || currentUser.role === "admin");
+  const groups = settingsHomeGroups.map((group) => ({
+    ...group,
+    items: group.items.flatMap((presentation) => {
+      const item = visibleItems.find((candidate) => candidate.key === presentation.key);
+      if (!item || !`${item.label} ${presentation.description} ${group.title}`.toLowerCase().includes(query)) return [];
+      return [{ ...item, description: presentation.description }];
+    })
+  })).filter((group) => group.items.length > 0);
+  const resultCount = groups.reduce((count, group) => count + group.items.length, 0);
+  const clearSearch = () => {
+    setSearch("");
+    searchRef.current?.focus();
+  };
+
   return (
-    <section className="view-stack settings-home">
-      <div className="toolbar"><div className="card-title"><SlidersHorizontal size={18} /><h1>Settings</h1></div></div>
-      <div className="card settings-appearance">
-        <div><h2>Appearance</h2><p>Choose how this console appears on this device.</p></div>
-        <fieldset className="settings-theme-choices"><legend>Theme</legend>{(["system", "light", "dark"] as ThemeMode[]).map((mode) => <label key={mode}><input type="radio" name="settings-theme" value={mode} checked={theme === mode} onChange={() => setTheme(mode)} />{mode[0].toUpperCase() + mode.slice(1)}</label>)}</fieldset>
+    <section className="view-stack settings-home" aria-labelledby={`${id}-title`}>
+      <header className="settings-home-header">
+        <div className="settings-home-intro">
+          <div className="settings-home-title"><h1 id={`${id}-title`}>Settings</h1><span className="settings-home-count" role="status" aria-live="polite">{query ? `${resultCount} ${resultCount === 1 ? "result" : "results"}` : `${resultCount} settings`}</span></div>
+          <p>Manage access, automation, and console preferences.</p>
+        </div>
+        <div className="settings-home-search" role="search" aria-label="Settings">
+          <Search size={18} aria-hidden="true" />
+          <input ref={searchRef} type="search" aria-label="Find a setting" placeholder="Find a setting…" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && search) { event.preventDefault(); clearSearch(); } }} />
+          {search && <button type="button" aria-label="Clear search" onClick={clearSearch}><X size={16} aria-hidden="true" /></button>}
+        </div>
+      </header>
+
+      <div className="settings-home-groups" role="region" aria-label="Settings pages">
+        {groups.map((group) => {
+          const GroupIcon = group.icon;
+          return (
+            <section className={`settings-home-group settings-home-group-${group.key}`} key={group.key} aria-labelledby={`${id}-${group.key}`}>
+              <header className="settings-home-group-header">
+                <span className="settings-home-group-icon"><GroupIcon size={21} aria-hidden="true" /></span>
+                <h2 id={`${id}-${group.key}`}>{group.title}</h2>
+                <p>{group.description}</p>
+              </header>
+              <div className="settings-home-group-items">
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return <button className="settings-home-destination" key={item.key} type="button" aria-labelledby={`${id}-${item.key}-label`} aria-describedby={`${id}-${item.key}-description`} onClick={() => navigateToView(item.key)}>
+                    <span className="settings-home-destination-icon"><Icon size={19} aria-hidden="true" /></span>
+                    <span className="settings-home-destination-copy"><span id={`${id}-${item.key}-label`} className="settings-home-destination-title">{item.label}</span><span id={`${id}-${item.key}-description`} className="settings-home-destination-description">{item.description}</span></span>
+                    <ChevronRight className="settings-home-destination-arrow" size={16} aria-hidden="true" />
+                  </button>;
+                })}
+              </div>
+            </section>
+          );
+        })}
+        {resultCount === 0 && <div className="settings-home-empty">
+          <Search size={26} aria-hidden="true" />
+          <h2>No settings found</h2>
+          <p>No settings match “{search.trim()}”. Try another title or keyword.</p>
+          <button type="button" onClick={clearSearch}>Show all settings</button>
+        </div>}
       </div>
-      <div className="settings-hub-list" aria-label="Settings pages">{visibleItems.map((item) => { const Icon = item.icon; return <button className="settings-hub-link" key={item.key} type="button" onClick={() => navigateToView(item.key)}><Icon size={19} /><span>{item.label}</span><span aria-hidden="true">›</span></button>; })}</div>
     </section>
   );
 }
 
-export const GATE_LPR_CAMERA_NAME = "gate lpr";
+const GATE_LPR_CAMERA_NAME = "gate lpr";
 
-export const GATE_LPR_CAMERA_DEVICE = "942A6FD09D64";
+const GATE_LPR_CAMERA_DEVICE = "942A6FD09D64";
 
 export type GateLprSmartZonesState = {
   loading: boolean;
@@ -115,7 +208,7 @@ export type LprZoneShadowObservation = {
   created_at: string | null;
 };
 
-export function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
+function useGateLprSmartZones(enabled: boolean): GateLprSmartZonesState {
   const [state, setState] = React.useState<GateLprSmartZonesState>({
     loading: false,
     error: "",
@@ -359,7 +452,7 @@ function normalizeZoneFilterMode(value: string): "shadow" | "live" {
   return value.trim().toLowerCase() === "live" ? "live" : "shadow";
 }
 
-export function findGateLprCamera(cameras: UnifiProtectCamera[]) {
+function findGateLprCamera(cameras: UnifiProtectCamera[]) {
   return cameras.find((camera) => normalizeCameraIdentifier(camera.name) === GATE_LPR_CAMERA_NAME)
     ?? cameras.find((camera) => normalizeCameraIdentifier(camera.mac) === normalizeCameraIdentifier(GATE_LPR_CAMERA_DEVICE))
     ?? cameras.find((camera) => {
@@ -369,7 +462,7 @@ export function findGateLprCamera(cameras: UnifiProtectCamera[]) {
     ?? null;
 }
 
-export function normalizeCameraIdentifier(value: unknown) {
+function normalizeCameraIdentifier(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
 
@@ -1122,7 +1215,7 @@ function bindingConfigForDiscovery(provider: string, selection: string, options:
   return provider === "esphome" ? { ...(match.metadata ?? {}) } : {};
 }
 
-export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number }) {
+function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number }) {
   const [status, setStatus] = React.useState<AuthSecretStatus | null>(null);
   const [customSecret, setCustomSecret] = React.useState("");
   const [confirmed, setConfirmed] = React.useState(false);
@@ -1240,7 +1333,7 @@ export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number
   );
 }
 
-export function MaintenanceModeSettings({
+function MaintenanceModeSettings({
   currentUser,
   status,
   onStatusChanged
@@ -1361,9 +1454,9 @@ export function UsersView({
     setModal("edit");
   };
 
-  const closeModal = () => {
+  const closeModal = (savedUser?: UserAccount) => {
     setModal(null);
-    setSelectedUser(null);
+    setSelectedUser(savedUser ?? null);
   };
   const [pendingUserIds, setPendingUserIds] = React.useState<Set<string>>(() => new Set());
   const pendingUserIdsRef = React.useRef(new Set<string>());
@@ -1515,12 +1608,11 @@ export function UsersView({
           onClose={closeModal}
           onSaved={async (password, savedUser) => {
             setTemporaryPassword(password);
+            setSelectedUser(savedUser ?? null);
             if (savedUser?.id === currentUser.id) {
               onCurrentUserUpdated(savedUser);
             }
-            closeModal();
             try { await loadUsers(); } catch { setError("User saved, but the list could not be refreshed. Refresh to see the latest data."); }
-            setSelectedUser(savedUser ?? null);
           }}
         />
       ) : null}
@@ -1528,20 +1620,21 @@ export function UsersView({
   );
 }
 
-export function UserModal({
+function UserModal({
   mode,
   people,
   user,
-  onClose,
+  onClose: finishClose,
   onSaved
 }: {
   mode: "create" | "edit";
   people: Person[];
   user: UserAccount | null;
-  onClose: () => void;
+  onClose: (savedUser?: UserAccount) => void;
   onSaved: (temporaryPassword: string | null, savedUser?: UserAccount) => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
   const [form, setForm] = React.useState({
     username: user?.username ?? "",
     first_name: user?.first_name ?? "",
@@ -1611,6 +1704,7 @@ export function UserModal({
         });
         const result = await api.post<{ user: UserAccount; temporary_password: string | null }>("/api/v1/users", { ...payload, confirmation_token: confirmation.confirmation_token });
         await onSaved(result.temporary_password, result.user);
+        await onClose(result.user);
       } else if (user) {
         const payload: Record<string, unknown> = {
           username: form.username,
@@ -1635,6 +1729,7 @@ export function UserModal({
         });
         const savedUser = await api.patch<UserAccount>(`/api/v1/users/${user.id}`, { ...payload, confirmation_token: confirmation.confirmation_token });
         await onSaved(null, savedUser);
+        await onClose(savedUser);
       }
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save user");
@@ -1788,7 +1883,7 @@ export function UserModal({
   );
 }
 
-export function SettingRow({ label, value }: { label: string; value: string }) {
+function SettingRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="setting-row">
       <span>{label}</span>
@@ -1797,7 +1892,7 @@ export function SettingRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function GateLprSmartZoneField({
+function GateLprSmartZoneField({
   field,
   state,
   value,
@@ -1831,11 +1926,11 @@ export function GateLprSmartZoneField({
   );
 }
 
-export function firstSettingListValue(value: string) {
+function firstSettingListValue(value: string) {
   return value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean)[0] ?? "";
 }
 
-export function uniqueGateLprSmartZones(zones: UnifiProtectCamera["smart_detect_zones"]) {
+function uniqueGateLprSmartZones(zones: UnifiProtectCamera["smart_detect_zones"]) {
   const seen = new Set<string>();
   return zones.filter((zone) => {
     const name = String(zone.name ?? "").trim();
@@ -1846,11 +1941,11 @@ export function uniqueGateLprSmartZones(zones: UnifiProtectCamera["smart_detect_
   });
 }
 
-export function normalizeSmartZoneName(value: unknown) {
+function normalizeSmartZoneName(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
 
-export function gateLprSmartZoneStatus(state: GateLprSmartZonesState) {
+function gateLprSmartZoneStatus(state: GateLprSmartZonesState) {
   if (state.loading) return "Loading Gate LPR smart zones from UniFi Protect.";
   if (state.error) return `UniFi Protect zones unavailable: ${state.error}`;
   if (!state.camera) return "Gate LPR camera was not found.";
@@ -1858,7 +1953,7 @@ export function gateLprSmartZoneStatus(state: GateLprSmartZonesState) {
   return `Gate LPR camera: ${state.camera.name}.`;
 }
 
-export function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefinition[] {
+function settingsFields(category: "general" | "auth" | "lpr"): SettingFieldDefinition[] {
   if (category === "general") {
     return [
       { key: "app_name", label: "App name" },

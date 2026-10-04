@@ -21,20 +21,28 @@ and [hardware safety](agent/hardware-safety.md).
 
 ## Current boundaries
 
+Backend paths below are relative to `backend/app/`; frontend paths are relative
+to the repository root.
+
 - LPR ingest, debounce and durable suppression: `services/access_events.py`.
   Evidence, decision, execution and optional enrichment live under
   `services/access/`. Exact movement ownership is maintained in the backend
   guide.
 - Gate commands: `services/gate_commands.py`; garage and access devices:
   `services/access_devices.py`. Hardware adapters stay in `modules/`.
-- Alfred contracts/context/catalog assembly: `app/ai/`; orchestration:
+- Alfred contracts/context/catalog assembly: `ai/`; orchestration:
   `services/chat.py` and `services/alfred/`.
 - Notification durable claims: `services/notification_runs.py`; dispatch:
   `services/notification_dispatch.py`; rendering/providers:
   `services/notifications.py`.
+- Recognition authority and expiry: `services/access/authorization.py`;
+  verified admission: `services/movement/admission.py`.
+- Missed-exit recovery: `services/resident_recovery.py`, with pure journey
+  policy in `services/resident_recovery_evidence.py`. Its scoped resident
+  capability uses the same command/admission owners and cannot invent an exit.
 - Frontend shell/refresh: `frontend/src/app/`; typed API clients:
-  `frontend/src/api/`; feature and route owners remain under `features/` and
-  `views/`.
+  `frontend/src/api/`; feature and route owners remain under
+  `frontend/src/features/` and `frontend/src/views/`.
 
 ## Retired updater systems
 
@@ -43,6 +51,6 @@ normal UniFi cameras, events, snapshots, analysis, General, and Exposes remain.
 See [the retirement release note](releases/remove-dependency-updaters.md) for
 migration, retained-file, and rollback limits.
 
-Historical milestone and architecture-review documents are retained evidence,
-not active implementation instructions. Start from this guide and the focused
-agent guides when they differ.
+Keep durable behavior in the focused guides and validation contracts. When retiring a feature, remove stale
+plans and duplicate documentation along with its callers; Git history preserves
+superseded implementation notes.

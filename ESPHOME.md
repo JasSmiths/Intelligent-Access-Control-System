@@ -1,100 +1,46 @@
-# ESPHome Direct Gate Notes
+# ESPHome access-device integration
 
-These notes capture the proof of concept for controlling the ESPHome gate opener directly, without Home Assistant running.
+ESPHome is a supported production provider behind IACS access-device owners.
+Home Assistant is not required for an ESPHome binding. Configure it through
+IACS Integrations and access-device configuration, with Admin confirmation and
+durable audit. Read [hardware safety](docs/agent/hardware-safety.md) before testing.
 
-## Confirmed Working
+## Configuration and ownership
 
-- Direct ESPHome native API access works while Home Assistant is completely shut down.
-- Tested device IP: `10.0.107.22`
-- Native API port: `6053`
-- The ESPHome device requires API encryption.
-- The encryption key should be entered at runtime only. Do not commit it to the repo.
-- Leave the legacy API password blank unless the ESPHome YAML explicitly configures `api.password`.
+Dynamic setting `esphome_devices` contains each device's `id`, `name`, `host`,
+`port` (default `6053`), `encryption_key`, `timeout_seconds` and `enabled` flag.
+The setting is encrypted as a secret by `backend/app/services/settings.py`.
+Keep credentials out of Markdown, logs, frontend code and committed config.
 
-The POC lives at:
+The provider `backend/app/modules/access_devices/esphome.py` discovers covers,
+maintains native API sessions and state subscriptions, and implements commands.
+`backend/app/services/access_device_configuration.py` owns device bindings,
+provider selection and frozen target plans. A cover's device identity and selector
+belong to its binding; do not hard-code a local address, name or entity key.
 
-```text
-pocs/esphome-gate/
-```
+Gate opens use `GateCommandCoordinator` through
+`backend/app/modules/gate/access_devices.py`. Garage/cover commands use
+`AccessDeviceService`. The provider itself is not a user-facing command path.
+Command receipts persist separately from live device state; native API write
+acceptance does not prove the gate or garage moved.
 
-Run it with:
+## Native API handshake
 
-```sh
-cd pocs/esphome-gate
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-uvicorn server:app --host 127.0.0.1 --port 8099
-```
+The current provider constructs `aioesphomeapi.APIClient` with host, port and
+`noise_psk`, then performs `start_resolve_host()`, `start_connection()` and
+`finish_connection(login=False)`. It does not send a legacy password login.
+Preserve this encrypted-handshake behavior; adding an empty-password login can
+cause a `HelloResponse`/`ConnectResponse` timeout.
 
-Open:
+The provider uses bounded connection/command budgets, a live-stream path and a
+cold-connect path. Keep observation freshness, pending verification, cleanup and
+shutdown fencing intact. An uncertain write must remain visible for reconciliation
+rather than triggering another send.
 
-```text
-http://127.0.0.1:8099
-```
+## Validation
 
-## Important Implementation Detail
-
-For this device, `aioesphomeapi` must finish the encrypted native API handshake without sending a legacy login request.
-
-Working pattern:
-
-```python
-client = aioesphomeapi.APIClient(
-    address=host,
-    port=6053,
-    password=None,
-    noise_psk=encryption_key,
-)
-
-await client.start_resolve_host()
-await client.start_connection()
-await client.finish_connection(login=False)
-entities, services = await client.list_entities_services()
-```
-
-Do not pass `password=""` and do not call `finish_connection(login=True)` unless a real legacy `api.password` exists. Doing so caused:
-
-```text
-Timeout waiting for HelloResponse, ConnectResponse after 30.0s
-```
-
-## Discovered Cover
-
-The device currently exposes one cover:
-
-```text
-Name: Garage Door
-Object ID: garage_door
-Device class: garage
-```
-
-The cover state subscription reports live state correctly, including `closed`.
-
-Opening is done with:
-
-```python
-client.cover_command(key=cover_key, position=1.0)
-```
-
-The POC requires browser confirmation before sending this command.
-
-## Future IACS Integration Shape
-
-If this becomes production code, keep it behind the existing gate abstraction instead of wiring ESPHome directly into access-event logic.
-
-Recommended shape:
-
-- Add an `esphome` implementation of `GateController`.
-- Register it in the module registry beside `home_assistant`.
-- Keep `GateCommandCoordinator` as the only path for physical gate opens.
-- Store ESPHome host, port, encryption key, and optional cover selector in dynamic settings.
-- Treat the encryption key as a secret setting.
-- Add an ESPHome state listener or polling service that writes equivalent `GateStateObservation` rows so reconciliation and malfunction detection keep working without Home Assistant.
-
-## Things Not To Do
-
-- Do not store the ESPHome encryption key in markdown, logs, frontend code, or committed config.
-- Do not use a Home Assistant token for ESPHome native API.
-- Do not send a legacy login request with an empty password.
-- Do not bypass `GateCommandCoordinator` for production gate commands.
+Use fake-provider tests through the [isolated harness](docs/validation/phase1.md),
+including access-device, configuration, target-plan and command-journal tests.
+Read-only status/discovery may contact the configured device; do not substitute
+it for an isolated test. Live command validation requires a separately requested
+supervised test, explicit local confirmation and IACS Admin confirmation.

@@ -1,8 +1,8 @@
 import { DoorOpen, Gauge, Lock, MapPinned, SlidersHorizontal, Warehouse } from "lucide-react";
 import React from "react";
+import { LoadingState } from "../ui/primitives";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
-import type { ThemeMode } from "./theme";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
 const GroupsView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.GroupsView })));
 const PeopleView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.PeopleView })));
@@ -24,8 +24,10 @@ const DynamicSettingsView = React.lazy(() => import("../views/SettingsViews").th
 const AccessDevicesSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
 const ZonesSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.ZonesSettingsView })));
 const UsersView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.UsersView })));
+const CommandHistoryView = React.lazy(() => import("../views/CommandHistoryView").then((module) => ({ default: module.CommandHistoryView })));
+const MissedExitRecoveryView = React.lazy(() => import("../features/missedExitRecovery/MissedExitRecoveryView").then((module) => ({ default: module.MissedExitRecoveryView })));
 function RouteLoading() {
-  return <div className="loading-panel">Loading view</div>;
+  return <LoadingState label="Loading view" />;
 }
 export function View(props: {
   view: ViewKey;
@@ -46,8 +48,6 @@ export function View(props: {
   historyResetToken: number;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
-  theme: ThemeMode;
-  setTheme: (mode: ThemeMode) => void;
   navigateToView: NavigateToView;
   onCurrentUserUpdated: (user: UserAccount) => void;
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
@@ -99,6 +99,12 @@ export function View(props: {
     case "settings_garage_doors":
       content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
+    case "settings_missed_exit_recovery":
+      content = <MissedExitRecoveryView targetId={new URLSearchParams(props.locationSearch).get("attempt")} key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} refresh={props.refresh} />;
+      break;
+    case "settings_command_history":
+      content = <CommandHistoryView currentUser={props.currentUser} targetId={new URLSearchParams(props.locationSearch).get("command")} />;
+      break;
     case "settings_auth":
       content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
       break;
@@ -120,7 +126,7 @@ export function View(props: {
       content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} currentUser={props.currentUser} />;
       break;
     case "settings":
-      content = <SettingsView currentUser={props.currentUser} theme={props.theme} setTheme={props.setTheme} navigateToView={props.navigateToView} />;
+      content = <SettingsView currentUser={props.currentUser} navigateToView={props.navigateToView} />;
       break;
     case "users":
       content = props.currentUser.role === "admin"

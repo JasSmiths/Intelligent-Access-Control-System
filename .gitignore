@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .venv/
 node_modules/
+.pnpm-store/
+*.egg-info/
 dist/
 build/
 frontend/test-results/
@@ -20,3 +22,4 @@ logs/
 
 # Host-specific release pins and bind mounts; never portable deployment defaults.
 docker-compose.override.yml
+.codex/config.toml

@@ -19,6 +19,7 @@ const person: Person = {
   id: "synthetic-person", display_name: "Synthetic Resident", first_name: "Synthetic", last_name: "Resident",
   pronouns: null, profile_photo_data_url: null, group_id: null, group: null, category: null,
   schedule_id: null, schedule: null, is_active: true, notes: null, garage_door_entity_ids: [],
+  missed_exit_recovery_enabled: false, missed_exit_recovery_tracker_entity_id: null,
   home_assistant_mobile_app_notify_service: null, home_assistant_presence_input_boolean_entity_ids: [],
   home_assistant_presence_input_boolean_entry_action: "turn_on", home_assistant_presence_input_boolean_exit_action: "turn_off",
   vehicles: [{ id: "synthetic-vehicle", registration_number: "SYNTH01", description: null, make: null, model: null }]

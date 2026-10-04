@@ -22,6 +22,7 @@ from app.services.access_device_commands import AccessDeviceCommandJournal, devi
 from app.services.notification_runs import NotificationRunStore
 from app.services.workflows.automation_definition import automation_triggers_for_origin
 from app.services.workflows.notification_payloads import notification_context_payload
+from app.services.workflows.vehicle_away import vehicle_time_away_seconds
 
 
 async def reserve_observation_outputs(
@@ -58,9 +59,12 @@ async def reserve_verified_arrival_notification(session: AsyncSession, event: Ac
     if person is None:
         return
     vehicle = await session.get(Vehicle, event.vehicle_id) if event.vehicle_id else None
+    facts = notification_facts(event, person, vehicle, authorized_entry_message(person, vehicle))
+    time_away = await vehicle_time_away_seconds(session, event)
+    facts["vehicle_time_away_seconds"] = str(time_away) if time_away is not None else ""
     context = NotificationContext(event_type="authorized_entry",
         subject=f"{person.display_name} arrived at the gate", severity="info",
-        facts=notification_facts(event, person, vehicle, authorized_entry_message(person, vehicle)))
+        facts=facts)
     await NotificationRunStore().enqueue_in_session(session, notification_context_payload(context),
         run_id=uuid.uuid5(event.id, "access.authorized_entry.notification"))
 

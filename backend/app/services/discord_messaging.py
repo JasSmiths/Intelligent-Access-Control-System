@@ -381,6 +381,7 @@ class DiscordMessagingService:
             context,
             attachment_paths=attachment_paths,
             config=config,
+            **({"recipient_content": action["recipient_content"]} if "recipient_content" in action else {}),
         )
 
     async def prepare_notification_action(
@@ -427,6 +428,7 @@ class DiscordMessagingService:
         *,
         attachment_paths: list[str] | None = None,
         config: DiscordIntegrationConfig,
+        recipient_content: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         if not channel_ids:
             raise NotificationDeliveryError("No Discord channel is configured or selected.", delivery="not_sent")
@@ -435,6 +437,11 @@ class DiscordMessagingService:
         outcomes: list[dict[str, str]] = []
         for index, channel_id in enumerate(channel_ids):
             try:
+                if recipient_content is not None:
+                    content = recipient_content.get(f"discord:{channel_id}", {"title": title, "message": message})
+                    payload = format_discord_notification(content["title"], content["message"], context,
+                        fallback_to_subject=False)
+                    embeds = [self._embed_to_payload(embed) for embed in payload.embeds]
                 await self.send_message(
                     channel_id,
                     payload.content,

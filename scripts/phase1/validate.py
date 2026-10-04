@@ -29,7 +29,7 @@ LINT_COMMANDS = {'ruff': ['-m', 'ruff', 'check', '--no-cache', 'app/services/not
 
 # The scoped style/type baseline must not hide undefined runtime names elsewhere.
 LINT_COMMANDS["undefined-names"] = ["-m", "ruff", "check", "--no-cache", "--select", "F821", "app"]
-LINT_COMMANDS["ruff"] += ["app/services/actionable_notifications.py", "app/simulation/scenarios.py"]
+LINT_COMMANDS["ruff"] += ["app/services/resident_recovery.py", "app/services/resident_recovery_evidence.py", "app/api/v1/missed_exit_recovery.py", "app/services/actionable_notifications.py", "app/simulation/scenarios.py"]
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)

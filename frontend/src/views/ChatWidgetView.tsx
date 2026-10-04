@@ -30,6 +30,7 @@ WifiOff,
 X
 } from "lucide-react";
 import React from "react";
+import "../styles/chat.css";
 
 import { api, CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MAX_LABEL, createActionConfirmation, wsUrl } from "../api/client";
 import { displayUserName, formatFileSize, isLlmProviderConfigured, isRecord, llmProviderDefinitions, normalizeLlmProvider, userInitials } from "../lib/format";

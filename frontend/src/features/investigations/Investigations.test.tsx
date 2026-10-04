@@ -36,7 +36,7 @@ const timelineDefaults = {
   timezone: SITE_TIMEZONE
 };
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("activity timeline", () => {
   it("renders one readable correlated episode and expands its chronological evidence", () => {
@@ -159,6 +159,14 @@ describe("investigation answer", () => {
 });
 
 describe("structured filters and permissions", () => {
+  it("does not report an empty timeline when the initial activity read fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Activity unavailable" }), { status: 503 })));
+    render(<LogsView currentUser={{ role: "admin" } as UserAccount} refreshToken={0} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Some investigation data could not be loaded.");
+    expect(screen.queryByText("No activity was recorded in this period")).not.toBeInTheDocument();
+    expect(screen.queryByText("No activity matched these filters")).not.toBeInTheDocument();
+  });
+
   it("changes time, device, automation and outcome independently and displays the site timezone", () => {
     const onChange = vi.fn();
     render(<InvestigationFilters catalog={filterCatalog} onChange={onChange} onReset={vi.fn()} query={DEFAULT_INVESTIGATION_QUERY} timezone={SITE_TIMEZONE} />);

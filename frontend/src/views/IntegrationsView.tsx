@@ -1,3 +1,4 @@
+import "../styles/integrations.css";
 import { Bell, PlugZap } from "lucide-react";
 import React from "react";
 
@@ -312,7 +313,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
             await save(updates, confirmationToken ? { confirmationToken } : {});
             await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
             await loadWhatsApp();
-            setActive(null);
           }}
         />
       ) : null}

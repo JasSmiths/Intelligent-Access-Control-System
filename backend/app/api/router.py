@@ -17,6 +17,7 @@ from app.api.v1 import (
     integrations,
     leaderboard,
     maintenance,
+    missed_exit_recovery,
     notification_snapshots,
     notifications,
     realtime,
@@ -50,6 +51,7 @@ api_router.include_router(icloud_calendar.router, prefix="/integrations/icloud-c
 api_router.include_router(discord.router, prefix="/integrations/discord", tags=["Integrations"])
 api_router.include_router(whatsapp.router, prefix="/integrations/whatsapp", tags=["Integrations"])
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
+api_router.include_router(missed_exit_recovery.router, prefix="/missed-exit-recovery", tags=["Missed Exit Recovery"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
 api_router.include_router(notification_snapshots.router, prefix="/notification-snapshots", tags=["Notifications"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])

@@ -49,9 +49,14 @@ async def open_gate_for_access_event(
         else None
     )
     expires_at = await _recognition_expiry(event)
+    direction_evidence = (getattr(event, "raw_payload", None) or {}).get("direction_resolution") or {}
+    recovery = direction_evidence.get("missed_exit_recovery") or {}
 
     async def authorize_dispatch(session):
         await assert_current_recognition_authorization(session, event_id=event.id)
+        if recovery:
+            from app.services.resident_recovery import authorize_automatic_recovery_dispatch
+            await authorize_automatic_recovery_dispatch(session, event_id=event.id)
 
     outcome = await get_gate_command_coordinator().execute_open(
         GateCommandIntent(
@@ -65,6 +70,7 @@ async def open_gate_for_access_event(
             intent_id=str(uuid.uuid5(uuid.UUID(str(event.id)), "automatic-gate-open")),
             expires_at=expires_at,
             automatic_entry_policy=True,
+            target_plan=recovery.get("target_plan"),
             authorize_dispatch=authorize_dispatch,
             metadata={
                 "movement_saga_id": movement_saga_id,

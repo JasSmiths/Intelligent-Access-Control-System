@@ -218,6 +218,13 @@ class ActionableNotificationService:
         return {"action": f"{GATE_OPEN_PREFIX}{token}", "title": "Open All Gates"}
 
     async def handle_home_assistant_action(self, action_id: str, event_data: dict[str, Any] | None = None) -> bool:
+        from app.services.resident_recovery import PREFIX as RESIDENT_PREFIX
+        from app.services.resident_recovery import handle_resident_action
+        if action_id.startswith(RESIDENT_PREFIX):
+            from app.services.movement.admission import AdmissionSessionInput, finalize_in_session
+            return await handle_resident_action(action_id, gate_intent_factory=GateCommandIntent,
+                execute_gate=get_gate_command_coordinator().execute_open,
+                finalize_admission=finalize_in_session, admission_input_factory=AdmissionSessionInput)
         token = _strip_prefix(action_id, GATE_OPEN_PREFIX)
         if token:
             await self.execute_gate_action(token, force=False, event_data=event_data or {})

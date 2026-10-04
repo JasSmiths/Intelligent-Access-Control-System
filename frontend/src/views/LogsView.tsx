@@ -1,3 +1,4 @@
+import "../styles/investigations.css";
 import { LockKeyhole } from "lucide-react";
 import React from "react";
 import type { UserAccount } from "../api/types";

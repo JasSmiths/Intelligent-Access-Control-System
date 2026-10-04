@@ -1,39 +1,28 @@
 # Backend
 
-FastAPI service for access events, presence, modular integrations, simulation,
-and the Alfred V3 AI agent.
+FastAPI services turn validated LPR observations into durable access/movement
+records, presence and audited gate/garage commands. The backend also owns
+notifications, integrations and Alfred V3 operations.
 
-The backend is deliberately arranged around ports and adapters:
+Start with the [backend agent guide](../docs/agent/backend.md) for task-specific
+owners and transaction contracts, [architecture guide](../docs/architecture.md)
+for extension/retirement rules, and [hardware safety](../docs/agent/hardware-safety.md)
+before touching physical effects.
 
-- Core services own business rules.
-- Modules own hardware or third-party protocol details.
-- API routers expose versioned external contracts.
-- Alfred tool contracts, actor context, registry assembly, and handlers have
-  explicit owners; see [the backend agent guide](../docs/agent/backend.md#alfred-v3).
+- `app/main.py`: startup, lifecycle and application construction.
+- `app/api/router.py`: `/api/v1` route registration.
+- `app/services/`: domain policy, transactions and audit.
+- `app/modules/`: hardware and provider protocols.
+- `app/ai/` and `app/services/alfred/`: tool contracts and agent execution.
+- `app/models/` and `alembic/`: durable schema and migrations.
+- `tests/`: focused behavior and contract tests; `../scripts/phase1/` owns isolated
+  PostgreSQL validation.
 
-Use [the architecture checklist](../docs/architecture.md) when extending a
-feature and [isolated regression validation](../docs/validation/phase1.md) before
-handoff. Schedules now have shared CRUD, assignment and override operations;
-see [their ownership guide](../docs/agent/backend.md#schedule-operations). Extend
-that pattern to other features instead of copying API/Alfred business rules.
+Use the [isolated harness](../docs/validation/phase1.md) for backend validation.
+Full-flow simulation is harness-only. Deployment, production migrations and live
+provider tests require separate authorization.
 
-Runtime dependency and UniFi Protect package updates are retired. The backend
-uses image-installed `uiprotect==16.10.0`; it has no package overlay or updater
-API. Apply dependency changes through the reviewed repository build and release
-workflow.
-
-### Feature mutations and Alfred execution
-
-VisitorPassService and AutomationService own their shared mutation rules/audit;
-notification_rules.py owns notification-rule transactions. API and Alfred are
-adapters. See `../docs/agent/backend.md` and the milestone 3 validation handoff.
-
-Tool execution uses `ai/tools.py` (`ToolOutcome`, `ToolError`) and
-`ai/tool_inputs.py`. Feature catalogs own labels, confirmation presentation and
-success flags; chat orchestration consumes that metadata. Domain output payloads
-and historical chat/audit records are preserved.
-
-Notification dispatch now uses `services/notification_runs.py` for durable
-claims/action checkpoints and `services/notification_dispatch.py` for execution
-and recovery. Rendering/providers remain in `services/notifications.py`.
-See [recovery, review and rollback](../docs/validation/milestone4-recovery.md).
+Dependencies come from the reviewed repository/image build. There is no runtime
+package updater or package overlay. The current UniFi Protect pin is defined in
+`pyproject.toml`; its wrapper contract is documented
+[here](../docs/unifi-protect-private-api.md).

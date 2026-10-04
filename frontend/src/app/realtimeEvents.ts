@@ -31,7 +31,7 @@ export type RealtimeConnectionState = {
 const REALTIME_STATUS_TITLES: Record<RealtimeConnectionStatus, string> = {
   connecting: "Opening stream",
   checking: "Verifying stream",
-  live: "Realtime live",
+  live: "Live",
   refreshing: "Syncing data",
   reconnecting: "Reconnecting",
   offline: "Network offline",

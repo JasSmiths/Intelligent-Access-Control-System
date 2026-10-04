@@ -1,0 +1,358 @@
+/* Controls shared across lazy routes. Keep these before the modal and form defaults. */
+
+.dependency-storage-note {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.maintenance-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.maintenance-settings.active {
+  border-color: color-mix(in srgb, var(--amber) 34%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 62%, var(--surface));
+}
+
+.maintenance-settings-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.maintenance-settings-copy > div {
+  min-width: 0;
+}
+
+.maintenance-settings-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--gray-soft);
+  line-height: 0;
+}
+
+.maintenance-settings.active .maintenance-settings-icon {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.maintenance-settings-copy > div strong,
+.maintenance-settings-copy > div span,
+.maintenance-settings-copy > div small {
+  display: block;
+  min-width: 0;
+}
+
+.maintenance-settings-copy > div strong {
+  font-size: 14px;
+  font-weight: 680;
+}
+
+.maintenance-settings-copy > div span,
+.maintenance-settings-copy > div small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.maintenance-switch {
+  position: relative;
+  min-width: 122px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 0 10px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted-strong);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.maintenance-switch::before {
+  content: "";
+  width: 36px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--surface-soft));
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.maintenance-switch.active {
+  border-color: color-mix(in srgb, var(--amber) 34%, var(--line));
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.maintenance-switch.active::before {
+  border-color: color-mix(in srgb, var(--amber) 38%, var(--line));
+  background: color-mix(in srgb, var(--amber) 78%, var(--surface));
+}
+
+.maintenance-switch input {
+  position: absolute;
+  top: 50%;
+  left: 9px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: -8px 0 0;
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+  transform: translateX(0);
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.maintenance-switch.active input {
+  border-color: color-mix(in srgb, var(--amber) 42%, #ffffff);
+  background: #ffffff;
+  transform: translateX(14px);
+}
+
+.maintenance-switch input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 68%, transparent);
+  outline-offset: 3px;
+}
+
+.maintenance-switch input:disabled {
+  cursor: not-allowed;
+}
+
+.maintenance-switch:has(input:disabled) {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+.maintenance-settings-error {
+  grid-column: 1 / -1;
+}
+
+.auth-secret-panel,
+.auth-secret-rotate {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-secret-confirm {
+  justify-self: start;
+}
+
+.garage-chip {
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.notifications-page {
+  max-width: 1560px;
+}
+
+.notification-add-modal {
+  width: min(840px, calc(100vw - 32px));
+}
+
+.two-pane-selection-modal {
+  width: min(1120px, 100%);
+  height: min(760px, 100%);
+  max-width: 100%;
+  max-height: 100%;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.two-pane-selection-modal.wide {
+  width: min(1344px, 100%);
+}
+
+.two-pane-selection-modal.embedded {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.modal-header.compact {
+  gap: 12px;
+  align-items: start;
+}
+
+.secondary-button.compact {
+  min-height: 34px;
+  padding-inline: 10px;
+}
+
+.workflow-editor-backdrop {
+  align-items: center;
+  overflow: hidden;
+  justify-items: center;
+  padding: max(12px, var(--safe-top)) max(12px, var(--safe-right)) max(12px, var(--safe-bottom)) max(12px, var(--safe-left));
+}
+
+.compact-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compact-field select {
+  min-height: 38px;
+}
+
+.variable-editor-field {
+  gap: 7px;
+}
+
+.success-note {
+  color: var(--green);
+  font-size: 13px;
+}
+
+.setting-row {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.setting-row:last-child {
+  border-bottom: 0;
+}
+
+.setting-row strong {
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-size: 13px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.spin {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}
+
+.integrations-page {
+  max-width: 1480px;
+  container-type: inline-size;
+}
+
+.investigations-page {
+  width: 100%;
+  max-width: 1600px;
+  min-width: 0;
+  margin-inline: auto;
+  gap: 16px;
+  padding-bottom: calc(24px + var(--alfred-launcher-clearance));
+}
+
+@media (max-width: 640px) {
+  .investigations-page { gap: 10px; }
+}
+
+@media (max-width: 480px) {
+  .investigations-page { gap: 8px; }
+}
+
+/* Durable receipt history is shared by integrations and its own route. */
+.command-history-card { padding: 22px; }
+.command-history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.command-history-heading h2 { margin: 0; font-size: 16px; font-weight: 630; }
+.command-history-heading p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.command-history-heading label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; flex: 0 0 190px; }
+.command-history-heading select { width: 100%; min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
+.command-history-note { margin: 18px 0; padding: 12px 14px; border-left: 2px solid var(--line-strong); background: var(--surface-soft); color: var(--muted); font-size: 12px; line-height: 1.6; }
+.command-history-content { display: grid; gap: 14px; }
+.command-history-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.command-history-tools > span { color: var(--muted); font-size: 12px; }
+.command-history-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.command-history-list > li { border-bottom: 1px solid var(--line); }
+.command-history-row { display: grid; grid-template-columns: 36px minmax(120px, 1fr) minmax(150px, auto) auto 16px; align-items: center; gap: 16px; width: 100%; min-height: 78px; padding: 14px 10px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.command-history-row:hover, .command-history-row.selected { background: var(--surface-soft); }
+.command-history-row.selected { box-shadow: inset 3px 0 var(--blue); }
+.command-history-icon { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted-strong); }
+.command-history-identity { display: grid; gap: 5px; min-width: 0; }
+.command-history-identity strong { font-size: 13px; font-weight: 570; }
+.command-history-identity code { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-history-row time, .command-history-time-unknown { color: var(--muted); font-size: 12px; }
+.command-history-chevron { color: var(--muted); }
+.command-history-pagination { display: flex; justify-content: center; padding-top: 4px; }
+.command-history-inspection { display: grid; gap: 16px; min-width: 0; padding-top: 20px; border-top: 1px solid var(--line-strong); }
+.command-history-inspection-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.command-history-inspection-heading > div > span { color: var(--muted); font-size: 11px; }
+.command-history-inspection h3 { margin: 5px 0 0; font-size: 14px; font-weight: 600; }
+.command-history-inspection h3 code { font-size: 12px; font-weight: 500; }
+.command-history-inspection .settings-list { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.command-history-inspection .settings-list strong { font-size: 13px; }
+.command-history-inspection .settings-list p { margin: 0; color: var(--muted-strong); font-size: 12px; line-height: 1.6; }
+.command-history-inspection-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 760px) {
+  .command-history-card { padding: 16px; }
+  .command-history-heading { flex-direction: column; gap: 14px; }
+  .command-history-heading label { flex: 0 0 auto; width: 100%; }
+  .command-history-row { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 8px 12px; padding: 14px 8px; }
+  .command-history-icon { width: 32px; height: 32px; grid-row: span 2; }
+  .command-history-row time, .command-history-time-unknown { grid-column: 2; grid-row: 2; font-size: 11px; }
+  .command-history-row .badge { grid-column: 3; grid-row: 1 / span 2; font-size: 10px; }
+  .command-history-chevron { display: none; }
+}

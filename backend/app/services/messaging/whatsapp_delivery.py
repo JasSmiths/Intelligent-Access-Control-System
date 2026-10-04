@@ -17,6 +17,7 @@ from app.services.messaging.identities import WhatsAppIdentityService, get_whats
 from app.services.messaging.whatsapp_replies import WhatsAppReplyCheckpoint
 from app.services.visitor_conversations import VisitorConversationService, get_visitor_conversation_service
 from app.services.mutation_context import MutationError, load_active_admin
+from app.services.workflows.template_recipients import content_for_recipient
 from app.services.visitor_passes import get_visitor_pass_service
 from app.services.messaging.whatsapp_helpers import (
     masked_phone_number,
@@ -266,11 +267,20 @@ class WhatsAppDeliveryService:
         title = str(action.get("title") or context.subject).strip()
         message = str(action.get("message") or "").strip()
         body = "\n\n".join(part for part in [title, message] if part) or context.subject
+        recipient_bodies = None
+        if "recipient_content" in action:
+            recipient_bodies = {}
+            for item in recipients:
+                endpoint = (f"whatsapp:admin:{item['user_id']}" if item.get("kind") == "admin"
+                            else f"whatsapp:number:{item['phone']}")
+                content = content_for_recipient(action, endpoint)
+                recipient_bodies[item["phone"]] = "\n\n".join(part for part in content.values() if part)
         delivered, failures = await self._send_to_phones(
             phones,
             body,
             config=config,
             buttons=visitor_pass_timeframe_notification_buttons(context),
+            **({"recipient_bodies": recipient_bodies} if recipient_bodies is not None else {}),
         )
         if failures:
             raise NotificationDeliveryError("; ".join(failures))
@@ -286,15 +296,17 @@ class WhatsAppDeliveryService:
         *,
         config: WhatsAppIntegrationConfig,
         buttons: list[dict[str, str]] | None = None,
+        recipient_bodies: dict[str, str] | None = None,
     ) -> tuple[int, list[str]]:
         failures: list[str] = []
         delivered = 0
         for phone in phones:
             try:
+                outgoing_body = recipient_bodies[phone] if recipient_bodies is not None else body
                 if buttons:
-                    await self.send_interactive_buttons(phone, body, buttons, config=config)
+                    await self.send_interactive_buttons(phone, outgoing_body, buttons, config=config)
                 else:
-                    await self.send_text_message(phone, body, config=config)
+                    await self.send_text_message(phone, outgoing_body, config=config)
                 delivered += 1
             except Exception as exc:
                 failures.append(f"{masked_phone_number(phone)}: {exc}")

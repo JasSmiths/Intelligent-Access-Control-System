@@ -1,5 +1,5 @@
 import React from "react";
-import type { NotificationVariable } from "../../api/workflows";
+import type { NotificationEndpoint, NotificationVariable, VariableRecipientRestriction } from "../../api/workflows";
 import { stringifyTemplateValue } from "./model";
 
 const VariableRichTextEditor = React.lazy(() => import("../../VariableRichTextEditor"));
@@ -9,7 +9,9 @@ type TemplateEditorProps = {
   multiline?: boolean;
   value: string;
   variables: Array<NotificationVariable & { group: string }>;
-  onChange: (value: string) => void;
+  onChange: (value: string, restrictions?: VariableRecipientRestriction[]) => void;
+  recipients?: NotificationEndpoint[];
+  variableRecipients?: VariableRecipientRestriction[];
 };
 
 class TemplateEditorBoundary extends React.Component<
@@ -59,7 +61,8 @@ export function SafeVariableRichTextEditor(props: TemplateEditorProps) {
   );
 }
 
-export function PlainTemplateEditor({ label, multiline = false, value, onChange }: TemplateEditorProps) {
+export function PlainTemplateEditor({ label, multiline = false, value, onChange, variableRecipients = [] }: TemplateEditorProps) {
+  const protectedTemplate = variableRecipients.length > 0;
   return (
     <label className="field variable-editor-field">
       <span>{label}</span>
@@ -69,14 +72,17 @@ export function PlainTemplateEditor({ label, multiline = false, value, onChange 
           value={value}
           onChange={(event) => onChange(event.target.value)}
           rows={4}
+          readOnly={protectedTemplate}
         />
       ) : (
         <input
           className="template-editor-fallback"
           value={value}
+          readOnly={protectedTemplate}
           onChange={(event) => onChange(event.target.value)}
         />
       )}
+      {protectedTemplate ? <small>Recipient settings are preserved. Reload to edit this template.</small> : null}
     </label>
   );
 }

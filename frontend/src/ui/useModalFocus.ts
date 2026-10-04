@@ -41,6 +41,10 @@ export function useModalFocus<T extends HTMLElement>(
 
     // Safari's keyboard can reduce the visual viewport without changing dvh.
     const backdrop = modal.closest<HTMLElement>(".modal-backdrop, .search-palette-backdrop");
+    const keepBackdropFocus = (event: MouseEvent) => {
+      if (event.target === backdrop) event.preventDefault();
+    };
+    backdrop?.addEventListener("mousedown", keepBackdropFocus);
     const viewport = window.visualViewport;
     const updateViewport = () => {
       if (!backdrop || !viewport || viewport.scale !== 1) return;
@@ -76,7 +80,7 @@ export function useModalFocus<T extends HTMLElement>(
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        closeRef.current();
+        if (!modal.closest('[data-closing="true"]')) closeRef.current();
       } else if (event.key === "Tab") {
         const elements = controls();
         const first = elements[0] ?? modal;
@@ -95,6 +99,7 @@ export function useModalFocus<T extends HTMLElement>(
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
+      backdrop?.removeEventListener("mousedown", keepBackdropFocus);
       viewport?.removeEventListener("resize", updateViewport);
       viewport?.removeEventListener("scroll", updateViewport);
       backdrop?.style.removeProperty("--overlay-viewport-height");

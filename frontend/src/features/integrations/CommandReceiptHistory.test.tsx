@@ -93,3 +93,12 @@ it("aborts an in-flight list on unmount", () => {
   view.unmount();
   expect(list.mock.calls[0][1]!.signal!.aborted).toBe(true);
 });
+it("inspects a linked recovery command even when it is outside the current history page", async () => {
+  vi.spyOn(integrationsApi, "getGateCommands").mockResolvedValue({ items: [], next_cursor: null });
+  const read = vi.spyOn(integrationsApi, "getGateCommand").mockResolvedValue(gates.items[0]);
+  render(<CommandReceiptHistory currentUser={admin} targetId={gateId} renderReceipt={renderReceipt} />);
+  await screen.findByText("Retained outcome: accepted");
+  expect(read).toHaveBeenCalledWith(gateId, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(integrationsApi.openGate).not.toHaveBeenCalled();
+  expect(integrationsApi.commandCover).not.toHaveBeenCalled();
+});

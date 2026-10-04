@@ -36,3 +36,10 @@ it("invalidates schedule default policy and integration options at their owners"
   expect(select(event("audit.log.created", { action: "settings.update" }), "schedules")).toEqual({ keys: new Set(["schedules", "maintenanceStatus"]), route: true });
   expect(select(event("audit.log.created", { action: "access_device.update" }), "settings_automations")).toEqual({ keys: new Set(["people"]), route: true });
 });
+
+it("refreshes recovery diagnostics and owner config without refreshing unrelated routes", () => {
+  expect(select(event("missed_exit_recovery.updated"), "settings_missed_exit_recovery")).toEqual({ keys: new Set(), route: true });
+  expect(select(event("missed_exit_recovery.updated"), "dashboard")).toEqual({ keys: new Set(), route: false });
+  expect(select(event("audit.log.created", { action: "settings.update" }), "settings_missed_exit_recovery").route).toBe(true);
+  expect(select(event("audit.log.created", { action: "person.update" }), "settings_missed_exit_recovery")).toEqual({ keys: new Set(["people"]), route: true });
+});

@@ -17,7 +17,7 @@ Warehouse
 import React from "react";
 
 import { AccessPulse } from "../features/dashboard/AccessPulse";
-import { CommandReceiptHistory } from "../features/integrations/CommandReceiptHistory";
+import { CommandReceiptDetails } from "../features/integrations/CommandReceiptDetails";
 import { api, ApiError, createActionConfirmation } from "../api/client";
 import { integrationsApi, coverTargetReceipt, isDeviceCommandReceipt, isGateCommandReceipt, type DeviceCommandReceipt, type GateCommandReceipt } from "../api/integrations";
 import { activeManagedCovers, displayUserName, isActionableAlert, titleCase, visitorEventDisplayName } from "../lib/format";
@@ -26,6 +26,7 @@ import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
 import type { AccessEvent, AlertSeverity, Anomaly, ExpectedPresencePerson, ExpectedPresenceSummary, HomeAssistantManagedCover, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 
 
 
@@ -90,6 +91,10 @@ function DashboardSession({
   const [now, setNow] = React.useState(() => new Date());
   const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
   const [maintenanceDisableOpen, setMaintenanceDisableOpen] = React.useState(false);
+  const commandModalRef = React.useRef<HTMLDivElement>(null);
+  const maintenanceModalRef = React.useRef<HTMLDivElement>(null);
+  const closeCommand = useModalClose(commandModalRef, () => setPendingCommand(null));
+  const closeMaintenance = useModalClose(maintenanceModalRef, () => setMaintenanceDisableOpen(false));
   const [maintenanceLoading, setMaintenanceLoading] = React.useState(false);
   const [maintenanceError, setMaintenanceError] = React.useState("");
   const [commandLoading, setCommandLoading] = React.useState(false);
@@ -97,7 +102,6 @@ function DashboardSession({
   const storageKey = `iacs-dashboard-commands:${currentUser.id}:${currentUser.role}`;
   const [savedCommands, setSavedCommands] = React.useState(() => loadSavedCommands(storageKey));
   const [receiptReads, setReceiptReads] = React.useState<Record<string, ReceiptRead>>({});
-  const [showCommandHistory, setShowCommandHistory] = React.useState(false);
   const [receiptRefresh, setReceiptRefresh] = React.useState(0);
   const [receiptStorageError, setReceiptStorageError] = React.useState("");
   const commandAttemptRef = React.useRef(false);
@@ -115,7 +119,7 @@ function DashboardSession({
   const persistCommands = (commands: SavedDashboardCommand[]) => {
     // Advisory browser index; the durable backend receipt owns the outcome.
     try { window.sessionStorage.setItem(storageKey, JSON.stringify(commands)); }
-    catch { setReceiptStorageError("This browser cannot retain action IDs across reloads. Use Command history to find saved server receipts."); }
+    catch { setReceiptStorageError("This browser cannot retain action IDs across reloads. Open Command History in Settings to find saved server receipts."); }
     setSavedCommands(commands);
   };
   const [openSnapshotEventId, setOpenSnapshotEventId] = React.useState<string | null>(null);
@@ -148,7 +152,7 @@ function DashboardSession({
   const unknown = Math.max(presence.length - present - exited, 0);
   const exitedTodayPeople = exitedTodayRoster(events, vehicles, people, now);
   const activeVehicles = vehicles.filter((vehicle) => vehicle.is_active !== false).length;
-  const liveSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
+  const eventSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
 
   React.useEffect(() => {
     if (openSnapshotEventId && !displayEvents.some((event) => event.id === openSnapshotEventId)) {
@@ -161,14 +165,16 @@ function DashboardSession({
   const garageDoorEntities = activeManagedCovers(integrationStatus?.garage_door_entities);
   const topGateState = gateEntities[0]?.state ?? integrationStatus?.current_gate_state ?? integrationStatus?.last_gate_state ?? "unknown";
   const integrationDegraded = Boolean(integrationStatus?.configured && (integrationStatus.degraded || integrationStatus.connected === false));
-  const siteStatusTitle = maintenanceActive ? "Maintenance Mode Enabled" : integrationDegraded ? "Integration degraded" : critical ? "Critical alerts" : warning ? "Action needed" : "All systems normal";
+  const integrationUnavailable = !integrationStatus?.configured;
+  const siteStatusTone = maintenanceActive ? "attention" : integrationDegraded || critical ? "degraded" : warning || integrationUnavailable ? "attention" : "normal";
+  const siteStatusTitle = maintenanceActive ? "Maintenance Mode Enabled" : integrationDegraded ? "Integration degraded" : critical ? "Critical alerts" : warning ? "Action needed" : integrationUnavailable ? "Device status unavailable" : "No actionable alerts";
   const siteStatusDetail = maintenanceActive ? "All automated actions disabled" : integrationDegraded
     ? integrationStatus?.last_error || "Access-device state sync is not connected"
     : critical
     ? `${critical} critical alert${critical === 1 ? "" : "s"}`
     : warning
       ? `${warning} warning alert${warning === 1 ? "" : "s"}`
-      : "No actionable alerts";
+      : integrationUnavailable ? "Review integrations for access-device status" : "Your recent alert feed is clear";
   const greeting = greetingForDate(now);
   const firstName = currentUser.first_name || displayUserName(currentUser).split(" ")[0] || "there";
 
@@ -255,7 +261,7 @@ function DashboardSession({
         commandAbortRef.current = null;
         setCommandLoading(false);
         if (saved) {
-          setPendingCommand(null);
+          void closeCommand();
           refresh().catch(() => undefined);
           if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
           refreshTimerRef.current = window.setTimeout(() => {
@@ -283,7 +289,7 @@ function DashboardSession({
         confirmation_token: confirmation.confirmation_token
       });
       onMaintenanceStatusChanged(status);
-      setMaintenanceDisableOpen(false);
+      void closeMaintenance();
       await refresh();
     } catch (error) {
       setMaintenanceError(error instanceof Error ? error.message : "Unable to disable Maintenance Mode.");
@@ -297,7 +303,7 @@ function DashboardSession({
       <div className="dashboard-intro">
         <div>
           <h1>{greeting}, {firstName}</h1>
-          <p>Here's what's happening at Crest House today.</p>
+          <p>Your site at a glance. Presence, access and activity.</p>
         </div>
         <div className="intro-clock">
           <Clock3 size={18} />
@@ -307,8 +313,8 @@ function DashboardSession({
 
       <div className="dashboard-grid">
         <div className="card site-status-card">
-          <PanelHeader title="Site Status" />
-          <div className={maintenanceActive ? "site-status-main maintenance" : integrationDegraded ? "site-status-main degraded" : "site-status-main"}>
+          <PanelHeader title="Site overview" />
+          <div className={`site-status-main ${siteStatusTone}${maintenanceActive ? " maintenance" : ""}`}>
             {maintenanceActive ? (
               <button
                 className="maintenance-status-icon"
@@ -321,12 +327,12 @@ function DashboardSession({
                 type="button"
                 aria-label="Disable Maintenance Mode"
               >
-                <Construction size={54} strokeWidth={1} />
+                <Construction size={28} strokeWidth={1.6} />
               </button>
-            ) : integrationDegraded ? (
-              <AlertTriangle size={54} />
+            ) : siteStatusTone !== "normal" ? (
+              <span className="site-status-icon"><AlertTriangle size={27} strokeWidth={1.7} /></span>
             ) : (
-              <ShieldCheck size={54} />
+              <span className="site-status-icon"><ShieldCheck size={27} strokeWidth={1.7} /></span>
             )}
             <div>
               <strong>{siteStatusTitle}</strong>
@@ -336,12 +342,12 @@ function DashboardSession({
           <div className="status-metrics">
             <StatusMetric label="People tracked" mobileLabel="People" value={String(people.length)} />
             <StatusMetric label="Active vehicles" mobileLabel="Vehicles" value={String(activeVehicles)} />
-            <StatusMetric label="Live sources" mobileLabel="Sources" value={String(liveSources)} />
+            <StatusMetric label="Event sources" mobileLabel="Sources" value={String(eventSources)} />
           </div>
         </div>
 
         <div className="card gate-card">
-          <PanelHeader title="Status" action="View all" />
+          <PanelHeader title="Access points" action="Manage" onAction={isAdmin ? () => navigateToView("settings_gates") : undefined} />
           <div className={maintenanceActive ? "gate-control-section maintenance-disabled" : "gate-control-section"}>
           <div className="gate-list">
             {gateEntities.length ? gateEntities.map((gate) => (
@@ -379,7 +385,7 @@ function DashboardSession({
         </div>
 
         <div className="card presence-summary-card">
-          <PanelHeader title="Presence Summary" action="View all" />
+          <PanelHeader title="Presence" action="People" onAction={() => navigateToView("people")} />
           <div className="presence-stats">
             <PresenceStat
               label="Inside Now"
@@ -442,7 +448,7 @@ function DashboardSession({
         </div>
 
         <div className="card recent-events-card">
-          <PanelHeader title="Recent Events" action="View all" />
+          <PanelHeader title="Recent Events" action="View all" onAction={() => navigateToView("events")} />
           <div className="event-feed">
             {displayEvents.length ? displayEvents.map((event) => {
               const Icon = event.icon;
@@ -486,7 +492,7 @@ function DashboardSession({
               );
             }) : <EmptyState icon={CalendarDays} label="No recent events" />}
           </div>
-          <p className="card-footnote">Showing latest 5 events</p>
+          {displayEvents.length > 0 ? <p className="card-footnote">Latest {displayEvents.length} event{displayEvents.length === 1 ? "" : "s"} from your feed</p> : null}
         </div>
 
         <div className="card anomaly-card">
@@ -508,7 +514,7 @@ function DashboardSession({
                 </div>
                 <time>{item.time}</time>
               </button>
-            )) : <EmptyState icon={CheckCircle2} label="No actionable alerts" />}
+            )) : <div className="dashboard-clear-state"><CheckCircle2 size={28} strokeWidth={1.5} /><strong>No actionable alerts</strong><p>New alerts that need your attention will appear here.</p></div>}
           </div>
           {actionableAlerts.length ? <p className="unresolved-count">{actionableAlerts.length} action needed</p> : null}
         </div>
@@ -518,10 +524,6 @@ function DashboardSession({
         </div>
       </div>
 
-      {isAdmin ? <div>
-        <button type="button" className="secondary-button" aria-expanded={showCommandHistory} onClick={() => setShowCommandHistory((value) => !value)}>{showCommandHistory ? "Hide command history" : "Command history"}</button>
-        {showCommandHistory ? <CommandReceiptHistory currentUser={currentUser} renderReceipt={(receipt) => <CommandReceiptDetails receipt={receipt} />} /> : null}
-      </div> : null}
       {isAdmin && savedCommands.length ? (
         <section className="card" aria-label="Saved gate and garage actions">
           <PanelHeader title="Gate and garage action results" />
@@ -543,6 +545,7 @@ function DashboardSession({
 
       {pendingCommand ? (
         <GateConfirmModal
+          modalRef={commandModalRef}
           action={pendingCommand.action}
           error={commandError}
           label={pendingCommand.label}
@@ -557,6 +560,7 @@ function DashboardSession({
       ) : null}
       {maintenanceDisableOpen ? (
         <MaintenanceDisableModal
+          modalRef={maintenanceModalRef}
           error={maintenanceError}
           loading={maintenanceLoading}
           onCancel={() => {
@@ -574,15 +578,19 @@ function DashboardSession({
 export function MaintenanceDisableModal({
   error,
   loading,
-  onCancel,
+  modalRef: providedRef,
+  onCancel: finishCancel,
   onConfirm
 }: {
   error: string;
   loading: boolean;
+  modalRef?: React.RefObject<HTMLDivElement | null>;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const modalRef = React.useRef<HTMLDivElement>(null);
+  const localRef = React.useRef<HTMLDivElement>(null);
+  const modalRef = providedRef ?? localRef;
+  const onCancel = useModalClose(modalRef, finishCancel);
   useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
   return (
     <div className="modal-backdrop" role="presentation">
@@ -613,39 +621,30 @@ export function MaintenanceDisableModal({
   );
 }
 
-export function CommandReceiptDetails({ receipt }: { receipt: DashboardReceipt }) {
-  const targets = "target_receipts" in receipt ? receipt.target_receipts : [receipt];
-  return <div>
-    {receipt.delivery === "partial" ? <p role="status">Partial command delivery. Results differ between targets; see each result below.</p> : null}
-    {"admission_verified" in receipt && receipt.admission_verified ? <p>Entry admission verified. Vehicle passage is not established by this result.</p> : null}
-    {!targets.length ? <p>No target result is available yet.</p> : null}
-    {targets.map((target) => <div className="settings-list" key={target.command_id}>
-      <strong>{target.device_key}</strong>
-      <p>{target.delivery === "accepted" ? "Request accepted" : target.delivery === "rejected" ? "Request rejected" : target.delivery === "not_sent" ? "Request not sent" : "Delivery unknown"} · {target.verified ? `Physical ${target.state} verified` : "Physical state not verified"}</p>
-      {target.provider_receipts?.map((provider, index) => <p key={`${provider.provider}:${index}`}>{provider.provider === "esphome" ? "ESPHome" : provider.provider === "home_assistant" ? "Home Assistant" : provider.provider}: {provider.acceptance_basis === "home_assistant_http_2xx" ? "service request accepted" : provider.acceptance_basis === "native_api_write" ? "controller SDK write completed" : provider.delivery}</p>)}
-      {target.detail ? <p>{target.detail}</p> : null}
-      {target.requires_reconciliation ? <p>Awaiting reconciliation. Do not repeat this command.</p> : null}
-    </div>)}
-  </div>;
-}
-
 export function GateConfirmModal({
   action,
   error,
   label,
   loading,
-  onCancel,
+  modalRef: providedRef,
+  onCancel: finishCancel,
   onConfirm
 }: {
   action: DoorCommandAction;
   error: string;
   label: string;
   loading: boolean;
+  modalRef?: React.RefObject<HTMLDivElement | null>;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const modalRef = React.useRef<HTMLDivElement>(null);
-  useModalFocus(modalRef, true, () => { if (!loading) onCancel(); });
+  const localRef = React.useRef<HTMLDivElement>(null);
+  const modalRef = providedRef ?? localRef;
+  const onCancel = useModalClose(modalRef, finishCancel);
+  const dismiss = () => {
+    if (!loading) return onCancel();
+  };
+  useModalFocus(modalRef, true, dismiss);
   const actionLabel = titleCase(action);
   const isGarage = label.toLowerCase().includes("garage");
   const Icon = isGarage
@@ -666,7 +665,7 @@ export function GateConfirmModal({
         </div>
         {error ? <div className="auth-error inline-error">{error}</div> : null}
         <div className="modal-actions">
-          <button className="secondary-button" disabled={loading} onClick={onCancel} type="button">
+          <button className="secondary-button" disabled={loading} onClick={dismiss} type="button">
             Cancel
           </button>
           <button className="primary-button" disabled={loading} onClick={onConfirm} type="button">
@@ -683,7 +682,6 @@ export function StatusMetric({ label, mobileLabel, value }: { label: string; mob
   return (
     <div>
       <span>
-        <i />
         <span className="status-label status-label-desktop">{label}</span>
         <span className="status-label status-label-mobile">{mobileLabel ?? label}</span>
       </span>
@@ -1095,10 +1093,16 @@ export function getDashboardEvents(events: AccessEvent[], vehicles: Vehicle[], p
 }
 
 export function DashboardEventSnapshotPreview({ event, visible }: { event: DashboardEvent; visible: boolean }) {
-  if (!event.snapshot_url || !visible) return null;
+  const [hasBeenVisible, setHasBeenVisible] = React.useState(false);
+  React.useEffect(() => { if (visible) setHasBeenVisible(true); }, [visible]);
+  if (!event.snapshot_url) return null;
   return (
-    <span className="dashboard-event-snapshot-preview">
-      <img alt={event.snapshotLabel} decoding="async" loading="lazy" src={event.snapshot_url} />
+    <span className="dashboard-event-snapshot-preview" aria-hidden={!visible}>
+      <span className="dashboard-event-snapshot-clip">
+        <span className="dashboard-event-snapshot-frame">
+          {(visible || hasBeenVisible) && <img alt={event.snapshotLabel} decoding="async" loading="lazy" src={event.snapshot_url} />}
+        </span>
+      </span>
     </span>
   );
 }

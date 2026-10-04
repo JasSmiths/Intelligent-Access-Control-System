@@ -5,7 +5,7 @@ export function ThemeControl({ theme, setTheme }: { theme: ThemeMode; setTheme: 
   const next = theme === "system" ? "light" : theme === "light" ? "dark" : "system";
   const Icon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
   return (
-    <button className="icon-button theme-button" onClick={() => setTheme(next)} type="button" aria-label="Theme">
+    <button className="icon-button theme-button" onClick={() => setTheme(next)} type="button" aria-label="Theme" title={`Theme: ${theme}. Switch to ${next}.`}>
       <Icon size={17} />
       <span>{theme}</span>
     </button>

@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
 import { api, isAbortError } from "../api/client";
 import { formatDate, initials, matches, titleCase } from "../lib/format";
 import { mediaSource, mediaVariantUrl } from "../lib/media";
-import { Badge, EmptyState, Toolbar } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState, Toolbar } from "../ui/primitives";
 import type { RealtimeMessage } from "../api/types";
 import type { BadgeTone } from "../ui/primitives";
 
@@ -89,7 +89,7 @@ export type LeaderboardResponse = {
   generated_at: string;
 };
 
-export const TOP_CHARTS_PAGE_SIZE = 5;
+const TOP_CHARTS_PAGE_SIZE = 5;
 
 export function TopChartsView({ query, latestRealtime, refreshToken }: { query: string; latestRealtime: RealtimeMessage | null; refreshToken: number }) {
   const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
@@ -200,10 +200,10 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
       </Toolbar>
       <p className="top-charts-scope">All recorded access events through {leaderboard?.generated_at ? formatDate(leaderboard.generated_at) : "the latest refresh"}. Known counts include granted entries linked to a vehicle; unknown counts include denied events without a linked vehicle. Each chart shows up to 25 plates.</p>
 
-      {error ? <div className="error-banner">{error}</div> : null}
-      {loading ? (
-        <div className="loading-panel">Loading Top Charts</div>
-      ) : (
+      {error ? <ErrorState title="Top Charts unavailable" description={error} onRetry={() => void load()} retrying={refreshing} /> : null}
+      {loading || (!leaderboard && refreshing) ? (
+        <LoadingState label="Loading Top Charts" />
+      ) : leaderboard ? (
         <div className="top-charts-grid">
           <section className="card top-charts-card top-charts-known-card">
             <div className="top-charts-card-header">
@@ -230,7 +230,7 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 />
               </>
             ) : (
-              <EmptyState icon={Trophy} label={query ? "No known entries match this filter" : "No known vehicle entries recorded"} />
+              <EmptyState icon={Trophy} label={query ? "No known entries match this filter" : "No known vehicle entries recorded"} description={query ? "Try searching for another name or registration." : "Rankings will build as known vehicles receive entry access."} />
             )}
           </section>
 
@@ -259,16 +259,16 @@ export function TopChartsView({ query, latestRealtime, refreshToken }: { query: 
                 />
               </>
             ) : (
-              <EmptyState icon={Search} label={query ? "No unknown plates match this filter" : "No unknown denied plates recorded"} />
+              <EmptyState icon={Search} label={query ? "No unknown plates match this filter" : "No unknown denied plates recorded"} description={query ? "Try searching for another registration." : "Denied events for unrecognised plates will appear here."} />
             )}
           </section>
         </div>
-      )}
+      ) : null}
     </section>
   );
 }
 
-export function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry }) {
+function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry }) {
   const firstName = entry.person.first_name || entry.first_name || entry.display_name.split(" ")[0] || "VIP";
   return (
     <article className="top-charts-row">
@@ -290,7 +290,7 @@ export function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry })
   );
 }
 
-export function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
+function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
   const label = entry.dvla.label || "DVLA details unavailable";
   const showStatus = entry.dvla.status && entry.dvla.status !== "ok";
   return (
@@ -311,7 +311,7 @@ export function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntr
   );
 }
 
-export function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownEntry }) {
+function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownEntry }) {
   const snapshot = entry.latest_snapshot;
   const tooltipId = React.useId();
   const [tooltipPosition, setTooltipPosition] = React.useState<OverlayPlacement | null>(null);
@@ -385,7 +385,7 @@ export function LeaderboardSnapshotThumb({ entry }: { entry: LeaderboardUnknownE
   );
 }
 
-export function TopChartsPagination({
+function TopChartsPagination({
   page,
   pageCount,
   total,
@@ -426,7 +426,7 @@ export function TopChartsPagination({
   );
 }
 
-export function LeaderboardAvatar({ imageUrl, name }: { imageUrl: string | null; name: string }) {
+function LeaderboardAvatar({ imageUrl, name }: { imageUrl: string | null; name: string }) {
   return (
     <span className="top-charts-avatar" aria-label={name}>
       {imageUrl ? <img alt="" decoding="async" loading="lazy" src={imageUrl} /> : initials(name).toUpperCase()}
@@ -434,7 +434,7 @@ export function LeaderboardAvatar({ imageUrl, name }: { imageUrl: string | null;
   );
 }
 
-export function leaderboardKnownMatches(entry: LeaderboardKnownEntry, query: string) {
+function leaderboardKnownMatches(entry: LeaderboardKnownEntry, query: string) {
   return (
     matches(entry.registration_number, query) ||
     matches(entry.display_name, query) ||
@@ -443,7 +443,7 @@ export function leaderboardKnownMatches(entry: LeaderboardKnownEntry, query: str
   );
 }
 
-export function leaderboardUnknownMatches(entry: LeaderboardUnknownEntry, query: string) {
+function leaderboardUnknownMatches(entry: LeaderboardUnknownEntry, query: string) {
   return (
     matches(entry.registration_number, query) ||
     matches(entry.dvla.label, query) ||
@@ -451,28 +451,21 @@ export function leaderboardUnknownMatches(entry: LeaderboardUnknownEntry, query:
   );
 }
 
-export function rankBadgeClass(rank: number) {
+function rankBadgeClass(rank: number) {
   if (rank === 1) return "rank-badge rank-badge-gold";
   if (rank === 2) return "rank-badge rank-badge-silver";
   if (rank === 3) return "rank-badge rank-badge-bronze";
   return "rank-badge";
 }
 
-export function leaderboardDvlaTone(status: string): BadgeTone {
+function leaderboardDvlaTone(status: string): BadgeTone {
   if (status === "unconfigured") return "gray";
   if (status === "failed") return "amber";
   return "gray";
 }
 
-export function leaderboardDvlaLabel(status: string) {
+function leaderboardDvlaLabel(status: string) {
   if (status === "unconfigured") return "DVLA off";
   if (status === "failed") return "DVLA failed";
   return titleCase(status);
-}
-
-export function mysteryGuestQuip(rank: number) {
-  if (rank === 1) return "Chief driveway plot twist";
-  if (rank === 2) return "Strong encore energy";
-  if (rank === 3) return "Podium-level mystery";
-  return "Still under investigation";
 }

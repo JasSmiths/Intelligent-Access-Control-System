@@ -7,7 +7,9 @@ import { notificationChannelMeta } from "../../lib/notifications";
 import { Badge } from "../../ui/primitives";
 import { WorkflowBlock } from "./components";
 import { NotificationActionCard } from "./NotificationActionCard";
-import { notificationActionableLabel, notificationSeverityTone } from "./notificationModel";
+import { notificationActionableLabel, notificationSeverityTone, variableRecipientChoices } from "./notificationModel";
+
+type PreviewAction = NotificationAction & { title: string; message: string; phoneticsApplied?: boolean; recipient_previews?: Record<string, {title: string; message: string}> };
 
 export function NotificationWorkflowEditor({
   actionableOptions,
@@ -38,7 +40,7 @@ export function NotificationWorkflowEditor({
   gateMalfunctionStageOptions: NotificationGateMalfunctionStageOption[];
   integrations: NotificationIntegration[];
   people: Person[];
-  previewActions: Array<NotificationAction & { title: string; message: string }>;
+  previewActions: PreviewAction[];
   rule: NotificationRule;
   saving: boolean;
   schedules: Schedule[];
@@ -156,7 +158,7 @@ export function NotificationWorkflowEditor({
           </div>
         </section>
       </div>
-      <div id="workflow-preview" className="workflow-preview-wrapper"><NotificationLivePreviewPanel actions={previewActions} /></div>
+      <div id="workflow-preview" className="workflow-preview-wrapper"><NotificationLivePreviewPanel actions={previewActions} integrations={integrations} /></div>
     </div>
   );
 }
@@ -217,10 +219,13 @@ function NotificationConditionCard({
 }
 
 function NotificationLivePreviewPanel({
-  actions
+  actions,
+  integrations
 }: {
-  actions: Array<NotificationAction & { title: string; message: string; phoneticsApplied?: boolean }>;
+  actions: PreviewAction[];
+  integrations: NotificationIntegration[];
 }) {
+  const [previewRecipients, setPreviewRecipients] = React.useState<Record<string, string>>({});
   return (
     <aside className="notification-preview-panel" aria-label="Live notification preview">
       <div className="notification-preview-rail-head">
@@ -234,6 +239,7 @@ function NotificationLivePreviewPanel({
           {actions.map((action) => {
             const meta = notificationChannelMeta[action.type];
             const Icon = meta.icon;
+            const content = action.recipient_previews?.[previewRecipients[action.id]] ?? action;
             return (
               <article className="notification-preview-card-inline" key={action.id}>
                 <div>
@@ -242,8 +248,16 @@ function NotificationLivePreviewPanel({
                   <Badge tone={meta.tone}>{action.target_mode}</Badge>
                   {action.phoneticsApplied ? <span className="phonetic-preview-badge"><Volume2 size={12} /> Phonetics Applied</span> : null}
                 </div>
-                {action.title ? <h3>{action.title}</h3> : null}
-                <p>{action.message}</p>
+                {action.variable_recipients ? (
+                  <label className="variable-preview-recipient">Preview for
+                    <select aria-label={`Preview recipient for ${meta.label}`} value={previewRecipients[action.id] ?? ""} onChange={(event) => setPreviewRecipients({...previewRecipients, [action.id]: event.target.value})}>
+                      <option value="">Everyone else</option>
+                      {variableRecipientChoices(action, integrations.find((item) => item.id === action.type)).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+                {content.title ? <h3>{content.title}</h3> : null}
+                <p>{content.message}</p>
                 {action.media.attach_camera_snapshot ? <span className="preview-media-chip"><Camera size={13} /> Camera Screenshot</span> : null}
                 {action.actionable.enabled ? <span className="preview-media-chip"><DoorOpen size={13} /> {notificationActionableLabel(action.actionable.action)}</span> : null}
               </article>

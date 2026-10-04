@@ -6,7 +6,8 @@ import { displayUserName, titleCase } from "../../lib/format";
 import { notificationChannelMeta } from "../../lib/notifications";
 import type { BadgeTone } from "../../ui/primitives";
 import type { TwoPaneCategory, WorkflowTriggerCategory } from "./model";
-import { draftId, groupRulesByTrigger, normalizeIdentityName, renderWorkflowTemplate, stringifyTemplateValue } from "./model";
+import { draftId, groupRulesByTrigger, normalizeIdentityName, stringifyTemplateValue } from "./model";
+import { normalizeVariableRecipients, renderRecipientTemplate } from "../../lib/templateRecipients";
 
 type NotificationRuleCategory = {
   id: string;
@@ -425,6 +426,7 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
   const rawType = stringifyTemplateValue(action.type);
   const type = isNotificationActionType(rawType) ? rawType : "in_app";
   const templates = defaultWorkflowActionTemplates[type];
+  const variableRecipients = normalizeVariableRecipients(action.variable_recipients);
   return {
     id: stringifyTemplateValue(action.id) || draftId("action"),
     type,
@@ -432,6 +434,7 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
     target_ids: Array.isArray(action.target_ids) ? action.target_ids.map(stringifyTemplateValue).filter(Boolean) : [],
     title_template: stringifyTemplateValue(action.title_template) || templates.title_template,
     message_template: stringifyTemplateValue(action.message_template) || templates.message_template,
+    ...(Object.keys(variableRecipients).length ? {variable_recipients: variableRecipients} : {}),
     gate_malfunction_stages: normalizeGateMalfunctionStages(action.gate_malfunction_stages),
     media: normalizeNotificationMedia(action.media),
     actionable: normalizeNotificationActionable(action.actionable),
@@ -488,15 +491,28 @@ export function renderWorkflowPreview(actions: NotificationAction[], context: Re
     const generated = triggerEvent === "gate_malfunction"
       ? gateMalfunctionPreviewContent(action.type, context, stageOptions)
       : null;
-    const title = generated?.title ?? renderWorkflowTemplate(action.title_template, context);
-    const message = generated?.message ?? renderWorkflowTemplate(action.message_template, context);
+    const restrictions = action.variable_recipients;
+    const title = generated?.title ?? renderRecipientTemplate(action.title_template, context, restrictions?.title_template);
+    const message = generated?.message ?? renderRecipientTemplate(action.message_template, context, restrictions?.message_template);
+    const targets = new Set(Object.values(restrictions ?? {}).flatMap((entries) => entries.flatMap((entry) => entry.target_ids)));
+    const recipient_previews = Object.fromEntries(Array.from(targets).map((target) => [target, {
+      title: renderRecipientTemplate(action.title_template, context, restrictions?.title_template, target),
+      message: renderRecipientTemplate(action.message_template, context, restrictions?.message_template, target),
+    }]));
     return {
       ...action,
       title,
       message,
+      ...(restrictions ? {recipient_previews} : {}),
       phoneticsApplied: action.type === "voice" && hasVehicleTtsPhoneticMatch(message),
     };
   });
+}
+
+export function variableRecipientChoices(action: NotificationAction, integration?: NotificationIntegration) {
+  return concreteNotificationEndpoints(integration?.endpoints ?? []).filter((endpoint) => action.target_mode === "all"
+    || action.target_ids.includes(endpoint.id)
+    || action.target_ids.some((id) => id.endsWith(":*") && endpoint.id.startsWith(id.slice(0, -1))));
 }
 
 function gateMalfunctionPreviewContent(actionType: NotificationActionType, context: Record<string, string>, stageOptions: NotificationGateMalfunctionStageOption[] = []) {

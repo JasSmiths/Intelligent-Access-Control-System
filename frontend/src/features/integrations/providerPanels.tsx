@@ -1,3 +1,4 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import {
@@ -125,7 +126,7 @@ export function IntegrationModal({
   whatsappLoading,
   whatsappStatus,
   people,
-  onClose,
+  onClose: finishClose,
   onDiscordChanged,
   onWhatsAppChanged,
   onICloudChanged,
@@ -167,6 +168,7 @@ export function IntegrationModal({
   onSaved: (updates: Record<string, unknown>, confirmationToken?: string) => Promise<void>;
 }) {
   const modalRef = React.useRef<HTMLDivElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
   const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>(initialTab);
   const [form, setForm] = React.useState<Record<string, string>>(() => integrationInitialValues(definition, values));
   const [testing, setTesting] = React.useState(false);
@@ -390,6 +392,7 @@ export function IntegrationModal({
         reason: "Save integration settings"
       });
       await onSaved(payload.values, confirmation.confirmation_token);
+      await onClose();
     } catch (error) {
       setFeedback({
         tone: "error",

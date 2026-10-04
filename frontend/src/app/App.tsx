@@ -1,3 +1,4 @@
+import { LoadingState } from "../ui/primitives";
 import { useModalFocus } from "../ui/useModalFocus";
 import { Bell, ChevronDown, Loader2, LogOut, Menu, RefreshCcw, Search, ShieldCheck, X } from "lucide-react";
 import React from "react";
@@ -314,8 +315,13 @@ export function App() {
       });
     };
     scrollActiveIntoView();
+    const submenu = sidebarRef.current?.querySelector(".nav-submenu-region");
+    const onSubmenuSettled = (event: Event) => {
+      if (event.target === submenu) scrollActiveIntoView();
+    };
+    submenu?.addEventListener("transitionend", onSubmenuSettled);
     window.addEventListener("resize", scrollActiveIntoView);
-    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("resize", scrollActiveIntoView); };
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("resize", scrollActiveIntoView); submenu?.removeEventListener("transitionend", onSubmenuSettled); };
   }, [view, settingsExpanded, isMobileNavigation, mobileNavOpen, authStatus?.authenticated]);
   React.useEffect(() => {
     if (!alertsOpen) return undefined;
@@ -369,6 +375,7 @@ export function App() {
   }
   return (
     <div className={`${navigationCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}${mobileNavOpen ? " mobile-nav-open" : ""}`}>
+      <a className="skip-link" href="#main-content">Skip to content</a>
       <aside role={isMobileNavigation && mobileNavOpen ? "dialog" : undefined} aria-modal={isMobileNavigation && mobileNavOpen ? true : undefined} aria-label="Site navigation" inert={isMobileNavigation && !mobileNavOpen} className="sidebar" id="site-sidebar" aria-hidden={isMobileNavigation && !mobileNavOpen} ref={sidebarRef}>
         <div className="brand">
           <div className="brand-mark">
@@ -395,12 +402,13 @@ export function App() {
                     type="button"
                     title={item.label}
                     aria-label={item.label}
+                    aria-current={view === "settings" ? "page" : undefined}
                   >
                     <Icon size={18} />
                     <span>{item.label}</span>
                   </button><button className="nav-disclosure" type="button" aria-label={settingsExpanded ? "Collapse Settings" : "Expand Settings"} aria-expanded={settingsExpanded && !navigationCollapsed} aria-controls="settings-submenu" onClick={() => setSettingsExpanded((current) => !current)}><ChevronDown size={15} /></button></div>
-                  {settingsExpanded && !navigationCollapsed ? (
-                    <div className="nav-submenu" id="settings-submenu">
+                  <div className={`nav-submenu-region${settingsExpanded && !navigationCollapsed ? " open" : ""}`} id="settings-submenu" inert={!settingsExpanded || navigationCollapsed} aria-hidden={!settingsExpanded || navigationCollapsed}>
+                    <div className="nav-submenu">
                       {visibleSettingsNavItems.map((subItem) => {
                         const SubIcon = subItem.icon;
                         return (
@@ -408,6 +416,7 @@ export function App() {
                             className={subItem.key === view ? "nav-item nested active" : "nav-item nested"}
                             key={subItem.key}
                             aria-label={subItem.label}
+                            aria-current={subItem.key === view ? "page" : undefined}
                             title={subItem.label}
                             onClick={() => navigateFromNav(subItem.key)}
                             type="button"
@@ -418,7 +427,7 @@ export function App() {
                         );
                       })}
                     </div>
-                  ) : null}
+                  </div>
                 </div>
               );
             }
@@ -428,6 +437,7 @@ export function App() {
               <button
                 key={item.key}
                 aria-label={item.label}
+                aria-current={item.key === view ? "page" : undefined}
                 className={item.key === view ? "nav-item active" : "nav-item"}
                 onClick={() => navigateFromNav(item.key)}
                 type="button"
@@ -486,7 +496,7 @@ export function App() {
           )}
         </div>
       </aside>
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         <header className="topbar">
           <div className="topbar-left">
             <button
@@ -500,18 +510,18 @@ export function App() {
             >
               <Menu size={20} />
             </button>
-            <span className="estate-select" aria-label="Current site">
-              <span>Crest House</span>
-            </span>
+            <div className="topbar-location"><span className="estate-select" aria-label="Current site"><span>Crest House</span></span><span className="location-divider" aria-hidden="true">/</span><span className="topbar-page" key={view}>{[...primaryNavItems, ...settingsNavItems].find((item) => item.key === view)?.label ?? "Console"}</span></div>
           </div>
           <div className="topbar-actions">
             <button
               className="search global-search-trigger"
+              aria-label="Search anything"
+              aria-keyshortcuts="Meta+K Control+K"
               onClick={() => setSearchPaletteOpen(true)}
               type="button"
             >
               <Search size={16} />
-              <span>Search Anything...</span>
+              <span>Search anything…</span><kbd aria-hidden="true">⌘ K</kbd>
             </button>
             <div className="alert-tray-shell">
               <button
@@ -539,17 +549,18 @@ export function App() {
                 />
               ) : null}
             </div>
-            <button className="icon-button refresh-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button" aria-label="Refresh" disabled={dashboardRefreshing}>
+            <button className="icon-button refresh-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button" aria-label="Refresh" aria-busy={dashboardRefreshing} disabled={dashboardRefreshing}>
               <RefreshCcw className={dashboardRefreshing ? "spin" : undefined} size={17} />
             </button>
             <ThemeControl theme={theme} setTheme={setTheme} />
+            <DeferredChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
           </div>
         </header>
         {routeSearch?.view === view && routeSearch.value && !restrictedView ? <div className="route-filter-bar"><label><Search size={16} /><span>Page filter</span><input aria-label="Page filter" value={routeSearch.value} onChange={(event) => setRouteSearch({ view, value: event.target.value })} /></label><button className="secondary-button" type="button" onClick={() => setRouteSearch(null)}>Clear</button></div> : null}
         {restrictedView ? (
           <section className="view-stack permission-state" role="alert"><h1>Administrator access required</h1><p>This page is restricted to administrators. Your account can continue using the other console pages.</p><button className="secondary-button" type="button" onClick={() => navigateToView("dashboard")}>Go to Dashboard</button></section>
         ) : loading ? (
-          <div className="loading-panel">Loading live site data</div>
+          <LoadingState label="Loading live site data" />
         ) : readState === "unavailable" ? (
           <section className="view-stack permission-state" role="alert"><h1>Site data unavailable</h1><p>Required {failedDescription} data could not be loaded. Editors are paused until a successful read.</p><button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></section>
         ) : (
@@ -572,8 +583,6 @@ export function App() {
             historyResetToken={historyResetToken}
             refresh={refresh}
             currentUser={currentUser}
-            theme={theme}
-            setTheme={setTheme}
             navigateToView={navigateToView}
             onCurrentUserUpdated={(user) =>
               setAuthStatus((current) => current ? { ...current, user } : current)
@@ -594,7 +603,6 @@ export function App() {
         onAction={handleNotificationAction}
         onDismiss={(id) => setNotificationToasts((current) => current.filter((item) => item.id !== id))}
       />
-      <DeferredChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
     </div>
   );
 }

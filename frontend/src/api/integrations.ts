@@ -1,6 +1,12 @@
 import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
 import type { AccessDevice, ActionConfirmationOptions, HomeAssistantDiscovery, IntegrationStatus, UnifiProtectCamera, UserAccount } from "./types";
 export type AccessDeviceEligibility = AccessDevice & { commandable: boolean; admission_eligible: boolean };
+export type RecoveryTrackerDiscovery = {
+  trackers: Array<{ entity_id: string; name: string; available: boolean; eligible: boolean; reason: string | null }>;
+  mappings: Array<{ person_id: string; notify_service_id: string | null; suggested_tracker_entity_id: string | null; status: "matched" | "ambiguous" | "not_found" | "unavailable"; reason: string | null }>;
+  status: "complete" | "unavailable";
+  reason: string | null;
+};
 // These describe persisted command receipts, not live device state.
 export type CommandDelivery = "accepted" | "rejected" | "not_sent" | "unknown";
 export type GateCommandDelivery = CommandDelivery | "partial";
@@ -160,6 +166,7 @@ export const integrationsApi = {
     api.get<DeviceCommandReceipt>(`/api/v1/integrations/cover/commands/${encodeURIComponent(commandId)}`, options),
   getHomeAssistantStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"),
   getHomeAssistantDiscovery: () => api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities"),
+  getRecoveryTrackers: (options: ApiRequestOptions = {}) => api.get<RecoveryTrackerDiscovery>("/api/v1/integrations/home-assistant/recovery-trackers", options),
   getAccessDeviceStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/gate/status"),
   getProtectStatus: () => api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status"),
   getProtectCameras: async (forceRefresh = false) => {

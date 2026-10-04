@@ -3,13 +3,15 @@ import type { UnifiProtectCamera } from "../../api/types";
 import { workflowApi } from "../../api/workflows";
 import type { NotificationFilterCounts, NotificationStatusFilter, WorkflowRuleStatusFeedback } from "./model";
 
+const EMPTY_RULES: never[] = [];
+
 // One request owner for both workflow lists. A superseded response cannot replace
 // current data, and background refresh leaves an open editor mounted.
 export function useWorkflowData<Data extends { rules: { id: string }[] }>(
   fetchData: (options: { signal: AbortSignal }) => Promise<Data>, refreshToken: number
 ) {
   const [data, setData] = React.useState<Data | null>(null);
-  const [rules, updateRules] = React.useState<Data["rules"]>([] as Data["rules"]);
+  const rules: Data["rules"] = data?.rules ?? EMPTY_RULES;
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const request = React.useRef<AbortController | null>(null);
@@ -22,7 +24,6 @@ export function useWorkflowData<Data extends { rules: { id: string }[] }>(
       const result = await fetchData({ signal: controller.signal });
       if (controller.signal.aborted) return;
       setData(result);
-      updateRules(result.rules as Data["rules"]);
     } catch (failure) {
       if (controller.signal.aborted) return;
       setError(failure instanceof Error ? failure.message : "Unable to load workflows.");
@@ -38,7 +39,7 @@ export function useWorkflowData<Data extends { rules: { id: string }[] }>(
   const setRules = React.useCallback((update: React.SetStateAction<Data["rules"]>) => {
     // A completed mutation is newer than a previously started list read.
     request.current?.abort();
-    updateRules(update);
+    setData((current) => current ? { ...current, rules: typeof update === "function" ? update(current.rules) : update } : current);
     setLoading(false);
   }, []);
   return { data, rules, setRules, loading, error, load };

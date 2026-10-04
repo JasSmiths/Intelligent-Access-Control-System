@@ -76,6 +76,8 @@ class Person(Base, TimestampMixin):
     )
     garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     home_assistant_mobile_app_notify_service: Mapped[str | None] = mapped_column(String(255))
+    missed_exit_recovery_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    missed_exit_recovery_tracker_entity_id: Mapped[str | None] = mapped_column(String(255))
     home_assistant_presence_input_boolean_entity_ids: Mapped[list[str]] = mapped_column(
         JSONB, default=list, nullable=False
     )
@@ -96,6 +98,10 @@ class Person(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
+
+
+Index("uq_people_recovery_tracker", Person.missed_exit_recovery_tracker_entity_id, unique=True,
+      postgresql_where=text("missed_exit_recovery_tracker_entity_id IS NOT NULL"))
 
 
 class AccessDevice(Base, TimestampMixin):
@@ -1579,3 +1585,40 @@ Index(
     postgresql_ops={"embedding": "vector_cosine_ops"},
     postgresql_where=AlfredEvalExample.embedding.is_not(None),
 )
+
+
+class ResidentRecoveryJourney(Base, TimestampMixin):
+    """Bounded distance evidence, not a resident's raw location history."""
+    __tablename__ = "resident_recovery_journeys"
+    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), primary_key=True)
+    epoch: Mapped[str] = mapped_column(String(36), nullable=False)
+    binding: Mapped[str] = mapped_column(String(64), nullable=False)
+    coordinate_hash: Mapped[str | None] = mapped_column(String(64))
+    latest_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    samples: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    invalid_reason: Mapped[str | None] = mapped_column(String(80))
+    claimed_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="SET NULL"))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MissedExitRecoveryAttempt(Base, TimestampMixin):
+    __tablename__ = "missed_exit_recovery_attempts"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    owner_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
+    registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("access_events.id", ondelete="CASCADE"), unique=True, nullable=False)
+    saga_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("movement_sagas.id", ondelete="SET NULL"))
+    recovery_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="SET NULL"))
+    command_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("gate_command_records.id", ondelete="SET NULL"))
+    action_context_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("notification_action_contexts.id", ondelete="SET NULL"))
+    method: Mapped[str] = mapped_column(String(40), default="none", nullable=False, index=True)
+    outcome: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(120), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    checks: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    timeline: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    notification: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    duration_ms: Mapped[float | None] = mapped_column(Float)

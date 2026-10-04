@@ -53,6 +53,9 @@ def validate_dynamic_setting_keys(updates: dict[str, Any]) -> None:
 
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
+    "missed_exit_recovery_enabled": ("missed_exit_recovery", False, "Enable opted-in resident missed exit recovery."),
+    "missed_exit_recovery_gate_latitude": ("missed_exit_recovery", None, "Top gate latitude; exact-location iPhone tracking required."),
+    "missed_exit_recovery_gate_longitude": ("missed_exit_recovery", None, "Top gate longitude."),
     "app_name": ("general", settings.app_name, "Application display name."),
     "log_level": ("general", settings.log_level, "Backend log level."),
     "site_timezone": ("general", settings.site_timezone, "Site timezone."),
@@ -255,6 +258,9 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    missed_exit_recovery_enabled: bool
+    missed_exit_recovery_gate_latitude: float | None
+    missed_exit_recovery_gate_longitude: float | None
     app_name: str
     log_level: str
     site_timezone: str
@@ -524,6 +530,9 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         values[record.key] = decrypted_value(record)
 
     config = RuntimeConfig(
+        missed_exit_recovery_enabled=bool(values["missed_exit_recovery_enabled"]),
+        missed_exit_recovery_gate_latitude=values["missed_exit_recovery_gate_latitude"],
+        missed_exit_recovery_gate_longitude=values["missed_exit_recovery_gate_longitude"],
         app_name=str(values["app_name"]),
         log_level=str(values["log_level"]),
         site_timezone=str(values["site_timezone"]),
@@ -718,6 +727,22 @@ async def update_settings(
                               if not (key in records and records[key].is_secret and value in (None, "")
                                       and key not in CLEARABLE_SECRET_KEYS)})
             await _validate_admission_setting(session, candidate)
+        if any(key.startswith("missed_exit_recovery_") for key in updates):
+            from app.services.resident_recovery_evidence import gate_coordinates
+            from types import SimpleNamespace
+            candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+            candidate.update({key: decrypted_value(row) for key, row in records.items()})
+            candidate.update(updates)
+            if type(candidate["missed_exit_recovery_enabled"]) is not bool:
+                raise ValueError("Recovery enablement must be a boolean.")
+            if candidate["missed_exit_recovery_enabled"] and (gate_coordinates(SimpleNamespace(**candidate)) is None
+                    or not candidate["gate_admission_device_key"]):
+                raise ValueError("Configure the top gate coordinates and admission gate before enabling recovery.")
+            from app.models import ResidentRecoveryJourney
+            journeys = list((await session.scalars(select(ResidentRecoveryJourney)
+                .order_by(ResidentRecoveryJourney.person_id).with_for_update())).all())
+            for journey in journeys:
+                journey.samples, journey.invalid_reason = [], "recovery_settings_changed"
         for key, value in updates.items():
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)

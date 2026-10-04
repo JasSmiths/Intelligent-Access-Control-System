@@ -4,7 +4,7 @@ import React from "react";
 import { api, createActionConfirmation } from "../api/client";
 import { titleCase } from "../lib/format";
 import { useSettings } from "../lib/settings";
-import { Badge } from "../ui/primitives";
+import { Badge, ErrorState, LoadingState } from "../ui/primitives";
 
 type AlfredTrainingSource = {
   kind: "user_feedback" | "self_learning" | "manual_training" | "seed" | "system" | string;
@@ -71,6 +71,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
   const [lessons, setLessons] = React.useState<AlfredLessonRecord[]>([]);
   const [examples, setExamples] = React.useState<AlfredEvalExample[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [hasLoaded, setHasLoaded] = React.useState(false);
   const [error, setError] = React.useState("");
   const [lessonDraft, setLessonDraft] = React.useState<LessonDraft | null>(null);
   const [lessonTab, setLessonTab] = React.useState<LessonTab>("pending");
@@ -93,6 +94,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
       setFeedback(feedbackPayload.feedback);
       setLessons(lessonPayload.lessons);
       setExamples(examplePayload.examples);
+      setHasLoaded(true);
       return true;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Alfred training data.");
@@ -216,14 +218,14 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
             <Download size={15} />
             <span>Export JSONL</span>
           </a>
-          <button className="secondary-button" onClick={() => load()} type="button">
+          <button className="secondary-button" onClick={() => load()} disabled={loading} type="button">
             {loading ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
             <span>Refresh</span>
           </button>
         </div>
       </div>
 
-      {error ? <div className="inline-error">{error}</div> : null}
+      {error ? <ErrorState title="Training data unavailable" description={error} onRetry={() => void load()} retrying={loading} /> : null}
       {settings.error ? <div className="inline-error" role="alert">Learning mode unavailable: {settings.error}</div> : null}
       {actionError ? <div className="inline-error" role="alert">{actionError}</div> : null}
       {actionStatus ? <div className="callout" role="status">{actionStatus}</div> : null}
@@ -253,6 +255,8 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
         </div>
       </section>
 
+      {!hasLoaded && loading ? <LoadingState label="Loading Alfred training data" /> : null}
+      {hasLoaded ? <>
       <div className="alfred-training-tabs" role="tablist" aria-label="Alfred training state">
         <button
           aria-selected={lessonTab === "pending"}
@@ -425,6 +429,7 @@ export function AlfredTrainingView({ refreshToken }: { refreshToken: number }) {
           </div>
         </section>
       </div>
+      </> : null}
     </div>
   );
 }

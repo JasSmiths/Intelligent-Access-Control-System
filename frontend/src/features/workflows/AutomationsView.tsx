@@ -1,11 +1,12 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
-import { GitBranch, Play, Plus, Save, Split, Trash2, X, Zap } from "lucide-react";
+import { GitBranch, Play, Plus, Save, Split, Trash2, X } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount, Vehicle } from "../../api/types";
 import type { AutomationAction, AutomationCatalogGroup, AutomationNode, AutomationRule } from "../../api/workflows";
 import { workflowApi } from "../../api/workflows";
-import { Toolbar } from "../../ui/primitives";
+import { ErrorState, LoadingState, Toolbar } from "../../ui/primitives";
 import { AutomationNodeStack, AutomationPreviewPanel, AutomationSelectionModal } from "./AutomationEditor";
 import { automationRulePayload, automationVariablesForTrigger, cloneAutomationRule, createAutomationDraft, groupAutomationRulesByTriggerCategory } from "./automationModel";
 import { NotificationConfigChip, WorkflowBlock, WorkflowRuleList, WorkflowStatusFilters } from "./components";
@@ -25,7 +26,8 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const modalRef = React.useRef<HTMLDivElement>(null);
   const baseline = React.useRef("");
-  const dismissDraft = useEditorDismiss(() => setDraft(null), Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "automation changes");
+  const closeDraft = useModalClose(modalRef, () => { setDraft(null); setModal(null); });
+  const dismissDraft = useEditorDismiss(closeDraft, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "automation changes");
   const requestClose = () => { if (saving) return; if (modal) setModal(null); else dismissDraft(); };
   useModalFocus(modalRef, Boolean(draft), requestClose);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
@@ -79,8 +81,7 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
       const saved = await workflowApi.saveAutomationRule(draft, payload);
       setRules((current) => current.some((item) => item.id === saved.id) ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current]);
       void load();
-      setDraft(null);
-      setModal(null);
+      await closeDraft();
       setDryRun(null);
       setFeedback({ tone: "success", text: "Automation saved. It will run when its trigger fires." });
     } catch (saveError) {
@@ -92,13 +93,13 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
 
   const deleteRule = async (rule: AutomationRule) => {
     if (rule.id.startsWith("draft-")) {
-      setDraft(null);
+      await closeDraft();
       return;
     }
     if (!window.confirm(`Delete ${rule.name}?`)) return;
     try {
       await workflowApi.deleteAutomationRule(rule);
-      setDraft(null);
+      await closeDraft();
       await load();
       setFeedback({ tone: "success", text: "Automation deleted." });
     } catch (deleteError) {
@@ -166,13 +167,17 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
     }
   };
 
-  if (loading) {
+  if (loading || (!data && !error)) {
     return (
       <section className="view-stack notifications-page workflow-notifications-page">
-        <Toolbar title="Automations" count={0} icon={GitBranch} />
-        <div className="loading-panel">Loading automation rules</div>
+        <Toolbar title="Automations" icon={GitBranch} />
+        <LoadingState label="Loading automation rules" />
       </section>
     );
+  }
+
+  if (!data) {
+    return <section className="view-stack notifications-page workflow-notifications-page"><Toolbar title="Automations" icon={GitBranch} /><ErrorState title="Automations unavailable" description={error} onRetry={() => void load()} /></section>;
   }
 
   return (
@@ -183,7 +188,7 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
           <Plus size={15} /> Add Automation
         </button>
       </Toolbar>
-      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {error ? <ErrorState title="Automations unavailable" description={error} onRetry={() => void load()} /> : null}
       {feedback && !draft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
       {showRuns ? <AutomationRunHistory currentUser={currentUser} refreshToken={refreshToken} rules={rules} /> : null}
 

@@ -1,3 +1,4 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Car, Clock3, Save, UserRound, Warehouse, X } from "lucide-react";
@@ -12,7 +13,7 @@ import { WeeklyScheduleGrid } from "./WeeklyScheduleGrid";
 
 export function ScheduleEditor({
   mode,
-  onClose,
+  onClose: finishClose,
   onSaved,
   schedule,
   setPageError
@@ -24,6 +25,7 @@ export function ScheduleEditor({
   setPageError: (message: string) => void;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
   const [form, setForm] = React.useState({
     name: schedule?.name ?? "",
     description: schedule?.description ?? "",
@@ -71,7 +73,7 @@ export function ScheduleEditor({
     };
     try {
       await schedulesApi.save(payload, mode === "edit" ? schedule : null);
-      onClose();
+      await onClose();
       try { await onSaved(); } catch { setPageError("Schedule saved, but the list could not be refreshed. Refresh to see the latest data."); }
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Unable to save schedule";

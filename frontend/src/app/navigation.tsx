@@ -1,4 +1,4 @@
-import { BarChart3, Bell, Bot, CalendarDays, Car, ClipboardPaste, Clock3, DoorOpen, FileText, Gauge, GitBranch, Home, Lock, MapPinned, MoveHorizontal, PlugZap, Settings, SlidersHorizontal, Trophy, UserRound, Users, Warehouse } from "lucide-react";
+import { BarChart3, Bell, Bot, CalendarDays, Car, ClipboardPaste, Clock3, DoorOpen, FileText, Gauge, GitBranch, History, Home, Lock, MapPinned, MoveHorizontal, PlugZap, Settings, SlidersHorizontal, Trophy, UserRound, Users, Warehouse } from "lucide-react";
 import type React from "react";
 import type { UserAccount, ViewKey } from "../api/types";
 export type ShellDataKey =
@@ -31,6 +31,8 @@ const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
   settings_general: [],
   settings_gates: ["schedules"],
   settings_garage_doors: ["schedules"],
+  settings_command_history: [],
+  settings_missed_exit_recovery: ["people"],
   settings_auth: [],
   alfred_training: [],
   settings_automations: ["people", "vehicles"],
@@ -73,6 +75,8 @@ export const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.
   { key: "settings_general", label: "General", icon: SlidersHorizontal },
   { key: "settings_gates", label: "Gates", icon: DoorOpen },
   { key: "settings_garage_doors", label: "Garage Doors", icon: Warehouse },
+  { key: "settings_missed_exit_recovery", label: "Missed Exit Recovery", icon: History, adminOnly: true },
+  { key: "settings_command_history", label: "Command History", icon: History, adminOnly: true },
   { key: "settings_auth", label: "Auth & Security", icon: Lock },
   { key: "integrations", label: "API & Integrations", icon: PlugZap, adminOnly: true },
   { key: "settings_automations", label: "Automations", icon: GitBranch, adminOnly: true },
@@ -87,9 +91,6 @@ export const navigationItems: NavigationItem[] = [...primaryNavItems, ...setting
 export function canAccessView(view: ViewKey, user: UserAccount | null) {
   const item = navigationItems.find((candidate) => candidate.key === view);
   return !item?.adminOnly || user?.role === "admin";
-}
-export function viewLabel(view: ViewKey) {
-  return navigationItems.find((item) => item.key === view)?.label ?? "Dashboard";
 }
 export const viewPaths: Record<ViewKey, string> = {
   dashboard: "/",
@@ -109,6 +110,8 @@ export const viewPaths: Record<ViewKey, string> = {
   settings_general: "/settings/general",
   settings_gates: "/settings/gates",
   settings_garage_doors: "/settings/garage-doors",
+  settings_command_history: "/settings/command-history",
+  settings_missed_exit_recovery: "/settings/missed-exit-recovery",
   settings_auth: "/settings/auth-security",
   alfred_training: "/settings/alfred-training",
   settings_automations: "/settings/automations",

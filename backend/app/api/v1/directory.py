@@ -80,6 +80,8 @@ class PersonResponse(BaseModel):
     notes: str | None
     garage_door_entity_ids: list[str]
     home_assistant_mobile_app_notify_service: str | None
+    missed_exit_recovery_enabled: bool = False
+    missed_exit_recovery_tracker_entity_id: str | None = None
     home_assistant_presence_input_boolean_entity_ids: list[str]
     home_assistant_presence_input_boolean_entry_action: Literal["turn_on", "turn_off"]
     home_assistant_presence_input_boolean_exit_action: Literal["turn_on", "turn_off"]
@@ -96,6 +98,8 @@ class CreatePersonRequest(BaseModel):
     vehicle_ids: list[uuid.UUID] = Field(default_factory=list)
     garage_door_entity_ids: list[str] = Field(default_factory=list)
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
+    missed_exit_recovery_enabled: bool = False
+    missed_exit_recovery_tracker_entity_id: str | None = Field(default=None, max_length=255)
     home_assistant_presence_input_boolean_entity_ids: list[str] = Field(default_factory=list)
     home_assistant_presence_input_boolean_entry_action: str = Field(
         default=DEFAULT_INPUT_BOOLEAN_ACTION,
@@ -120,6 +124,8 @@ class UpdatePersonRequest(BaseModel):
     vehicle_ids: list[uuid.UUID] | None = None
     garage_door_entity_ids: list[str] | None = None
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
+    missed_exit_recovery_enabled: bool | None = None
+    missed_exit_recovery_tracker_entity_id: str | None = Field(default=None, max_length=255)
     home_assistant_presence_input_boolean_entity_ids: list[str] | None = None
     home_assistant_presence_input_boolean_entry_action: str | None = Field(
         default=None,
@@ -467,6 +473,8 @@ def serialize_person(
         "notes": person.notes,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
+        "missed_exit_recovery_enabled": person.missed_exit_recovery_enabled,
+        "missed_exit_recovery_tracker_entity_id": person.missed_exit_recovery_tracker_entity_id,
         "home_assistant_presence_input_boolean_entity_ids": list(
             getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
         ),
@@ -511,6 +519,8 @@ def person_audit_snapshot(person: Person) -> dict:
         "schedule_id": str(person.schedule_id) if person.schedule_id else None,
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
+        "missed_exit_recovery_enabled": person.missed_exit_recovery_enabled,
+        "missed_exit_recovery_tracker_entity_id": person.missed_exit_recovery_tracker_entity_id,
         "home_assistant_presence_input_boolean_entity_ids": list(
             getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
         ),
@@ -775,12 +785,19 @@ async def add_person(
         home_assistant_presence_input_boolean_exit_action=normalize_person_presence_input_boolean_action(
             request.home_assistant_presence_input_boolean_exit_action
         ),
+        missed_exit_recovery_enabled=request.missed_exit_recovery_enabled,
+        missed_exit_recovery_tracker_entity_id=request.missed_exit_recovery_tracker_entity_id,
         notes=normalize_optional_text(request.notes),
         is_active=request.is_active,
     )
     session.add(person)
     await session.flush()
 
+    from app.services.resident_recovery import validate_person_configuration
+    try:
+        await validate_person_configuration(session, person)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await set_person_vehicle_assignments(session, person, vehicles)
     await _set_schedule_assignment_or_http(session, person, request.schedule_id, user)
 
@@ -838,6 +855,8 @@ async def update_person(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
+    # Recovery dispatch holds this same owner row through its durable checkpoint.
+    await session.refresh(person, with_for_update=True)
     before = person_audit_snapshot(person)
 
     if "group_id" in request.model_fields_set:
@@ -895,6 +914,21 @@ async def update_person(
     if request.is_active is not None:
         person.is_active = request.is_active
 
+    if request.missed_exit_recovery_enabled is not None:
+        person.missed_exit_recovery_enabled = request.missed_exit_recovery_enabled
+    if "missed_exit_recovery_tracker_entity_id" in request.model_fields_set:
+        person.missed_exit_recovery_tracker_entity_id = request.missed_exit_recovery_tracker_entity_id
+    from app.services.resident_recovery import validate_person_configuration
+    try:
+        await validate_person_configuration(session, person)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if any(key in request.model_fields_set for key in ("missed_exit_recovery_enabled",
+            "missed_exit_recovery_tracker_entity_id", "home_assistant_mobile_app_notify_service", "is_active")):
+        from app.models import ResidentRecoveryJourney
+        journey = await session.get(ResidentRecoveryJourney, person.id, with_for_update=True)
+        if journey:
+            journey.samples, journey.invalid_reason = [], "resident_configuration_changed"
     after = person_audit_snapshot(person)
     await write_audit_log(
         session,

@@ -25,55 +25,34 @@ async function parseApiResponse<T>(response: Response, path: string): Promise<T>
     throw new Error(`Malformed JSON response from ${path}: ${error instanceof Error ? error.message : "unable to parse response"}`);
   }
 }
+async function writeJson<T>(method: "POST" | "PATCH" | "PUT" | "DELETE", path: string, body: unknown, options: ApiRequestOptions): Promise<T> {
+  const response = await fetch(path, {
+    method,
+    headers: method === "DELETE" && !body ? undefined : { "Content-Type": "application/json" },
+    credentials: "include",
+    signal: options.signal,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!response.ok) throw await apiError(response);
+  return parseApiResponse<T>(response, path);
+}
 export const api = {
   async get<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
     const response = await fetch(path, { credentials: "include", signal: options.signal });
     if (!response.ok) throw await apiError(response);
     return parseApiResponse<T>(response, path);
   },
-  async post<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      signal: options.signal,
-      body: body ? JSON.stringify(body) : undefined
-    });
-    if (!response.ok) throw await apiError(response);
-    return parseApiResponse<T>(response, path);
+  post<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
+    return writeJson<T>("POST", path, body, options);
   },
-  async patch<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
-    const response = await fetch(path, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      signal: options.signal,
-      body: body ? JSON.stringify(body) : undefined
-    });
-    if (!response.ok) throw await apiError(response);
-    return parseApiResponse<T>(response, path);
+  patch<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
+    return writeJson<T>("PATCH", path, body, options);
   },
-  async put<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
-    const response = await fetch(path, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      signal: options.signal,
-      body: body ? JSON.stringify(body) : undefined
-    });
-    if (!response.ok) throw await apiError(response);
-    return parseApiResponse<T>(response, path);
+  put<T>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
+    return writeJson<T>("PUT", path, body, options);
   },
-  async delete<T = void>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
-    const response = await fetch(path, {
-      method: "DELETE",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      credentials: "include",
-      signal: options.signal,
-      body: body ? JSON.stringify(body) : undefined
-    });
-    if (!response.ok) throw await apiError(response);
-    return parseApiResponse<T>(response, path);
+  delete<T = void>(path: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
+    return writeJson<T>("DELETE", path, body, options);
   }
 };
 export async function createActionConfirmation(

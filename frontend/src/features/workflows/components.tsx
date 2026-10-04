@@ -1,3 +1,6 @@
+import { useModalClose } from "../../ui/useModalClose";
+import { useEditorDismiss } from "../../ui/useEditorDismiss";
+import "../../styles/workflows.css";
 import { ArrowLeft, Bell, ChevronDown, ChevronRight, Copy, GitBranch, MoreHorizontal, Pencil, Search, Trash2, X } from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
@@ -236,11 +239,13 @@ export function TwoPaneSelectionModal({
   backLabel = "Back to editor",
   categories,
   children,
+  dirty = false,
+  discardLabel = "selection",
   embedded = false,
   footer,
   onBack,
   onCategoryChange,
-  onClose,
+  onClose: finishClose,
   onSearchChange,
   searchPlaceholder = "Search",
   searchQuery,
@@ -252,6 +257,8 @@ export function TwoPaneSelectionModal({
   backLabel?: string;
   categories: TwoPaneCategory[];
   children: React.ReactNode;
+  dirty?: boolean;
+  discardLabel?: string;
   embedded?: boolean;
   footer?: React.ReactNode;
   onBack?: () => void;
@@ -265,6 +272,8 @@ export function TwoPaneSelectionModal({
   wide?: boolean;
 }) {
   const modalRef = React.useRef<HTMLDivElement | null>(null);
+  const close = useModalClose(modalRef, finishClose);
+  const onClose = useEditorDismiss(close, dirty, false, discardLabel);
   useModalFocus(modalRef, !embedded, onClose);
   const className = [
     "modal-card",

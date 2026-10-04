@@ -1,24 +1,3 @@
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-.investigations-page {
-  width: 100%;
-  max-width: 1600px;
-  min-width: 0;
-  margin-inline: auto;
-  gap: 16px;
-  padding-bottom: calc(24px + var(--alfred-launcher-clearance));
-}
-
 .investigations-route .chat-teaser {
   display: none;
 }
@@ -781,9 +760,6 @@
   line-height: 1.45;
 }
 
-.spin { animation: investigation-spin 900ms linear infinite; }
-@keyframes investigation-spin { to { transform: rotate(360deg); } }
-
 .investigation-timeline-list {
   padding: 0 16px 8px;
 }
@@ -890,7 +866,6 @@
 }
 
 .investigation-dispatch-state,
-.investigation-config-context,
 .investigation-configuration-list > div {
   display: flex;
   align-items: flex-start;
@@ -910,7 +885,6 @@
 .investigation-dispatch-state.verified { border-left-color: var(--green); }
 
 .investigation-dispatch-state > span,
-.investigation-config-context > span,
 .investigation-configuration-list > div > span {
   display: grid;
   min-width: 0;
@@ -918,7 +892,6 @@
 }
 
 .investigation-dispatch-state small,
-.investigation-config-context small,
 .investigation-configuration-list small {
   color: var(--muted);
   font-size: 10px;
@@ -1037,8 +1010,6 @@
 .investigation-evidence-copy strong { font-size: 11px; overflow-wrap: anywhere; }
 .investigation-evidence-copy p { margin-top: 3px; color: var(--muted-strong); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 
-.investigation-config-context { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-
 .investigation-configuration-list {
   margin-top: 14px;
   padding-top: 12px;
@@ -1153,7 +1124,6 @@
 }
 
 @media (max-width: 640px) {
-  .investigations-page { gap: 10px; }
   .investigation-question-heading { display: grid; gap: 10px; }
   .investigation-question-form { grid-template-columns: 1fr; }
   .investigation-question-form .primary-button { width: 100%; }
@@ -1189,7 +1159,6 @@
 }
 
 @media (max-width: 480px) {
-  .investigations-page { gap: 8px; }
   .investigation-question,
   .investigation-overview { padding: 14px; }
   .investigation-filter-shell { padding: 12px; }
@@ -1233,5 +1202,4 @@
 
 @media (prefers-reduced-motion: reduce) {
   .investigation-expand-icon { transition: none; }
-  .spin { animation: none; }
 }

@@ -52,7 +52,7 @@ export function InvestigationsWorkspace({ refreshToken }: { refreshToken: number
 
       <InvestigationFilters catalog={data.filters ?? EMPTY_FILTER_CATALOG} onChange={updateQuery} onReset={resetQuery} query={query} timezone={timezone} />
 
-      <ActivityTimeline
+      {(data.page || data.loading || !data.error) ? <ActivityTimeline
         detailErrors={episodeDetails.errors}
         details={episodeDetails.details}
         focusedEvidenceId={focusedEvidenceId}
@@ -67,7 +67,7 @@ export function InvestigationsWorkspace({ refreshToken }: { refreshToken: number
         partial={Boolean(data.page?.partial)}
         requestedEpisodeId={selectedEpisodeId}
         timezone={timezone}
-      />
+      /> : null}
     </section>
   );
 }

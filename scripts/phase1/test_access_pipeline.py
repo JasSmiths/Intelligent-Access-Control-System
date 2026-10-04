@@ -302,7 +302,11 @@ async def test_visitor_arrival_and_departure_keep_pass_links_and_audit(h):
     first=read('VISIT01')
     async with AsyncSessionLocal() as s:
         visitor=VisitorPass(visitor_name='Synthetic visitor', expected_time=first.captured_at, status=VisitorPassStatus.ACTIVE, window_minutes=30)
-        s.add(visitor); await s.commit(); identity=visitor.id
+        s.add(visitor)
+        s.add(AccessEvent(registration_number='VISIT01', direction=AccessDirection.EXIT,
+            decision=AccessDecision.GRANTED, occurred_at=first.captured_at-timedelta(hours=2, minutes=20),
+            confidence=1, source='synthetic-prior-visit', raw_payload={}))
+        await s.commit(); identity=visitor.id
     await process(h.service(),first)
     await process(h.service(),read('VISIT01',gate='closing',at=first.captured_at+timedelta(minutes=5)))
     async with AsyncSessionLocal() as s:
@@ -310,7 +314,13 @@ async def test_visitor_arrival_and_departure_keep_pass_links_and_audit(h):
         assert visitor.status==VisitorPassStatus.USED and visitor.number_plate=='VISIT01'
         assert visitor.arrival_event_id and visitor.departure_event_id and visitor.duration_on_site_seconds==300
         assert visitor.vehicle_make=='Synthetic' and visitor.vehicle_colour=='Blue'
-    assert len(await rows(AccessEvent))==2 and len(h.gate_calls)==1 and not await rows(Presence)
+    assert len(await rows(AccessEvent))==3 and len(h.gate_calls)==1 and not await rows(Presence)
+    arrivals = [notice for notice in await rows(NotificationRun)
+                if notice.trigger_event in {'visitor_pass_used', 'visitor_pass_vehicle_arrived'}]
+    assert len(arrivals) == 2
+    assert all(notice.context['facts']['vehicle_time_away_seconds'] == '8400.0' for notice in arrivals)
+    exits = [notice for notice in await rows(NotificationRun) if notice.trigger_event == 'visitor_pass_vehicle_exited']
+    assert len(exits) == 1 and 'vehicle_time_away_seconds' not in exits[0].context['facts']
     assert {'visitor_pass.reserved','visitor_pass.reservation_settled','visitor_pass.arrival_linked','visitor_pass.departure_linked'} <= {a.action for a in await rows(AuditLog)}
 
 

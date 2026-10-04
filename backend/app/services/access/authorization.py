@@ -15,7 +15,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import AccessEvent, LprIngestEvent, Person, Schedule, ScheduleOverride, SystemSetting, Vehicle
+from app.models import AccessEvent, LprIngestEvent, NotificationActionContext, Person, Schedule, ScheduleOverride, SystemSetting, Vehicle
 from app.models.enums import AccessDecision
 from app.services.access.reads import VISITOR_PASS_PAYLOAD_KEY
 from app.services.schedules import evaluate_vehicle_schedule
@@ -48,6 +48,25 @@ def recognition_deadline(captured_at: datetime, first_received_at: datetime) -> 
 async def recognition_deadline_for_event(session: AsyncSession, event: AccessEvent) -> datetime:
     received_at = await session.scalar(select(func.min(LprIngestEvent.received_at))
                                       .where(LprIngestEvent.access_event_id == event.id))
+    if received_at is None and event.source == "resident_missed_exit_recovery":
+        # A resident-approved derivative retains its original LPR deadline.
+        # Its scoped 120-second gate authority belongs only to resident_recovery;
+        # ordinary automation/hardware never gains a fresh recognition window.
+        origin = (event.raw_payload or {}).get("resident_recovery") or {}
+        try:
+            context = await session.get(NotificationActionContext, uuid.UUID(origin["context_id"]))
+            original_id = uuid.UUID(origin["original_event_id"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise RecognitionAuthorizationDenied("Resident recovery provenance is invalid.") from exc
+        if (context is None or context.action != "resident.missed_exit.allow_entry" or context.outcome != "authorized"
+                or context.access_event_id != original_id or context.person_id != event.person_id
+                or (context.metadata_ or {}).get("recovery_event_id") != str(event.id)):
+            raise RecognitionAuthorizationDenied("Resident recovery provenance is no longer valid.")
+        original = await session.get(AccessEvent, original_id)
+        if original is None or original.occurred_at != event.occurred_at:
+            raise RecognitionAuthorizationDenied("Resident recovery original observation is unavailable.")
+        received_at = await session.scalar(select(func.min(LprIngestEvent.received_at))
+            .where(LprIngestEvent.access_event_id == original_id))
     if received_at is None:
         raise RecognitionAuthorizationDenied("A durable first recognition receipt is required.")
     return recognition_deadline(event.occurred_at, received_at)

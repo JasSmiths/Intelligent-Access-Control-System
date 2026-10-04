@@ -6,9 +6,9 @@ import type { RefreshSelection } from "./refreshCoordinator";
 type Impact = { keys: ShellDataKey[]; views?: ViewKey[] };
 const accessImpact: Impact = {
   keys: ["presence", "expectedPresence", "events", "vehicles", "people", "anomalies"],
-  views: ["movements", "alerts", "logs"]
+  views: ["movements", "alerts", "logs", "settings_missed_exit_recovery"]
 };
-const settingsViews: ViewKey[] = ["schedules", "settings_general", "settings_gates", "settings_garage_doors", "settings_auth", "settings_lpr", "settings_zones", "integrations", "alfred_training", "settings_notifications", "settings_automations"];
+const settingsViews: ViewKey[] = ["schedules", "settings_general", "settings_missed_exit_recovery", "settings_gates", "settings_garage_doors", "settings_auth", "settings_lpr", "settings_zones", "integrations", "alfred_training", "settings_notifications", "settings_automations"];
 const auditImpacts: Record<string, Impact> = {
   access_device: { keys: ["integrationStatus", "people", "schedules"], views: ["settings_gates", "settings_garage_doors", "settings_automations", "settings_notifications", "integrations"] },
   esphome: { keys: ["integrationStatus"], views: ["settings_gates", "settings_garage_doors", "integrations"] },
@@ -17,7 +17,7 @@ const auditImpacts: Record<string, Impact> = {
   automation_rule: { keys: [], views: ["settings_automations"] },
   notification_rule: { keys: [], views: ["settings_notifications", "settings_automations"] },
   group: { keys: ["groups", "people", "vehicles", "expectedPresence"] },
-  person: { keys: ["people", "vehicles", "groups", "presence", "expectedPresence"], views: ["settings_notifications", "settings_automations", "passes"] },
+  person: { keys: ["people", "vehicles", "groups", "presence", "expectedPresence"], views: ["settings_notifications", "settings_automations", "passes", "settings_missed_exit_recovery"] },
   schedule: { keys: ["schedules", "people", "vehicles", "groups", "integrationStatus", "expectedPresence"], views: ["settings_gates", "settings_garage_doors", "settings_notifications", "settings_automations"] },
   settings: { keys: ["integrationStatus", "maintenanceStatus", "schedules", "expectedPresence"], views: settingsViews },
   user: { keys: [], views: ["users", "settings_notifications", "settings_automations"] },
@@ -30,6 +30,7 @@ const auditImpacts: Record<string, Impact> = {
 export function refreshSelectionForEvent(event: RealtimeMessage, view: ViewKey, required: Set<ShellDataKey>): RefreshSelection {
   let impact: Impact | undefined;
   if (event.type === "access_event.finalized" || event.type === "access_event.finalize_failed") impact = accessImpact;
+  else if (event.type.startsWith("missed_exit_recovery.")) impact = { keys: [], views: ["settings_missed_exit_recovery"] };
   else if (event.type === "alerts.updated") impact = { keys: ["anomalies"], views: ["alerts"] };
   else if (event.type.startsWith("automation.run.")) impact = { keys: [], views: ["settings_automations", "logs"] };
   else if (event.type.startsWith("visitor_pass.")) impact = auditImpacts.visitor_pass;

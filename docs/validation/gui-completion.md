@@ -1,41 +1,63 @@
-# GUI completion: isolated validation and coverage
+# Frontend browser validation
 
-This work was implemented in the `review/gui-completion` isolated checkout from the source snapshot at `ed49a869`. This task made no edits to the original bind-mounted checkout and sent no live API or hardware commands. Browser requests used synthetic fixtures; all unexpected API mutations were rejected by the fixture router.
+Use this for route, editor, role, navigation and layout changes. Ownership is in
+the [frontend guide](../agent/frontend.md); responsive invariants and manual
+device checks are in [frontend-responsive.md](frontend-responsive.md).
 
-Operators can now move through a grouped console, see and clear page filters, open all route families on desktop and mobile, use reachable editor actions, browse durable histories, and distinguish unavailable or unverified outcomes from completed ones. The Settings hub changes appearance directly; permission-gated destinations explain restricted access.
+## Run the isolated browser suite
 
-## Findings and changes
+From the repository root, with the frontend lockfile dependencies installed:
 
-| Route family | Finding addressed | Evidence |
-| --- | --- | --- |
-| Shell and Settings home | Settings disclosure could stay open on unrelated pages; search silently filtered another page; Settings cards showed static developer information; admin links could lead to failed editors. Route metadata now owns labels, groups and access, destination changes control expansion, current site is a label, search has a visible page filter/Clear, and the hub has working appearance controls. | Navigation unit tests; desktop/mobile navigation, direct-role, search, Back/Forward and theme browser checks. |
-| People, Groups, Vehicles | Assignment choices were hard to scan; ownership and failed data reads were unclear; Delete keyboard events could trigger Edit. Editors now show searchable ownership, explicit save feedback, guarded row events, dirty dismissal and pending locks. Initial failed critical reads block dependent editors; later failures show a stale banner. | Directory/browser fixtures, pending Group mutation test, shell failure/retry unit and browser checks. |
-| Schedules and Passes | Schedule intervals were hidden behind details; failed dependency reads looked empty; modal actions could fall below a short screen. Intervals are shown on cards, dependencies have an unavailable state, and scrollable editors retain reachable actions. Pass editor uses the common dirty-close policy. | Schedule model/editor unit tests and short-phone screenshot. Passes route/viewport smoke; live send scenarios remain excluded. |
-| Events, Movements, Alerts | Recent feeds did not support durable history traversal; movement detail could clip and unknown states looked confirmed; alert groups could be truncated. Dedicated cursor history, stable older-page behavior, direct record targeting, explicit unknown/required-command text and grouped alert resolution now use audited server owners. | History frontend/backend tests; selected movement desktop/mobile screenshots; alert group persistence checks documented in Phase 1 results. |
-| Reports and Top Charts | Report controls did not explain period, timezone, complete preview or export; chart captions lacked scope. Reports now explain these concepts, and charts state detection metrics and time period. Mobile quick periods use compact two-column controls. | Browser route/viewport sweep; existing report preview/export unit coverage. |
-| General, Auth, LPR, Gates, Garage Doors, Zones | Settings had false-ready status, stale edits could be lost during refresh, and technical identifiers dominated device forms. Settings reads expose loading/unavailable/empty states, dirty values survive refresh, save locks during submission, role-restricted secret reads are skipped, and device identifiers move into secondary details. Zone filter output is distinguished from final access decisions. | Settings/access-device unit tests; category draft isolation browser test; failure/retry fixture; four-viewport route screenshots. |
-| Integrations | Configuration was presented as connection health and loading could flash “Not configured.” Tiles separate configuration, checking, unavailable and verified connection states. | Integration state source review and four-viewport route screenshots. Provider tests remain synthetic-only. |
-| Automations and Notifications | Rule summaries were cryptic and mobile builder footers/preview were hard to reach. Summaries now read as trigger/action flow, editors use dirty/pending close policy, mobile preview starts collapsed, and actions stay in a fixed footer. | Workflow unit checks; short-phone Notification editor/preview screenshots, synthetic no-mutation fixture. |
-| Investigations, Alfred Training, Users, Alfred panel | Oversized empty areas and weak pending feedback obscured status. Drill-down/evidence, training review state, user pending locks and clipboard feedback were improved; modal ownership suppresses Alfred prompt and launcher. | Investigation/training unit checks; route screenshots; responsive Alfred composer regression. Full live reconnect/approval recovery is not claimed. |
+```sh
+cd frontend
+npx playwright install chromium webkit
+npm run test:e2e
+```
 
-The shared close policy routes Close, Cancel, Escape and backdrop through a dirty-draft confirmation, prevents dismissal during saving, and restores focus on actual close. Native confirmation dialogs and nested notification action selectors are included. A same-tick save ref lock prevents duplicate Group, Person, Vehicle, Schedule and Settings submissions. Browser fixtures check the pending Group case, including all dismissal paths.
+`frontend/playwright.config.ts` runs Chromium and WebKit against loopback port
+5174 with `frontend/vite.e2e.config.ts`, which has no backend proxy. Tests install
+synthetic `/api/v1` fixtures and close WebSockets. Unrecognized API requests are
+blocked and recorded; selected GUI cases override specific routes with simulated
+mutations to exercise pending saves, auth changes and upload failures. They do
+not contact the backend or command hardware.
 
-## Browser evidence
+The config may reuse an existing server outside CI. Confirm port 5174 belongs to
+this isolated preview before running; do not reuse a production/dev proxy there.
+Browser installation may need network access. The pinned version is in
+`frontend/package.json`/`package-lock.json`; keep it aligned with installed browser
+binaries rather than copying old local runtime paths.
 
-Baseline captures are in `/private/tmp/iacs-gui-audit-20260928`, including `09-movements.png`, `27-mobile-schedule.png` and `28-mobile-notification-editor.png`. Final retained after images are in `/private/tmp/iacs-gui-browser-final`: all 24 routes at 1440×1000 and 390×844 in Chromium and WebKit, selected movement detail at top and State History end, and reduced-height Group, Schedule and Notification editors. The route smoke also checks tablet and 390×600 without horizontal document overflow. The responsive suite covers 719/720/721 boundaries, modal focus and Alfred composer preservation.
+## Current coverage owners
 
-Representative image pairs: baseline `09-movements.png` → Chromium `gui-completion-shows-movem-e15c9-pping-on-desktop-and-mobile-chromium/movement-detail-desktop-lower-after.png`; baseline `27-mobile-schedule.png` → WebKit `gui-completion-keeps-Sched-47a26--reachable-on-a-short-phone-webkit/schedule-editor-mobile-short-after.png`; baseline `28-mobile-notification-editor.png` → Chromium `gui-completion-keeps-Notif-ea436-preview-reachable-on-mobile-chromium/notification-editor-mobile-short-after.png`. All after paths are relative to `/private/tmp/iacs-gui-browser-final`.
+| Suite | What it checks |
+| --- | --- |
+| `frontend/e2e/gui-completion.spec.ts` | Fixture-backed route sweep, Settings navigation/search/theme, Admin and standard-user access, landscape drawer, long directory labels, short-screen editors, dirty/pending saves, settings category isolation, read-failure retry, account reset, Alfred attachment failure and Movement detail scrolling. |
+| `frontend/e2e/responsive.spec.ts` | Resize without reload, 720px/980px boundaries, sidebar preferences, snapshots, profile menus, modal focus/drafts, date popovers, Alfred composer, safe areas, coarse pointers and reduced motion. |
+| `frontend/e2e/directory-layout.spec.ts` | Long labels, enlarged text, overlap/overflow and keyboard row activation in People, Groups and Vehicles. |
 
-History tests cover more than 250 timestamp-tied records, changing activity between pages, older direct targets, malformed cursors, DST and inclusive/exclusive date boundaries, grouped alerts larger than 200 members, exact confirmation membership, replay/concurrency rejection and rollback. `as_of` is a creation cutoff rather than a frozen row snapshot; changed mutable status can produce a 409 that asks the operator to refresh.
+The route sweep uses a fixed list in the test: when adding a route, compare it
+with `frontend/src/app/navigation.tsx` and extend fixtures/coverage explicitly.
+Do not assume a passing sweep automatically covers a new destination.
 
-## Validation status and limits
+For a focused rerun, use the existing Playwright CLI, for example:
 
-The source was reviewed and approved by Astra in shell, history and final sweeps; the shell partial-read failure and active Settings child issues were repaired. The exact-lock frontend build passed, as did all 39 unit-test files (236 tests) with two workers. The full isolated Phase 1 validation passed all 146 checks without this task editing the original checkout; source-snapshot checks passed all 22 checks. `git diff --check` passed after the final Movement repair. In Chromium/WebKit, 46 of 48 scenarios passed in the full run; the two Movement lower-scroll assertions revealed a real desktop clipping issue. After repairing desktop detail scroll ownership, both affected Movement scenarios passed in a focused rerun. Thus all 48 scenarios have passing evidence against final code, across two runs; no single clean 48-scenario run is claimed. The exact manifest/lock dependencies and pinned Chromium/WebKit were installed for the isolated checks.
+```sh
+npm run test:e2e -- gui-completion.spec.ts --project=webkit
+```
 
-No production deployment, migration, hardware command, notification send, provider test, standard-user live session or live Alfred approval/reconnect check was performed. These require their own supervised fixture or operational test. Browser screenshots demonstrate layout with synthetic data; they do not validate provider health or physical outcomes.
+## Record evidence and limits
 
-## iPhone landscape navigation follow-up (29 September 2026)
-
-At a 956×440 landscape viewport, CSS previously forced an 82px navigation rail while React still treated widths above 720px as desktop navigation. The rail clipped section headings and nested Settings items, and the menu button could not open a full labeled drawer. Navigation now uses a single 980px drawer boundary in React and CSS; the existing 720px page/editor layout boundary remains unchanged. The drawer reserves safe-area insets, keeps the navigation list scrollable above its account footer, and scrolls the active Settings child into view after a height change. Escape closes the nested account menu first, then the drawer, with focus returned to the relevant trigger. Leaving drawer width preserves the desktop sidebar preference.
-
-Synthetic Chromium and WebKit checks passed: six focused landscape, 719/720/721/979/980/981 boundary, and profile-menu scenarios (`/private/tmp/iacs-iphone-nav-focused-final.log`); two desktop-preference rotation scenarios (`/private/tmp/iacs-iphone-nav-preference.log`). The touch fixture asserted full icon and label geometry with asymmetric 62px/38px safe insets at 956×440, reached the last Settings item and account footer at 440px height, and rotated portrait→landscape while the drawer stayed open. The retained [landscape after screenshot](/private/tmp/iacs-iphone-nav-release-20260929/iphone-landscape-after.png) shows the labeled Settings drawer. The exact-lock frontend build and 239 unit tests passed in the isolated worktree; `git diff --check` was run before handoff. No live API or hardware action was used in these checks. Frontend deployment is handled separately by the parent task.
+- Run the required frontend build/unit checks in the agent guide as well.
+- Review generated screenshots for the affected state, theme and viewport.
+  The ignored `frontend/test-results/playwright/` directory contains screenshots
+  and retained failure traces; preserve needed evidence before a subsequent run.
+- Record source revision/working-tree context, commands, engine, viewport,
+  fixture/live status, actual results and unresolved failures in the task report.
+  Distinguish a full clean run from focused repairs; do not reuse historical
+  counts or machine-specific temporary paths as current evidence.
+- Fixtures validate browser behavior and layout. They do not prove provider
+  health, physical outcomes, production migrations, live notification delivery,
+  backend cursor consistency or live Alfred approval/reconnect recovery.
+  Backend invariants use [Phase 1](phase1.md). Live deployment and operational
+  checks need separate authorization under the
+  [hardware safety guide](../agent/hardware-safety.md).

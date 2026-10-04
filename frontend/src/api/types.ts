@@ -130,6 +130,8 @@ export type Person = {
   notes: string | null;
   garage_door_entity_ids: string[];
   home_assistant_mobile_app_notify_service: string | null;
+  missed_exit_recovery_enabled: boolean;
+  missed_exit_recovery_tracker_entity_id: string | null;
   home_assistant_presence_input_boolean_entity_ids: string[];
   home_assistant_presence_input_boolean_entry_action: "turn_on" | "turn_off";
   home_assistant_presence_input_boolean_exit_action: "turn_on" | "turn_off";
@@ -411,6 +413,8 @@ export type ViewKey =
   | "settings_general"
   | "settings_gates"
   | "settings_garage_doors"
+  | "settings_command_history"
+  | "settings_missed_exit_recovery"
   | "settings_auth"
   | "alfred_training"
   | "settings_automations"

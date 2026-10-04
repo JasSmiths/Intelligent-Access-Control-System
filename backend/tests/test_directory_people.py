@@ -178,6 +178,8 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
         is_active=True,
         notes=None,
         garage_door_entity_ids=[],
+        missed_exit_recovery_enabled=False,
+        missed_exit_recovery_tracker_entity_id=None,
         home_assistant_mobile_app_notify_service=None,
         home_assistant_presence_input_boolean_entity_ids=["input_boolean.ash_home"],
         home_assistant_presence_input_boolean_entry_action="turn_on",

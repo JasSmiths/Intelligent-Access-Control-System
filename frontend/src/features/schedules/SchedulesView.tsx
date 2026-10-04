@@ -190,7 +190,7 @@ export function SchedulesView({
           </article>
         )) : (
           <div className="card schedule-empty-card">
-            <EmptyState icon={Clock3} label="No schedules match this view" />
+            <EmptyState icon={Clock3} label="No schedules match this view" description={query ? "Try another schedule name, day, or time in search." : "Define weekly access windows, then assign them to people or vehicles."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create schedule</button> : undefined} />
           </div>
         )}
       </div>

@@ -1,0 +1,27 @@
+/* Missed exit recovery diagnostics stay bounded and readable on small screens. */
+.recovery-page .card { padding: 18px; }
+.recovery-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; border: 0; padding: 0; margin: 0 0 14px; align-items: end; }
+.recovery-page .table-scroll { overflow-x: auto; }
+.recovery-page .data-table { width: 100%; }
+.recovery-page .data-table td { max-width: 300px; overflow-wrap: anywhere; }
+.recovery-summary { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr); gap: 6px 16px; }
+.recovery-summary dt { opacity: .75; }
+.recovery-summary dd { margin: 0; overflow-wrap: anywhere; }
+.recovery-pagination { display: flex; gap: 8px; }
+.recovery-timeline { padding-left: 22px; }
+.recovery-timeline li { padding: 8px 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .recovery-summary { grid-template-columns: 1fr; } .recovery-summary dd { margin-bottom: 8px; } }
+.recovery-page > .muted { max-width: 90ch; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.recovery-page .card { min-height: 0; }
+.recovery-page .card > h2 { margin: 0 0 18px; font-size: 15px; font-weight: 650; }
+.recovery-fields .field { min-width: 0; gap: 7px; }
+.recovery-fields :is(input, select) { width: 100%; min-width: 0; height: 40px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 13px; }
+.recovery-fields :is(input, select):focus { border-color: var(--blue); outline: 2px solid var(--blue-soft); outline-offset: 1px; }
+.recovery-fields :is(input, select):disabled { background: var(--surface-soft); color: var(--muted); cursor: not-allowed; }
+.recovery-fields > button { min-height: 40px; }
+.recovery-page .card .toolbar { min-height: 44px; margin-bottom: 14px; padding: 0 0 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+.recovery-page .data-table th { padding: 12px; background: var(--surface-soft); color: var(--muted); font-size: 11px; font-weight: 650; text-align: left; }
+.recovery-page .data-table td { padding: 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.recovery-pagination { align-items: center; justify-content: flex-end; padding-top: 14px; }
+.recovery-summary { font-size: 13px; line-height: 1.6; }
+@media (max-width: 600px) { .recovery-fields { grid-template-columns: minmax(0, 1fr); } .recovery-page .card { padding: 16px; } }

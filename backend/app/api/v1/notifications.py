@@ -14,6 +14,7 @@ from app.services.notification_runs import review_filter, run_summary
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services import notification_rules
 from app.services.mutation_context import MutationError
+from app.services.workflows.template_recipients import TemplateRecipientError
 from app.services.workflows.notification_payloads import (normalize_actions, normalize_conditions, normalize_rule_payload)
 from app.services.notifications import (
     get_notification_service,
@@ -203,7 +204,10 @@ async def preview_notification_rule(
     request: NotificationPreviewRequest,
     _: User = Depends(admin_user),
 ) -> dict[str, Any]:
-    rule = normalize_rule_payload(request.rule)
+    try:
+        rule = normalize_rule_payload(request.rule)
+    except TemplateRecipientError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     context = (
         notification_context_from_payload(request.context)
         if request.context
@@ -218,7 +222,10 @@ async def test_notification_rule_payload(
     user: User = Depends(admin_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    rule = normalize_rule_payload(request.rule)
+    try:
+        rule = normalize_rule_payload(request.rule)
+    except TemplateRecipientError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not rule["trigger_event"]:
         raise HTTPException(status_code=400, detail="A trigger is required before sending a test.")
     if not rule["actions"]:

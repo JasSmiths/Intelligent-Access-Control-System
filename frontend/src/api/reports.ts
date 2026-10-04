@@ -16,7 +16,7 @@ export type ReportSnapshotVehicle = Person["vehicles"][number] & {
   tax_tone?: "green" | "red" | "muted";
 };
 
-export type ReportSnapshotPerson = Omit<Person, "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "profile_photo_data_url" | "vehicles"> & {
+export type ReportSnapshotPerson = Omit<Person, "missed_exit_recovery_enabled" | "missed_exit_recovery_tracker_entity_id" | "group_id" | "schedule_id" | "schedule" | "is_active" | "notes" | "garage_door_entity_ids" | "home_assistant_mobile_app_notify_service" | "home_assistant_presence_input_boolean_entity_ids" | "home_assistant_presence_input_boolean_entry_action" | "home_assistant_presence_input_boolean_exit_action" | "profile_photo_data_url" | "vehicles"> & {
   profile_photo_data_url?: string | null;
   vehicles: ReportSnapshotVehicle[];
 };

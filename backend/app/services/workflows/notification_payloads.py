@@ -12,6 +12,7 @@ from typing import Any
 from app.modules.notifications.base import NotificationContext
 from app.services.workflows.catalog import notification_trigger_catalog
 from app.services.workflows.context import normalize_string_list
+from app.services.workflows.template_recipients import normalize_variable_recipients
 
 GATE_OPEN_ACTION = "gate.open"
 
@@ -139,6 +140,9 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
                 "actionable": normalize_actionable(raw.get("actionable")),
             }
         )
+        recipients = normalize_variable_recipients(raw)
+        if recipients:
+            actions[-1]["variable_recipients"] = recipients
     return actions
 
 

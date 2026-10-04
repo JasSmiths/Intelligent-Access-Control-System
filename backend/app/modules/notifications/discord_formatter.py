@@ -40,9 +40,11 @@ def format_discord_notification(
     title: str,
     body: str,
     context: NotificationContext,
+    *, fallback_to_subject: bool = True,
 ) -> DiscordNotificationPayload:
-    safe_title = _truncate(_plain_text(title or context.subject), DISCORD_EMBED_TITLE_LIMIT)
-    safe_body = _plain_text(body or context.subject)
+    fallback = context.subject if fallback_to_subject else ""
+    safe_title = _truncate(_plain_text(title or fallback), DISCORD_EMBED_TITLE_LIMIT)
+    safe_body = _plain_text(body or fallback)
     chunks = _split_text(safe_body, DISCORD_EMBED_DESCRIPTION_LIMIT)
     color = SEVERITY_COLORS.get(str(context.severity).lower(), SEVERITY_COLORS["info"])
     embeds = [

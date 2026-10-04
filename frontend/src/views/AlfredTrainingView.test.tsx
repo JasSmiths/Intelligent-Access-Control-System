@@ -1,9 +1,29 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { AlfredTrainingView } from "./AlfredTrainingView";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it("does not present unavailable training records as empty and recovers through retry", async () => {
+  let available = false;
+  vi.stubGlobal("fetch", vi.fn(async (path: string) => {
+    if (path.includes("/settings?")) return new Response("[]");
+    if (!available) return new Response(JSON.stringify({ detail: "Training read unavailable" }), { status: 503 });
+    if (path.includes("/feedback?")) return new Response(JSON.stringify({ feedback: [] }));
+    if (path.includes("/lessons?")) return new Response(JSON.stringify({ lessons: [] }));
+    return new Response(JSON.stringify({ examples: [] }));
+  }));
+  render(<AlfredTrainingView refreshToken={0} />);
+  expect(screen.getByRole("status", { name: "Loading Alfred training data" })).toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: /Pending/ })).not.toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Training read unavailable");
+  expect(screen.queryByText("No pending lessons.")).not.toBeInTheDocument();
+  available = true;
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("No pending lessons.")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
 
 it("keeps a committed lesson review locked when the follow-up read fails", async () => {
   let reviewed = false;

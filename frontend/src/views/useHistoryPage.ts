@@ -8,9 +8,9 @@ const EMPTY_ITEMS: never[] = [];
 
 export function useHistoryPage<T>(path: string, filters: URLSearchParams, refreshToken = 0, resetToken = 0) {
   const filterKey = filters.toString();
-  const [page, setPage] = React.useState<HistoryPage<T> | null>(null);
   const [pages, setPages] = React.useState<Array<HistoryPage<T>>>([]);
   const [index, setIndex] = React.useState(0);
+  const page = pages[index] ?? null;
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [newActivity, setNewActivity] = React.useState(false);
@@ -20,7 +20,7 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams, refres
   const previousRefreshRef = React.useRef(refreshToken);
   const previousResetRef = React.useRef(resetToken);
 
-  const load = React.useCallback(async (cursor: string | null, onSuccess?: (result: HistoryPage<T>) => void) => {
+  const load = React.useCallback(async (cursor: string | null, onSuccess: (result: HistoryPage<T>) => void) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -30,8 +30,7 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams, refres
     try {
       const result = await getHistory<T>(path, new URLSearchParams(filterKey), cursor, controller.signal);
       if (sequence !== sequenceRef.current || controller.signal.aborted) return;
-      setPage(result);
-      onSuccess?.(result);
+      onSuccess(result);
     } catch (loadError) {
       if (isAbortError(loadError) || sequence !== sequenceRef.current) return;
       setError(loadError instanceof Error ? loadError.message : "History is unavailable.");
@@ -44,13 +43,10 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams, refres
     if (previousFiltersRef.current !== filterKey) {
       previousFiltersRef.current = filterKey;
       setIndex(0);
-      setPage(null);
       setPages([]);
       setNewActivity(false);
-      void load(null, (result) => setPages([result]));
-    } else {
-      void load(null, (result) => setPages([result]));
     }
+    void load(null, (result) => setPages([result]));
     return () => { abortRef.current?.abort(); sequenceRef.current += 1; };
     // Cursor navigation calls load directly; this effect reacts only to filters/path.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -68,7 +64,6 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams, refres
     const nextIndex = index + 1;
     if (pages[nextIndex]) {
       setIndex(nextIndex);
-      setPage(pages[nextIndex]);
       return;
     }
     const cursor = page.next_cursor;
@@ -83,12 +78,11 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams, refres
     const previousPage = pages[previousIndex];
     if (!previousPage) return;
     setIndex(previousIndex);
-    setPage(previousPage);
   };
   const refresh = () => {
     setIndex(0);
     setNewActivity(false);
-    setPage(null);
+    setPages([]);
     void load(null, (result) => setPages([result]));
   };
   React.useEffect(() => {

@@ -4,7 +4,8 @@ import { ApiError } from "../api/client";
 import { integrationsApi, type GateCommandReceipt } from "../api/integrations";
 import type { AccessEvent, ActionConfirmation, ExpectedPresenceSummary, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import contract from "../api/fixtures/gateCommandReceipts.generated.json";
-import { CommandReceiptDetails, Dashboard, formatTime } from "./DashboardView";
+import { CommandReceiptDetails } from "../features/integrations/CommandReceiptDetails";
+import { Dashboard, formatTime } from "./DashboardView";
 
 const admin = { id: "synthetic-admin", first_name: "Synthetic", last_name: "Admin", role: "admin" } as UserAccount;
 const confirmation = { confirmation_id: "synthetic-intent", confirmation_token: "synthetic-token", action: "gate.open", expires_at: "2026-09-12T15:00:00Z" };
@@ -174,6 +175,8 @@ function directoryPerson(overrides: Partial<Person> & Pick<Person, "id" | "displ
     is_active: true,
     notes: null,
     garage_door_entity_ids: [],
+    missed_exit_recovery_enabled: false,
+    missed_exit_recovery_tracker_entity_id: null,
     home_assistant_mobile_app_notify_service: null,
     home_assistant_presence_input_boolean_entity_ids: [],
     home_assistant_presence_input_boolean_entry_action: "turn_on",
@@ -348,18 +351,10 @@ it("keeps the inside popover to the first six people", () => {
   expect(within(inside).getByText("+1 more inside")).toBeInTheDocument();
 });
 
-it("opens durable command history only on request and recovers with no browser metadata or POST", async () => {
-  const pages = (await import("../api/fixtures/gateReceiptPages.generated.json")).default;
-  const list = vi.spyOn(integrationsApi, "getGateCommands").mockResolvedValue(pages.gates as Awaited<ReturnType<typeof integrationsApi.getGateCommands>>);
-  const read = vi.spyOn(integrationsApi, "getGateCommand").mockResolvedValue(pages.gates.items[0] as GateCommandReceipt & { command_id: string });
-  const send = vi.spyOn(integrationsApi, "openGate");
+it("keeps durable command history off the dashboard", () => {
+  const list = vi.spyOn(integrationsApi, "getGateCommands");
   render(<Dashboard {...props} />);
+  expect(screen.queryByRole("button", { name: "Command history" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Command history" })).not.toBeInTheDocument();
   expect(list).not.toHaveBeenCalled();
-  expect(sessionStorage.length).toBe(0);
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Command history" })));
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: `Inspect command ${pages.gates.items[0].command_id}` })));
-  expect(screen.getByText("Request accepted · Physical open verified")).toBeInTheDocument();
-  expect(read).toHaveBeenCalledOnce();
-  expect(send).not.toHaveBeenCalled();
-  expect(integrationsApi.confirmGateOpen).not.toHaveBeenCalled();
 });

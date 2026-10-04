@@ -48,7 +48,7 @@ function arc(inner: number, outer: number, start: number, end: number) {
 }
 
 export function AccessPulse({ events, now, onOpenEvents }: { events: AccessEvent[]; now: Date; onOpenEvents: () => void }) {
-  const [minutes, setMinutes] = React.useState(60);
+  const [minutes, setMinutes] = React.useState(360);
   const [selected, setSelected] = React.useState<number | null>(null);
   const id = React.useId();
   const slices = pulseSlices(events, now.getTime(), minutes);
@@ -64,9 +64,10 @@ export function AccessPulse({ events, now, onOpenEvents }: { events: AccessEvent
     <header className="access-pulse-header">
       <div><h2 id={`${id}-title`}>Access pulse</h2><p>Patterns in the recent feed</p></div>
       <div className="access-pulse-range" role="group" aria-label="Activity time window">
-        {[60, 360].map((value) => <button key={value} type="button" aria-pressed={minutes === value} onClick={() => { setMinutes(value); setSelected(null); }}>{value / 60}h</button>)}
+        {[360, 720].map((value) => <button key={value} type="button" aria-pressed={minutes === value} onClick={() => { setMinutes(value); setSelected(null); }}>{value / 60}h</button>)}
       </div>
     </header>
+    <div className="access-pulse-body">
     <div className="access-pulse-visual">
       <svg viewBox="0 0 280 240" role="group" aria-label={`${minutes / 60}-hour activity timeline; select a time slice`}>
         <circle className="access-pulse-orbit" cx="140" cy="127" r="62" />
@@ -109,6 +110,8 @@ export function AccessPulse({ events, now, onOpenEvents }: { events: AccessEvent
         <text x="241" y="225" className="access-pulse-axis">Now</text>
       </svg>
     </div>
+    <div className="access-pulse-summary">
+    <p className="access-pulse-summary-label">{chosen ? "Selected time slice" : "Activity breakdown"}</p>
     <div className="access-pulse-counts" aria-label={chosen ? "Selected slice event counts" : "Time window event counts"}>
       {counts.filter(({ kind, count }) => kind !== "unknown" || count > 0).map(({ kind, count }) => {
         const Icon = kind === "entry" ? ArrowDownLeft : kind === "exit" ? ArrowUpRight : ShieldAlert;
@@ -122,5 +125,7 @@ export function AccessPulse({ events, now, onOpenEvents }: { events: AccessEvent
       <p>{latest ? <>Latest: <b>{latest.registration_number}</b> · {labels[pulseKind(latest)]} · {time(Date.parse(latest.occurred_at))}</> : chosen ? "No events in this slice of the loaded feed." : "No events in this time window of the loaded feed."}</p>
     </div>
     <footer className="access-pulse-footer"><p>Recent feed only · local times<br />Events do not confirm physical passage.</p><button type="button" onClick={onOpenEvents}>Events <ChevronRight size={14} aria-hidden="true" /></button></footer>
+    </div>
+    </div>
   </section>;
 }

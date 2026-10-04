@@ -548,8 +548,6 @@ export function ReportsView({
     }
   }, [selectedVisitorPassId, visitorPasses]);
 
-  const selectedPerson = reportablePeople.find((person) => person.id === selectedPersonId) ?? null;
-  const selectedVisitorPass = visitorPasses.find((visitorPass) => visitorPass.id === selectedVisitorPassId) ?? null;
   React.useEffect(() => {
     const shouldLoadVisitorPasses = isPersonSearchOpen || Boolean(personQuery.trim()) || Boolean(selectedVisitorPassId);
     if (!shouldLoadVisitorPasses || visitorPassesLoadedRef.current) return undefined;

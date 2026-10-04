@@ -1,6 +1,8 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "./lib/viewportPlacement";
+import type { NotificationEndpoint, VariableRecipientRestriction } from "./api/workflows";
+import { restrictionsAfterReplacement, templateOccurrences } from "./lib/templateRecipients";
 
 type NotificationVariable = {
   name: string;
@@ -25,14 +27,24 @@ function VariableRichTextEditor({
   multiline = false,
   value,
   variables,
-  onChange
+  onChange,
+  recipients,
+  variableRecipients = []
 }: {
   label: string;
   multiline?: boolean;
   value: string;
   variables: Array<NotificationVariable & { group: string }>;
-  onChange: (value: string) => void;
+  onChange: (value: string, restrictions?: VariableRecipientRestriction[]) => void;
+  recipients?: NotificationEndpoint[];
+  variableRecipients?: VariableRecipientRestriction[];
 }) {
+  const [audience, setAudience] = React.useState<{ occurrence: number; name: string; anchor: HTMLElement; focus?: boolean } | null>(null);
+  const [audienceSearch, setAudienceSearch] = React.useState("");
+  const [audienceLayout, setAudienceLayout] = React.useState<MenuLayout>({maxHeight: 320, maxWidth: 320, placement: "bottom-start", ready: false, x: 0, y: 0});
+  const audienceMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const audienceCloseRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restrictionsRef = React.useRef(variableRecipients);
   const [suggestion, setSuggestion] = React.useState<SuggestionState | null>(null);
   const [activeIndex, setActiveIndex] = React.useState(0);
   const [menuLayout, setMenuLayout] = React.useState<MenuLayout>({
@@ -56,9 +68,11 @@ function VariableRichTextEditor({
 
   onChangeRef.current = onChange;
   valueRef.current = value;
+  restrictionsRef.current = variableRecipients;
 
   const variableSignature = React.useMemo(() => variables.map((variable) => variable.name).join("\u0000"), [variables]);
   const variableNames = React.useMemo(() => new Set(variables.map((variable) => variable.name)), [variableSignature, variables]);
+  const renderSignature = `${variableSignature}\u0000${JSON.stringify(variableRecipients)}\u0000${recipients?.map((item) => item.label).join("\u0000") ?? ""}`;
 
   const updateSuggestion = React.useCallback((nextSuggestion: SuggestionState | null) => {
     suggestionRef.current = nextSuggestion;
@@ -73,17 +87,18 @@ function VariableRichTextEditor({
   const renderValue = React.useCallback((nextValue: string, caretOffset: number | null = null) => {
     const editor = editorRef.current;
     if (!editor) return;
-    editor.innerHTML = templateToEditorHtml(nextValue, variableNames);
-    renderedSignatureRef.current = variableSignature;
+    editor.innerHTML = templateToEditorHtml(nextValue, variableNames, restrictionsRef.current, recipients);
+    renderedSignatureRef.current = renderSignature;
     if (caretOffset !== null && document.activeElement === editor) {
       setSelectionOffset(editor, Math.min(caretOffset, nextValue.length));
     }
-  }, [variableNames, variableSignature]);
+  }, [variableNames, renderSignature, recipients]);
 
-  const commitValue = React.useCallback((nextValue: string, caretOffset: number) => {
+  const commitValue = React.useCallback((nextValue: string, caretOffset: number, restrictions = restrictionsRef.current) => {
     valueRef.current = nextValue;
     pendingSelectionRef.current = caretOffset;
-    onChangeRef.current(nextValue);
+    restrictionsRef.current = restrictions;
+    onChangeRef.current(nextValue, restrictions);
     updateSuggestion(findMentionSuggestion(nextValue, caretOffset));
   }, [updateSuggestion]);
 
@@ -91,7 +106,8 @@ function VariableRichTextEditor({
     const current = valueRef.current;
     const nextValue = current.slice(0, from) + replacement + current.slice(to);
     const caretOffset = from + replacement.length;
-    commitValue(nextValue, caretOffset);
+    const restrictions = restrictionsAfterReplacement(current, restrictionsRef.current, from, to, replacement);
+    commitValue(nextValue, caretOffset, restrictions);
     renderValue(nextValue, caretOffset);
   }, [commitValue, renderValue]);
 
@@ -101,7 +117,7 @@ function VariableRichTextEditor({
     const selection = editor ? getSelectionOffsets(editor) : null;
     const from = activeSuggestion?.from ?? selection?.start ?? valueRef.current.length;
     const to = activeSuggestion?.to ?? selection?.end ?? from;
-    replaceRange(from, to, `@${variable.name} `);
+    replaceRange(from, to, `@${variable.name}`);
     updateSuggestion(null);
   }, [replaceRange, updateSuggestion]);
 
@@ -110,14 +126,14 @@ function VariableRichTextEditor({
     if (!editor) return;
     const nextValue = value ?? "";
     const domValue = editor.childNodes.length ? editableText(editor) : "";
-    const needsRender = domValue !== nextValue || renderedSignatureRef.current !== variableSignature;
+    const needsRender = domValue !== nextValue || renderedSignatureRef.current !== renderSignature;
     if (!needsRender) return;
 
     const currentSelection = getSelectionOffsets(editor)?.end ?? nextValue.length;
     const pendingSelection = pendingSelectionRef.current;
     pendingSelectionRef.current = null;
     renderValue(nextValue, pendingSelection ?? currentSelection);
-  }, [renderValue, value, variableSignature]);
+  }, [renderValue, value, renderSignature]);
 
   React.useEffect(() => {
     const onSelectionChange = () => {
@@ -184,10 +200,17 @@ function VariableRichTextEditor({
     if (!editor) return;
     const nextValue = editableText(editor);
     const caretOffset = getSelectionOffsets(editor)?.end ?? nextValue.length;
-    commitValue(nextValue, caretOffset);
+    commitValue(nextValue, caretOffset, restrictionsFromEditor(editor, nextValue));
   }, [commitValue]);
 
   const handleKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const pill = closestVariablePill(event.target);
+    if (recipients !== undefined && pill && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      updateSuggestion(null);
+      setAudience({ occurrence: Number(pill.dataset.occurrence), name: pill.dataset.variable!, anchor: pill, focus: true });
+      return;
+    }
     const activeSuggestion = suggestionRef.current;
     const options = filteredRef.current;
 
@@ -232,7 +255,7 @@ function VariableRichTextEditor({
       const to = selection?.end ?? from;
       replaceRange(from, to, "\n");
     }
-  }, [insertVariable, multiline, replaceRange, updateActiveIndex, updateSuggestion]);
+  }, [insertVariable, multiline, replaceRange, updateActiveIndex, updateSuggestion, recipients]);
 
   const handlePaste = React.useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     const text = event.clipboardData.getData("text/plain");
@@ -249,11 +272,80 @@ function VariableRichTextEditor({
     const editor = editorRef.current;
     const pill = closestVariablePill(event.target);
     if (!editor || !pill) return;
+    if (recipients !== undefined) {
+      updateSuggestion(null);
+      setAudienceSearch("");
+      setAudience({ occurrence: Number(pill.dataset.occurrence), name: pill.dataset.variable!, anchor: pill });
+      return;
+    }
     const from = offsetBeforeNode(editor, pill);
     const token = `@${pill.dataset.variable || ""}`;
     setSelectionOffset(editor, from + token.length);
     updateSuggestion({ query: "", from, to: from + token.length });
-  }, [updateSuggestion]);
+  }, [updateSuggestion, recipients]);
+
+  const keepAudienceOpen = () => {
+    if (audienceCloseRef.current !== null) clearTimeout(audienceCloseRef.current);
+    audienceCloseRef.current = null;
+  };
+  const closeAudienceSoon = () => {
+    keepAudienceOpen();
+    audienceCloseRef.current = setTimeout(() => {
+      if (!audienceMenuRef.current?.contains(document.activeElement)) setAudience(null);
+    }, 220);
+  };
+  React.useEffect(() => () => { if (audienceCloseRef.current !== null) clearTimeout(audienceCloseRef.current); }, []);
+  React.useLayoutEffect(() => {
+    if (!audience || !audienceMenuRef.current || !editorRef.current) return;
+    const match = templateOccurrences(value)[audience.occurrence];
+    if (!match || match[1] !== audience.name) { setAudience(null); return; }
+    const anchor = editorRef.current.querySelector<HTMLElement>(`[data-occurrence="${audience.occurrence}"]`) ?? audience.anchor;
+    const menu = audienceMenuRef.current;
+    const update = () => {
+      const placed = placeOverlay(anchor.getBoundingClientRect(), {width: menu.offsetWidth, height: Math.min(menu.scrollHeight, 320)}, getUsableViewportBounds());
+      setAudienceLayout({maxHeight: Math.min(320, placed.maxHeight), maxWidth: placed.maxWidth, placement: placed.side === "top" ? "top-start" : "bottom-start", ready: true, x: placed.left, y: placed.top});
+    };
+    return observeOverlayPlacement(anchor, menu, update);
+  }, [audience, value, renderSignature, audienceSearch]);
+  React.useEffect(() => {
+    if (!audience) return;
+    if (audience.focus) audienceMenuRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !audienceMenuRef.current?.contains(event.target) && !editorRef.current?.contains(event.target)) setAudience(null);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [audience]);
+  const audienceRule = audience ? variableRecipients.find((rule) => rule.occurrence === audience.occurrence) : undefined;
+  const audienceChoices = [...(recipients ?? [])];
+  for (const id of audienceRule?.target_ids ?? []) {
+    if (!audienceChoices.some((item) => item.id === id)) audienceChoices.push({id, label: "Unavailable recipient", provider: "", detail: ""});
+  }
+  const setVariableAudience = (targetIds: string[] | null) => {
+    if (!audience) return;
+    const rules = restrictionsRef.current.filter((rule) => rule.occurrence !== audience.occurrence);
+    if (targetIds !== null) rules.push({occurrence: audience.occurrence, name: audience.name, target_ids: targetIds});
+    rules.sort((a, b) => a.occurrence - b.occurrence);
+    restrictionsRef.current = rules;
+    onChangeRef.current(valueRef.current, rules);
+  };
+  const audienceMenu = audience && recipients !== undefined ? createPortal(
+    <div ref={audienceMenuRef} className="variable-recipient-menu" role="dialog" aria-label={`Recipients for @${audience.name}`}
+      onMouseEnter={keepAudienceOpen} onMouseLeave={closeAudienceSoon}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setAudience(null); editorRef.current?.querySelector<HTMLElement>(`[data-occurrence="${audience.occurrence}"]`)?.focus(); } }}
+      style={{left: audienceLayout.x, top: audienceLayout.y, maxHeight: audienceLayout.maxHeight, maxWidth: audienceLayout.maxWidth, visibility: audienceLayout.ready ? "visible" : "hidden"}}>
+      <strong>@{audience.name}</strong><span>Show this occurrence to</span>
+      <label><input type="checkbox" checked={!audienceRule} onChange={(event) => setVariableAudience(event.target.checked ? null : [])} />Everyone</label>
+      {audienceChoices.length > 5 ? <input aria-label="Search variable recipients" value={audienceSearch} onChange={(event) => setAudienceSearch(event.target.value)} placeholder="Search recipients" /> : null}
+      <div className="variable-recipient-options">
+        {audienceChoices.filter((item) => `${item.label} ${item.provider}`.toLowerCase().includes(audienceSearch.toLowerCase())).map((item) => (
+          <label key={item.id}><input type="checkbox" checked={audienceRule?.target_ids.includes(item.id) ?? false}
+            onChange={(event) => setVariableAudience(event.target.checked ? [...(audienceRule?.target_ids ?? []), item.id] : (audienceRule?.target_ids ?? []).filter((id) => id !== item.id))} />{item.label}</label>
+        ))}
+      </div>
+      <small>Other recipients get the message without this variable.</small>
+      <button type="button" onClick={() => setAudience(null)}>Done</button>
+    </div>, document.body) : null;
 
   const menu = suggestion && filtered.length && typeof document !== "undefined"
     ? createPortal(
@@ -310,6 +402,16 @@ function VariableRichTextEditor({
             className={multiline ? "variable-editor-content multiline" : "variable-editor-content"}
             contentEditable
             onClick={handleClick}
+            onMouseOver={(event) => {
+              const pill = closestVariablePill(event.target);
+              if (recipients === undefined || !pill) return;
+              keepAudienceOpen(); updateSuggestion(null); setAudienceSearch("");
+              setAudience({occurrence: Number(pill.dataset.occurrence), name: pill.dataset.variable!, anchor: pill});
+            }}
+            onMouseOut={(event) => {
+              const pill = closestVariablePill(event.target);
+              if (pill && !(event.relatedTarget instanceof Node && pill.contains(event.relatedTarget))) closeAudienceSoon();
+            }}
             onInput={handleInput}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
@@ -320,28 +422,34 @@ function VariableRichTextEditor({
         </div>
       </label>
       {menu}
+      {audienceMenu}
     </>
   );
 }
 
 export default VariableRichTextEditor;
 
-function templateToEditorHtml(template: string, variables: Set<string>) {
+function templateToEditorHtml(template: string, variables: Set<string>, restrictions: VariableRecipientRestriction[], recipients?: NotificationEndpoint[]) {
   const parts: string[] = [];
   const pattern = /@([A-Za-z][A-Za-z0-9_]*)|\n/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
+  let occurrence = -1;
 
   while ((match = pattern.exec(template || ""))) {
     if (match.index > lastIndex) parts.push(escapeHtml(template.slice(lastIndex, match.index)));
     if (match[0] === "\n") {
       parts.push("<br>");
     } else if (variables.has(match[1])) {
+      occurrence += 1;
       const variableName = match[1];
+      const rule = restrictions.find((item) => item.occurrence === occurrence && item.name === variableName);
+      const audienceLabel = rule ? (rule.target_ids.map((id) => recipients?.find((item) => item.id === id)?.label ?? "Unavailable recipient").join(", ") || "Nobody") : "Everyone";
       parts.push(
-        `<span class="variable-pill" data-variable="${escapeAttribute(variableName)}" contenteditable="false">@${escapeHtml(variableName)}</span>`
+        `<span class="variable-pill${rule ? " is-restricted" : ""}" data-variable="${escapeAttribute(variableName)}" data-occurrence="${occurrence}"${rule ? ` data-recipient-ids="${escapeAttribute(JSON.stringify(rule.target_ids))}"` : ""}${recipients !== undefined ? ` role="button" tabindex="0" aria-label="Recipients for @${escapeAttribute(variableName)}: ${escapeAttribute(audienceLabel)}"` : ""} contenteditable="false">@${escapeHtml(variableName)}${rule ? `<small class="variable-recipient-badge">${escapeHtml(audienceLabel)}</small>` : ""}</span>`
       );
     } else {
+      occurrence += 1;
       parts.push(escapeHtml(match[0]));
     }
     lastIndex = match.index + match[0].length;
@@ -349,6 +457,25 @@ function templateToEditorHtml(template: string, variables: Set<string>) {
 
   if (lastIndex < template.length) parts.push(escapeHtml(template.slice(lastIndex)));
   return parts.join("");
+}
+
+function restrictionsFromEditor(root: HTMLElement, value: string): VariableRecipientRestriction[] {
+  const occurrences = templateOccurrences(value);
+  const result: VariableRecipientRestriction[] = [];
+  let offset = 0;
+  const visit = (node: Node) => {
+    if (node instanceof HTMLElement && node.classList.contains("variable-pill")) {
+      const occurrence = occurrences.findIndex((match) => match.index === offset && match[1] === node.dataset.variable);
+      if (node.dataset.recipientIds !== undefined && occurrence >= 0) {
+        result.push({occurrence, name: node.dataset.variable!, target_ids: JSON.parse(node.dataset.recipientIds)});
+      }
+      offset += textFromNode(node).length;
+    } else if (node.nodeType === Node.TEXT_NODE || node instanceof HTMLElement && node.tagName === "BR") {
+      offset += textFromNode(node).length;
+    } else node.childNodes.forEach(visit);
+  };
+  root.childNodes.forEach(visit);
+  return result;
 }
 
 function editableText(root: HTMLElement) {

@@ -4,7 +4,11 @@ Intelligent Access Control + Presence System turns LPR reads into durable moveme
 and access decisions, presence, alerts, audited gate/garage orchestration, and
 a realtime console with Alfred operations.
 
-## Read first
+## Find the relevant context
+
+Read the guides needed for the task; a small edit does not require a full system
+review. Current source and tests define behavior. The [documentation index](docs/README.md)
+routes operational and validation questions.
 
 - Backend, APIs, Alfred, migrations, integrations: [backend guide](docs/agent/backend.md)
 - React, typed API clients, routes, styles: [frontend guide](docs/agent/frontend.md)
@@ -29,7 +33,24 @@ a realtime console with Alfred operations.
 - Do not run live hardware commands without a user-requested supervised test and
   explicit local confirmation. Never expose secrets or provider payloads.
 
-## Working rules
+## Work through to completion
+
+- Complete the requested change, update affected documentation, and run the
+  relevant checks. Resolve routine implementation choices from existing owners
+  and contracts. Ask when a missing decision changes scope or requires live access.
+- Local edits, read-only inspection, and the isolated validation harness are
+  authorized development work. Run them and fix task-related failures without
+  requesting approval for each step. Use exact locked dependencies; follow the
+  harness's explicit download/reuse modes.
+- Admin confirmation above is an application requirement for real actions, not
+  a reason to stop before editing their implementation or testing inert fixtures.
+  Deployment, production migrations, live provider sends/tests, and hardware
+  operation require separate authorization. A simulation endpoint can actuate
+  hardware; synthetic input alone does not make it safe.
+- Preserve unrelated working-tree changes. If backend source is mounted into a
+  running application, use an isolated checkout for code changes and validation.
+
+## Repository constraints
 
 - Keep context focused: use `rg -l` to locate owners, then bounded searches and
   relevant line ranges. Do not dump whole large files, catalogs, logs, or diffs.
@@ -45,14 +66,20 @@ a realtime console with Alfred operations.
   provider bypasses. Delete retired callers, tests, UI, and documentation together.
 - Compose ports: frontend 8089, backend 8088, Postgres 5432, Redis 6379.
 
-## Main validation
+## Validation by change
 
-```bash
-python3 scripts/phase1/validate.py
-python3 scripts/phase1/test_source_snapshot.py
-git diff --check
-```
+- Documentation only: check links, referenced paths/commands, and `git diff --check`.
+- Frontend only: `cd frontend && npm run build && npm test`; use the frontend
+  guide for browser checks when interaction or layout changes.
+- Backend, schema, or cross-system changes: run the full
+  [isolated harness](docs/validation/phase1.md). The entrypoint is
+  `python3 scripts/phase1/validate.py`; execution needs `--reuse-dependencies`
+  or `--allow-downloads`. It includes source-selection tests, backend and frontend
+  checks, migrations, persistence, diagnostics, and a database restore rehearsal.
+- Harness/source-selection changes also need
+  `python3 scripts/phase1/test_source_snapshot.py` and
+  `python3 scripts/phase1/test_harness_configuration.py`.
 
-For frontend-only work, run `cd frontend && npm run build && npm test`.
-Do not use `scripts/backend-pytest` as an isolated regression run. Deployment,
-production migrations, and hardware tests require separate authorization.
+Do not use `scripts/backend-pytest` for isolated regression: it can select the
+running Compose backend. Report failed or unattempted checks and their limits;
+repeat checks only after relevant changes or to resolve a failure.

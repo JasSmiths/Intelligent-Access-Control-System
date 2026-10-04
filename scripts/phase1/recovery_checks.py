@@ -9,6 +9,8 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/phase1/test_resident_recovery.py",
+    "scripts/phase1/test_resident_recovery_automatic.py",
     'backend/tests/test_access_device_command_journal.py',
     'scripts/phase1/test_persistence.py',
     'scripts/phase1/test_schedule_operations.py',

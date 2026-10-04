@@ -1,4 +1,5 @@
 import { useModalFocus } from "../ui/useModalFocus";
+import { useModalClose } from "../ui/useModalClose";
 import { ArrowRight, Bell, CalendarDays, Car, ClipboardPaste, Clock3, Command, GitBranch, Loader2, Search, UserRound, Users, X } from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
@@ -12,8 +13,10 @@ const searchMeta: Record<SearchPaletteItem["type"], SearchMeta> = {
   access_event: { icon: CalendarDays, label: "Event" }, alert: { icon: Bell, label: "Alert" }, automation_rule: { icon: GitBranch, label: "Automation" }, group: { icon: Users, label: "Group" }, notification_rule: { icon: Bell, label: "Notification" }, person: { icon: UserRound, label: "Person" }, schedule: { icon: Clock3, label: "Schedule" }, shortcut: { icon: Command, label: "Shortcut" }, user: { icon: Users, label: "User" }, vehicle: { icon: Car, label: "Vehicle" }, visitor_pass: { icon: ClipboardPaste, label: "Pass" }
 };
 
-export function SearchPalette({ currentUser, initialQuery, open, onClose, onOpenResult }: { currentUser: UserAccount; initialQuery: string; open: boolean; onClose: () => void; onOpenResult: (result: SearchPaletteItem) => void }) {
+export function SearchPalette({ currentUser, initialQuery, open, onClose: finishClose, onOpenResult: finishOpenResult }: { currentUser: UserAccount; initialQuery: string; open: boolean; onClose: () => void; onOpenResult: (result: SearchPaletteItem) => void }) {
   const modalRef = React.useRef<HTMLElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onOpenResult = useModalClose(modalRef, finishOpenResult);
   useModalFocus(modalRef, open, onClose);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = React.useState(initialQuery);

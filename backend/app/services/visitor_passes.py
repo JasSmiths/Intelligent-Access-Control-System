@@ -975,10 +975,18 @@ class VisitorPassService:
             from app.services.notification_runs import NotificationRunStore
             from app.services.workflows.notification_payloads import notification_context_payload
             from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
+            from app.services.workflows.vehicle_away import vehicle_time_away_seconds
 
             store = NotificationRunStore()
             notification_origin = RealtimeEvent(notification_event, payload, audit.timestamp.isoformat())
+            time_away = None
+            if action == "visitor_pass.arrival_linked" and visitor_pass.arrival_event_id:
+                arrival = await session.get(AccessEvent, visitor_pass.arrival_event_id)
+                if arrival is not None:
+                    time_away = await vehicle_time_away_seconds(session, arrival)
             for context in visitor_pass_notification_contexts_from_event(notification_origin):
+                if context.event_type in {"visitor_pass_used", "visitor_pass_vehicle_arrived"}:
+                    context.facts["vehicle_time_away_seconds"] = str(time_away) if time_away is not None else ""
                 await store.enqueue_in_session(session, notification_context_payload(context),
                     run_id=uuid.uuid5(audit.id, "visitor.notification:" + context.event_type))
 

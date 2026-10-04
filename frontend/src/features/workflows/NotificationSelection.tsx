@@ -1,3 +1,4 @@
+import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { ArrowLeft, Check, Clock3, Users, X } from "lucide-react";
@@ -103,8 +104,8 @@ export function NotificationTriggerModal({
 export function NotificationConditionModal({
   people,
   schedules,
-  onClose,
-  onSelect
+  onClose: finishClose,
+  onSelect: finishSelect
 }: {
   people: Person[];
   schedules: Schedule[];
@@ -112,6 +113,8 @@ export function NotificationConditionModal({
   onSelect: (condition: NotificationCondition) => void;
 }) {
   const modalRef = React.useRef<HTMLDivElement>(null);
+  const onClose = useModalClose(modalRef, finishClose);
+  const onSelect = useModalClose(modalRef, finishSelect);
   useModalFocus(modalRef, true, onClose);
   return (
     <div className="modal-backdrop" role="presentation">
@@ -250,7 +253,9 @@ export function NotificationActionModal({
       ) : null}
       onBack={embedded ? requestClose : undefined}
       onCategoryChange={chooseCategory}
-      onClose={requestClose}
+      onClose={onClose}
+      dirty={Boolean(selectedMethodId)}
+      discardLabel="notification action selection"
       onSearchChange={setSearchQuery}
       searchPlaceholder={selectedMethod ? "Search targets" : "Search actions"}
       searchQuery={searchQuery}

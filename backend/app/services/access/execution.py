@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -118,6 +120,7 @@ class AccessExecution:
         finalize_started_at: datetime,
         webhook_trace: dict[str, Any],
     ) -> AccessExecutionResult | None:
+        execution_started = time.monotonic()
         external_admission = _external_admission_from_read(read)
         presence_updated = False
         gate_command_required = False
@@ -138,6 +141,14 @@ class AccessExecution:
             if existing and existing.access_event_id:
                 return None
             runtime = await get_runtime_config_for_session(session)
+            # Serialize owner journeys across concurrent plate reads and all owned vehicles.
+            if getattr(runtime, "missed_exit_recovery_enabled", False):
+                from app.models import Vehicle
+                from app.services.resident_recovery import lock_owner
+                candidate_owner = await session.scalar(select(Vehicle.person_id).where(
+                    Vehicle.registration_number == read.registration_number, Vehicle.is_active.is_(True)))
+                if candidate_owner:
+                    await lock_owner(session, candidate_owner)
             evidence = await AccessEvidenceResolver(runtime).resolve(
                 session, read, direction_read, external_admission, trace,
                 camera_evidence=camera_evidence,
@@ -279,6 +290,16 @@ class AccessExecution:
             )
             session.add_all(anomalies)
 
+            recovery = direction_resolution.get("missed_exit_recovery")
+            if recovery and person:
+                recovery["duration_ms"] = round((time.monotonic()-execution_started)*1000, 2)
+                recovery["checks"]["decision_processing_ms"] = recovery["duration_ms"]
+                from app.services.resident_recovery import record_attempt
+                await record_attempt(session, event=event, saga=movement_saga, person=person,
+                                     recovery=recovery, config=runtime)
+            elif person and decision == AccessDecision.GRANTED and getattr(runtime, "missed_exit_recovery_enabled", False):
+                from app.services.resident_recovery import invalidate_owner_in_session
+                await invalidate_owner_in_session(session, person.id, event=event)
             gate_open_skipped = bool(external_admission and direction == AccessDirection.ENTRY)
             admission = await finalize_in_session(session, saga_id=movement_saga.id,
                 mode="external" if external_admission else "live",
