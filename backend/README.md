@@ -26,3 +26,8 @@ Dependencies come from the reviewed repository/image build. There is no runtime
 package updater or package overlay. The current UniFi Protect pin is defined in
 `pyproject.toml`; its wrapper contract is documented
 [here](../docs/unifi-protect-private-api.md).
+
+GitHub Project Checks audits the complete locked dependency set, including
+development and transitive packages. Resolve audit failures with targeted
+`uv lock --upgrade-package PACKAGE==FIXED_VERSION` updates, then rerun the strict
+audit and isolated harness before deploying the rebuilt image.
