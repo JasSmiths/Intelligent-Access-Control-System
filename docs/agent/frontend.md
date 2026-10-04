@@ -83,7 +83,9 @@ test both through resize. Use per-edge safe-area variables from `styles/base.css
 and `lib/viewportPlacement.ts` for floating controls.
 
 Keep the console dense and readable with restrained radii, status badges and
-light/dark/system themes. Use existing lucide action icons. Avoid nested cards,
+light/dark/system themes. Stream health appears as a dot on the topbar refresh
+control, with its title and detail available on hover, keyboard focus and to
+screen readers. Keep the sidebar footer for the account menu. Use existing lucide action icons. Avoid nested cards,
 text clipping and document overflow; allow deliberate table/calendar scrolling.
 Keep `.badge` inline-flex and scope title styles instead of broad span rules.
 The sample design under `prototypes/premium-dashboard/` is a separate app,

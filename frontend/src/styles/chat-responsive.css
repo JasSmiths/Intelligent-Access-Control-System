@@ -301,10 +301,6 @@
     display: block;
   }
 
-  .sidebar-status .sidebar-status-copy {
-    display: grid;
-  }
-
   .sidebar-footer {
     display: grid;
   }
@@ -325,11 +321,6 @@
 
   .profile-switcher > svg:last-child {
     display: block;
-  }
-
-  .sidebar-status {
-    justify-content: flex-start;
-    padding: 0 30px;
   }
 
   .nav-list {
@@ -437,10 +428,6 @@
     display: block;
   }
 
-  .sidebar-collapsed .sidebar-status .sidebar-status-copy {
-    display: grid;
-  }
-
   .sidebar-collapsed .main {
     margin-left: 0;
   }
@@ -463,11 +450,6 @@
     justify-items: stretch;
     min-height: 74px;
     padding: 12px;
-  }
-
-  .sidebar-collapsed .sidebar-status {
-    justify-content: flex-start;
-    padding: 0 30px;
   }
 
   .toolbar,

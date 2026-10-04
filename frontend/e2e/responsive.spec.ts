@@ -151,6 +151,16 @@ test("keeps the dashboard within the viewport matrix without reloading", async (
   for (const [width, height] of viewportMatrix) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(350);
+    const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+    await refresh.focus();
+    await expect(refresh.locator(".refresh-status-dot")).toBeVisible();
+    const statusTooltip = refresh.locator(".refresh-status-tooltip");
+    await expect(statusTooltip).toBeVisible();
+    await expect(refresh).toHaveAccessibleDescription(/.+: .+/);
+    const tooltipBounds = await statusTooltip.boundingBox();
+    expect(tooltipBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(tooltipBounds!.x + tooltipBounds!.width).toBeLessThanOrEqual(width);
+    await expect(page.locator(".sidebar-footer > *")).toHaveCount(1);
     await expectNoPageOverflow(page);
     if (width === 320 && height === 480) {
       await page.screenshot({ path: testInfo.outputPath("dashboard-320x480.png"), fullPage: false });

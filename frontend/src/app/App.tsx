@@ -485,15 +485,6 @@ export function App() {
               </div>
             ) : null}
           </div>
-          {view === "logs" ? null : (
-            <div className="sidebar-status" aria-live="polite" title={`${realtimeConnection.title}: ${realtimeConnection.detail}`}>
-              <span className={`dot ${realtimeConnectionStatus}`} aria-hidden="true" />
-              <span className="sidebar-status-copy">
-                <strong>{realtimeConnection.title}</strong>
-                <small>{realtimeConnection.detail}</small>
-              </span>
-            </div>
-          )}
         </div>
       </aside>
       <main className="main" id="main-content" tabIndex={-1}>
@@ -549,8 +540,19 @@ export function App() {
                 />
               ) : null}
             </div>
-            <button className="icon-button refresh-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button" aria-label="Refresh" aria-busy={dashboardRefreshing} disabled={dashboardRefreshing}>
+            <button className="icon-button refresh-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button" aria-label="Refresh" aria-describedby={view === "logs" ? undefined : "realtime-status"} aria-busy={dashboardRefreshing} disabled={dashboardRefreshing}>
               <RefreshCcw className={dashboardRefreshing ? "spin" : undefined} size={17} />
+              {view === "logs" ? null : (
+                <>
+                  <span className={`dot refresh-status-dot ${realtimeConnectionStatus}`} aria-hidden="true" />
+                  <span className="refresh-status-tooltip" aria-hidden="true">
+                    {realtimeConnection.title} · {realtimeConnection.detail}
+                  </span>
+                  <span className="sr-only" id="realtime-status" role="status">
+                    {realtimeConnection.title}: {realtimeConnection.detail}
+                  </span>
+                </>
+              )}
             </button>
             <ThemeControl theme={theme} setTheme={setTheme} />
             <DeferredChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />

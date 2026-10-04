@@ -399,43 +399,6 @@ h2 {
   object-fit: cover;
 }
 
-.sidebar-status {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 30px;
-  color: var(--text);
-  font-size: 12px;
-  min-width: 0;
-}
-
-.sidebar-status-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  line-height: 1.15;
-}
-
-.sidebar-status-copy strong,
-.sidebar-status-copy small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-status-copy strong {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.sidebar-status-copy small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .dot {
   display: inline-block;
   width: 9px;
@@ -510,8 +473,7 @@ h2 {
 .sidebar-collapsed .nav-item span,
 .sidebar-collapsed .profile-switcher span:not(.profile-photo),
 .sidebar-collapsed .nav-chevron,
-.sidebar-collapsed .profile-switcher > svg:last-child,
-.sidebar-collapsed .sidebar-status .sidebar-status-copy {
+.sidebar-collapsed .profile-switcher > svg:last-child {
   display: none;
 }
 
@@ -531,11 +493,6 @@ h2 {
   left: 0;
   right: auto;
   width: 180px;
-}
-
-.sidebar-collapsed .sidebar-status {
-  justify-content: center;
-  padding: 0;
 }
 
 .sidebar-collapsed .main {
@@ -938,6 +895,45 @@ h2 {
 
 .refresh-button {
   display: inline-flex;
+  position: relative;
+}
+
+.refresh-status-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 2px var(--surface);
+  pointer-events: none;
+}
+
+.refresh-status-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 128px));
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px #00000014;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 450;
+  line-height: 1.4;
+  white-space: normal;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+}
+
+.refresh-button:hover .refresh-status-tooltip,
+.refresh-button:focus-visible .refresh-status-tooltip {
+  visibility: visible;
+  opacity: 1;
 }
 
 .theme-button {
