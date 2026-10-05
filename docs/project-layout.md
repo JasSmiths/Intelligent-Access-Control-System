@@ -51,6 +51,14 @@ runtime data is excluded. Evidence snapshots are frozen records of assessed sour
 not additional working checkouts. Future harness execution still follows the
 [validation guide](validation/phase1.md).
 
+Run new validation in an external evidence directory, such as `/private/tmp/`;
+the harness rejects evidence inside the assessed checkout. The production
+container retains a read-only mount of the whole project at `/workspace`, so
+dependency reuse also requires a temporary copy outside that bind mount. Copy
+the retained reset run to an external temporary directory before passing it to
+`--reuse-dependencies`; its recorded backend and Node image identities and locked
+dependency checks still apply. Consolidate completed evidence here afterward.
+
 Historical receipts retain their original embedded paths. Consult
 `data/relocations-20261005.json` for their current locations; do not rewrite old
 receipts to make them appear newly produced.
