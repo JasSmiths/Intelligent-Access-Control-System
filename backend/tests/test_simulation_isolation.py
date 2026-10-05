@@ -23,17 +23,17 @@ def _isolated_snapshot(
         environment=environment
         or {
             "IACS_ENVIRONMENT": "testing",
-            "IACS_PHASE1_MODE": "persistence",
+            "IACS_VALIDATION_MODE": "persistence",
             "IACS_RECOVERY_PROBES": "synthetic-only",
             "IACS_AUTO_CREATE_SCHEMA": "false",
             "IACS_SEED_DEMO_DATA": "false",
-            "IACS_AUTH_SECRET_KEY": "phase1-synthetic-auth-root-never-production",
+            "IACS_AUTH_SECRET_KEY": "validation-synthetic-auth-root-never-production",
             "IACS_DATA_DIR": "/isolated/runtime",
             "IACS_LOG_DIR": "/isolated/logs",
             "IACS_WORKSPACE_DIR": "/workspace",
             "IACS_DATABASE_URL": (
-                "postgresql+asyncpg://phase1:synthetic-phase1-only@127.0.0.1:5432/"
-                "iacs_p1_simulation"
+                "postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:5432/"
+                "iacs_validation_simulation"
             ),
             "IACS_REDIS_URL": "redis://127.0.0.1:6379/0",
         },
@@ -59,7 +59,7 @@ def test_full_access_flow_isolation_requires_all_harness_boundaries() -> None:
             snapshot,
             environment={
                 **snapshot.environment,
-                "IACS_DISCORD_BOT_TOKEN": "synthetic-but-disallowed",
+                "IACS_HOME_ASSISTANT_TOKEN": "synthetic-but-disallowed",
             },
         )
     )
@@ -69,11 +69,28 @@ def test_full_access_flow_isolation_requires_all_harness_boundaries() -> None:
             environment={
                 **snapshot.environment,
                 "IACS_DATABASE_URL": (
-                    "postgresql+asyncpg://phase1:synthetic-phase1-only@127.0.0.1:5432/iacs"
+                    "postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:5432/iacs"
                 ),
             },
         )
     )
+
+
+@pytest.mark.parametrize("overrides", [
+    {"IACS_VALIDATION_MODE": "", "IACS_PHASE1_MODE": "persistence"},
+    {"IACS_AUTH_SECRET_KEY": "phase1-synthetic-auth-root-never-production"},
+    {"IACS_DATABASE_URL": "postgresql+asyncpg://phase1:synthetic-phase1-only@127.0.0.1:5432/iacs_p1_simulation"},
+    {"IACS_DATABASE_URL": "postgresql+asyncpg://phase1:synthetic-validation-only@127.0.0.1:5432/iacs_validation_simulation"},
+    {"IACS_DATABASE_URL": "postgresql+asyncpg://validation:synthetic-phase1-only@127.0.0.1:5432/iacs_validation_simulation"},
+    {"IACS_DATABASE_URL": "postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:5432/iacs_p1_simulation"},
+])
+def test_full_access_flow_refuses_former_or_mixed_validation_identities(monkeypatch, overrides) -> None:
+    valid = _isolated_snapshot()
+    invalid = replace(valid, environment={**valid.environment, **overrides})
+    monkeypatch.setattr(scenarios, "_full_access_flow_isolation_snapshot", lambda: invalid)
+
+    with pytest.raises(scenarios.FullAccessFlowIsolationError):
+        scenarios.issue_isolated_full_access_flow_capability()
 
 
 def test_full_access_flow_capability_is_issued_and_revalidated_only_after_proof(monkeypatch) -> None:
@@ -92,7 +109,7 @@ def test_full_access_flow_capability_is_issued_and_revalidated_only_after_proof(
         scenarios._require_isolated_full_access_flow_capability(capability)
 
     forged = scenarios.FullAccessFlowIsolationCapability(object())
-    with pytest.raises(scenarios.FullAccessFlowIsolationError, match="isolated phase1 capability"):
+    with pytest.raises(scenarios.FullAccessFlowIsolationError, match="isolated validation capability"):
         scenarios._require_isolated_full_access_flow_capability(forged)
 
 
@@ -117,7 +134,7 @@ async def test_direct_runner_refuses_before_scenario_selection_or_simulator_glob
     monkeypatch.setattr(scenarios, "HardwareFreePatchScope", ForbiddenPatchScope)
     monkeypatch.setattr(scenarios, "AsyncSessionLocal", forbidden_session_factory)
 
-    with pytest.raises(scenarios.FullAccessFlowIsolationError, match="isolated phase1 capability"):
+    with pytest.raises(scenarios.FullAccessFlowIsolationError, match="isolated validation capability"):
         await scenarios.run_full_access_flow(scenarios.FullAccessFlowRequest(cleanup=True))
 
     assert calls == []

@@ -230,7 +230,7 @@ async def test_search_includes_admin_results_without_exposing_action_secrets() -
         name="Garage Alert",
         trigger_event="gate.opened",
         conditions=[],
-        actions=[{"type": "discord", "config": {"bot_token": secret}}],
+        actions=[{"type": "mobile", "config": {"apprise_urls": secret}}],
         is_active=True,
         created_at=NOW,
         updated_at=NOW,

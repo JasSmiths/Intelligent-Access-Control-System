@@ -1,4 +1,4 @@
-"""Inert provider receipt contracts; PostgreSQL fencing runs in phase1 diagnostics."""
+"""Inert provider receipt contracts; PostgreSQL fencing runs in validation diagnostics."""
 
 import asyncio
 from datetime import UTC, datetime

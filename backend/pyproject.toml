@@ -61,6 +61,3 @@ warn_unused_ignores = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = [
-    "alfred_critical: critical Alfred regressions covering answer correctness and confirmation safety",
-]

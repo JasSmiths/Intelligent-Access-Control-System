@@ -175,7 +175,6 @@ def _source_label(source: str) -> str:
         "ui": "UI",
         "dashboard": "Dashboard",
         "settings": "Settings",
-        "alfred": "Alfred",
         "home assistant": "Home Assistant",
         "home assistant sync": "Home Assistant Sync",
     }

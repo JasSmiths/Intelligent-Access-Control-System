@@ -186,14 +186,6 @@ export function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: Vis
   const oldValue = isRecord(log.diff.old) ? log.diff.old : {};
   const newValue = isRecord(log.diff.new) ? log.diff.new : {};
   const fields = visitorPassLogChangedFields(oldValue, newValue);
-  const request = isRecord(log.metadata.request) ? log.metadata.request : null;
-  if (request) {
-    const currentWindow = visitorPassWindowFromValues(request.current_valid_from, request.current_valid_until);
-    const originalWindow = visitorPassWindowFromValues(request.original_valid_from, request.original_valid_until);
-    const requestedWindow = visitorPassWindowFromValues(request.requested_valid_from, request.requested_valid_until);
-    if (originalWindow || currentWindow) fields.push({ label: "Original", value: originalWindow || currentWindow || "" });
-    if (requestedWindow) fields.push({ label: "Requested", value: requestedWindow });
-  }
 
   if (log.action === "visitor_pass.create") {
     return {
@@ -209,30 +201,6 @@ export function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: Vis
       title: changedWindow ? "Time Window Updated" : "Pass Updated",
       description: `${actor} updated ${visitorPass.visitor_name}'s Visitor Pass.`,
       tone: changedWindow ? "blue" : "gray",
-      fields,
-    };
-  }
-  if (log.action === "visitor_pass.timeframe_change_requested") {
-    return {
-      title: "Time Change Requested",
-      description: `Visitor requested a time change for ${visitorPass.visitor_name}.`,
-      tone: "amber",
-      fields,
-    };
-  }
-  if (log.action === "visitor_pass.timeframe_change_approved") {
-    return {
-      title: "Time Change Approved",
-      description: `${actor} approved the requested time change.`,
-      tone: "green",
-      fields,
-    };
-  }
-  if (log.action === "visitor_pass.timeframe_change_denied") {
-    return {
-      title: "Time Change Denied",
-      description: `${actor} denied the requested time change.`,
-      tone: "red",
       fields,
     };
   }
@@ -295,7 +263,7 @@ export function visitorPassLogDetails(log: VisitorPassLogEntry, visitorPass: Vis
 export function visitorPassLogIcon(action: string): React.ElementType {
   if (action === "visitor_pass.create") return UserPlus;
   if (action === "visitor_pass.vehicle_plate_update") return Car;
-  if (action.includes("timeframe") || action === "visitor_pass.update") return Clock3;
+  if (action === "visitor_pass.update") return Clock3;
   if (action === "visitor_pass.cancel" || action === "visitor_pass.delete") return Trash2;
   if (action.includes("arrival") || action === "visitor_pass.claim") return CheckCircle2;
   if (action.includes("departure")) return ArrowRight;
@@ -304,13 +272,9 @@ export function visitorPassLogIcon(action: string): React.ElementType {
 
 function visitorPassLogActor(log: VisitorPassLogEntry) {
   const actor = log.actor_user_label || log.actor || "IACS";
-  if (log.actor === "Visitor Concierge" || log.action === "visitor_pass.timeframe_change_requested") return "Visitor";
-  if (log.action === "visitor_pass.timeframe_change_approved" || log.action === "visitor_pass.timeframe_change_denied") {
-    return `${actor}`;
-  }
   if (log.actor === "System") return "IACS";
   if (log.actor.toLowerCase().includes("icloud")) return "iCloud Calendar Sync";
-  return `${actor} in UI`;
+  return actor;
 }
 
 function visitorPassLogChangedFields(oldValue: Record<string, unknown>, newValue: Record<string, unknown>) {
@@ -343,11 +307,4 @@ function visitorPassLogFieldValue(key: string, value: unknown) {
   if (key === "duration_on_site_seconds" && typeof value === "number") return formatDurationSeconds(value);
   if (key === "status") return titleCase(text);
   return text;
-}
-
-function visitorPassWindowFromValues(start: unknown, end: unknown) {
-  const startText = stringPayload(start);
-  const endText = stringPayload(end);
-  if (!startText || !endText) return "";
-  return `${formatDate(startText)} to ${formatDate(endText)}`;
 }

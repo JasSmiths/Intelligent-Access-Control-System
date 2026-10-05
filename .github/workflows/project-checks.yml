@@ -5,7 +5,7 @@ on:
     paths:
       - "backend/**"
       - "frontend/**"
-      - "scripts/phase1/**"
+      - "scripts/validation/**"
       - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -15,7 +15,7 @@ on:
     paths:
       - "backend/**"
       - "frontend/**"
-      - "scripts/phase1/**"
+      - "scripts/validation/**"
       - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      PHASE1_BACKEND_IMAGE: iacs-backend:ci-runtime
+      IACS_VALIDATION_BACKEND_IMAGE: iacs-backend:ci-runtime
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -38,13 +38,13 @@ jobs:
           python-version: "3.12"
       - name: Validate source selection and required check classification
         run: |
-          python3 scripts/phase1/test_source_snapshot.py
-          python3 scripts/phase1/test_harness_configuration.py
+          python3 scripts/validation/test_source_snapshot.py
+          python3 scripts/validation/test_harness_configuration.py
       - name: Build backend runtime image
         run: docker build --target runtime -t iacs-backend:ci-runtime backend
       - name: Run the same isolated locked checks as local development
         run: >-
-          python3 scripts/phase1/validate.py --mode full --allow-downloads
+          python3 scripts/validation/validate.py --mode full --allow-downloads
           --evidence-root "${{ runner.temp }}/iacs-evidence"
       - name: Retain commands, fingerprints and test results
         if: always()

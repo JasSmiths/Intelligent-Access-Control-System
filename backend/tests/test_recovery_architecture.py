@@ -1,18 +1,12 @@
-"""Small enforceable guards; detailed persistence contracts prove runtime behavior."""
+"""Scanner algorithm regressions; the isolated harness owns the repository scan."""
 
 import importlib.util
 from pathlib import Path
-import json
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("iacs_architecture_guard", ROOT / "scripts/architecture/check_boundaries.py")
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
-
-
-def test_no_new_cycles_side_effect_bypasses_or_presence_constructors():
-    baseline = json.loads((ROOT / "scripts/architecture/baseline.json").read_text())
-    assert guard.regressions(guard.inspect(ROOT), baseline) == []
 
 
 def test_ratchet_detects_new_edges_and_writer_increases_but_allows_removal():

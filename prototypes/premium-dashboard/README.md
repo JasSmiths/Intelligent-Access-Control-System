@@ -12,7 +12,7 @@ When started with the command below, the preview is available locally at **http:
 - Search filters recent events by person, plate or event type.
 - **Preview controls → Simulate arrival** adds Jamie once, changes presence from 3/3 to 4/2, and preserves the selected event. **Reset preview** restores the initial fixture and Steph snapshot; the animation preference remains selected.
 - **Preview controls → Animations** compares motion with an instant update. System reduced motion always takes precedence.
-- The sidebar, alerts, account and Alfred controls show local preview content. Access-point statuses are display-only.
+- The sidebar, alerts and account controls show local preview content. Access-point statuses are display-only.
 
 ## Development and checks
 

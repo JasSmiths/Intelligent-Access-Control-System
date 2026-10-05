@@ -280,11 +280,6 @@ def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, A
                 "message": json.dumps(body)[:500] if body else payload.get("message"),
             }
         )
-    if trigger_key.startswith("ai."):
-        merged.update(
-            {
-            }
-        )
     return merged
 
 

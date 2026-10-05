@@ -72,7 +72,7 @@ TELEMETRY_CATEGORIES = [
     {
         "id": TELEMETRY_CATEGORY_AUTOMATION,
         "label": "Automations",
-        "description": "Trigger, condition, action, and AI-authored automation workflow execution.",
+        "description": "Trigger, condition, and action execution for automation workflows.",
     },
     {
         "id": TELEMETRY_CATEGORY_MAINTENANCE,

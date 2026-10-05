@@ -22,7 +22,7 @@ MAX_PREPARATION_ATTEMPTS = 3
 ACTIVE_STATUSES = ("queued", "processing")
 DELIVERY_CERTAINTIES = {"accepted", "not_sent", "rejected", "unknown"}
 _MOBILE_RECEIPT_TARGET = re.compile(r"notify\.mobile_app_[A-Za-z0-9_]{1,192}\Z")
-_DISCORD_RECEIPT_TARGET = re.compile(r"[0-9]{1,32}\Z")
+_NUMERIC_RECEIPT_TARGET = re.compile(r"[0-9]{1,32}\Z")
 
 
 class ClaimLost(RuntimeError):
@@ -67,7 +67,7 @@ def safe_destination_outcomes(value: Any) -> list[dict[str, str]]:
         if not (
             target == "apprise"
             or _MOBILE_RECEIPT_TARGET.fullmatch(target)
-            or _DISCORD_RECEIPT_TARGET.fullmatch(target)
+            or _NUMERIC_RECEIPT_TARGET.fullmatch(target)
         ):
             continue
         if delivery not in DELIVERY_CERTAINTIES:

@@ -4,21 +4,27 @@ The approved direction is option 3, Prismatic Glass; durable design constraints
 live in [AGENTS.md](AGENTS.md). This is a sample-data prototype, separate from
 production IACS. Its screenshots do not establish live-system behavior.
 
-## Retained reference captures
+## Current fixture captures
 
-These captures were reviewed on 2 October 2026. They document that design state,
-not a current build/test result. Use the initial fixture for comparison: 22:15
-Europe/London, Steph’s 19:23 snapshot expanded, and 19:15–19:45 selected.
+These captures were refreshed on 5 October 2026 after retired controls were
+removed. They use the initial fixture: 22:15 Europe/London, Steph's 19:23
+snapshot expanded, and 19:15–19:45 selected.
 
-- [Reference and implementation, 1440 × 1024](qa/reference-comparison.jpg)
 - [Desktop, 1440 × 1024](qa/desktop-1440.jpg)
 - [Tablet, 1024 × 768](qa/tablet-1024.jpg)
 - [Phone, 390 × 844](qa/mobile-390.jpg)
-- [Phone with Sylvia’s evidence expanded](qa/mobile-evidence-390.jpg)
+- [Phone with Sylvia's evidence expanded](qa/mobile-evidence-390.jpg)
 
-The reference was normalized from 1487 × 1058 for the paired comparison.
-Intentional adaptations include fictional sample imagery, labelled preview
-controls, proportional presence bars, a tablet rail and stacked phone sections.
+Chromium and WebKit fixture checks covered these sizes plus 640 × 360, including
+modal dismissal and focus return, search, presence rosters, simulated arrival and
+reset. No API or provider requests were permitted. These are prototype checks;
+they do not establish production behavior or physical-device behavior.
+
+The earlier captures and paired design comparison are historical evidence,
+preserved outside current source under `data/archives/prototype-qa-20261005/`.
+The [capture mapping](qa/historical-captures.json) records their original paths,
+archive paths and checksums. The old paired comparison is not a current UX
+reference. The accepted visual constraints remain in [AGENTS.md](AGENTS.md).
 
 ## Repeat after changes
 

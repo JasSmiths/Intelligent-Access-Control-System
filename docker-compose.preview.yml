@@ -1,5 +1,5 @@
 # Standalone: never combine this with docker-compose.yml or the production override.
-# Supply the private image/storage receipt with --env-file; see docs/validation/preview.md.
+# Supply the private image/storage receipt with --env-file; see docs/development.md.
 name: iacs-reset-preview
 
 services:
@@ -39,7 +39,6 @@ services:
     security_opt: [no-new-privileges:true]
     volumes:
       - ${IACS_PREVIEW_ROOT}/backend:/app/data
-      - ${IACS_PREVIEW_ROOT}/chat_attachments:/app/data/chat_attachments
       - ${IACS_PREVIEW_ROOT}/logs/backend:/app/logs
     networks: [isolated]
     depends_on:

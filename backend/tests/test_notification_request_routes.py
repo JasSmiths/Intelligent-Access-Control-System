@@ -60,11 +60,10 @@ def boundary(monkeypatch):
     async def rollback():
         trace.append("rollback")
 
-    async def dispatch(run_id, reserved_claim, *, ephemeral_config=None):
+    async def dispatch(run_id, reserved_claim):
         trace.append("dispatch")
         assert trace == ["reserve", "commit", "dispatch"]
         assert run_id == identity and reserved_claim is claimed
-        assert ephemeral_config is None
         if state.dispatch_error is not None:
             raise state.dispatch_error
         return state.result
