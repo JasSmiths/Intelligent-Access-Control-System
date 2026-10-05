@@ -114,7 +114,7 @@ async def insert_old_command(name):
 
 
 @pytest.mark.asyncio
-async def test_historical_null_rows_remain_inert_after_upgrade_and_duplicate_delivery(scratch):
+async def test_historical_null_rows_remain_inert_after_upgrade_and_garage_projection(scratch):
     item = scratch
     migrate(item, "upgrade", BEFORE, "old-upgrade")
     await insert_old_message(item.name)
@@ -227,7 +227,6 @@ async def historical_worker():
     from unittest.mock import AsyncMock
     from app.db.session import AsyncSessionLocal, engine
     from app.models import AuditLog, AutomationRun, NotificationRun
-    from app.services.messaging.incoming_messages import IncomingMessageStore
     from app.services.access import delivery
 
     original_connect = socket.socket.connect
@@ -242,15 +241,7 @@ async def historical_worker():
     delivery.write_audit_log = forbidden
     delivery.NotificationRunStore.enqueue_in_session = forbidden
     try:
-        store = IncomingMessageStore()
-        assert await store.claim() is None
-        assert await store.claim(MESSAGE_ID) is None
         async with AsyncSessionLocal() as session:
-            same = await store.accept_in_session(session, provider="synthetic", provider_message_id="synthetic-historical-id",
-                provider_channel_id="synthetic-channel", author_provider_id="synthetic-author",
-                envelope={"message": {"type": "text", "text": "synthetic duplicate"}},
-                routing_context={"kind": "denied"}, received_at=None)
-            assert same == MESSAGE_ID
             assert await delivery.reserve_garage_outcome_outputs(session, command_id=COMMAND_ID) is False
             await session.commit()
         assert await delivery.recover_garage_outcome_outputs() == 0
@@ -261,7 +252,7 @@ async def historical_worker():
     finally:
         await engine.dispose()
         socket.socket.connect = original_connect
-    print("PASS: historical inbox duplicate/claim and unattributed garage recovery remained inert")
+    print("PASS: historical inbox rows and unattributed garage recovery remained inert")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Architecture and retirement guide
 
 IACS has explicit owners for durable access decisions, hardware commands, provider
-I/O, Alfred operations, and the realtime console. Use the focused agent guides for
+I/O, camera image analysis, and the realtime console. Use the focused agent guides for
 implementation detail: [backend](agent/backend.md), [frontend](agent/frontend.md),
 and [hardware safety](agent/hardware-safety.md).
 
@@ -9,7 +9,7 @@ and [hardware safety](agent/hardware-safety.md).
 
 1. Identify the domain owner before editing. Keep vendor I/O in modules and
    business rules in services.
-2. Keep API, UI, and Alfred presentation as adapters. They must call the same
+2. Keep API and UI presentation as adapters. They must call the same
    audited operations as other callers.
 3. Preserve durable history, audit, reconciliation, and provider contracts.
    Realtime is enrichment, never the audit record.
@@ -30,11 +30,10 @@ to the repository root.
   guide.
 - Gate commands: `services/gate_commands.py`; garage and access devices:
   `services/access_devices.py`. Hardware adapters stay in `modules/`.
-- Alfred contracts/context/catalog assembly: `ai/`; orchestration:
-  `services/chat.py` and `services/alfred/`.
+- Camera image analysis: `ai/providers.py`, used by access evidence and UniFi snapshots.
 - Notification durable claims: `services/notification_runs.py`; dispatch:
-  `services/notification_dispatch.py`; rendering/providers:
-  `services/notifications.py`.
+  `services/notification_dispatch.py`; providers/orchestration: `services/notifications.py`; pure rendering:
+  `services/notification_rendering.py`.
 - Recognition authority and expiry: `services/access/authorization.py`;
   verified admission: `services/movement/admission.py`.
 - Missed-exit recovery: `services/resident_recovery.py`, with pure journey

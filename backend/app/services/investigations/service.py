@@ -15,7 +15,6 @@ from app.services.investigations.contracts import (
     encode_cursor,
     resolve_time_range,
 )
-from app.services.investigations.interpreter import interpret_question
 from app.services.investigations.presenter import (
     build_audit_detail,
     build_audit_episode,
@@ -29,7 +28,6 @@ from app.services.investigations.repository import (
     load_audit_or_linked_trace,
     load_trace_detail,
 )
-from app.services.settings import RuntimeConfig
 
 
 MAX_ACTIVITY_SCAN_ROWS = 5000
@@ -220,126 +218,6 @@ async def investigation_overview(
     }
 
 
-async def investigate(
-    session: AsyncSession,
-    *,
-    question: str,
-    scope: Mapping[str, Any],
-    max_evidence: int,
-    use_ai: bool,
-    runtime: RuntimeConfig,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    catalog = await investigation_filter_options(session, site_timezone=runtime.site_timezone)
-    interpretation = await interpret_question(
-        question,
-        catalog,
-        runtime=runtime,
-        use_ai=use_ai,
-        now=now,
-    )
-    merged = {**interpretation.filters, **{key: value for key, value in scope.items() if value is not None}}
-    filters = _resolved_activity_filters(merged, runtime.site_timezone, now=now)
-
-    if not _has_investigation_anchor(filters):
-        return _insufficient_response(
-            question,
-            filters=filters,
-            site_timezone=runtime.site_timezone,
-            mode=interpretation.mode,
-            ai_used=interpretation.ai_used,
-            reason=(
-                "The question does not identify a recorded device, automation, integration, outcome, "
-                "trace, or searchable event. Add one of those details so IACS does not select unrelated activity."
-            ),
-        )
-
-    activity = await list_activity(
-        session,
-        filters,
-        limit=8,
-        cursor=None,
-        site_timezone=runtime.site_timezone,
-    )
-    episodes = activity["items"]
-    if not episodes:
-        return _insufficient_response(
-            question,
-            filters=filters,
-            site_timezone=runtime.site_timezone,
-            mode=interpretation.mode,
-            ai_used=interpretation.ai_used,
-            reason="No authorised recorded evidence matched the interpreted entities and time range.",
-        )
-
-    primary = episodes[0]
-    detail = await get_activity_detail(
-        session,
-        str(primary["episode_id"]),
-        site_timezone=runtime.site_timezone,
-    )
-    if not detail:
-        return _insufficient_response(
-            question,
-            filters=filters,
-            site_timezone=runtime.site_timezone,
-            mode=interpretation.mode,
-            ai_used=interpretation.ai_used,
-            reason="The matching activity exists, but its supporting evidence could not be loaded.",
-            episodes=episodes,
-        )
-
-    negative_question = _asks_about_missing_action(question)
-    if primary["outcome"] == "unknown" or (
-        negative_question and primary["outcome"] == "succeeded" and primary["dispatch_state"] == "not_applicable"
-    ):
-        return _insufficient_response(
-            question,
-            filters=filters,
-            site_timezone=runtime.site_timezone,
-            mode=interpretation.mode,
-            ai_used=interpretation.ai_used,
-            reason=(
-                "Matching activity was found, but it does not record why the action in the question did or did not occur."
-            ),
-            episodes=episodes,
-            detail=detail,
-            max_evidence=max_evidence,
-        )
-
-    evidence = [
-        {**item, "episode_id": primary["episode_id"]}
-        for item in detail["timeline"][:max_evidence]
-    ]
-    citations = [
-        {
-            "id": item["id"],
-            "label": item["title"],
-            "timestamp": item["timestamp"],
-            "episode_id": primary["episode_id"],
-        }
-        for item in evidence
-    ]
-    answer = _grounded_answer(primary)
-    missing = _missing_evidence(primary, detail)
-    certainty = "high" if primary["correlation"]["confidence"] == "exact" and not missing else "medium"
-    return {
-        "question": question,
-        "answer": answer,
-        "most_likely_reason": primary["summary"],
-        "outcome": primary["outcome"],
-        "dispatch_state": primary["dispatch_state"],
-        "certainty": certainty,
-        "evidence": evidence,
-        "citations": citations,
-        "episodes": episodes,
-        "interpreted_filters": filters.as_payload(),
-        "missing_evidence": missing,
-        "site_timezone": runtime.site_timezone,
-        "resolved_range": activity["resolved_range"],
-        "ai_used": interpretation.ai_used,
-        "mode": interpretation.mode,
-    }
 
 
 def _trace_detail_payload(bundle: Any, site_timezone: str) -> dict[str, Any]:
@@ -365,133 +243,14 @@ def _candidate_sort_key(candidate: tuple[str, Any]) -> tuple[datetime, int, str]
     return timestamp, 1 if kind == "trace" else 0, row_id
 
 
-def _resolved_activity_filters(
-    values: Mapping[str, Any],
-    site_timezone: str,
-    *,
-    now: datetime | None,
-) -> ActivityFilters:
-    from_at, to_at, range_key = resolve_time_range(
-        str(values.get("time_range") or "last_7_days"),
-        from_at=values.get("from_at") if isinstance(values.get("from_at"), datetime) else None,
-        to_at=values.get("to_at") if isinstance(values.get("to_at"), datetime) else None,
-        timezone_name=site_timezone,
-        now=now,
-    )
-    allowed = {
-        "device",
-        "automation",
-        "schedule",
-        "integration",
-        "category",
-        "outcome",
-        "severity",
-        "actor",
-        "trigger",
-        "trace",
-        "q",
-    }
-    text_values = {
-        key: str(values[key]).strip()
-        for key in allowed
-        if values.get(key) is not None and str(values[key]).strip()
-    }
-    return ActivityFilters(
-        from_at=from_at,
-        to_at=to_at,
-        time_range=range_key,
-        include_routine=bool(values.get("include_routine", False)),
-        **text_values,
-    )
 
 
-def _has_investigation_anchor(filters: ActivityFilters) -> bool:
-    return any(
-        getattr(filters, key)
-        for key in (
-            "device",
-            "automation",
-            "schedule",
-            "integration",
-            "category",
-            "outcome",
-            "severity",
-            "actor",
-            "trigger",
-            "trace",
-            "q",
-        )
-    )
 
 
-def _grounded_answer(episode: Mapping[str, Any]) -> str:
-    summary = str(episode.get("summary") or "The activity has a recorded outcome.")
-    dispatch = episode.get("dispatch_state")
-    if dispatch == "withheld":
-        return f"IACS decided not to send a device command. {summary}"
-    if dispatch == "attempted_rejected":
-        return f"IACS attempted the command, but it was rejected or failed. {summary}"
-    if dispatch == "accepted_unverified":
-        return f"IACS sent the command and it was accepted, but the expected device state was not confirmed. {summary}"
-    if dispatch == "verified":
-        return f"IACS sent the command and recorded the expected resulting state. {summary}"
-    return summary
 
 
-def _missing_evidence(episode: Mapping[str, Any], detail: Mapping[str, Any]) -> list[str]:
-    missing: list[str] = []
-    if episode.get("dispatch_state") == "accepted_unverified":
-        missing.append("No resulting device-state confirmation was recorded.")
-    if episode.get("correlation", {}).get("confidence") != "exact":
-        missing.append("This standalone audit record is not linked to a telemetry trace.")
-    contexts = detail.get("configuration_context")
-    if episode.get("reason_code") == "schedule_not_allowed" and isinstance(contexts, list):
-        if not any(item.get("recorded_at_decision_time") for item in contexts if isinstance(item, Mapping)):
-            missing.append("The schedule values used at decision time were not recorded.")
-    return missing
 
 
-def _insufficient_response(
-    question: str,
-    *,
-    filters: ActivityFilters,
-    site_timezone: str,
-    mode: str,
-    ai_used: bool,
-    reason: str,
-    episodes: list[dict[str, Any]] | None = None,
-    detail: Mapping[str, Any] | None = None,
-    max_evidence: int = 30,
-) -> dict[str, Any]:
-    primary_id = episodes[0]["episode_id"] if episodes else None
-    raw_evidence = list(detail.get("timeline", []))[:max_evidence] if detail else []
-    evidence = [{**item, "episode_id": primary_id} for item in raw_evidence]
-    citations = [
-        {
-            "id": item.get("id"),
-            "label": item.get("title"),
-            "timestamp": item.get("timestamp"),
-            "episode_id": item.get("episode_id"),
-        }
-        for item in evidence
-    ]
-    return {
-        "question": question,
-        "answer": f"IACS cannot determine the cause from the available evidence. {reason}",
-        "most_likely_reason": None,
-        "outcome": "unknown",
-        "dispatch_state": "unknown",
-        "certainty": "low",
-        "evidence": evidence,
-        "citations": citations,
-        "episodes": episodes or [],
-        "interpreted_filters": filters.as_payload(),
-        "missing_evidence": [reason],
-        "site_timezone": site_timezone,
-        "resolved_range": _resolved_range(filters),
-        "ai_used": ai_used,
-        "mode": mode,
-    }
 
 
 def _resolved_range(filters: ActivityFilters) -> dict[str, Any]:
@@ -541,19 +300,3 @@ def _repeated_problems(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
     repeated.sort(key=lambda item: (item["count"], item["latest_at"]), reverse=True)
     return repeated[:8]
-
-
-def _asks_about_missing_action(question: str) -> bool:
-    text = question.casefold()
-    return any(
-        phrase in text
-        for phrase in (
-            "why didn't",
-            "why did not",
-            "why wasn’t",
-            "why wasn't",
-            "didn't open",
-            "did not open",
-            "not happen",
-        )
-    )

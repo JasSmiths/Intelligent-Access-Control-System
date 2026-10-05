@@ -398,49 +398,6 @@ async def test_identity_denial_records_durable_result_without_gate_transport(mon
     assert finalizations[0][1]["result_kind"] == "identity_denied"
 
 
-async def test_malfunction_failure_message_repairs_unhelpful_llm_output(monkeypatch) -> None:
-    service = ActionableNotificationService()
-    bound = bound_context()
-    person_identity = identity(bound.person_id, bound.actor_user_id)
-    calls = []
-    malfunction = ActiveGateMalfunctionContext(
-        id=uuid.uuid4(),
-        gate_entity_id="cover.top_gate",
-        gate_name="Top Gate",
-        status=GateMalfunctionStatus.FUBAR,
-        opened_at=datetime.now(tz=UTC) - timedelta(days=1, hours=3),
-        declared_at=datetime.now(tz=UTC) - timedelta(days=1, hours=2),
-        last_gate_state="open",
-        duration_seconds=27 * 60 * 60,
-    )
-
-    class FakeProvider:
-        async def complete(self, messages, **_options):
-            calls.append([message.content for message in messages])
-            if len(calls) == 1:
-                return SimpleNamespace(
-                    text=(
-                        "Jason Smith: Top Gate could not be opened because its in an active unresolved "
-                        "malfunction state. Request AB12CDE was blocked - try again in 1 day 3 hours"
-                    )
-                )
-            return SimpleNamespace(
-                text=(
-                    "Sorry, the gate was not opened for AB12CDE, the gate has been malfunctioning for "
-                    "1 day 3 hours and is currently unresolved."
-                )
-            )
-
-    monkeypatch.setattr(actionable, "get_runtime_config", lambda: _async_value(SimpleNamespace(llm_provider="openai")))
-    monkeypatch.setattr(actionable, "get_llm_provider", lambda _provider: FakeProvider())
-
-    message = await service._malfunction_failure_message(bound, person_identity, malfunction, force=True)
-
-    assert len(calls) == 2
-    assert "1 day 3 hours" in calls[0][-1]
-    assert message.startswith("Sorry, the gate was not opened")
-    assert "try again" not in message
-    assert "Jason Smith" not in message
 
 
 async def _async_value(value):

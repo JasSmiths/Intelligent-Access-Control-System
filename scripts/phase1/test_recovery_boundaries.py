@@ -1,4 +1,4 @@
-"""Six inert recovery diagnostics. Expected hazards fail; never xfail or replay hardware.
+"""Inert recovery diagnostics. Expected hazards fail; never xfail or replay hardware.
 
 Run explicitly, serially, in the existing phase1 loopback-only namespace after
 its schema preparation. See docs/validation/recovery-boundaries.md. This file
@@ -43,7 +43,6 @@ def _require_isolated_environment():
 DATABASE_NAME = _require_isolated_environment()
 
 # Third-party/application imports intentionally follow the fail-closed guard.
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -52,32 +51,23 @@ import uuid
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
 from sqlalchemy import select, text, update
 
-from app.ai.context import set_chat_tool_context
-from app.ai.tool_groups import access_incident_handlers as historical_alfred
-from app.api.v1 import ai as ai_api
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AccessEvent, AutomationRule, AutomationRun, ChatSession, GateCommandRecord, MovementSagaRecord, Person, Presence, User
-from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState, PresenceState, TimingClassification, UserRole
+from app.models import AccessEvent, AutomationRule, AutomationRun, GateCommandRecord, MovementSagaRecord, Person, Presence
+from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState, PresenceState, TimingClassification
 from app.modules.access_devices.base import AccessDeviceBinding, AccessDeviceCommandResult, AccessDeviceEntity
 from app.modules.access_devices.home_assistant import HomeAssistantAccessDeviceProvider
 from app.modules.gate import access_devices as gate_adapter
 from app.modules.gate.base import GateCommandResult, GateState
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.services import access_devices as devices_owner
-from app.services import automation_integration_actions as integration_actions
 from app.services import automations as automation_owner
-from app.services import chat as chat_owner
-from app.services import movement_reconciliation as reconciliation_owner
-from app.services import restart_backfill
 from app.services.access_devices import AccessDeviceOperationResult, AccessDeviceProviderAttempt, AccessDeviceService
-from app.services.chat import ChatService
-from app.services.chat_contracts import IntentRoute
-from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 from app.services.movement_reconciliation import MovementReconciliationService
+from app.services.telemetry import telemetry
 
 pytestmark = pytest.mark.asyncio
 CASES = json.loads((Path(__file__).parent / "fixtures/recovery_boundaries/scenarios.json").read_text())
@@ -130,23 +120,17 @@ async def isolated_resources(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", no_http)
     monkeypatch.setattr(event_bus, "publish", AsyncMock())
-    monkeypatch.setattr(automation_owner.telemetry, "start_trace", lambda *a, **kw: Trace())
-    monkeypatch.setattr(automation_owner.telemetry, "flush", AsyncMock())
+    monkeypatch.setattr(telemetry, "start_trace", lambda *a, **kw: Trace())
+    monkeypatch.setattr(telemetry, "flush", AsyncMock())
     monkeypatch.setattr(automation_owner, "emit_audit_log", lambda *a, **kw: None)
-    monkeypatch.setattr(chat_owner, "emit_audit_log", lambda *a, **kw: None)
     monkeypatch.setattr(automation_owner, "is_maintenance_mode_active", AsyncMock(return_value=False))
-
-    runtime = SimpleNamespace(site_timezone="Europe/London", llm_provider="local", llm_timeout_seconds=1)
-    for module in (automation_owner, chat_owner, historical_alfred):
-        monkeypatch.setattr(module, "get_runtime_config", AsyncMock(return_value=runtime))
-    monkeypatch.setattr(chat_owner, "get_llm_provider", lambda name: SimpleNamespace(name="local"))
 
     try:
         async with AsyncSessionLocal() as session:
             assert await session.scalar(text("SELECT current_database()")) == DATABASE_NAME
             # Fail rather than reading any persisted runtime settings supplied by a caller.
             assert await session.scalar(text("SELECT count(*) FROM system_settings")) == 0, "Probe DB must have no persisted runtime settings"
-            await session.execute(text("TRUNCATE people, users, access_events, movement_sagas, movement_sessions, gate_command_records, gate_state_observations, automation_rules, automation_runs, chat_sessions, audit_logs, visitor_pass_reservations, visitor_passes, notification_runs CASCADE"))
+            await session.execute(text("TRUNCATE people, users, access_events, movement_sagas, movement_sessions, gate_command_records, gate_state_observations, automation_rules, automation_runs, audit_logs, visitor_pass_reservations, visitor_passes, notification_runs CASCADE"))
             await session.commit()
         yield
     finally:
@@ -337,11 +321,10 @@ async def test_probe_03_support_terminal_same_intent_never_replays():
 
 @pytest.mark.parametrize("hardware", ["gate.open", "garage_door.open", "garage_door.close"])
 @pytest.mark.parametrize("hardware_first", [True, False], ids=["hardware-first", "notification-first"])
-@pytest.mark.parametrize("origin", ["unknown", "known", "visitor", "phrase", "historical"])
+@pytest.mark.parametrize("origin", ["unknown", "known", "visitor", "historical"])
 async def test_probe_04_real_automation_intake_preserves_recognition_authority(monkeypatch, hardware, hardware_first, origin):
-    from app.models import LprIngestEvent, NotificationRun, Vehicle, VisitorPass
+    from app.models import LprIngestEvent, Vehicle, VisitorPass
     from app.services.access import authorization
-    from app.services import notifications as notification_owner
     from sqlalchemy import func
     from app.models.enums import VisitorPassStatus
 
@@ -361,10 +344,11 @@ async def test_probe_04_real_automation_intake_preserves_recognition_authority(m
         calls.append("garage")
         return _device_outcome(key, True, "opening")
 
-    async def send_message(action, context, **kwargs):
-        notifications.append(action["id"])
-        return {"id": action["id"], "type": action["type"], "status": "success"}
+    async def activate_rules(session, *, reference, active):
+        notifications.append("notify")
+        return {"enabled": active, "rule_ids": []}
 
+    monkeypatch.setattr(automation_owner, "set_automation_activation", activate_rules)
     monkeypatch.setattr(automation_owner, "get_gate_command_coordinator", lambda: GateCommandCoordinator(lambda name: SimpleNamespace(open_gate=open_gate)))
     from app.services import automation_intake
     monkeypatch.setattr(automation_owner, "get_access_device_service", lambda: SimpleNamespace(command_device=command_device))
@@ -372,22 +356,10 @@ async def test_probe_04_real_automation_intake_preserves_recognition_authority(m
         preview_gate_open=AsyncMock(return_value={"version": 1, "action": "open", "targets": [{"device_key": "synthetic_gate"}]}),
         preview_device_command=AsyncMock(side_effect=lambda key, command, **kwargs: {"version": 1, "action": command, "target_device_key": key, "targets": [{"device_key": key}]})))
     monkeypatch.setattr(automation_intake, "automation_garage_targets", AsyncMock(return_value=[_device("synthetic_garage")]))
-    async def prepare_message(action, context, **kwargs):
-        return dict(action)
-
-    fake_messaging = SimpleNamespace(
-        status=AsyncMock(return_value={"configured": True}),
-        prepare_notification_action=prepare_message,
-        authorize_notification_action_in_session=AsyncMock(return_value=None),
-        send_notification_action=send_message,
-    )
-    monkeypatch.setattr(integration_actions, "get_whatsapp_delivery_service", lambda: fake_messaging)
-    monkeypatch.setattr(notification_owner, "get_whatsapp_delivery_service", lambda: fake_messaging)
     monkeypatch.setattr(authorization, "get_runtime_config_for_session", AsyncMock(return_value=SimpleNamespace(site_timezone="Europe/London", schedule_default_policy="allow")))
-    trigger = {"known": "vehicle.known_plate", "visitor": "visitor_pass.used",
-               "phrase": "ai.phrase_received"}.get(origin, "vehicle.unknown_plate")
+    trigger = {"known": "vehicle.known_plate", "visitor": "visitor_pass.used"}.get(origin, "vehicle.unknown_plate")
     hardware_action = {"id": "hardware", "type": hardware, "config": {}, "reason_template": "Synthetic probe"}
-    notification_action = {"id": "notify", "type": "integration.whatsapp.send_message", "config": {"target_mode": "all", "message_template": "Synthetic observation"}}
+    notification_action = {"id": "notify", "type": "notification.disable", "config": {}}
     actions = [hardware_action, notification_action] if hardware_first else [notification_action, hardware_action]
     pass_id = vehicle_id = event_id = None
     async with AsyncSessionLocal() as session:
@@ -462,10 +434,6 @@ async def test_probe_04_real_automation_intake_preserves_recognition_authority(m
         payload = {"visitor_pass_id": str(pass_id), "decision": "granted", "person_id": None,
                    "vehicle_id": None, "access_event_id": str(event_id), "occurred_at": observed_at.isoformat()}
         event_type = "visitor_pass.used"
-    if origin == "phrase":
-        payload = {"phrase": "Synthetic open", "user_id": str(uuid.uuid4()), "user_role": "admin",
-                   "confirmed": True, "confirmation_id": "payload-is-not-an-approval"}
-        event_type = "ai.phrase_received"
     if origin == "historical":
         payload.update(backfilled=True, skip_automation_actions=True, skip_notification_actions=True)
     try:
@@ -487,12 +455,6 @@ async def test_probe_04_real_automation_intake_preserves_recognition_authority(m
         service = automation_owner.AutomationService()
         for identity in identities:
             await service.dispatcher.run_once(identity)
-        notification_service = notification_owner.NotificationService()
-        monkeypatch.setattr(notification_service, "delivery_config", AsyncMock(return_value=SimpleNamespace()))
-        async with AsyncSessionLocal() as session:
-            notices = (await session.scalars(select(NotificationRun.id))).all()
-        for identity in notices:
-            await notification_service.dispatcher.run_once(identity)
     finally:
         if pass_id:
             async with AsyncSessionLocal() as session:
@@ -508,11 +470,11 @@ async def test_probe_04_real_automation_intake_preserves_recognition_authority(m
         action = next(item for item in runs[0].action_results if item["id"] == "hardware")
         assert action["status"] == "skipped" and action["command_sent"] is False
         assert action["reason_code"] == "visitor_already_admitted"
-    if origin in {"unknown", "phrase"}:
+    if origin == "unknown":
         action = next(item for item in runs[0].action_results if item["id"] == "hardware")
         assert action["status"] == "skipped" and action["command_sent"] is False
-        assert action["reason_code"] == ("unknown_plate_hardware_forbidden" if origin == "unknown" else "requester_confirmation_required")
-        assert action["requires_confirmation"] is (origin == "phrase")
+        assert action["reason_code"] == "unknown_plate_hardware_forbidden"
+        assert action["requires_confirmation"] is False
         assert runs[0].context["provenance"]["trigger_key"] == trigger
 
 
@@ -532,83 +494,12 @@ async def test_probe_04_support_dry_run_has_no_actions_or_runs(monkeypatch):
     sink.assert_not_awaited()
 
 
-async def _admin():
-    async with AsyncSessionLocal() as session:
-        user = User(username="synthetic-admin", full_name="Synthetic Admin", password_hash="not-a-real-password-hash", role=UserRole.ADMIN, is_active=True)
-        session.add(user)
-        await session.commit()
-        return user.id
 
 
-async def _approval_setup(monkeypatch):
-    user_id = await _admin()
-    service = ChatService()
-    calls = []
-
-    async def inert_gate(arguments):
-        if not arguments.get("confirm"):
-            return {"requires_confirmation": True, "confirmation_field": "confirm", "target": "Synthetic Gate"}
-        calls.append("confirmed-inert-tool")
-        return {"opened": True, "accepted": True, "action": "open", "target": "Synthetic Gate"}
-
-    service._tools["open_gate"] = replace(service._tools["open_gate"], handler=inert_gate)
-    monkeypatch.setattr(service, "_update_memory", AsyncMock())  # Optional reflection is outside approval ownership.
-    monkeypatch.setattr(service, "_run_provider_agent_loop", AsyncMock(side_effect=AssertionError("No LLM call is allowed")))
-    session_id = await service._ensure_session(None)
-    pending = await service._store_pending_agent_action(
-        session_id,
-        {"name": "open_gate", "arguments": {"target": "Synthetic Gate", "confirm": False},
-         "output": {"requires_confirmation": True, "confirmation_field": "confirm", "target": "Synthetic Gate"}},
-        [], IntentRoute(intents=("Gate_Hardware",), confidence=1, requires_entity_resolution=False, reason="Synthetic preview"),
-        [service._tools["open_gate"]], provider_name="local", user_message="Synthetic open preview",
-        user_id=str(user_id), actor_context={"user": {"id": str(user_id), "role": "admin"}}, iteration=0,
-    )
-    assert not calls
-    app = FastAPI()
-    app.include_router(ai_api.router, prefix="/api/v1/ai")
-    monkeypatch.setattr(ai_api, "chat_service", service)
-
-    async def current_synthetic_actor():
-        # Current actor is loaded for each HTTP request, not a shared ORM instance.
-        async with AsyncSessionLocal() as session:
-            return await session.get(User, user_id)
-
-    app.dependency_overrides[ai_api.require_current_user] = current_synthetic_actor
-    request = {"session_id": str(session_id), "confirmation_id": pending["confirmation_id"], "decision": "confirm"}
-    return service, app, request, calls
 
 
-async def test_probe_05_concurrent_v3_confirmation_claims_once(monkeypatch):
-    service, app, request, calls = await _approval_setup(monkeypatch)
-    original_decide = service._approvals.decide
-    read_barrier = asyncio.Barrier(2)
-
-    async def synchronized_real_claim(*args, **kwargs):
-        pending = await original_decide(*args, **kwargs)
-        # Both real database claims complete before the winning request invokes
-        # a handler. The second sees the durable claim through a fresh session.
-        await _bounded(read_barrier.wait())
-        return pending
-
-    monkeypatch.setattr(service._approvals, "decide", synchronized_real_claim)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic.invalid", trust_env=False) as client:
-        responses = await _bounded(asyncio.gather(*(
-            client.post("/api/v1/ai/chat/confirm", json=request) for _ in range(2)
-        )))
-    assert [response.status_code for response in responses] == [200, 200], "Probe failed before reaching the approval boundary"
-    assert calls == ["confirmed-inert-tool"], "Two fresh-session confirmations invoked the same approved action twice"
 
 
-async def test_probe_05_support_preview_and_sequential_replay_are_inert(monkeypatch):
-    service, app, request, calls = await _approval_setup(monkeypatch)
-    assert not calls
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic.invalid", trust_env=False) as client:
-        first = await client.post("/api/v1/ai/chat/confirm", json=request)
-        second = await client.post("/api/v1/ai/chat/confirm", json=request)
-    assert first.status_code == second.status_code == 200
-    assert calls == ["confirmed-inert-tool"]
-    sessions = await _rows(ChatSession)
-    assert "pending_agent_action" not in (sessions[0].context or {})
 
 
 async def _presence_history():
@@ -654,35 +545,3 @@ async def test_probe_06_restart_does_not_promote_uncompleted_grant(saga_state):
         "History repair treated authorization GRANTED as a completed movement despite failed/pending actuation"
     )
     assert not await _rows(GateCommandRecord)
-
-
-@pytest.mark.parametrize("minutes", [-10, 10], ids=["stale-history", "newer-history-support"])
-async def test_probe_06_alfred_historical_write_does_not_rewind_presence(monkeypatch, minutes):
-    monkeypatch.setattr(historical_alfred, "get_runtime_config", AsyncMock(return_value=SimpleNamespace(
-        site_timezone="Europe/London", lpr_debounce_max_seconds=10, lpr_vehicle_session_idle_seconds=90)))
-    person_id, committed_event_id = await _presence_history()
-    user_id = await _admin()
-    candidate = {
-        "person_id": person_id, "registration_number": "SYNTH01", "captured_at": NOW + timedelta(minutes=minutes),
-        "direction": "entry", "decision": "granted", "confidence": .99, "source": "synthetic-history",
-        "evidence_kind": "protect_event", "label": "Synthetic Resident", "reason": "Synthetic historical correction",
-    }
-    # Only the external evidence acquisition is replaced. The registered Alfred
-    # handler's permission, duplicate check, event/presence/audit writes are real.
-    monkeypatch.setattr(historical_alfred, "_backfill_candidate", AsyncMock(return_value=candidate))
-    token = set_chat_tool_context({"user_id": str(user_id), "user_role": "admin"})
-    try:
-        result = await historical_alfred.backfill_access_event_from_protect({"confirm": True})
-    finally:
-        set_chat_tool_context({}, token=token)
-    assert result["backfilled"]
-    presence, = await _rows(Presence)
-    if minutes < 0:
-        assert (presence.state, presence.last_event_id, presence.last_changed_at) == (PresenceState.EXITED, committed_event_id, NOW), (
-            "Alfred historical repair overwrote newer committed presence with stale evidence"
-        )
-    else:
-        assert presence.state == PresenceState.PRESENT and str(presence.last_event_id) == result["access_event_id"]
-    assert not await _rows(GateCommandRecord)
-    assert event_bus.publish.await_args.args[1]["skip_automation_actions"] is True
-    assert event_bus.publish.await_args.args[1]["skip_notification_actions"] is True

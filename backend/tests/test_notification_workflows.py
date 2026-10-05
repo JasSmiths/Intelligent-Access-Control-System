@@ -9,9 +9,6 @@ from fastapi import HTTPException
 
 from app.api.v1 import notifications as notification_api
 from app.models.enums import UserRole
-from app.ai.tool_groups import access_diagnostics_handlers as alfred_access_diagnostics_handlers
-from app.ai.tool_groups import notifications_handlers as alfred_notifications_handlers
-from app.ai.tool_groups import registry as alfred_registry
 from app.modules.notifications.home_assistant_mobile import (
     HomeAssistantMobileAppNotifier,
     HomeAssistantMobileAppTarget,
@@ -29,15 +26,15 @@ from app.services.notifications import (
     NotificationService,
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
-    context_variables,
-    gate_malfunction_notification_content,
-    gate_malfunction_plain_body,
-    home_assistant_notification_actions,
-    notification_action_buttons,
-    postprocess_gate_malfunction_body,
     presence_condition_matches,
     render_template,
     visitor_pass_notification_contexts_from_event,
+)
+from app.services.notification_rendering import (
+    context_variables,
+    gate_malfunction_notification_content,
+    gate_malfunction_plain_body,
+    postprocess_gate_malfunction_body,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.home_assistant import HomeAssistantIntegrationService
@@ -175,7 +172,6 @@ def test_notification_span_records_access_trace(monkeypatch) -> None:
 def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
     labels = [group["label"] for group in TRIGGER_CATALOG]
     assert labels == [
-        "AI Agents",
         "Compliance",
         "Gate Actions",
         "Gate Malfunctions",
@@ -193,7 +189,6 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
     events = [event["value"] for group in TRIGGER_CATALOG for event in group["events"]]
     assert "integration_test" not in events
     assert {
-        "agent_anomaly_alert",
         "authorized_entry",
         "duplicate_entry",
         "duplicate_exit",
@@ -203,16 +198,13 @@ def test_trigger_catalog_is_categorized_for_notification_builder() -> None:
         "gate_malfunction",
         "gate_open_failed",
         "integration_degraded",
-        "leaderboard_overtake",
         "maintenance_mode_disabled",
         "maintenance_mode_enabled",
         "outside_schedule",
         "unauthorized_plate",
-        "visitor_pass_arranged",
         "visitor_pass_cancelled",
         "visitor_pass_created",
         "visitor_pass_expired",
-        "visitor_pass_timeframe_change_requested",
         "visitor_pass_used",
         "visitor_pass_vehicle_arrived",
         "visitor_pass_vehicle_exited",
@@ -287,26 +279,6 @@ def test_context_variables_include_person_pronoun_fields() -> None:
     assert variables["ObjectPronoun"] == "her"
     assert variables["PossessiveDeterminer"] == "her"
     assert render_template("I've let @ObjectPronoun in.", variables) == "I've let her in."
-
-
-def test_context_variables_include_visitor_pass_timeframe_request_fields() -> None:
-    variables = context_variables(
-        NotificationContext(
-            event_type="visitor_pass_timeframe_change_requested",
-            subject="Visitor Pass timeframe change requested for Vicky Thompson",
-            severity="warning",
-            facts={
-                "visitor_name": "Vicky Thompson",
-                "visitor_pass_original_time": "01 May 2026, 10:00 to 01 May 2026, 18:00",
-                "visitor_pass_requested_time": "01 May 2026, 10:00 to 01 May 2026, 20:00",
-            },
-        )
-    )
-
-    assert variables["VisitorName"] == "Vicky Thompson"
-    assert variables["VisitorPassName"] == "Vicky Thompson"
-    assert variables["VisitorPassOriginalTime"] == "01 May 2026, 10:00 to 01 May 2026, 18:00"
-    assert variables["VisitorPassRequestedTime"] == "01 May 2026, 10:00 to 01 May 2026, 20:00"
 
 
 def test_leaderboard_overtake_trigger_and_variables_are_available() -> None:
@@ -399,10 +371,8 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
     for trigger in [
         "visitor_pass_created",
         "visitor_pass_cancelled",
-        "visitor_pass_arranged",
         "visitor_pass_used",
         "visitor_pass_expired",
-        "visitor_pass_timeframe_change_requested",
         "visitor_pass_vehicle_arrived",
         "visitor_pass_vehicle_exited",
     ]:
@@ -422,9 +392,6 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
                 "visitor_pass_vehicle_colour": "Silver",
                 "vehicle_colour": "White",
                 "visitor_pass_duration_on_site": "1h 25m",
-                "visitor_pass_current_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
-                "visitor_pass_requested_window": "01 May 2026, 10:00 to 01 May 2026, 20:00",
-                "visitor_pass_visitor_message": "Can I stay longer?",
             },
         )
     )
@@ -435,9 +402,6 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
     assert variables["VisitorPassVehicleMake"] == "Peugeot"
     assert variables["VisitorPassVehicleColour"] == "Silver"
     assert variables["VisitorPassDurationOnSite"] == "1h 25m"
-    assert variables["VisitorPassCurrentWindow"] == "01 May 2026, 10:00 to 01 May 2026, 18:00"
-    assert variables["VisitorPassRequestedWindow"] == "01 May 2026, 10:00 to 01 May 2026, 20:00"
-    assert variables["VisitorPassVisitorMessage"] == "Can I stay longer?"
     assert variables["Registration"] == "PE70DHX"
     assert variables["VehicleMake"] == "Peugeot"
     assert variables["VehicleColour"] == "Silver"
@@ -448,54 +412,6 @@ def test_visitor_pass_triggers_and_variables_are_available() -> None:
         )
         == "Silver Peugeot PE70DHX stayed for 1h 25m."
     )
-
-
-def test_visitor_pass_timeframe_notification_actions_are_available() -> None:
-    actions = notification_action_buttons(
-        NotificationContext(
-            event_type="visitor_pass_timeframe_change_requested",
-            subject="Visitor requested a timeframe change",
-            severity="warning",
-            facts={
-                "visitor_pass_id": "pass-1",
-                "visitor_pass_timeframe_request_id": "request-1",
-            },
-        )
-    )
-
-    assert actions == [
-        {
-            "id": "allow",
-            "label": "Allow",
-            "method": "POST",
-            "path": "/api/v1/visitor-passes/pass-1/timeframe-requests/request-1/allow",
-        },
-        {
-            "id": "deny",
-            "label": "Deny",
-            "method": "POST",
-            "path": "/api/v1/visitor-passes/pass-1/timeframe-requests/request-1/deny",
-        },
-    ]
-
-
-def test_visitor_pass_timeframe_home_assistant_actions_are_available() -> None:
-    actions = home_assistant_notification_actions(
-        NotificationContext(
-            event_type="visitor_pass_timeframe_change_requested",
-            subject="Visitor requested a timeframe change",
-            severity="warning",
-            facts={
-                "visitor_pass_id": "pass-1",
-                "visitor_pass_timeframe_request_id": "request-1",
-            },
-        )
-    )
-
-    assert actions == [
-        {"action": "iacs:vp_time:allow:pass-1:request-1", "title": "Allow"},
-        {"action": "iacs:vp_time:deny:pass-1:request-1", "title": "Deny", "destructive": True},
-    ]
 
 
 def test_unknown_vehicle_open_gate_actionable_catalog_is_available() -> None:
@@ -536,25 +452,10 @@ def test_visitor_pass_realtime_events_map_to_notification_contexts() -> None:
         "updated_at": "2026-04-29T16:28:00+01:00",
     }
 
-    arranged_contexts = visitor_pass_notification_contexts_from_event(
-        RealtimeEvent(
-            type="visitor_pass.arranged",
-            payload={"visitor_pass": payload, "source": "whatsapp_visitor"},
-            created_at="2026-04-29T14:05:01+01:00",
-        )
-    )
-    assert [context.event_type for context in arranged_contexts] == ["visitor_pass_arranged"]
-    assert arranged_contexts[0].facts["visitor_pass_registration"] == "PE70DHX"
-    assert arranged_contexts[0].facts["visitor_pass_time_window"] == "29 Apr 2026, 14:00 to 29 Apr 2026, 18:00"
-    arranged_variables = context_variables(arranged_contexts[0])
-    assert arranged_variables["VisitorPassName"] == "Sarah"
-    assert arranged_variables["VisitorPassRegistration"] == "PE70DHX"
-    assert arranged_variables["VisitorPassTimeWindow"] == "29 Apr 2026, 14:00 to 29 Apr 2026, 18:00"
-
     used_contexts = visitor_pass_notification_contexts_from_event(
         RealtimeEvent(
             type="visitor_pass.used",
-            payload={"visitor_pass": payload, "source": "alfred"},
+            payload={"visitor_pass": payload, "source": "api"},
             created_at="2026-04-29T15:03:01+01:00",
         )
     )
@@ -676,13 +577,13 @@ def test_gate_malfunction_text_post_processing_strips_duplicate_prefixes() -> No
 
 def test_gate_malfunction_plain_body_is_household_friendly() -> None:
     assert gate_malfunction_plain_body("initial") == (
-        "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
+        "The gate has malfunctioned and is stuck open. Automatic recovery is trying to resolve it."
     )
     assert gate_malfunction_plain_body("30m") == (
-        "The gate is still stuck open. Alfred is still working on it."
+        "The gate is still stuck open. Automatic recovery is still working on it."
     )
     assert gate_malfunction_plain_body("60m") == (
-        "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case."
+        "The gate has been stuck open for about an hour. It is not looking good, but automatic recovery is still running."
     )
     assert gate_malfunction_plain_body("resolved") == (
         "The gate malfunction has been resolved and the gate is closed again."
@@ -701,8 +602,6 @@ async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch
             {"type": "mobile", "gate_malfunction_stages": ["30m"]},
             {"type": "in_app", "gate_malfunction_stages": []},
             {"type": "voice", "gate_malfunction_stages": ["resolved"]},
-            {"type": "discord", "gate_malfunction_stages": ["30m", "resolved"]},
-            {"type": "whatsapp", "gate_malfunction_stages": ["initial"]},
         ],
         NotificationContext(
             event_type=GATE_MALFUNCTION_EVENT_TYPE,
@@ -716,7 +615,7 @@ async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch
         ),
     )
 
-    assert [action["type"] for action in actions] == ["mobile", "in_app", "discord"]
+    assert [action["type"] for action in actions] == ["mobile", "in_app"]
     assert all(action["message"] for action in actions)
 
 
@@ -737,7 +636,7 @@ def test_gate_malfunction_content_is_deterministic_current_behavior() -> None:
     )
 
     assert content["title"] == "Gate malfunction 30 minutes stuck"
-    assert content["body"] == "Attention. Gate Malfunction Update: The gate is still stuck open. Alfred is still working on it."
+    assert content["body"] == "Attention. Gate Malfunction Update: The gate is still stuck open. Automatic recovery is still working on it."
 
 
 async def test_notification_catalog_exposes_single_gate_malfunction_trigger_and_stages(monkeypatch) -> None:
@@ -776,21 +675,6 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
                 "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
                 "actionable": {"enabled": True, "action": "gate.open"},
             },
-            {
-                "type": "discord",
-                "target_mode": "selected",
-                "target_ids": ["discord:123"],
-                "title_template": "@Subject",
-                "message_template": "@Message",
-                "media": {"attach_camera_snapshot": True, "camera_id": "camera-2"},
-            },
-            {
-                "type": "whatsapp",
-                "target_mode": "selected",
-                "target_ids": ["whatsapp:admin:user-1", "whatsapp:number:@AdminPhone"],
-                "title_template": "@Subject",
-                "message_template": "@Message",
-            },
             {"type": "unsupported"},
         ]
     )
@@ -801,14 +685,9 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
         ]
     )
 
-    assert len(actions) == 3
+    assert len(actions) == 1
     assert actions[0]["media"]["attach_camera_snapshot"] is True
     assert actions[0]["actionable"] == {"enabled": True, "action": "gate.open"}
-    assert actions[1]["type"] == "discord"
-    assert actions[1]["target_ids"] == ["discord:123"]
-    assert actions[1]["media"]["camera_id"] == "camera-2"
-    assert actions[2]["type"] == "whatsapp"
-    assert actions[2]["target_ids"] == ["whatsapp:admin:user-1", "whatsapp:number:@AdminPhone"]
     assert len(conditions) == 1
     assert conditions[0]["mode"] == "person_home"
 
@@ -1056,27 +935,6 @@ async def test_mobile_workflow_omits_home_assistant_snapshot_without_public_base
     ]
 
 
-async def test_home_assistant_mobile_action_decides_visitor_timeframe(monkeypatch) -> None:
-    calls = []
-
-    class FakeVisitorConversationService:
-        async def decide_timeframe_request(self, pass_id, request_id, decision, *, integration_action):
-            calls.append((pass_id, request_id, decision, integration_action))
-            return SimpleNamespace(kind="approved")
-
-    monkeypatch.setattr(
-        "app.services.visitor_conversations.get_visitor_conversation_service",
-        lambda: FakeVisitorConversationService(),
-    )
-
-    await HomeAssistantIntegrationService()._handle_mobile_notification_action(
-        {"data": {"action": "iacs:vp_time:allow:pass-1:request-1"}}
-    )
-
-    from app.services.visitor_conversations import HomeAssistantTimeframeAction
-    assert calls == [("pass-1", "request-1", "allow", HomeAssistantTimeframeAction("pass-1", "request-1", "allow"))]
-
-
 async def test_home_assistant_mobile_action_routes_actionable_gate_event(monkeypatch) -> None:
     calls = []
 
@@ -1272,130 +1130,6 @@ async def test_rule_test_endpoint_propagates_delivery_failures(monkeypatch) -> N
     assert "No Apprise endpoints" in str(exc.value.detail)
 
 
-async def test_ai_alert_tool_does_not_report_false_success(monkeypatch) -> None:
-    class FailingNotificationService:
-        async def notify(self, *_args, **_kwargs):
-            raise NotificationDeliveryError("No active notification workflow matched this event.")
-
-    monkeypatch.setattr(alfred_access_diagnostics_handlers, "get_notification_service", lambda: FailingNotificationService())
-
-    result = await alfred_access_diagnostics_handlers.trigger_anomaly_alert(
-        {"subject": "Test anomaly", "severity": "critical", "message": "Something happened", "confirm": True}
-    )
-
-    assert result["sent"] is False
-    assert "No active notification workflow" in result["error"]
-
-
-def test_ai_notification_workflow_tools_are_registered() -> None:
-    tools = alfred_registry.build_agent_tools()
-
-    expected = {
-        "query_notification_catalog",
-        "query_notification_workflows",
-        "get_notification_workflow",
-        "create_notification_workflow",
-        "update_notification_workflow",
-        "delete_notification_workflow",
-        "preview_notification_workflow",
-        "test_notification_workflow",
-    }
-    assert expected.issubset(tools.keys())
-
-
-async def test_ai_preview_notification_workflow_resolves_variables() -> None:
-    result = await alfred_notifications_handlers.preview_notification_workflow(
-        {
-            "rule": {
-                "name": "Preview",
-                "trigger_event": "authorized_entry",
-                "actions": [
-                    {
-                        "type": "in_app",
-                        "title_template": "@FirstName arrived",
-                        "message_template": "@FirstName arrived in the @VehicleName.",
-                    }
-                ],
-            }
-        }
-    )
-
-    assert result["previewed"] is True
-    assert result["preview"]["actions"][0]["title"] == "Steph arrived"
-
-
-async def test_ai_notification_mutation_tools_require_confirmation(monkeypatch) -> None:
-    async def actor(_purpose): return SimpleNamespace(id=uuid.UUID(int=76), auth_session_version=0)
-    async def prepare(*args, **kwargs): return [], "synthetic-config-binding"
-    monkeypatch.setattr(alfred_notifications_handlers, "_require_admin_user", actor)
-    monkeypatch.setattr(alfred_notifications_handlers, "get_notification_service", lambda: SimpleNamespace(prepare_confirmed_delivery=prepare))
-    create_result = await alfred_notifications_handlers.create_notification_workflow(
-        {
-            "name": "Gate arrivals",
-            "trigger_event": "authorized_entry",
-            "actions": [{"type": "in_app"}],
-        }
-    )
-    delete_result = await alfred_notifications_handlers.delete_notification_workflow({"rule_name": "Gate arrivals"})
-    test_result = await alfred_notifications_handlers.test_notification_workflow(
-        {
-            "rule": {
-                "name": "Preview",
-                "trigger_event": "authorized_entry",
-                "actions": [{"type": "in_app"}],
-            }
-        }
-    )
-
-    assert create_result["created"] is False
-    assert create_result["requires_confirmation"] is True
-    assert create_result["confirmation_field"] == "confirm"
-    assert delete_result["deleted"] is False
-    assert delete_result["requires_confirmation"] is True
-    assert delete_result["confirmation_field"] == "confirm"
-    assert test_result["sent"] is False
-    assert test_result["requires_confirmation"] is True
-    assert test_result["confirmation_field"] == "confirm_send"
-
-
-async def test_ai_notification_test_tool_propagates_provider_failure(monkeypatch) -> None:
-    actor = SimpleNamespace(id=uuid.UUID(int=76), auth_session_version=0)
-    operation = uuid.UUID(int=77)
-    class FailingWorkflowService:
-        async def prepare_confirmed_delivery(self, *args, **kwargs): return [], "synthetic-config-binding"
-        async def reserve_confirmed_in_session(self, session, **kwargs):
-            assert kwargs["operation_id"] == operation and kwargs["actor_user_id"] == actor.id
-            return operation, object()
-        async def dispatch_reserved(self, *args, **kwargs):
-            raise NotificationDeliveryError("No Apprise endpoints are configured or selected.")
-    class Session:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def commit(self): pass
-    async def current_actor(_purpose): return actor
-    monkeypatch.setattr(alfred_notifications_handlers, "_require_admin_user", current_actor)
-    monkeypatch.setattr(alfred_notifications_handlers, "AsyncSessionLocal", Session)
-    monkeypatch.setattr(alfred_notifications_handlers, "get_notification_service", lambda: FailingWorkflowService())
-    monkeypatch.setattr(alfred_notifications_handlers, "get_chat_tool_context", lambda: {
-        "intent_id": operation, "approval": {"requester_user_id": str(actor.id), "requester_auth_session_version": 0,
-            "tool_name": "test_notification_workflow", "preview_output": {"prepared_delivery": {
-                "plan": [], "configuration_binding": "synthetic-config-binding"}}}})
-
-    result = await alfred_notifications_handlers.test_notification_workflow(
-        {
-            "confirm_send": True,
-            "rule": {
-                "name": "Mobile",
-                "trigger_event": "authorized_entry",
-                "actions": [{"type": "mobile", "title_template": "@Subject", "message_template": "@Message"}],
-            },
-        }
-    )
-
-    assert result["sent"] is False
-    assert "No Apprise endpoints" in result["error"]
-
-
 async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     async def fake_runtime_config():
         return SimpleNamespace()
@@ -1441,47 +1175,6 @@ async def test_in_app_action_emits_realtime_notification(monkeypatch) -> None:
     assert len(in_app_events) == 1
     assert in_app_events[0].payload["title"] == "Steph arrived"
     assert in_app_events[0].payload["body"] == "Gate opened"
-
-
-async def test_discord_action_routes_through_discord_sender_and_cleans_snapshot(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    snapshot_path = tmp_path / "notification-snapshots" / "snapshot.jpg"
-    snapshot_path.parent.mkdir(parents=True)
-    snapshot_path.write_bytes(b"snapshot")
-    calls = []
-
-    class FakeDiscordService:
-        async def send_notification_action(self, action, context, *, attachment_paths=None, config):
-            calls.append((action, context, list(attachment_paths or []), config))
-            return {"destination_outcomes": [{"target": "123", "delivery": "accepted"}],
-                    "partial_failure": False, "failure_count": 0}
-
-    service = NotificationService()
-
-    async def fake_snapshot_attachments(_media):
-        return [str(snapshot_path)]
-
-    monkeypatch.setattr(service, "_snapshot_attachments", fake_snapshot_attachments)
-    monkeypatch.setattr("app.services.notifications.get_discord_messaging_service", lambda: FakeDiscordService())
-    monkeypatch.setattr("app.services.notifications.discord_config_from_runtime", lambda config: config)
-
-    outcome = await service._send_discord(
-        {
-            "type": "discord",
-            "target_mode": "selected",
-            "target_ids": ["discord:123"],
-            "title": "Gate",
-            "message": "Steph arrived",
-            "media": {"attach_camera_snapshot": True, "camera_id": "camera-1"},
-        },
-        NotificationContext(event_type="authorized_entry", subject="Gate", severity="info", facts={}),
-        SimpleNamespace(),
-    )
-
-    assert calls[0][0]["target_ids"] == ["discord:123"]
-    assert calls[0][2] == [str(snapshot_path)]
-    assert outcome.delivered is True
-    assert not snapshot_path.exists()
 
 
 async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch) -> None:

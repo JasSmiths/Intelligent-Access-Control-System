@@ -16,8 +16,6 @@ import httpx
 from fastapi import FastAPI
 from sqlalchemy import func, select
 
-from app.ai.context import set_chat_tool_context
-from app.ai.tool_groups import schedules_handlers as alfred
 from app.api.dependencies import current_user
 from app.api.v1 import schedules as api
 from app.db.session import AsyncSessionLocal, engine
@@ -50,16 +48,6 @@ async def make_user(role=UserRole.ADMIN, *, active=True):
 
 async def call(channel, action, user, *, data=None, schedule_id=None, confirmed=True):
     data = dict(data or {})
-    if channel == 'alfred':
-        context = set_chat_tool_context({'user_id': str(user.id), 'user_role': user.role.value})
-        try:
-            if schedule_id:
-                data['schedule_id'] = str(schedule_id)
-            data['confirm'] = confirmed
-            return await getattr(alfred, action + '_schedule')(data)
-        finally:
-            set_chat_tool_context({}, token=context)
-
     app = FastAPI()
     app.include_router(api.router, prefix='/api/v1/schedules')
     app.dependency_overrides[current_user] = lambda: user
@@ -99,11 +87,11 @@ async def schedule_count(name):
         return await session.scalar(select(func.count()).select_from(Schedule).where(Schedule.name == name))
 
 
-async def test_api_and_alfred_commit_equivalent_schedule_fields_and_audit():
+async def test_api_commits_schedule_fields_and_audit():
     user = await make_user()
     name = 'Parity-' + uuid.uuid4().hex
     evidence = []
-    for channel in ('api', 'alfred'):
+    for channel in ('api',):
         result = await call(channel, 'create', user, data={'name': '  ' + name + '  ', 'description': '  note  ', 'time_blocks': BLOCKS})
         assert result['created'] is True, result
         schedule_id = result['schedule']['id']
@@ -127,23 +115,12 @@ async def test_api_and_alfred_commit_equivalent_schedule_fields_and_audit():
         # Identity is intentionally generated per create; all business changes match.
         evidence.append([{side: {k: v for k, v in r.diff[side].items() if k != 'id'}
                           for side in ('old', 'new')} for r in rows])
-    assert evidence[0] == evidence[1]
+    assert len(evidence) == 1
 
 
-async def test_alfred_description_only_update_preserves_blocks_and_omitted_name():
-    user = await make_user()
-    created = await call('alfred', 'create', user, data={'name': 'Partial-' + uuid.uuid4().hex, 'time_blocks': BLOCKS})
-    original = created['schedule']
-    changed = await call('alfred', 'update', user, schedule_id=original['id'], data={'description': 'Ordinary maintenance note'})
-    assert changed['updated'] is True
-    row = await schedule_row(original['id'])
-    assert row.name == original['name']
-    assert row.time_blocks == original['time_blocks']
-    assert row.description == 'Ordinary maintenance note'
-    assert (await audit_rows(user.id))[-1].diff == {'old': {'description': None}, 'new': {'description': row.description}}
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 async def test_no_confirmation_creates_no_schedule_or_crud_audit(channel):
     user = await make_user()
     name = 'Unconfirmed-' + uuid.uuid4().hex
@@ -153,7 +130,7 @@ async def test_no_confirmation_creates_no_schedule_or_crud_audit(channel):
     assert await audit_rows(user.id) == []
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('name', ['   ', 'x' * 121])
 async def test_invalid_names_fail_without_persistence(channel, name):
     user = await make_user()
@@ -163,7 +140,7 @@ async def test_invalid_names_fail_without_persistence(channel, name):
     assert await audit_rows(user.id) == []
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 async def test_duplicate_create_and_rename_preserve_existing_records_and_audit(channel):
     user = await make_user()
     name = 'Duplicate-' + uuid.uuid4().hex
@@ -180,7 +157,7 @@ async def test_duplicate_create_and_rename_preserve_existing_records_and_audit(c
     assert await schedule_row(created['schedule']['id']) is not None
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('action', ['update', 'delete'])
 async def test_missing_schedule_returns_not_found_without_audit(channel, action):
     user = await make_user()
@@ -189,7 +166,7 @@ async def test_missing_schedule_returns_not_found_without_audit(channel, action)
     assert await audit_rows(user.id) == []
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('kind', ['person', 'vehicle', 'door'])
 async def test_assigned_schedule_cannot_be_deleted(channel, kind):
     user = await make_user()
@@ -210,7 +187,7 @@ async def test_assigned_schedule_cannot_be_deleted(channel, kind):
     assert len(await audit_rows(user.id)) == 1
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('action', ['create', 'update', 'delete'])
 async def test_audit_failure_rolls_back_mutation(channel, action, monkeypatch):
     user = await make_user()
@@ -234,7 +211,7 @@ async def test_audit_failure_rolls_back_mutation(channel, action, monkeypatch):
         assert (await schedule_row(schedule_id)).name == name
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 async def test_standard_user_cannot_mutate_even_with_confirmation(channel):
     user = await make_user(UserRole.STANDARD)
     name = 'Denied-' + uuid.uuid4().hex
@@ -246,12 +223,12 @@ async def test_standard_user_cannot_mutate_even_with_confirmation(channel):
 
 async def test_concurrent_partial_updates_merge_against_current_locked_state():
     user = await make_user()
-    original = await call('alfred', 'create', user, data={'name': 'Concurrent-' + uuid.uuid4().hex, 'time_blocks': BLOCKS})
+    original = await call('api', 'create', user, data={'name': 'Concurrent-' + uuid.uuid4().hex, 'time_blocks': BLOCKS})
     schedule_id = uuid.UUID(original['schedule']['id'])
 
     async def update(changes):
         async with AsyncSessionLocal() as session:
-            await operations.update_schedule(session, schedule_id, changes, user=user, source='alfred')
+            await operations.update_schedule(session, schedule_id, changes, user=user, source='api')
 
     await asyncio.wait_for(asyncio.gather(update({'name': original['schedule']['name'] + '-new'}),
                                           update({'description': 'Concurrent description'})), timeout=10)
@@ -261,7 +238,7 @@ async def test_concurrent_partial_updates_merge_against_current_locked_state():
     assert len(await audit_rows(user.id)) == 3
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('action', ['update', 'delete'])
 async def test_confirmation_is_required_before_updating_or_deleting(channel, action):
     user = await make_user()
@@ -274,7 +251,7 @@ async def test_confirmation_is_required_before_updating_or_deleting(channel, act
     assert len(await audit_rows(user.id)) == 1
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 async def test_invalid_time_blocks_do_not_create_a_schedule(channel):
     user = await make_user()
     name = 'Invalid-time-' + uuid.uuid4().hex
@@ -286,12 +263,9 @@ async def test_invalid_time_blocks_do_not_create_a_schedule(channel):
     assert await audit_rows(user.id) == []
 
 
-async def test_api_empty_schedule_and_alfred_clarification_are_explicit_channel_policies():
+async def test_api_empty_schedule_is_explicit():
     user = await make_user()
     name = 'Empty-' + uuid.uuid4().hex
-    preview = await call('alfred', 'create', user, data={'name': name, 'time_blocks': {}})
-    assert preview['requires_details'] is True
-    assert await audit_rows(user.id) == []
     created = await call('api', 'create', user, data={'name': name, 'time_blocks': {}})
     assert created['created'] is True
     assert (await schedule_row(created['schedule']['id'])).time_blocks == normalize_time_blocks({})
@@ -313,16 +287,6 @@ async def make_target(kind):
 async def call_assignment(channel, user, target, schedule_id, *, confirmed=True):
     from app.api.v1 import access_devices as devices_api, directory
     kind = 'person' if isinstance(target, Person) else 'vehicle' if isinstance(target, Vehicle) else target.kind
-    if channel == 'alfred':
-        context = set_chat_tool_context({'user_id': str(user.id), 'user_role': user.role.value})
-        try:
-            return await alfred.assign_schedule_to_entity({
-                'entity_type': kind, 'entity_id': target.key if isinstance(target, AccessDevice) else str(target.id),
-                'schedule_id': str(schedule_id) if schedule_id else None,
-                'clear_schedule': schedule_id is None, 'confirm': confirmed,
-            })
-        finally:
-            set_chat_tool_context({}, token=context)
     app = FastAPI()
     app.include_router(directory.router, prefix='/api/v1')
     app.include_router(devices_api.router, prefix='/api/v1/access-devices')
@@ -346,7 +310,7 @@ async def call_assignment(channel, user, target, schedule_id, *, confirmed=True)
 
 
 @pytest.mark.parametrize('kind', ['person', 'vehicle', 'gate', 'garage_door'])
-async def test_assignment_and_clear_share_persistence_and_audit_across_adapters(kind, monkeypatch):
+async def test_api_assignment_and_clear_commit_audited_schedule_changes(kind, monkeypatch):
     from app.services import access_devices
 
     def forbidden_provider(*_args, **_kwargs):
@@ -356,16 +320,12 @@ async def test_assignment_and_clear_share_persistence_and_audit_across_adapters(
     user = await make_user()
     created = await call('api', 'create', user, data={'name': 'Assign-' + uuid.uuid4().hex, 'time_blocks': BLOCKS})
     schedule_id = uuid.UUID(created['schedule']['id'])
-    snapshots = []
-    for channel in ('api', 'alfred'):
+    for channel in ('api',):
         target = await make_target(kind)
         assigned = await call_assignment(channel, user, target, schedule_id)
         assert assigned.get('assigned'), assigned
         async with AsyncSessionLocal() as session:
             assert (await session.get(type(target), target.id)).schedule_id == schedule_id
-        if kind in ('gate', 'garage_door'):
-            listed = await alfred.query_schedule_targets({'entity_type': kind, 'search': target.key})
-            assert listed['doors'][0]['schedule_id'] == str(schedule_id)
         cleared = await call_assignment(channel, user, target, None)
         assert cleared.get('assigned'), cleared
         async with AsyncSessionLocal() as session:
@@ -373,11 +333,13 @@ async def test_assignment_and_clear_share_persistence_and_audit_across_adapters(
         rows = [r for r in await audit_rows(user.id) if r.target_id == str(target.id)]
         assert [r.action for r in rows] == ['schedule.assign', 'schedule.assign']
         assert all(r.actor == actor_from_user(user) and r.metadata_ == {'source': channel} for r in rows)
-        snapshots.append([r.diff for r in rows])
-    assert snapshots[0] == snapshots[1]
+        assert [r.diff for r in rows] == [
+            {"old": {"schedule_id": None}, "new": {"schedule_id": str(schedule_id)}},
+            {"old": {"schedule_id": str(schedule_id)}, "new": {"schedule_id": None}},
+        ]
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('kind', ['person', 'vehicle', 'gate'])
 async def test_unconfirmed_assignment_has_no_persistent_effect(channel, kind):
     user = await make_user()
@@ -390,7 +352,7 @@ async def test_unconfirmed_assignment_has_no_persistent_effect(channel, kind):
     assert not [r for r in await audit_rows(user.id) if r.action == 'schedule.assign']
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('kind', ['person', 'vehicle', 'gate'])
 async def test_assignment_audit_failure_rolls_back_the_target(channel, kind, monkeypatch):
     from app.services import schedule_assignments
@@ -409,7 +371,7 @@ async def test_assignment_audit_failure_rolls_back_the_target(channel, kind, mon
     assert not [r for r in await audit_rows(user.id) if r.action == 'schedule.assign']
 
 
-@pytest.mark.parametrize('channel', ['api', 'alfred'])
+@pytest.mark.parametrize('channel', ['api'])
 @pytest.mark.parametrize('kind', ['person', 'vehicle', 'gate'])
 async def test_missing_assignment_reference_cannot_be_saved(channel, kind):
     user = await make_user()
@@ -436,13 +398,15 @@ async def test_cleared_vehicle_assignment_inherits_owner_schedule():
         row = await session.get(Vehicle, vehicle.id)
         row.person_id = owner.id
         await session.commit()
-    await call_assignment('alfred', user, vehicle, schedule_id)
-    cleared = await call_assignment('alfred', user, vehicle, None)
-    assert cleared['vehicle']['inherits_from_owner'] is True
-    assert cleared['vehicle']['owner_schedule_id'] == str(schedule_id)
+    await call_assignment('api', user, vehicle, schedule_id)
+    cleared = await call_assignment('api', user, vehicle, None)
+    assert cleared['assigned'] is True
+    assert cleared['target']['schedule_id'] is None
+    assert cleared['target']['person_id'] == str(owner.id)
     async with AsyncSessionLocal() as session:
         row = await session.scalar(select(Vehicle).options(selectinload(Vehicle.schedule),
             selectinload(Vehicle.owner).selectinload(Person.schedule)).where(Vehicle.id == vehicle.id))
+        assert row.schedule_id is None and row.owner.schedule_id == schedule_id
         result = await evaluate_vehicle_schedule(session, row, datetime(2026, 1, 5, 9, tzinfo=UTC),
                                                  timezone_name='Europe/London', default_policy='deny')
         assert result.allowed is True
@@ -456,118 +420,4 @@ async def test_invalid_device_schedule_id_is_rejected_instead_of_cleared():
     result = await call_assignment('api', user, target, 'not-a-uuid')
     assert result.get('status') == 400
     assert 'Invalid schedule ID' in result['error']
-    assert await audit_rows(user.id) == []
-
-
-async def call_override(user, person, *, confirmed=True):
-    token = set_chat_tool_context({'user_id': str(user.id), 'user_role': user.role.value})
-    try:
-        return await alfred.override_schedule({
-            'person_id': str(person.id), 'time': '2026-07-06T09:00:00+01:00',
-            'duration_minutes': 60, 'reason': 'Synthetic allowance', 'confirm': confirmed,
-        })
-    finally:
-        set_chat_tool_context({}, token=token)
-
-
-async def overrides_for(person_id):
-    from app.models import ScheduleOverride
-    async with AsyncSessionLocal() as session:
-        return (await session.scalars(select(ScheduleOverride).where(ScheduleOverride.person_id == person_id))).all()
-
-
-async def test_override_preview_has_no_durable_side_effects():
-    user = await make_user()
-    person = await make_target('person')
-    result = await call_override(user, person, confirmed=False)
-    assert result['requires_confirmation'] is True
-    assert await overrides_for(person.id) == []
-    assert await audit_rows(user.id) == []
-
-
-async def test_confirmed_override_commits_with_audit_and_preserves_display(monkeypatch):
-    from datetime import UTC, datetime, timedelta
-    from app.services import schedule_overrides
-    events = []
-
-    async def record_event(name, payload):
-        events.append((name, payload))
-
-    monkeypatch.setattr(schedule_overrides.event_bus, 'publish', record_event)
-    user = await make_user()
-    person = await make_target('person')
-    result = await call_override(user, person)
-    assert result['created'] is True
-    assert result['starts_at'] == '2026-07-06T09:00:00+01:00'
-    rows = await overrides_for(person.id)
-    assert len(rows) == 1
-    assert rows[0].starts_at == datetime(2026, 7, 6, 8, tzinfo=UTC)
-    assert rows[0].ends_at - rows[0].starts_at == timedelta(minutes=60)
-    assert rows[0].created_by_user_id == user.id
-    audit = await audit_rows(user.id)
-    assert len(audit) == 1
-    assert audit[0].action == 'schedule.override.create'
-    assert audit[0].target_id == str(rows[0].id)
-    assert audit[0].actor == actor_from_user(user)
-    assert audit[0].diff['new']['reason'] == 'Synthetic allowance'
-    assert events[0][0] == 'schedule.override_created'
-    assert events[0][1]['override_id'] == str(rows[0].id)
-
-
-async def test_override_audit_failure_rolls_back_override(monkeypatch):
-    from app.services import schedule_overrides
-    user = await make_user()
-    person = await make_target('person')
-
-    async def fail_audit(*_args, **_kwargs):
-        raise RuntimeError('Synthetic override audit failure')
-
-    monkeypatch.setattr(schedule_overrides, 'write_audit_log', fail_audit)
-    with pytest.raises(RuntimeError, match='Synthetic override audit failure'):
-        await call_override(user, person)
-    assert await overrides_for(person.id) == []
-    assert await audit_rows(user.id) == []
-
-
-async def test_committed_override_stays_successful_when_realtime_delivery_fails(monkeypatch):
-    from app.services import schedule_overrides
-    user = await make_user()
-    person = await make_target('person')
-    attempts = []
-
-    async def fail_event(*_args, **_kwargs):
-        attempts.append(True)
-        raise RuntimeError('Synthetic event delivery failure')
-
-    monkeypatch.setattr(schedule_overrides.event_bus, 'publish', fail_event)
-    result = await call_override(user, person)
-    assert result['created'] is True
-    assert len(await overrides_for(person.id)) == 1
-    assert len(await audit_rows(user.id)) == 1
-    assert attempts == [True]
-
-
-async def test_standard_user_cannot_create_an_override():
-    user = await make_user(UserRole.STANDARD)
-    person = await make_target('person')
-    result = await call_override(user, person)
-    assert result['created'] is False
-    assert 'Admin access' in result['error']
-    assert await overrides_for(person.id) == []
-    assert await audit_rows(user.id) == []
-
-
-@pytest.mark.parametrize('minutes,aware', [(0, True), (1441, True), (60, False)])
-async def test_override_operation_rejects_invalid_duration_or_naive_datetime(minutes, aware):
-    from datetime import UTC, datetime
-    from app.services.schedule_overrides import create_schedule_override
-    user = await make_user()
-    person = await make_target('person')
-    async with AsyncSessionLocal() as session:
-        with pytest.raises(operations.ScheduleOperationError) as caught:
-            await create_schedule_override(session, person_id=person.id,
-                starts_at=datetime(2026, 1, 1, tzinfo=UTC if aware else None), duration_minutes=minutes,
-                reason='Synthetic', user=user, source='alfred')
-    assert caught.value.code == 'invalid_override'
-    assert await overrides_for(person.id) == []
     assert await audit_rows(user.id) == []

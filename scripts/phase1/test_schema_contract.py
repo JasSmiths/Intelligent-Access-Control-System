@@ -298,6 +298,7 @@ async def postgres_run(output: Path) -> int:
         rows = inventory()
         first, head = rows[0]["revision"], rows[-1]["revision"]
         pre_recovery = "20260713_0002"
+        pre_retirement = "20261002_0009"
         for fixture_name in (None, "pre_recovery"):
             export_args = [sys.executable, str(Path(__file__).resolve()), "worker", "--export-ddl", str(output)]
             if fixture_name:
@@ -354,22 +355,29 @@ async def postgres_run(output: Path) -> int:
             preserved = retired_settings == 0 and retained_setting == 1 and retained_audit == 1
             record("retired-updater-data-removal", "PASS" if preserved else "FAIL",
                    "Six retired settings are removed while unrelated settings and audit history survive the populated upgrade")
-        if fresh is not None and pre_recovery in staged:
-            if migrate(fresh_db, "downgrade", pre_recovery, output, "roundtrip-downgrade"):
-                downgraded = await capture_schema(asyncpg.connect, fresh_db, output, "downgraded-pre-recovery")
+        # The historical chain still supports its original empty-data roundtrip.
+        # Retirement itself is deliberately restore-only, even for an empty database.
+        prior_db = await create("prior_roundtrip")
+        prior = None
+        if pre_retirement in staged and migrate(prior_db, "upgrade", pre_retirement, output, "prior-roundtrip-create"):
+            prior = await capture_schema(asyncpg.connect, prior_db, output, "prior-head")
+            compare("staged-vs-prior-head", staged[pre_retirement], prior)
+        if prior is not None and pre_recovery in staged:
+            if migrate(prior_db, "downgrade", pre_recovery, output, "roundtrip-downgrade"):
+                downgraded = await capture_schema(asyncpg.connect, prior_db, output, "downgraded-pre-recovery")
                 compare("direct-vs-downgraded-pre-recovery", staged[pre_recovery], downgraded)
-                if migrate(fresh_db, "upgrade", head, output, "roundtrip-upgrade"):
-                    recovered = await capture_schema(asyncpg.connect, fresh_db, output, "roundtrip-head")
-                    compare("fresh-vs-roundtrip-head", fresh, recovered)
+                if migrate(prior_db, "upgrade", pre_retirement, output, "roundtrip-upgrade"):
+                    recovered = await capture_schema(asyncpg.connect, prior_db, output, "roundtrip-prior-head")
+                    compare("prior-vs-roundtrip-prior-head", prior, recovered)
                 else:
-                    record("fresh-vs-roundtrip-head", "FAIL", "Re-upgrade failed")
+                    record("prior-vs-roundtrip-prior-head", "FAIL", "Historical re-upgrade failed")
             else:
-                record("direct-vs-downgraded-pre-recovery", "FAIL", "Empty-data downgrade failed")
+                record("direct-vs-downgraded-pre-recovery", "FAIL", "Historical empty-data downgrade failed")
         else:
-            record("direct-vs-downgraded-pre-recovery", "BLOCKED", "A prerequisite migration failed")
+            record("direct-vs-downgraded-pre-recovery", "BLOCKED", "A prerequisite historical migration failed")
 
-        if head in staged:
-            connection = await asyncpg.connect(scratch_url(staged_db).replace("+asyncpg", ""), timeout=10)
+        if prior is not None:
+            connection = await asyncpg.connect(scratch_url(prior_db).replace("+asyncpg", ""), timeout=10)
             try:
                 await connection.execute("""INSERT INTO notification_runs
                     (id,trigger_event,subject,severity,status,context,delivered_count,failed_count,
@@ -378,20 +386,35 @@ async def postgres_run(output: Path) -> int:
                     'info','queued','{}'::jsonb,0,0,0,'[]'::jsonb,'[]'::jsonb,now(),1)""")
             finally:
                 await connection.close()
-            accepted = migrate(staged_db, "downgrade", pre_recovery, output, "recovery-downgrade-guard")
+            accepted = migrate(prior_db, "downgrade", pre_recovery, output, "recovery-downgrade-guard")
             marker = "Notification recovery records exist" in (output / "recovery-downgrade-guard.log").read_text()
-            after = await capture_schema(asyncpg.connect, staged_db, output, "guard-retained-head")
-            connection = await asyncpg.connect(scratch_url(staged_db).replace("+asyncpg", ""), timeout=10)
+            after = await capture_schema(asyncpg.connect, prior_db, output, "guard-retained-prior-head")
+            connection = await asyncpg.connect(scratch_url(prior_db).replace("+asyncpg", ""), timeout=10)
             try:
                 retained = await connection.fetchval("SELECT recovery_version FROM notification_runs WHERE id='00000000-0000-0000-0000-000000000001'")
                 revision = await connection.fetchval("SELECT version_num FROM alembic_version")
             finally:
                 await connection.close()
-            ok = not accepted and marker and retained == 1 and revision == head and not differences(staged[head], after)
+            ok = not accepted and marker and retained == 1 and revision == pre_retirement and not differences(prior, after)
             record("recovery-downgrade-guard", "PASS" if ok else "FAIL",
-                   "Expected explicit refusal; synthetic eligibility, schema and revision must survive")
+                   "Historical recovery guard refuses downgrade while retaining synthetic eligibility, schema and revision")
         else:
-            record("recovery-downgrade-guard", "BLOCKED", "Staged head migration failed")
+            record("recovery-downgrade-guard", "BLOCKED", "Historical prior-head migration failed")
+
+        if fresh is not None:
+            accepted = migrate(fresh_db, "downgrade", pre_retirement, output, "retirement-downgrade-guard")
+            marker = "matching database/files and image pair" in (output / "retirement-downgrade-guard.log").read_text()
+            after = await capture_schema(asyncpg.connect, fresh_db, output, "guard-retained-current-head")
+            connection = await asyncpg.connect(scratch_url(fresh_db).replace("+asyncpg", ""), timeout=10)
+            try:
+                revision = await connection.fetchval("SELECT version_num FROM alembic_version")
+            finally:
+                await connection.close()
+            ok = not accepted and marker and revision == head and not differences(fresh, after)
+            record("retirement-downgrade-guard", "PASS" if ok else "FAIL",
+                   "Current retirement always requires the matching backup and image pair; empty schema and revision survive refusal")
+        else:
+            record("retirement-downgrade-guard", "BLOCKED", "Fresh current-head migration failed")
 
         sentinel_db = await create("sentinel")
         if migrate(sentinel_db, "upgrade", first, output, "sentinel-upgrade", sentinel=True):
@@ -498,7 +521,7 @@ def worker(args) -> int:
 
         engine = create_mock_engine("postgresql://", capture)
         Base.metadata.create_all(engine, checkfirst=False)
-        upgrades = ["CREATE EXTENSION IF NOT EXISTS vector", *statements]
+        upgrades = (["CREATE EXTENSION IF NOT EXISTS vector"] if args.ddl_model_fixture else []) + statements
         statements.clear()
         downgrade_note = None
         if args.ddl_model_fixture == "initial":

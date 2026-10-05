@@ -1,6 +1,6 @@
 """Notification rule payload and action schema, independent of dispatch and persistence.
 
-CRUD, Alfred previews and notification execution share these normalization rules.
+CRUD, previews and notification execution share these normalization rules.
 This module imports no provider, runtime configuration, chat or ORM owner.
 """
 
@@ -123,7 +123,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         action_type = str(raw.get("type") or "")
-        if action_type not in {"mobile", "voice", "in_app", "discord", "whatsapp"}:
+        if action_type not in {"mobile", "voice", "in_app"}:
             continue
         actions.append(
             {

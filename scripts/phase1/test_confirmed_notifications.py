@@ -8,8 +8,6 @@ from test_recovery_boundaries import isolated_resources as isolated_resources
 
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict, replace
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import uuid
@@ -18,17 +16,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text, update
 
-from app.ai.context import set_chat_tool_context
-from app.ai.tool_groups import notifications_handlers
 from app.api.confirmations import send_confirmed_notification
 from app.api.v1 import integrations as integrations_api
 from app.db.session import AsyncSessionLocal
-from app.models import ActionConfirmation, AlfredApproval, AuditLog, ChatSession, MaintenanceModeState, NotificationRun, SystemSetting, User
+from app.models import ActionConfirmation, AuditLog, MaintenanceModeState, NotificationRun, SystemSetting, User
 from app.models.enums import UserRole
-from app.modules.messaging.whatsapp import WhatsAppIntegrationConfig
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services import action_confirmations, notifications, settings
-from app.services.alfred.approvals import AlfredApprovalStore
 from app.services.mutation_context import MutationError
 from app.services.notification_runs import MAX_DISPATCH_AGE_SECONDS, NotificationRunStore
 from app.services.notifications import NotificationService
@@ -50,7 +44,7 @@ def context():
 
 def direct(kind="voice", *, body=BODY):
     return {"type": kind, "delivery_mode": "literal", "message": body, "title": "Literal {subject}",
-        "target": "media_player.synthetic" if kind == "voice" else "notify.mobile_app_synthetic" if kind == "mobile" else "15550000001"}
+        "target": "media_player.synthetic" if kind == "voice" else "notify.mobile_app_synthetic"}
 
 
 async def set_default_media_player(target):
@@ -89,16 +83,13 @@ async def announce_via_route(user, confirmation_token, *, entity_id=None):
         return await integrations_api.say_announcement(request, user=user, session=session)
 
 
-def ephemeral():
-    return WhatsAppIntegrationConfig(True, "synthetic-unsaved-secret", "synthetic-unsaved-phone", "", "", "",
-        "v25.0", "synthetic_template", "en")
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def confirmed_resources(isolated_resources, monkeypatch):
     async def clear():
         async with AsyncSessionLocal() as session:
-            await session.execute(text("TRUNCATE system_settings, action_confirmations, notification_runs, maintenance_mode_state, alfred_approvals, chat_sessions CASCADE"))
+            await session.execute(text("TRUNCATE system_settings, action_confirmations, notification_runs, maintenance_mode_state CASCADE"))
             await session.commit()
         settings.invalidate_runtime_config_cache()
 
@@ -106,8 +97,7 @@ async def confirmed_resources(isolated_resources, monkeypatch):
     async with AsyncSessionLocal() as session:
         for key, value in {
             "home_assistant_url": "http://synthetic.invalid", "home_assistant_token": "synthetic-saved-ha-secret",
-            "home_assistant_tts_service": "tts.synthetic_say", "whatsapp_enabled": True,
-            "whatsapp_access_token": "synthetic-saved-wa-secret", "whatsapp_phone_number_id": "synthetic-saved-phone",
+            "home_assistant_tts_service": "tts.synthetic_say",
         }.items():
             category, _, description = settings.DEFAULT_DYNAMIC_SETTINGS[key]
             session.add(SystemSetting(key=key, category=category, description=description,
@@ -121,13 +111,9 @@ async def confirmed_resources(isolated_resources, monkeypatch):
 @pytest.fixture
 def delivery(monkeypatch):
     service = NotificationService(run_store=NotificationRunStore())
-    reply = {"messages": [{"id": "synthetic-provider-message"}]}
-    providers = SimpleNamespace(announce=AsyncMock(), mobile=AsyncMock(),
-        text=AsyncMock(return_value=reply), template=AsyncMock(return_value=reply))
+    providers = SimpleNamespace(announce=AsyncMock(), mobile=AsyncMock())
     monkeypatch.setattr(notifications, "HomeAssistantTtsAnnouncer", lambda: SimpleNamespace(announce=providers.announce))
     monkeypatch.setattr(notifications, "HomeAssistantMobileAppNotifier", lambda: SimpleNamespace(send=providers.mobile))
-    monkeypatch.setattr(notifications, "get_whatsapp_delivery_service", lambda: SimpleNamespace(
-        send_text_message=providers.text, send_template_message=providers.template))
     for name in ("publish_planned_outcome", "publish_planned_failure", "publish_plan_completion"):
         monkeypatch.setattr(service, name, AsyncMock())
     yield service, providers
@@ -144,28 +130,26 @@ async def actor():
     return user
 
 
-async def confirmation(user, action, *, ephemeral_config=None):
+async def confirmation(user, action):
     payload = {"action": deepcopy(action)}
-    if ephemeral_config is not None:
-        payload["configuration"] = asdict(ephemeral_config)
     async with AsyncSessionLocal() as session:
         approval = await action_confirmations.create_action_confirmation(session, user=user, action=ACTION, payload=payload)
     return approval, payload
 
 
-async def reserve(service, user, approval, payload, action, *, ephemeral_config=None):
+async def reserve(service, user, approval, payload, action):
     async with AsyncSessionLocal() as session:
         identity, claimed = await service.reserve_confirmed_request(session, user=user, action=ACTION,
             payload=payload, confirmation_token=approval["confirmation_token"], context=context(),
-            direct_action=action, ephemeral_config=ephemeral_config)
+            direct_action=action)
         await session.commit()
     return identity, claimed
 
 
-async def accepted(service, *, kind="voice", ephemeral_config=None):
+async def accepted(service, *, kind="voice"):
     user, action = await actor(), direct(kind)
-    approval, payload = await confirmation(user, action, ephemeral_config=ephemeral_config)
-    identity, claimed = await reserve(service, user, approval, payload, action, ephemeral_config=ephemeral_config)
+    approval, payload = await confirmation(user, action)
+    identity, claimed = await reserve(service, user, approval, payload, action)
     return SimpleNamespace(user=user, action=action, approval=approval, payload=payload, identity=identity, claimed=claimed)
 
 
@@ -173,7 +157,7 @@ async def snapshot():
     async with AsyncSessionLocal() as session:
         return {model.__tablename__: [dict(row) for row in (await session.execute(
             select(model.__table__).order_by(model.id if hasattr(model, "id") else model.key))).mappings()]
-            for model in (ActionConfirmation, AlfredApproval, AuditLog, NotificationRun, SystemSetting)}
+            for model in (ActionConfirmation, AuditLog, NotificationRun, SystemSetting)}
 
 
 async def expire(identity):
@@ -267,14 +251,14 @@ async def test_duplicate_stable_origin_retains_claim_plan_timestamps_and_audit(d
     before = await snapshot()
     async with AsyncSessionLocal() as session:
         identity, claim = await service.reserve_confirmed_in_session(session, actor_user_id=data.user.id,
-            auth_version=data.user.auth_session_version, operation_id=data.approval["confirmation_id"], authority="api",
+            auth_version=data.user.auth_session_version, operation_id=data.approval["confirmation_id"],
             action=ACTION, context=context(), direct_action=data.action)
         await session.commit()
     assert identity == data.identity and claim is None
     assert await snapshot() == before
 
 
-@pytest.mark.parametrize("change", ["other_actor", "unconsumed", "wrong_action", "unsupported_authority"])
+@pytest.mark.parametrize("change", ["other_actor", "unconsumed", "wrong_action"])
 async def test_confirmed_origin_requires_the_actual_consumed_requester_bound_approval(delivery, change):
     service, providers = delivery
     data = await accepted(service)
@@ -290,7 +274,6 @@ async def test_confirmed_origin_requires_the_actual_consumed_requester_bound_app
         async with AsyncSessionLocal() as session:
             await service.reserve_confirmed_in_session(session, actor_user_id=user.id,
                 auth_version=user.auth_session_version, operation_id=data.approval["confirmation_id"],
-                authority="unsupported" if change == "unsupported_authority" else "api",
                 action="different.action" if change == "wrong_action" else ACTION,
                 context=context(), direct_action=data.action)
             await session.commit()
@@ -308,7 +291,7 @@ async def test_prepared_duplicate_origin_cannot_rebind_content_or_authority(deli
     if change in {"message", "target"}:
         plan[0]["action"][change] += " changed"
     else:
-        payload["confirmed_delivery"]["user_id" if change == "actor" else "authority"] = str(uuid.uuid4()) if change == "actor" else "alfred"
+        payload["confirmed_delivery"]["user_id" if change == "actor" else "authority"] = str(uuid.uuid4()) if change == "actor" else "unsupported"
     before = await snapshot()
     with pytest.raises(ValueError, match="different content or authority"):
         async with AsyncSessionLocal() as session:
@@ -406,31 +389,9 @@ async def test_attempted_delivery_interruption_requires_review_and_never_replays
     providers.announce.assert_awaited_once()
 
 
-@pytest.mark.parametrize("supplied", ["same", "missing", "changed"])
-async def test_unsaved_configuration_stays_in_memory_and_only_the_exact_approved_snapshot_can_send(delivery, supplied):
-    service, providers = delivery
-    config = ephemeral()
-    data = await accepted(service, kind="whatsapp", ephemeral_config=config)
-    serialized = json.dumps(await snapshot(), default=str)
-    assert config.access_token not in serialized and config.phone_number_id not in serialized
-    assert data.claimed.context["confirmed_delivery"]["ephemeral_config"] is True
-    supplied_config = config if supplied == "same" else None if supplied == "missing" else replace(config, phone_number_id="synthetic-rebound-phone")
-    await service.dispatch_reserved(data.identity, data.claimed, ephemeral_config=supplied_config)
-    row = await service.run_store.get(data.identity)
-    if supplied == "same":
-        assert row.status == "provider_accepted"
-        providers.text.assert_awaited_once_with("15550000001", BODY, config=config)
-        assert providers.text.await_args.kwargs["config"] is config
-    else:
-        providers.text.assert_not_awaited()
-        assert row.status in {"review_required", "skipped"} and row.delivered_count == 0
-        if supplied == "missing":
-            assert row.status == "review_required" and row.review_reason == "ephemeral_configuration_unavailable"
-        assert not await service.dispatcher.run_once(data.identity)
-    assert config.access_token not in json.dumps(await snapshot(), default=str)
 
 
-@pytest.mark.parametrize("kind", ["voice", "mobile", "whatsapp"])
+@pytest.mark.parametrize("kind", ["voice", "mobile"])
 async def test_literal_body_and_validated_configuration_reach_transport_unchanged(delivery, monkeypatch, kind):
     service, providers = delivery
     data = await accepted(service, kind=kind)
@@ -447,17 +408,12 @@ async def test_literal_body_and_validated_configuration_reach_transport_unchange
     await service.dispatch_reserved(data.identity, data.claimed)
     row = await service.run_store.get(data.identity)
     assert row.status == "provider_accepted" and snapshots and snapshots[-1] is not None
-    provider = providers.announce if kind == "voice" else providers.mobile if kind == "mobile" else providers.text
+    provider = providers.announce if kind == "voice" else providers.mobile
     provider.assert_awaited_once()
     args, kwargs = provider.await_args
     assert args[1 if kind != "mobile" else 2] == BODY
-    if kind != "whatsapp":
-        assert kwargs["runtime_config"] is snapshots[-1]
-        assert kwargs["runtime_config"].home_assistant_token == "synthetic-saved-ha-secret"
-    else:
-        assert kwargs["config"].access_token == snapshots[-1].whatsapp_access_token
-        assert kwargs["config"].phone_number_id == snapshots[-1].whatsapp_phone_number_id
-        assert row.delivery_plan[0]["provider_message_id"] == "synthetic-provider-message"
+    assert kwargs["runtime_config"] is snapshots[-1]
+    assert kwargs["runtime_config"].home_assistant_token == "synthetic-saved-ha-secret"
 
 
 @pytest.mark.parametrize("kind", ["voice", "mobile"])
@@ -593,84 +549,6 @@ async def test_config_changed_while_dispatch_waits_for_authority_or_final_run_lo
                    for config, denial in validated[:-1])
 
 
-@pytest.mark.parametrize("case", ["matching", "matching_unsaved_no_id", "wrong_context_tool", "wrong_stored_tool", "old_preview", "changed_body"])
-async def test_actual_claimed_alfred_notification_requires_the_current_tool_and_exact_preview(delivery, monkeypatch, case):
-    """Use the real approval store, handler, prepared journal and inert provider.
-
-    A forged context for a different durable tool still has to pass the stored
-    approval owner. Historical previews without a prepared delivery cannot send.
-    """
-    service, providers = delivery
-    user = await actor()
-    monkeypatch.setattr(notifications_handlers, "get_notification_service", lambda: service)
-    monkeypatch.setattr(service, "_voice_announcements_preflight", AsyncMock(return_value=None))
-    async with AsyncSessionLocal() as session:
-        conversation = ChatSession(title="Synthetic notification approval", context={})
-        session.add(conversation)
-        await session.commit()
-    arguments = {
-        "rule": {"id": str(uuid.uuid4()), "name": "Synthetic notification approval",
-            "trigger_event": "integration_test", "conditions": [], "is_active": True,
-            "actions": [{"id": "synthetic-voice", "type": "voice", "target_mode": "selected",
-                "target_ids": ["home_assistant_tts:media_player.synthetic"],
-                "title_template": "Synthetic title", "message_template": "Synthetic approved body"}]},
-        "context": {"event_type": "integration_test", "subject": "Synthetic notification approval",
-            "severity": "info", "facts": {}},
-    }
-    if case == "matching_unsaved_no_id":
-        arguments["rule"].pop("id")
-    actor_context = {"user_id": str(user.id), "user_role": "admin", "session_id": str(conversation.id)}
-    context_token = set_chat_tool_context(actor_context)
-    try:
-        preview = await notifications_handlers.test_notification_workflow(arguments)
-    finally:
-        set_chat_tool_context({}, token=context_token)
-    assert preview["requires_confirmation"] and not preview["sent"]
-    assert preview["prepared_delivery"]["plan"][0]["action"]["frozen_voice_targets"] == ["media_player.synthetic"]
-    providers.announce.assert_not_awaited()
-    if case == "old_preview":
-        preview = {key: value for key, value in preview.items() if key != "prepared_delivery"}
-    stored_tool = "query_notification_catalog" if case == "wrong_stored_tool" else "test_notification_workflow"
-    store = AlfredApprovalStore()
-    approval = await store.create(conversation.id, str(user.id), {
-        "tool_name": stored_tool, "arguments": deepcopy(arguments), "preview_output": preview,
-    })
-    decision = await store.decide(conversation.id, approval.id, str(user.id), confirm=True)
-    assert decision.status == "claimed" and decision.approval is not None
-    claimed = decision.approval
-    request_context = {**actor_context, "intent_id": str(claimed.operation_id), "approval": {
-        "confirmation_id": claimed.id, "operation_id": str(claimed.operation_id),
-        "requester_user_id": str(claimed.requester_user_id),
-        "requester_auth_session_version": claimed.requester_auth_session_version,
-        # The wrong-stored-tool case deliberately forges this context; the
-        # durable approval remains the authoritative independent check.
-        "tool_name": "query_notification_catalog" if case == "wrong_context_tool" else "test_notification_workflow",
-        "arguments": claimed.payload["arguments"], "preview_output": claimed.payload["preview_output"],
-    }}
-    before = await snapshot()
-    invocation = deepcopy(arguments)
-    invocation["confirm_send"] = True
-    if case == "changed_body":
-        invocation["rule"]["actions"][0]["message_template"] = "Synthetic unapproved changed body"
-    context_token = set_chat_tool_context(request_context)
-    try:
-        result = await notifications_handlers.test_notification_workflow(invocation)
-    finally:
-        set_chat_tool_context({}, token=context_token)
-    if case in {"matching", "matching_unsaved_no_id"}:
-        identity = uuid.uuid5(claimed.operation_id, "notification-delivery")
-        assert result["sent"] and result["delivery_status"] == "sent"
-        assert result["notification_run_id"] == str(identity)
-        row = await service.run_store.get(identity)
-        assert row.status == "provider_accepted" and row.delivered_count == 1
-        assert row.context["confirmed_delivery"]["authority"] == "alfred"
-        assert row.context["confirmed_delivery"]["operation_id"] == str(claimed.operation_id)
-        providers.announce.assert_awaited_once()
-        assert providers.announce.await_args.args[1] == "Synthetic approved body"
-    else:
-        assert result["sent"] is False and result["error"]
-        assert await snapshot() == before, "Rejected Alfred input changed a durable approval, audit or delivery run"
-        providers.announce.assert_not_awaited()
 
 
 async def test_default_announcement_service_rejects_stale_preparation_before_confirmation_consumption(delivery, monkeypatch):
@@ -788,7 +666,7 @@ async def test_announcement_route_rejects_default_changed_after_cached_lookup_be
     assert caught.value.delivery == "not_sent"
     assert observed == ["media_player.nr02_a"]
     after = await snapshot()
-    for table in ("action_confirmations", "alfred_approvals", "audit_logs", "notification_runs"):
+    for table in ("action_confirmations", "audit_logs", "notification_runs"):
         assert after[table] == before[table]
     async with AsyncSessionLocal() as session:
         confirmation = await session.get(ActionConfirmation, uuid.UUID(approval["confirmation_id"]))

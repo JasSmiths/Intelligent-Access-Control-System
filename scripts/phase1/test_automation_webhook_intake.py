@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock
 import uuid
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 
 from app.db.session import AsyncSessionLocal
-from app.models import AutomationRule, AutomationRun, AutomationWebhookNonce, AutomationWebhookSender, NotificationRun
+from app.models import AutomationRule, AutomationRun, AutomationWebhookNonce, AutomationWebhookSender, NotificationRule
 from app.services import automation_integration_actions, automations
 
 pytestmark = pytest.mark.asyncio
@@ -24,12 +24,16 @@ BODY = b'{"message":"Synthetic webhook","eligible_rule_ids":["body-is-not-author
 
 async def setup(monkeypatch, *, require_hmac=True, trigger="webhook.received", sources=None):
     async with AsyncSessionLocal() as session:
-        await session.execute(text("TRUNCATE automation_webhook_senders, automation_webhook_nonces, notification_runs CASCADE"))
+        await session.execute(text("TRUNCATE automation_webhook_senders, automation_webhook_nonces, notification_rules, notification_runs CASCADE"))
+        notice = NotificationRule(name="Synthetic webhook target", trigger_event="authorized_entry",
+            conditions=[], actions=[{"type": "in_app"}], is_active=True)
+        session.add(notice)
+        await session.flush()
         row = AutomationRule(name="Synthetic webhook rule", is_active=True,
             triggers=[{"id": "receive", "type": trigger, "config": {
                 "webhook_key": KEY, "require_hmac": require_hmac, "allowed_source_ips": sources or [],
             }}], trigger_keys=[trigger], conditions=[], actions=[{
-                "id": "notify", "type": "integration.whatsapp.send_message", "config": {"target_mode": "all"}}])
+                "id": "notify", "type": "notification.disable", "config": {"notification_rule_id": str(notice.id)}}])
         session.add(row)
         await session.commit()
         identity = row.id
@@ -121,18 +125,23 @@ async def test_lost_wakeup_keeps_durable_occurrence_recoverable(monkeypatch):
     fresh = automations.AutomationService()
     assert await fresh.dispatcher.run_once(runs[0].id)
     async with AsyncSessionLocal() as session:
-        assert await session.scalar(select(func.count()).select_from(NotificationRun)) == 1
+        notice = await session.scalar(select(NotificationRule))
+        assert notice.is_active is False
         recovered = await session.get(AutomationRun, runs[0].id)
         assert recovered.status == "success" and recovered.action_plan[0]["state"] == "succeeded"
+        assert recovered.action_results[0]["notification_rule_id"] == str(notice.id)
+        assert recovered.action_results[0]["is_active"] is False
+    assert await fresh.dispatcher.run_once(runs[0].id) is False
 
 
 async def test_shared_key_never_borrows_another_rules_source_authorization(monkeypatch):
     service, allowed = await setup(monkeypatch, require_hmac=False, sources=[SOURCE])
     async with AsyncSessionLocal() as session:
+        notice = await session.scalar(select(NotificationRule))
         other = AutomationRule(name="Synthetic restricted source", is_active=True,
             triggers=[{"id": "receive", "type": "webhook.received", "config": {
                 "webhook_key": KEY, "allowed_source_ips": ["198.51.100.20"], "require_hmac": False}}],
-            trigger_keys=["webhook.received"], conditions=[], actions=[{"id": "notice", "type": "integration.whatsapp.send_message", "config": {"target_mode": "all"}}])
+            trigger_keys=["webhook.received"], conditions=[], actions=[{"id": "notice", "type": "notification.disable", "config": {"notification_rule_id": str(notice.id)}}])
         session.add(other)
         await session.commit()
         denied = other.id
@@ -151,7 +160,7 @@ async def test_shared_key_never_borrows_another_rules_source_authorization(monke
         retained = await session.get(AutomationRun, runs[0].id)
         assert retained.action_plan[0]["state"] == "skipped" and retained.review_reason
         assert retained.action_results[0]["reason"] == "rule_changed_since_occurrence"
-        assert await session.scalar(select(func.count()).select_from(NotificationRun)) == 0
+        assert (await session.scalar(select(NotificationRule))).is_active is True
 
 
 async def test_unrecognized_and_new_sender_occurrences_share_acceptance_transaction(monkeypatch):

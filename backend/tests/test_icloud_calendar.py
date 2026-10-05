@@ -6,8 +6,6 @@ import uuid
 
 import pytest
 
-import app.services.icloud_calendar as icloud_calendar_module
-from app.ai.tool_groups import visitor_passes_handlers as alfred_visitor_passes_handlers
 from app.models import VisitorPass
 from app.models.enums import VisitorPassStatus
 from app.modules.icloud_calendar.client import (
@@ -69,41 +67,17 @@ def test_calendar_visitor_name_fallback_extracts_person_from_prefixed_title() ->
     assert fallback_visitor_name_from_calendar_title("Memory Clinic: Vicky Thompson") == "Vicky Thompson"
 
 
-@pytest.mark.asyncio
-async def test_calendar_visitor_name_uses_llm_json_response(monkeypatch) -> None:
-    class FakeProvider:
-        name = "fake"
-
-        async def complete(self, messages, tools=None, tool_results=None, **_options):
-            assert "Memory Clinic: Vicky Thompson" in messages[-1].content
-            return SimpleNamespace(text='{"visitor_name":"Vicky Thompson"}')
-
-    async def fake_runtime_config():
-        return SimpleNamespace(
-            llm_provider="openai",
-            openai_api_key="test-key",
-            gemini_api_key="",
-            anthropic_api_key="",
-        )
-
-    monkeypatch.setattr(icloud_calendar_module, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(icloud_calendar_module, "get_llm_provider", lambda provider_name: FakeProvider())
-
-    result = await calendar_visitor_name_for_event(calendar_event(title="Memory Clinic: Vicky Thompson"))
-
-    assert result.visitor_name == "Vicky Thompson"
-    assert result.source == "llm"
 
 
 def test_calendar_source_metadata_keeps_original_title_and_extracted_name() -> None:
     account = SimpleNamespace(id=uuid.uuid4(), apple_id="jas@example.com")
     event = calendar_event(title="Memory Clinic: Vicky Thompson")
 
-    metadata = source_metadata_for_event(account, event, visitor_name="Vicky Thompson", visitor_name_source="llm")
+    metadata = source_metadata_for_event(account, event, visitor_name="Vicky Thompson", visitor_name_source="fallback")
 
     assert metadata["event_title"] == "Memory Clinic: Vicky Thompson"
     assert metadata["visitor_name"] == "Vicky Thompson"
-    assert metadata["visitor_name_source"] == "llm"
+    assert metadata["visitor_name_source"] == "fallback"
 
 
 def test_icloud_event_normalizer_accepts_apple_date_arrays_and_private_comments() -> None:
@@ -331,16 +305,10 @@ async def test_bad_icloud_verification_code_keeps_handshake_for_retry() -> None:
     assert "handshake" in service._pending
 
 
+
+
 @pytest.mark.asyncio
-async def test_alfred_icloud_sync_requires_confirmation(monkeypatch) -> None:
-    from app.ai.tool_groups import visitor_passes_handlers
-
-    def forbidden_calendar_service():
-        raise AssertionError("Unconfirmed sync must not contact iCloud.")
-
-    monkeypatch.setattr(visitor_passes_handlers, "get_icloud_calendar_service", forbidden_calendar_service)
-    result = await alfred_visitor_passes_handlers.trigger_icloud_sync({"confirm": False})
-
-    assert result["requires_confirmation"] is True
-    assert result["confirmation_field"] == "confirm"
-    assert result["target"] == "iCloud Calendar"
+async def test_calendar_visitor_name_uses_title_fallback() -> None:
+    result = await calendar_visitor_name_for_event(calendar_event(title="Memory Clinic: Vicky Thompson"))
+    assert result.visitor_name == "Vicky Thompson"
+    assert result.source == "fallback"

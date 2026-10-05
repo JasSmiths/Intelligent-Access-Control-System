@@ -8,7 +8,7 @@ const accessImpact: Impact = {
   keys: ["presence", "expectedPresence", "events", "vehicles", "people", "anomalies"],
   views: ["movements", "alerts", "logs", "settings_missed_exit_recovery"]
 };
-const settingsViews: ViewKey[] = ["schedules", "settings_general", "settings_missed_exit_recovery", "settings_gates", "settings_garage_doors", "settings_auth", "settings_lpr", "settings_zones", "integrations", "alfred_training", "settings_notifications", "settings_automations"];
+const settingsViews: ViewKey[] = ["schedules", "settings_general", "settings_missed_exit_recovery", "settings_gates", "settings_garage_doors", "settings_auth", "settings_lpr", "settings_zones", "integrations", "settings_notifications", "settings_automations"];
 const auditImpacts: Record<string, Impact> = {
   access_device: { keys: ["integrationStatus", "people", "schedules"], views: ["settings_gates", "settings_garage_doors", "settings_automations", "settings_notifications", "integrations"] },
   esphome: { keys: ["integrationStatus"], views: ["settings_gates", "settings_garage_doors", "integrations"] },

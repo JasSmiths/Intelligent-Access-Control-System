@@ -38,10 +38,9 @@ class RecoveryProfileTests(unittest.TestCase):
         args = arguments(['--mode', 'full', '--allow-downloads'])
         selected = dict(recovery_checks.persistence_checks(args))
         required = {
-            'test_access_pipeline.py', 'test_alfred_approval_persistence.py',
+            'test_access_pipeline.py', 'test_feature_retirement.py',
             'test_confirmed_notifications.py', 'test_movement_admission.py',
             'test_visitor_reservation_recovery.py', 'test_automation_admission_order.py',
-            'test_incoming_messages.py', 'test_whatsapp_inbox.py', 'test_feedback_recovery.py',
             'test_delivery_schema_compatibility.py', 'test_access_device_command_journal.py',
         }
         self.assertTrue(required <= {Path(path).name for path in selected})
@@ -99,7 +98,7 @@ class RecoveryProfileTests(unittest.TestCase):
                 recovery_checks.pytest_arguments(invalid)
 
     def test_ci_uses_default_full_inventory_and_uploads_nested_recovery_artifacts(self):
-        workflow = (ROOT / '.github/workflows/backend-alfred.yml').read_text()
+        workflow = (ROOT / '.github/workflows/project-checks.yml').read_text()
         step = workflow.split('name: Run the same isolated locked checks as local development', 1)[1]
         step = step.split('      - name:', 1)[0]
         self.assertIn('scripts/phase1/validate.py --mode full --allow-downloads', step)

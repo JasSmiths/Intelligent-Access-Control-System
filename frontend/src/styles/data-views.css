@@ -5,26 +5,26 @@
 .alerts-controls {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .alert-status-tabs {
   display: inline-flex;
+  height: 40px;
   gap: 4px;
-  padding: 4px;
+  padding: 3px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
 }
 
 .alert-status-tabs button {
-  min-height: 30px;
+  min-height: 32px;
   padding: 0 12px;
   border: 0;
   border-radius: 6px;
@@ -37,22 +37,73 @@
 .alert-status-tabs button.active {
   background: var(--surface);
   color: var(--text);
-  box-shadow: var(--shadow);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .alerts-search {
   flex: 1 1 280px;
   width: auto;
+  height: 40px;
+  min-width: 0;
+}
+
+.alerts-controls .alerts-search input::placeholder {
+  color: var(--muted);
+}
+
+.alerts-select {
+  position: relative;
 }
 
 .alerts-controls select {
-  min-height: 36px;
+  appearance: none;
+  height: 40px;
+  min-height: 40px;
+  width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0 10px;
+  padding: 0 34px 0 12px;
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
+}
+
+.alerts-select > svg {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.alerts-controls .history-date-range {
+  flex: 0 1 280px;
+  min-width: 0;
+  gap: 12px;
+}
+
+.alerts-controls .history-date-field {
+  min-width: 0;
+}
+
+.alerts-controls .history-date-field input {
+  height: 40px;
+  min-height: 40px;
+  width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.alerts-controls > .secondary-button {
+  min-height: 40px;
+}
+
+@media (max-width: 360px) {
+  .alerts-controls .history-date-range {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .alerts-list {
@@ -1006,7 +1057,7 @@ tr:last-child td {
 .reports-page {
   display: grid;
   gap: 10px;
-  padding: 20px max(28px, var(--safe-right)) calc(max(30px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) 28px;
+  padding: 20px max(28px, var(--safe-right)) max(30px, var(--safe-bottom)) 28px;
 }
 
 .reports-page-head {
@@ -2370,7 +2421,7 @@ tr:last-child td {
 @media (max-width: 760px) {
   .reports-page {
     overflow-x: hidden;
-    padding: 18px max(14px, var(--safe-right)) calc(max(22px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) max(14px, var(--safe-left));
+    padding: 18px max(14px, var(--safe-right)) max(22px, var(--safe-bottom)) max(14px, var(--safe-left));
   }
 
   .report-builder-panel,
@@ -2540,221 +2591,6 @@ tr:last-child td {
     max-width: 44px;
     font-size: 10px;
   }
-}
-
-.alfred-training-page {
-  gap: 14px;
-}
-
-.alfred-training-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.alfred-training-mode-card {
-  min-height: auto;
-}
-
-.alfred-learning-mode {
-  display: inline-flex;
-  gap: 6px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.alfred-learning-mode button {
-  min-height: 34px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 620;
-  padding: 0 12px;
-}
-
-.alfred-learning-mode button.active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
-}
-
-.alfred-training-grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 1.1fr) repeat(2, minmax(260px, 0.95fr));
-  gap: 14px;
-}
-
-.alfred-training-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  max-width: 520px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.alfred-training-tabs button {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.alfred-training-tabs button.active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
-}
-
-.alfred-training-tabs strong {
-  min-width: 22px;
-  min-height: 22px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--blue-soft);
-  color: var(--blue-strong);
-  font-size: 11px;
-}
-
-.alfred-training-list {
-  display: grid;
-  gap: 10px;
-}
-
-.alfred-training-item {
-  display: grid;
-  gap: 9px;
-  padding: 11px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.alfred-training-item.compact {
-  gap: 7px;
-}
-
-.alfred-training-item.learned {
-  border-color: color-mix(in srgb, var(--green) 28%, var(--line));
-}
-
-.alfred-training-item input,
-.alfred-training-item textarea {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.4;
-  padding: 8px 9px;
-}
-
-.alfred-training-item input {
-  font-weight: 650;
-}
-
-.alfred-training-item p {
-  color: var(--muted-strong);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.alfred-feedback-heading {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-}
-
-.alfred-feedback-heading strong {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.alfred-linked-record {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 30px;
-  padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--blue) 20%, var(--line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--blue-soft) 45%, var(--surface));
-  color: var(--muted-strong);
-  font-size: 12px;
-}
-
-.alfred-linked-record span:not(.badge):not(.badge-label) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.alfred-training-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.alfred-training-source {
-  max-width: min(100%, 220px);
-  min-height: 22px;
-  display: inline-flex;
-  align-items: center;
-  overflow: hidden;
-  padding: 0 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--muted-strong);
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.alfred-training-source.user_feedback,
-.alfred-training-source.manual_training {
-  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
-  background: color-mix(in srgb, var(--blue-soft) 58%, var(--surface));
-  color: var(--blue-strong);
-}
-
-.alfred-training-source.self_learning {
-  border-color: color-mix(in srgb, var(--violet) 28%, var(--line));
-  background: color-mix(in srgb, var(--violet) 12%, var(--surface));
-  color: var(--violet);
-}
-
-.alfred-training-source.seed {
-  border-color: color-mix(in srgb, var(--amber) 32%, var(--line));
-  background: color-mix(in srgb, var(--amber-soft) 55%, var(--surface));
-  color: var(--amber);
 }
 
 .settings-list {
@@ -3313,25 +3149,6 @@ tr:last-child td {
   }
 }
 
-@media (max-width: 1100px) {
-  .alfred-training-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 640px) {
-  .alfred-training-actions {
-    align-items: stretch;
-    flex-direction: column;
-    width: 100%;
-  }
-
-  .alfred-learning-mode {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-}
-
 .history-filters {
   display: flex;
   flex-wrap: wrap;
@@ -3366,27 +3183,6 @@ tr:last-child td {
   padding: 0 10px;
   background: var(--surface);
   color: var(--text);
-}
-
-.alfred-training-panel {
-  min-height: 0;
-}
-
-.alfred-training-field {
-  display: grid;
-  gap: 5px;
-  color: var(--muted-strong);
-  font-size: 12px;
-}
-
-.alfred-training-field input,
-.alfred-training-field textarea {
-  width: 100%;
-}
-
-.alfred-training-panel .empty-state.compact {
-  min-height: 68px;
-  padding: 14px;
 }
 
 .history-filters input,
@@ -3440,10 +3236,6 @@ tr:last-child td {
 .movement-detail-panel strong,
 .movement-detail-panel span {
   overflow-wrap: anywhere;
-}
-
-body:has(.movements-view .movement-detail-panel:not(.movement-detail-empty)) .chat-teaser {
-  display: none;
 }
 
 @media (min-width: 981px) {

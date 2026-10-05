@@ -1,5 +1,4 @@
 import asyncio
-import re
 import uuid
 import copy
 from dataclasses import dataclass, field, replace
@@ -34,7 +33,7 @@ from app.modules.notifications.base import (
 from app.services.actionable_notifications import (
     get_actionable_notification_service,
 )
-from app.services.workflows.notification_payloads import notification_context_payload, trigger_severity, _duration_label_from_seconds
+from app.services.workflows.notification_payloads import notification_context_payload, trigger_severity
 from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
 from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
@@ -42,12 +41,18 @@ from app.services.automation_authorization import notification_origin_denial
 from app.services.access.authorization import assert_current_recognition_domain_authorization
 from app.services.notification_runs import NotificationActionAuthorization, NotificationRunStore
 from app.services.notification_dispatch import NotificationDispatcher
+from app.services.notification_rendering import (
+    composed_from_context,
+    context_variables,
+    context_occurred_at,
+    snapshot_payload,
+    gate_malfunction_notification_content,
+)
 from app.services.notification_requests import (
-    configuration_binding, confirmed_origin, confirmed_attempt_denial, ephemeral_configuration_binding,
+    configuration_binding, confirmed_origin, confirmed_attempt_denial,
 )
 from app.services.action_confirmations import consume_action_confirmation
 from app.services.mutation_context import load_active_admin
-from app.services.discord_messaging import discord_config_from_runtime, get_discord_messaging_service
 from app.services.snapshots import get_snapshot_manager
 from app.services.schedules import schedule_allows_at
 from app.services.settings import get_runtime_config, get_runtime_config_for_session
@@ -55,9 +60,6 @@ from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry, w
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.type_helpers import as_dict
 from app.services.unifi_protect import get_unifi_protect_service
-from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
-from app.services.messaging.whatsapp_helpers import visitor_pass_timeframe_button_id
-from app.services.visitor_conversations import get_visitor_conversation_service
 from app.services.workflows.catalog import (
     GATE_MALFUNCTION_EVENT_TYPE,
     INTEGRATION_DEGRADED_EVENT_TYPE,
@@ -65,8 +67,7 @@ from app.services.workflows.catalog import (
     notification_trigger_catalog,
     notification_variable_groups,
 )
-from app.services.workflows.context import canonical_key, normalize_string_list, render_template
-from app.services.workflows.vehicle_away import vehicle_time_away_label
+from app.services.workflows.context import normalize_string_list, render_template
 from app.services.workflows.template_recipients import content_for_recipient, recipient_content
 from app.services.workflows import notification_payloads
 
@@ -81,8 +82,6 @@ def _home_assistant_client() -> DefaultHomeAssistantClient:
     if HomeAssistantClient is DefaultHomeAssistantClient:
         return get_home_assistant_client()
     return HomeAssistantClient()
-GATE_MALFUNCTION_UPDATE_PREFIX = "Gate Malfunction Update:"
-GATE_MALFUNCTION_VOICE_PREFIX = "Attention."
 
 
 @dataclass
@@ -180,12 +179,6 @@ MOCK_FACTS = {
     "visitor_pass_vehicle_make": "Peugeot",
     "visitor_pass_vehicle_colour": "Silver",
     "visitor_pass_duration_on_site": "1h 25m",
-    "visitor_pass_current_window": "01 May 2026, 10:00 to 01 May 2026, 18:00",
-    "visitor_pass_requested_window": "01 May 2026, 10:00 to 01 May 2026, 20:00",
-    "visitor_pass_original_time": "01 May 2026, 10:00 to 01 May 2026, 18:00",
-    "visitor_pass_requested_time": "01 May 2026, 10:00 to 01 May 2026, 20:00",
-    "visitor_pass_timeframe_request_id": "request-1",
-    "visitor_pass_visitor_message": "Can I stay two hours longer?",
 }
 
 
@@ -261,8 +254,6 @@ class NotificationService:
         mobile_endpoints.extend(home_assistant_mobile_endpoints)
 
         voice_endpoints = await self._voice_endpoint_catalog(config)
-        discord_endpoints = await self._discord_endpoint_catalog()
-        whatsapp_endpoints = await self._whatsapp_endpoint_catalog()
         return [
             {
                 "id": "mobile",
@@ -291,20 +282,6 @@ class NotificationService:
                 "provider": "Home Assistant TTS",
                 "configured": bool(voice_endpoints),
                 "endpoints": voice_endpoints,
-            },
-            {
-                "id": "discord",
-                "name": "Discord",
-                "provider": "Discord",
-                "configured": bool(discord_endpoints),
-                "endpoints": discord_endpoints,
-            },
-            {
-                "id": "whatsapp",
-                "name": "WhatsApp",
-                "provider": "Meta WhatsApp Cloud API",
-                "configured": bool(whatsapp_endpoints),
-                "endpoints": whatsapp_endpoints,
             },
         ]
 
@@ -352,7 +329,7 @@ class NotificationService:
 
     async def reserve_confirmed_request(
         self, session, *, user, action, payload, confirmation_token, context,
-        direct_action=None, rules_override=None, ephemeral_config=None, visitor_origin=None,
+        direct_action=None, rules_override=None,
     ):
         """Confirmation, required request audit and delivery are one transaction.
 
@@ -368,10 +345,9 @@ class NotificationService:
         )
         return await self.reserve_confirmed_in_session(
             session, actor_user_id=current.id, auth_version=current.auth_session_version,
-            operation_id=confirmation.id, action=action, authority="api", context=context,
-            direct_action=direct_action, rules_override=rules_override, ephemeral_config=ephemeral_config,
+            operation_id=confirmation.id, action=action, context=context,
+            direct_action=direct_action, rules_override=rules_override,
             prepared=prepared,
-            visitor_origin=visitor_origin,
         )
 
     async def prepare_confirmed_delivery(self, context, *, action, direct_action=None, rules_override=None):
@@ -379,8 +355,8 @@ class NotificationService:
         async with self.run_store.sessions() as read_session:
             config = await get_runtime_config_for_session(read_session)
         if direct_action is not None:
-            if direct_action.get("delivery_mode") not in {"literal", "whatsapp_template"}:
-                raise ValueError("A concrete literal or template delivery mode is required")
+            if direct_action.get("delivery_mode") != "literal":
+                raise ValueError("A concrete literal delivery mode is required")
             if (direct_action.get("configured_default") and direct_action.get("type") == "voice"
                     and direct_action.get("target") != config.home_assistant_default_media_player):
                 raise NotificationDeliveryError("The default announcement destination changed. Create a fresh confirmation.",
@@ -406,31 +382,22 @@ class NotificationService:
 
     async def reserve_confirmed_in_session(
         self, session, *, actor_user_id, auth_version, operation_id, action, context,
-        authority="api", direct_action=None, rules_override=None, ephemeral_config=None, prepared=None,
-        visitor_origin=None,
+        direct_action=None, rules_override=None, prepared=None,
     ):
         plan, prepared_binding = prepared if prepared is not None else await self.prepare_confirmed_delivery(
             context, action=action, direct_action=direct_action, rules_override=rules_override,
         )
         user, origin = await confirmed_origin(
             session, actor_user_id=actor_user_id, auth_version=auth_version,
-            operation_id=operation_id, authority=authority, action=action,
+            operation_id=operation_id, action=action,
         )
         run_id = uuid.uuid5(uuid.UUID(str(operation_id)), "notification-delivery")
         payload = notification_context_payload(context)
-        if ephemeral_config and (direct_action is None or direct_action.get("type") != "whatsapp"):
-            raise ValueError("Ephemeral configuration is only supported for a WhatsApp integration test")
         config = await get_runtime_config_for_session(session)
         if configuration_binding(config, plan) != prepared_binding:
             raise ValueError("Notification configuration changed while preparing the request")
-        origin.update(ephemeral_config=ephemeral_config is not None,
-                      configuration_binding=ephemeral_configuration_binding(ephemeral_config)
-                      if ephemeral_config is not None else configuration_binding(config, plan))
+        origin["configuration_binding"] = configuration_binding(config, plan)
         payload["confirmed_delivery"] = origin
-        if visitor_origin is not None:
-            payload["visitor_conversation_origin"] = {
-                **copy.deepcopy(visitor_origin), "operation_id": str(operation_id),
-            }
         identity, claimed = await self.run_store.reserve_prepared_in_session(
             session, payload, run_id=run_id, plan=plan,
         )
@@ -438,12 +405,12 @@ class NotificationService:
             await write_audit_log(
                 session, category=TELEMETRY_CATEGORY_INTEGRATIONS, action=action + ".requested",
                 actor=actor_from_user(user), actor_user_id=user.id, target_entity="NotificationRun",
-                target_id=str(identity), metadata={"operation_id": str(operation_id), "authority": authority},
+                target_id=str(identity), metadata={"operation_id": str(operation_id), "authority": "api"},
             )
         return identity, claimed
 
-    async def dispatch_reserved(self, run_id, claimed=None, *, ephemeral_config=None):
-        await self.dispatcher.run_once(run_id, claimed=claimed, ephemeral_config=ephemeral_config)
+    async def dispatch_reserved(self, run_id, claimed=None):
+        await self.dispatcher.run_once(run_id, claimed=claimed)
         return self.result_from_run(await self.run_store.get(run_id))
 
     async def send_notification_now(
@@ -537,14 +504,8 @@ class NotificationService:
             if context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
                 rendered["actions"] = await self._gate_malfunction_actions_for_delivery(rendered["actions"], context)
             for action in rendered["actions"]:
-                if action.get("type") == "whatsapp":
-                    action = await get_whatsapp_delivery_service().prepare_notification_action(
-                        action, context, variables=context_variables(context),
-                    )
-                elif action.get("type") == "discord":
-                    action = await get_discord_messaging_service().prepare_notification_action(action, context)
                 item = {
-                    "rule": {k: v for k, v in rendered.items() if k != "actions"},
+                    "rule": {key: value for key, value in rendered.items() if key != "actions"},
                     "action": action,
                     "state": "pending",
                 }
@@ -575,20 +536,12 @@ class NotificationService:
                 action,
             )
             return NotificationActionAuthorization(action_skip=denial) if denial else None
-        visitor_origin = payload.get("visitor_conversation_origin")
-        if visitor_origin is not None:
-            denial = await get_visitor_conversation_service().authorize_notification_in_session(
-                session, visitor_origin, run_id,
-            )
-        else:
-            denial = await notification_origin_denial(session, payload, run_id,
-                authorize_recognition=assert_current_recognition_domain_authorization)
+        denial = await notification_origin_denial(session, payload, run_id,
+            authorize_recognition=assert_current_recognition_domain_authorization)
         if not denial and item is not None:
             action_skip = await self._ordinary_rule_action_skip(session, item)
             if action_skip:
                 return NotificationActionAuthorization(action_skip=action_skip)
-        if not denial and action is not None and action.get("type") == "whatsapp" and not action.get("delivery_mode"):
-            denial = await get_whatsapp_delivery_service().authorize_notification_action_in_session(session, action)
         return denial
 
     async def authorize_attempt_with_config(
@@ -647,29 +600,19 @@ class NotificationService:
             )
             if denial:
                 return NotificationActionAuthorization(action_skip=denial)
-        if action is None or action.get("type") != "discord":
-            return None
-        denial = await get_discord_messaging_service().authorize_notification_action_in_session(
-            session,
-            action,
-            config=discord_config_from_runtime(config),
-        )
-        return NotificationActionAuthorization(action_skip=denial) if denial else None
+        return None
 
-    async def authorize_confirmed_attempt(self, session, payload, run_id, *, plan, ephemeral_config=None, action=None, item=None):
+    async def authorize_confirmed_attempt(self, session, payload, run_id, *, plan, action=None, item=None):
         origin = payload.get("confirmed_delivery") or {}
         try:
             actors = {uuid.UUID(str(origin.get("user_id")))}
-            for recipient in (action or {}).get("frozen_whatsapp_recipients", []):
-                if recipient.get("kind") == "admin":
-                    actors.add(uuid.UUID(str(recipient["user_id"])))
             await session.scalars(select(User).where(User.id.in_(actors)).order_by(User.id).with_for_update())
             await load_active_admin(session, origin.get("user_id"), auth_version=origin.get("auth_version"), lock=True)
         except (ValueError, KeyError, TypeError):
             return None, "confirmed_actor_no_longer_authorized"
         config = await get_runtime_config_for_session(session)
         denial = await confirmed_attempt_denial(
-            session, payload, run_id, plan=plan, runtime_config=config, ephemeral_config=ephemeral_config,
+            session, payload, run_id, plan=plan, runtime_config=config,
         )
         if not denial and action is not None:
             denial = await self.authorize_attempt(session, payload, run_id, action=action, item=item)
@@ -728,15 +671,14 @@ class NotificationService:
     async def delivery_config(self):
         return await get_runtime_config()
 
-    async def deliver_planned_action(self, item, row, config, *, ephemeral_config=None) -> NotificationActionOutcome:
+    async def deliver_planned_action(self, item, row, config) -> NotificationActionOutcome:
         context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
         action = item["action"]
-        if action.get("delivery_mode") in {"literal", "whatsapp_template"}:
-            return await self._deliver_literal(action, context, config, ephemeral_config=ephemeral_config,
-                record_history=row.context.get("visitor_conversation_origin") is None)
+        if action.get("delivery_mode") == "literal":
+            return await self._deliver_literal(action, context, config)
         return await self._deliver_action(item["action"], context, config, item["rule"])
 
-    async def _deliver_literal(self, action, context, config, *, ephemeral_config=None, record_history=True):
+    async def _deliver_literal(self, action, context, config):
         """Preserve manual native bodies; workflow formatting does not apply here."""
         target, body = action["target"], action["message"]
         metadata = {}
@@ -757,31 +699,10 @@ class NotificationService:
                 runtime_config=config,
                 actions=output_actions or None,
             )
-        elif action["type"] == "whatsapp":
-            from app.services.messaging.whatsapp_configuration import whatsapp_config_from_runtime
-            transport_config = ephemeral_config or whatsapp_config_from_runtime(config)
-            delivery = get_whatsapp_delivery_service()
-            history_options = {"record_history": False} if not record_history else {}
-            if action.get("delivery_mode") == "whatsapp_template":
-                result = await delivery.send_template_message(
-                    target, template_name=action["template_name"], language_code=action["language_code"],
-                    body_parameters=action["body_parameters"], config=transport_config,
-                    **history_options,
-                )
-            else:
-                result = await delivery.send_text_message(target, body, config=transport_config, **history_options)
-            from app.services.messaging.whatsapp_helpers import whatsapp_response_message_id
-            identity = whatsapp_response_message_id(result)
-            if identity:
-                metadata["provider_message_id"] = identity
         else:
             raise NotificationDeliveryError("Unsupported literal notification channel")
         return NotificationActionOutcome(delivered=True, metadata=metadata)
 
-    async def prepare_delivery_output(self, session, row, index, outcome):
-        if row is not None and row.context.get("visitor_conversation_origin") is not None:
-            return await get_visitor_conversation_service().prepare_notification_output(session, row, index, outcome)
-        return None
 
     async def publish_planned_outcome(self, item, row, outcome) -> None:
         context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
@@ -1079,17 +1000,11 @@ class NotificationService:
                     "event_type": context.event_type,
                     "severity": context.severity,
                     "snapshot": action.get("snapshot") or None,
-                    "actions": notification_action_buttons(context),
                 },
             )
             return NotificationActionOutcome(delivered=True)
         if action_type == "voice":
             return await self._send_voice(action, config)
-        if action_type == "discord":
-            return await self._send_discord(action, context, config)
-        if action_type == "whatsapp":
-            await self._send_whatsapp(action, context, config)
-            return NotificationActionOutcome(delivered=True)
         raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
 
     async def _send_mobile(
@@ -1290,7 +1205,7 @@ class NotificationService:
         *,
         runtime_config=None,
     ) -> list[dict[str, Any]]:
-        actions: list[dict[str, Any]] = list(home_assistant_notification_actions(context))
+        actions: list[dict[str, Any]] = []
         actionable = notification_payloads.normalize_actionable(action.get("actionable"))
         if actionable.get("enabled") and actionable.get("action") == notification_payloads.GATE_OPEN_ACTION:
             gate_action = await get_actionable_notification_service().create_gate_open_action(
@@ -1310,38 +1225,6 @@ class NotificationService:
         if snapshot and not (home_assistant_targets and snapshot.public_url):
             get_snapshot_manager().delete_snapshot_path(snapshot.path)
 
-    async def _send_discord(self, action: dict[str, Any], context: NotificationContext, config) -> NotificationActionOutcome:
-        attachments = await self._snapshot_attachments(action.get("media") or {})
-        try:
-            receipt = await get_discord_messaging_service().send_notification_action(
-                action,
-                context,
-                attachment_paths=attachments,
-                config=discord_config_from_runtime(config),
-            )
-            metadata = receipt if isinstance(receipt, dict) else {}
-            outcomes = metadata.get("destination_outcomes") if isinstance(metadata.get("destination_outcomes"), list) else []
-            accepted_any = any(
-                isinstance(entry, dict) and entry.get("delivery") == "accepted"
-                for entry in outcomes
-            )
-            return NotificationActionOutcome(
-                delivered=accepted_any or not outcomes,
-                reason="delivered_with_failures" if metadata.get("partial_failure") else "delivered",
-                metadata={**metadata, "accepted_any": accepted_any or not outcomes},
-            )
-        finally:
-            for path in attachments:
-                get_snapshot_manager().delete_snapshot_path(path)
-
-    async def _send_whatsapp(self, action: dict[str, Any], context: NotificationContext, config) -> None:
-        from app.services.messaging.whatsapp_configuration import whatsapp_config_from_runtime
-        await get_whatsapp_delivery_service().send_notification_action(
-            action,
-            context,
-            variables=context_variables(context),
-            config=whatsapp_config_from_runtime(config),
-        )
 
     async def _send_voice(self, action: dict[str, Any], config) -> NotificationActionOutcome:
         frozen = "frozen_voice_targets" in action
@@ -1531,37 +1414,6 @@ class NotificationService:
             )
         return endpoints
 
-    async def _discord_endpoint_catalog(self) -> list[dict[str, Any]]:
-        try:
-            channels = await get_discord_messaging_service().available_channels()
-        except Exception as exc:
-            logger.debug("discord_endpoint_catalog_failed", extra={"error": str(exc)})
-            return []
-        endpoints = [
-            {
-                "id": "discord:*",
-                "provider": "Discord",
-                "label": "Default Discord channel",
-                "detail": "Configured Discord default notification channel",
-            }
-        ] if channels else []
-        endpoints.extend(
-            {
-                "id": f"discord:{channel['id']}",
-                "provider": "Discord",
-                "label": channel.get("label") or channel.get("name") or channel["id"],
-                "detail": f"Channel ID {channel['id']}",
-            }
-            for channel in channels
-        )
-        return endpoints
-
-    async def _whatsapp_endpoint_catalog(self) -> list[dict[str, Any]]:
-        try:
-            return await get_whatsapp_delivery_service().available_admin_targets()
-        except Exception as exc:
-            logger.debug("whatsapp_endpoint_catalog_failed", extra={"error": str(exc)})
-            return []
 
     async def _home_assistant_mobile_endpoint_catalog(self, config) -> list[dict[str, Any]]:
         targets = await self._all_home_assistant_mobile_targets(config)
@@ -1716,34 +1568,6 @@ class NotificationService:
         }
 
 
-
-def notification_action_buttons(context: NotificationContext) -> list[dict[str, str]]:
-    if context.event_type != "visitor_pass_timeframe_change_requested":
-        return []
-    pass_id = str(context.facts.get("visitor_pass_id") or "").strip()
-    request_id = str(context.facts.get("visitor_pass_timeframe_request_id") or "").strip()
-    if not pass_id or not request_id:
-        return []
-    base_path = f"/api/v1/visitor-passes/{pass_id}/timeframe-requests/{request_id}"
-    return [
-        {"id": "allow", "label": "Allow", "method": "POST", "path": f"{base_path}/allow"},
-        {"id": "deny", "label": "Deny", "method": "POST", "path": f"{base_path}/deny"},
-    ]
-
-
-def home_assistant_notification_actions(context: NotificationContext) -> list[dict[str, str | bool]]:
-    if context.event_type != "visitor_pass_timeframe_change_requested":
-        return []
-    pass_id = str(context.facts.get("visitor_pass_id") or "").strip()
-    request_id = str(context.facts.get("visitor_pass_timeframe_request_id") or "").strip()
-    if not pass_id or not request_id:
-        return []
-    return [
-        {"action": visitor_pass_timeframe_button_id("allow", pass_id, request_id), "title": "Allow"},
-        {"action": visitor_pass_timeframe_button_id("deny", pass_id, request_id), "title": "Deny", "destructive": True},
-    ]
-
-
 def notification_context_from_payload(payload: dict[str, Any]) -> NotificationContext:
     facts = as_dict(payload.get("facts"))
     notification_run_id = str(payload.get("notification_run_id") or "").strip()
@@ -1824,302 +1648,9 @@ def sample_notification_context(trigger_event: str | None = None) -> Notificatio
     )
 
 
-def composed_from_context(context: NotificationContext) -> ComposedNotification:
-    variables = context_variables(context)
-    return ComposedNotification(
-        title=context.subject,
-        body=variables.get("Message") or context.subject,
-    )
-
-
-def context_variables(context: NotificationContext) -> dict[str, str]:
-    facts = {
-        canonical_key(key): "" if value is None else str(value)
-        for key, value in context.facts.items()
-    }
-
-    def pick(*keys: str, default: str = "") -> str:
-        for key in keys:
-            value = facts.get(canonical_key(key))
-            if value:
-                return value
-        return default
-
-    display_name = pick("display_name", "person", "person_name")
-    first_name = pick("first_name", "person_first_name")
-    last_name = pick("last_name", "person_last_name")
-    if display_name and not first_name:
-        first_name = display_name.split(" ", 1)[0]
-    if display_name and not last_name and " " in display_name:
-        last_name = display_name.split(" ", 1)[1]
-
-    visitor_pass_registration = pick(
-        "visitor_pass_registration",
-        "visitor_pass_vehicle_registration",
-        "visitor_pass_registration_number",
-        "number_plate",
-        "vehicle_registration_number",
-        "registration_number",
-    )
-    visitor_pass_make = pick("visitor_pass_vehicle_make", "visitor_pass_make", "vehicle_make", "make")
-    visitor_pass_colour = pick(
-        "visitor_pass_vehicle_colour",
-        "visitor_pass_vehicle_color",
-        "visitor_pass_colour",
-        "visitor_pass_color",
-        "vehicle_colour",
-        "vehicle_color",
-        "colour",
-        "color",
-    )
-    visitor_pass_duration = pick("visitor_pass_duration_on_site", "duration_human", "duration_on_site")
-    if not visitor_pass_duration:
-        visitor_pass_duration = _duration_label_from_seconds(
-            pick("visitor_pass_duration_on_site_seconds", "duration_on_site_seconds")
-        )
-    visitor_pass_time_window = pick(
-        "visitor_pass_time_window",
-        "visitor_pass_window_label",
-        "visitor_pass_current_window",
-    )
-
-    vehicle_name = pick(
-        "vehicle_name",
-        "vehicle_display_name",
-        "vehicle_description",
-        "visitor_pass_vehicle_make",
-        "visitor_pass_vehicle_registration",
-        "vehicle_make",
-        "make",
-        "registration_number",
-        default=context.subject,
-    )
-    occurred_at = pick("occurred_at", "created_at")
-    if context.event_type == "unauthorized_plate":
-        vehicle_color = pick(
-            "detected_vehicle_colour",
-            "detected_vehicle_color",
-            "observed_vehicle_colour",
-            "observed_vehicle_color",
-            "vehicle_colour",
-            "vehicle_color",
-            "colour",
-            "color",
-        )
-    else:
-        vehicle_color = pick(
-            "visitor_pass_vehicle_colour",
-            "visitor_pass_vehicle_color",
-            "vehicle_color",
-            "vehicle_colour",
-            "detected_vehicle_color",
-            "detected_vehicle_colour",
-            "color",
-            "colour",
-        )
-    return {
-        "FirstName": first_name,
-        "FirstNamePossessive": _possessive(first_name),
-        "ObjectPronoun": pick("object_pronoun", "pronoun_object", default="them"),
-        "PossessiveDeterminer": pick("possessive_determiner", "pronoun_possessive", default="their"),
-        "LastName": last_name,
-        "DisplayName": display_name or first_name or "Unknown visitor",
-        "GroupName": pick("group_name", "group"),
-        "Registration": pick(
-            "visitor_pass_vehicle_registration",
-            "vehicle_registration_number",
-            "registration_number",
-            "vrn",
-            default=context.subject,
-        ),
-        "VehicleRegistrationNumber": pick(
-            "visitor_pass_vehicle_registration",
-            "vehicle_registration_number",
-            "registration_number",
-            "vrn",
-            default=context.subject,
-        ),
-        "VehicleName": vehicle_name,
-        "VehicleDisplayName": vehicle_name,
-        "VehicleTimeAway": vehicle_time_away_label(pick("vehicle_time_away_seconds")),
-        "VehicleMake": pick("visitor_pass_vehicle_make", "vehicle_make", "make"),
-        "VehicleType": pick("vehicle_type", "detected_vehicle_type", "observed_vehicle_type"),
-        "VehicleModel": pick("vehicle_model", "model"),
-        "VehicleColor": vehicle_color,
-        "VehicleColour": vehicle_color,
-        "MotStatus": pick("mot_status", "motStatus"),
-        "MotExpiry": pick("mot_expiry", "motExpiry", "mot_expiry_date"),
-        "TaxStatus": pick("tax_status", "taxStatus"),
-        "TaxExpiry": pick("tax_expiry", "taxExpiry", "tax_due_date", "taxDueDate"),
-        "Direction": pick("direction"),
-        "Decision": pick("decision"),
-        "TimingClassification": pick("timing_classification"),
-        "Source": pick("source"),
-        "Severity": context.severity.title(),
-        "EventType": context.event_type.replace("_", " ").title(),
-        "Subject": context.subject,
-        "Message": pick("message", default=context.subject),
-        "OccurredAt": occurred_at,
-        "Time": _time_label(occurred_at),
-        "GateStatus": pick("gate_status", "gate_state"),
-        "IntegrationName": pick("integration_name", "integration", "provider_name"),
-        "IntegrationStatus": pick("integration_status", "status"),
-        "IntegrationReason": pick("integration_reason", "degraded_reason", "failure_reason", "reason"),
-        "IntegrationLastConnectedAt": pick("integration_last_connected_at", "last_connected_at"),
-        "IntegrationLastFailureAt": pick("integration_last_failure_at", "last_failure_at"),
-        "GarageDoor": pick("garage_door"),
-        "EntityId": pick("entity_id"),
-        "VisitorName": pick("visitor_name", "visitor_pass_name", default=display_name or context.subject),
-        "VisitorPassName": pick("visitor_pass_name", "visitor_name", default=display_name or context.subject),
-        "VisitorPassRegistration": visitor_pass_registration,
-        "VisitorPassTimeWindow": visitor_pass_time_window,
-        "VisitorPassVehicleRegistration": visitor_pass_registration,
-        "VisitorPassVehicleMake": visitor_pass_make,
-        "VisitorPassVehicleColour": visitor_pass_colour,
-        "VisitorPassDurationOnSite": visitor_pass_duration,
-        "VisitorPassCurrentWindow": pick("visitor_pass_current_window"),
-        "VisitorPassRequestedWindow": pick("visitor_pass_requested_window"),
-        "VisitorPassOriginalTime": pick(
-            "visitor_pass_original_time",
-            "visitor_pass_original_window",
-            "visitor_pass_current_window",
-        ),
-        "VisitorPassRequestedTime": pick(
-            "visitor_pass_requested_time",
-            "visitor_pass_requested_window",
-        ),
-        "VisitorPassVisitorMessage": pick("visitor_pass_visitor_message"),
-        "NewWinnerName": pick("new_winner_name", "winner_name"),
-        "OvertakenName": pick("overtaken_name", "previous_winner_name"),
-        "ReadCount": pick("read_count", "leaderboard_read_count"),
-        "MaintenanceModeReason": pick("maintenance_mode_reason", "maintenance_reason", "reason"),
-        "MalfunctionDuration": pick("malfunction_duration"),
-        "MalfunctionOpenedTime": pick("malfunction_opened_time"),
-        "MalfunctionFixAttemptTime": pick("malfunction_fix_attempt_time"),
-        "MalfunctionFixAttempts": pick("malfunction_fix_attempts"),
-        "MalfunctionResolutionTime": pick("malfunction_resolution_time"),
-        "MalfunctionStage": pick("malfunction_stage"),
-        "LastKnownVehicle": pick("last_known_vehicle"),
-    }
-
-
-def context_occurred_at(context: NotificationContext) -> datetime:
-    raw = context.facts.get("occurred_at") or context.facts.get("created_at") or ""
-    if raw:
-        try:
-            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        except ValueError:
-            pass
-    return datetime.now(tz=UTC)
-
-
-def snapshot_payload(media: dict[str, Any]) -> dict[str, str | bool] | None:
-    if not media.get("attach_camera_snapshot") or not media.get("camera_id"):
-        return None
-    camera_id = str(media["camera_id"])
-    return {
-        "enabled": True,
-        "camera_id": camera_id,
-        "image_url": f"/api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot?width=960&height=540",
-    }
-
-
 def gate_malfunction_action_supports_stage(action: dict[str, Any], stage: str) -> bool:
     stages = notification_payloads.normalize_gate_malfunction_stages(action.get("gate_malfunction_stages"))
     return not stages or notification_payloads.normalize_gate_malfunction_stage(stage) in stages
-
-
-def gate_malfunction_notification_content(
-    channel: str,
-    context: NotificationContext,
-    *,
-    previous_notification: bool,
-) -> dict[str, str]:
-    facts = context.facts
-    stage = notification_payloads.normalize_gate_malfunction_stage(facts.get("malfunction_stage"))
-    stage_label = notification_payloads.GATE_MALFUNCTION_STAGE_LABELS.get(stage, stage)
-    if stage == "resolved":
-        title = "Gate malfunction resolved"
-    elif stage == "fubar":
-        title = "Gate malfunction needs attention"
-    elif stage == "initial":
-        title = "Gate malfunction detected"
-    else:
-        title = f"Gate malfunction {stage_label}"
-    body = gate_malfunction_plain_body(stage)
-    return {
-        "title": title[:160],
-        "body": postprocess_gate_malfunction_body(
-            channel,
-            body,
-            previous_notification=previous_notification,
-            default_body=body or context.subject,
-        ),
-    }
-
-
-def gate_malfunction_plain_body(stage: str) -> str:
-    normalized_stage = notification_payloads.normalize_gate_malfunction_stage(stage)
-    if normalized_stage == "initial":
-        return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
-    if normalized_stage == "30m":
-        return "The gate is still stuck open. Alfred is still working on it."
-    if normalized_stage == "60m":
-        return "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case."
-    if normalized_stage == "2hrs":
-        return "The gate has been stuck open for over two hours. Alfred has not been able to fix it yet."
-    if normalized_stage == "fubar":
-        return "The gate is still stuck open and Alfred has run out of automatic fixes. Please check the gate when you can."
-    if normalized_stage == "resolved":
-        return "The gate malfunction has been resolved and the gate is closed again."
-    return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it."
-
-
-def clean_notification_text(value: str) -> str:
-    text = " ".join(str(value or "").strip().split())
-    if len(text) > 1 and text.startswith('"') and text.endswith('"'):
-        text = text[1:-1].strip()
-    return text
-
-
-def postprocess_gate_malfunction_body(
-    channel: str,
-    body: str,
-    *,
-    previous_notification: bool,
-    default_body: str,
-) -> str:
-    text = clean_notification_text(body) or clean_notification_text(default_body)
-    text = strip_gate_malfunction_prefixes(text)
-    if previous_notification:
-        text = f"{GATE_MALFUNCTION_UPDATE_PREFIX} {text}".strip()
-    if channel == "voice":
-        text = f"{GATE_MALFUNCTION_VOICE_PREFIX} {strip_attention_prefix(text)}".strip()
-    return text[:500]
-
-
-def strip_gate_malfunction_prefixes(value: str) -> str:
-    text = clean_notification_text(value)
-    while True:
-        next_text = strip_attention_prefix(text)
-        next_text = strip_update_prefix(next_text)
-        if next_text == text:
-            return text
-        text = next_text
-
-
-def strip_attention_prefix(value: str) -> str:
-    return re.sub(r"^\s*attention\.\s*", "", value, flags=re.IGNORECASE).strip()
-
-
-def strip_update_prefix(value: str) -> str:
-    return re.sub(
-        r"^\s*gate\s+malfunction\s+update:\s*",
-        "",
-        value,
-        flags=re.IGNORECASE,
-    ).strip()
 
 
 def _context_bool(value: Any) -> bool:
@@ -2184,22 +1715,6 @@ def rule_actions(rule: NotificationRule | dict[str, Any]) -> list[dict[str, Any]
 
 def rule_is_active(rule: NotificationRule | dict[str, Any]) -> bool:
     return bool(rule.is_active if isinstance(rule, NotificationRule) else rule.get("is_active", True))
-
-
-def _possessive(value: str) -> str:
-    cleaned = value.strip()
-    if not cleaned:
-        return ""
-    return f"{cleaned}'" if cleaned.lower().endswith("s") else f"{cleaned}'s"
-
-
-def _time_label(value: str) -> str:
-    if not value:
-        return ""
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%H:%M")
-    except ValueError:
-        return value
 
 
 @lru_cache

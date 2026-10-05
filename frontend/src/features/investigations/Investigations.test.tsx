@@ -5,12 +5,9 @@ import { LogsView } from "../../views/LogsView";
 import { ActivityTimeline } from "./ActivityTimeline";
 import { InvestigationFilters } from "./InvestigationFilters";
 import { InvestigationOverview } from "./InvestigationOverview";
-import { QuestionComposer } from "./QuestionComposer";
 import {
   filterCatalog,
   defaultOverview,
-  groundedAnswer,
-  insufficientAnswer,
   integrationRejectedEpisode,
   scheduleBlockedDetail,
   scheduleBlockedEpisode,
@@ -134,62 +131,5 @@ describe("default investigation overview", () => {
       recent_problems: [], incomplete_runs: [], repeated_problems: [], important_activity: [] }} />);
     expect(screen.getByText(/No recent problems or repeated failures/)).toBeInTheDocument();
     expect(screen.queryByText("Problems and blocked actions")).not.toBeInTheDocument();
-  });
-});
-
-describe("investigation answer", () => {
-  it("renders a grounded answer and links each cited event to its exact evidence", () => {
-    const onEpisodeSelect = vi.fn();
-    render(<QuestionComposer answer={groundedAnswer} error="" loading={false} onClear={vi.fn()} onEpisodeSelect={onEpisodeSelect} onSubmit={vi.fn()} />);
-    expect(screen.getByText(/schedule ended at 22:30/)).toBeInTheDocument();
-    expect(screen.getByText("The garage-door schedule condition failed.")).toBeInTheDocument();
-    const links = screen.getAllByRole("button", { name: "View exact evidence" });
-    expect(links.length).toBe(3);
-    fireEvent.click(links[1]);
-    expect(onEpisodeSelect).toHaveBeenCalledWith(scheduleBlockedEpisode.episode_id, "e-schedule");
-  });
-
-  it("states insufficient evidence without inventing a reason", () => {
-    render(<QuestionComposer answer={insufficientAnswer} error="" loading={false} onClear={vi.fn()} onEpisodeSelect={vi.fn()} onSubmit={vi.fn()} />);
-    expect(screen.getByText(/cannot determine why/)).toBeInTheDocument();
-    expect(screen.getByText("Evidence is incomplete")).toBeInTheDocument();
-    expect(screen.getByText(/No correlated command/)).toBeInTheDocument();
-    expect(screen.queryByText("Most likely reason")).not.toBeInTheDocument();
-  });
-});
-
-describe("structured filters and permissions", () => {
-  it("does not report an empty timeline when the initial activity read fails", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Activity unavailable" }), { status: 503 })));
-    render(<LogsView currentUser={{ role: "admin" } as UserAccount} refreshToken={0} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Some investigation data could not be loaded.");
-    expect(screen.queryByText("No activity was recorded in this period")).not.toBeInTheDocument();
-    expect(screen.queryByText("No activity matched these filters")).not.toBeInTheDocument();
-  });
-
-  it("changes time, device, automation and outcome independently and displays the site timezone", () => {
-    const onChange = vi.fn();
-    render(<InvestigationFilters catalog={filterCatalog} onChange={onChange} onReset={vi.fn()} query={DEFAULT_INVESTIGATION_QUERY} timezone={SITE_TIMEZONE} />);
-    expect(screen.getByText(SITE_TIMEZONE)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("When"), { target: { value: "yesterday" } });
-    fireEvent.change(screen.getByLabelText("Device"), { target: { value: "main-garage" } });
-    fireEvent.change(screen.getByLabelText("Outcome"), { target: { value: "blocked" } });
-    fireEvent.click(screen.getByText("More filters"));
-    fireEvent.change(screen.getByLabelText("Automation or rule"), { target: { value: "open-on-arrival" } });
-    expect(onChange.mock.calls).toEqual(expect.arrayContaining([
-      [{ range: "yesterday" }],
-      [{ device: "main-garage" }],
-      [{ outcome: "blocked" }],
-      [{ automation: "open-on-arrival" }]
-    ]));
-  });
-
-  it("blocks standard users before any sensitive investigation data is mounted", () => {
-    const standardUser = { role: "standard" } as UserAccount;
-    render(<LogsView currentUser={standardUser} refreshToken={0} />);
-    const alert = screen.getByRole("alert");
-    expect(within(alert).getByText("Activity investigations require administrator access")).toBeInTheDocument();
-    expect(screen.queryByText("Ask what happened")).not.toBeInTheDocument();
-    expect(document.body).toHaveClass("investigations-route");
   });
 });

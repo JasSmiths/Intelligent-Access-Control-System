@@ -206,7 +206,7 @@ async def test_non_success_is_not_reported_as_sent_and_keeps_the_committed_run_i
     else:
         assert "Inspect its delivery record before sending again" in detail
     assert boundary.trace == ["reserve", "commit", "dispatch"]
-    boundary.service.dispatch_reserved.assert_awaited_once_with(boundary.identity, boundary.claimed, ephemeral_config=None)
+    boundary.service.dispatch_reserved.assert_awaited_once_with(boundary.identity, boundary.claimed)
     boundary.session.rollback.assert_not_awaited()
 
 

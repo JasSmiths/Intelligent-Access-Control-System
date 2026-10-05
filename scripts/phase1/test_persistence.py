@@ -42,23 +42,6 @@ async def test_visitor_source_reference_uniqueness_allows_multiple_unsourced_pas
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize('table', [
-    'alfred_memories', 'alfred_lessons', 'alfred_feedback', 'alfred_eval_examples',
-])
-async def test_semantic_search_can_use_migrated_hnsw_index(table):
-    from sqlalchemy import text
-
-    try:
-        async with engine.connect() as connection:
-            await connection.execute(text('SET LOCAL enable_seqscan = off'))
-            plan = await connection.execute(text(
-                f"EXPLAIN SELECT id FROM {table} WHERE embedding IS NOT NULL "
-                "ORDER BY embedding <=> array_fill(0.1::real, ARRAY[1536])::vector LIMIT 5"
-            ))
-            assert f'ix_{table}_embedding_hnsw' in '\n'.join(plan.scalars())
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -3,8 +3,7 @@ import React from "react";
 import { ActivityTimeline } from "./ActivityTimeline";
 import { InvestigationFilters } from "./InvestigationFilters";
 import { InvestigationOverview } from "./InvestigationOverview";
-import { QuestionComposer } from "./QuestionComposer";
-import { useEpisodeDetails, useInvestigationData, useInvestigationQueryState, useQuestionInvestigation } from "./hooks";
+import { useEpisodeDetails, useInvestigationData, useInvestigationQueryState } from "./hooks";
 import { activeFilterCount } from "./query";
 import { EMPTY_FILTER_CATALOG } from "./types";
 
@@ -12,7 +11,6 @@ export function InvestigationsWorkspace({ refreshToken }: { refreshToken: number
   const { query, committedQuery, updateQuery, resetQuery } = useInvestigationQueryState();
   const data = useInvestigationData(committedQuery, refreshToken);
   const timezone = data.page?.site_timezone || data.overview?.site_timezone || data.filters?.site_timezone || "UTC";
-  const question = useQuestionInvestigation(committedQuery, timezone);
   const episodeDetails = useEpisodeDetails();
   const [selectedEpisodeId, setSelectedEpisodeId] = React.useState<string>();
   const [focusedEvidenceId, setFocusedEvidenceId] = React.useState<string>();
@@ -38,7 +36,6 @@ export function InvestigationsWorkspace({ refreshToken }: { refreshToken: number
 
   return (
     <section className="view-stack investigations-page">
-      <QuestionComposer answer={question.answer} error={question.error} loading={question.loading} onClear={question.clear} onEpisodeSelect={selectEpisode} onSubmit={question.submit} />
 
       {data.error ? (
         <div className="investigation-page-error" role="alert">

@@ -23,7 +23,6 @@ async function installDirectoryFixtures(page: Page) {
     "/api/v1/integrations/gate/status": { configured: false, connected: false, gate_entity_id: null, default_media_player: null, last_gate_state: "unknown", garage_door_entities: [] },
     "/api/v1/maintenance/status": { is_active: false, enabled_by: null, enabled_at: null, source: null, reason: null, duration_seconds: 0, duration_label: null },
     "/api/v1/settings": [],
-    "/api/v1/ai/agent/status": { active_mode: "mocked", provider: "local", v3_ready: true },
   };
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();

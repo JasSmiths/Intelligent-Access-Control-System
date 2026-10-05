@@ -16,7 +16,7 @@ describe("console navigation registry", () => {
   it("groups operational destinations and hides backend admin readers", () => {
     expect(primaryNavItems.filter((item) => item.group === "Operations").map((item) => item.key)).toEqual(["dashboard", "events", "movements", "alerts"]);
     expect(primaryNavItems.filter((item) => item.group === "Access").map((item) => item.key)).toEqual(["people", "groups", "vehicles", "schedules", "passes"]);
-    for (const key of ["logs", "users", "alfred_training", "integrations", "settings_automations", "settings_notifications", "settings_command_history"] as ViewKey[]) {
+    for (const key of ["logs", "users", "integrations", "settings_automations", "settings_notifications", "settings_command_history"] as ViewKey[]) {
       expect(canAccessView(key, standard)).toBe(false);
       expect(canAccessView(key, admin)).toBe(true);
     }

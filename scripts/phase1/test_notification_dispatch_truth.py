@@ -212,73 +212,8 @@ async def test_definite_mobile_rejection_is_failed_without_reclaim_or_resend(mon
     assert client.calls == ["notify.mobile_app_rejected"]
 
 
-def discord_runtime(token: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        discord_bot_token=token,
-        discord_guild_allowlist=[],
-        discord_channel_allowlist=["123456789012345678"],
-        discord_user_allowlist=[],
-        discord_role_allowlist=[],
-        discord_admin_role_ids=[],
-        discord_default_notification_channel_id="123456789012345678",
-        discord_allow_direct_messages=False,
-        discord_require_mention=True,
-    )
 
 
-async def test_normal_discord_send_uses_the_post_lock_authorized_runtime_snapshot(monkeypatch):
-    before_lock, after_lock = discord_runtime("before-lock"), discord_runtime("after-lock")
-    captured_authorization_configs: list[object] = []
-    captured_send_configs: list[object] = []
-
-    class FakeDiscordService:
-        async def authorize_notification_action_in_session(self, _session, _action, *, config):
-            captured_authorization_configs.append(config)
-            return None
-
-        async def send_notification_action(self, _action, _context, *, attachment_paths=None, config):
-            assert attachment_paths == []
-            captured_send_configs.append(config)
-            return {
-                "destination_outcomes": [{"target": "123456789012345678", "delivery": "accepted"}],
-                "partial_failure": False,
-                "failure_count": 0,
-            }
-
-    monkeypatch.setattr(notification_owner, "get_runtime_config", AsyncMock(return_value=before_lock))
-    monkeypatch.setattr(
-        notification_owner,
-        "get_runtime_config_for_session",
-        AsyncMock(side_effect=[before_lock, after_lock]),
-    )
-    monkeypatch.setattr(notification_owner, "get_discord_messaging_service", lambda: FakeDiscordService())
-    value = service(monkeypatch)
-    monkeypatch.setattr(value, "_snapshot_attachments", AsyncMock(return_value=[]))
-    identity, claimed = await value.run_store.reserve(notification_owner.notification_context_payload(context()))
-    assert claimed is not None
-    plan = [
-        {
-            "rule": {"id": "synthetic-discord", "name": "Synthetic Discord", "trigger_event": EVENT_TYPE},
-            "action": {
-                "id": "discord-action",
-                "type": "discord",
-                "title": "Synthetic delivery",
-                "message": "Synthetic delivery body",
-                "frozen_discord_channel_ids": ["123456789012345678"],
-                "frozen_discord_configuration_binding": "synthetic-binding",
-            },
-            "state": "pending",
-        }
-    ]
-    await value.run_store.save_plan(identity, claimed.claim_token, plan)
-    claimed.delivery_plan = plan
-
-    assert await value.dispatcher.run_once(identity, claimed=claimed)
-    row = await value.run_store.get(identity)
-    assert row.status == "provider_accepted" and row.delivery_plan[0]["state"] == "accepted"
-    assert len(captured_authorization_configs) == 2
-    assert captured_send_configs == [captured_authorization_configs[-1]]
-    assert captured_send_configs[0].bot_token == "after-lock"
 
 
 @pytest.mark.parametrize(

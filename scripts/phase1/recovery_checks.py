@@ -18,7 +18,6 @@ PERSISTENCE_TESTS = [
     'scripts/phase1/test_feature_operations.py',
     'scripts/phase1/test_notification_recovery.py',
     'scripts/phase1/test_access_pipeline.py',
-    'scripts/phase1/test_alfred_approval_persistence.py',
     'scripts/phase1/test_authority_mutations.py',
     'scripts/phase1/test_notification_activation.py',
     'scripts/phase1/test_automation_intake.py',
@@ -37,16 +36,10 @@ PERSISTENCE_TESTS = [
     'scripts/phase1/test_confirmed_notifications.py',
     'scripts/phase1/test_notification_dispatch_truth.py',
     'scripts/phase1/test_actionable_recovery.py',
-    'scripts/phase1/test_incoming_messages.py',
-    'scripts/phase1/test_messaging_authority.py',
-    'scripts/phase1/test_messaging_confirmations.py',
-    'scripts/phase1/test_visitor_conversation_authority.py',
-    'scripts/phase1/test_whatsapp_inbox.py',
-    'scripts/phase1/test_discord_inbox.py',
-    'scripts/phase1/test_feedback_recovery.py',
     'scripts/phase1/test_recovery_discovery.py',
     'scripts/phase1/test_recovery_hold_persistence.py',
     'scripts/phase1/test_delivery_schema_compatibility.py',
+    'scripts/phase1/test_feature_retirement.py',
 ]
 DIAGNOSTIC_TESTS = ['scripts/phase1/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/phase1/test_schema_contract.py']

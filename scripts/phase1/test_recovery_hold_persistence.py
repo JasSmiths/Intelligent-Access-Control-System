@@ -31,9 +31,8 @@ from app import main, recovery_hold
 from app.core import recovery_hold as hold_policy
 from app.db.session import AsyncSessionLocal, engine
 from app.models import (
-    AccessDeviceCommandRecord, AlfredApproval, AlfredFeedback, AutomationRun,
-    ChatSession, GateCommandRecord, NotificationRun,
-    ProcessedMessagingMessage, RevokedAuthToken, User,
+    AccessDeviceCommandRecord, AutomationRun, GateCommandRecord, NotificationRun,
+    RevokedAuthToken, User,
 )
 from app.models.enums import GateCommandState, UserRole
 from app.services import auth, settings
@@ -42,14 +41,10 @@ from app.services.gate_commands import GateCommandCoordinator
 
 pytestmark = pytest.mark.asyncio
 PASSWORD = "Synthetic-hold-password-only-123!"
-EXTRA_TABLES = "processed_messaging_messages, alfred_feedback"
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def hold_resources(isolated_resources, monkeypatch):
-    async with AsyncSessionLocal() as session:
-        await session.execute(text("TRUNCATE " + EXTRA_TABLES + " CASCADE"))
-        await session.commit()
     settings.invalidate_runtime_config_cache()
     monkeypatch.setattr(hold_policy.settings, "recovery_hold", True)
     assert not main.app.dependency_overrides, "Real hold auth requires no dependency overrides"
@@ -62,7 +57,6 @@ async def hold_resources(isolated_resources, monkeypatch):
             monkeypatch.setattr(main, name, forbidden_sync)
     monkeypatch.setattr(main.event_bus, "start", forbidden_async)
     monkeypatch.setattr(main.event_bus, "publish", forbidden_async)
-    monkeypatch.setattr(main.alfred_feedback_service, "start", forbidden_async)
     monkeypatch.setattr(main.telemetry, "start_trace", forbidden_sync)
     monkeypatch.setattr(main.telemetry, "_schedule", forbidden_sync)
     monkeypatch.setattr(GateCommandCoordinator, "execute_open", forbidden_async)
@@ -76,9 +70,6 @@ async def hold_resources(isolated_resources, monkeypatch):
         forbidden_async.assert_not_called()
     finally:
         settings.invalidate_runtime_config_cache()
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("TRUNCATE " + EXTRA_TABLES + " CASCADE"))
-            await session.commit()
 
 
 async def snapshot(*, auth_mutations=False):
@@ -139,21 +130,9 @@ async def retained():
     users = {name: User(username="synthetic-hold-" + name, full_name="Synthetic Hold User",
         password_hash=password_hash, role=UserRole.STANDARD if name == "standard" else UserRole.ADMIN,
         is_active=True) for name in ("admin", "other_admin", "standard", "revoked", "stale", "inactive")}
-    chat = ChatSession(title="Synthetic retained confirmation", context={})
     async with AsyncSessionLocal() as session:
-        session.add_all([*users.values(), chat])
+        session.add_all(list(users.values()))
         await session.flush()
-        admin = users["admin"]
-        approvals = {}
-        for status in ("pending", "claimed", "completed", "unknown"):
-            approvals[status] = AlfredApproval(id="confirm-" + uuid.uuid4().hex,
-                operation_id=uuid.uuid4(), session_id=chat.id, requester_user_id=admin.id,
-                requester_auth_session_version=admin.auth_session_version, status=status,
-                payload={"tool_name": "open_gate", "provider": "local", "preview_output": {"target": "Synthetic gate"}},
-                result={"turn": {"session_id": str(chat.id), "provider": "local", "text": "Retained synthetic result",
-                    "tool_results": [], "attachments": []}} if status in {"completed", "unknown"} else None,
-                created_at=old, updated_at=old, claimed_at=old if status == "claimed" else None,
-                expires_at=now + timedelta(hours=1))
         target = {"target_device_id": str(uuid.uuid4()), "device_key": "synthetic_entry",
             "kind": "gate", "binding_fingerprint": "a" * 64, "binding_snapshot": {"providers": []}}
         gate = GateCommandRecord(id=uuid.uuid4(), idempotency_key="synthetic-hold-gate", source="manual_admin",
@@ -186,17 +165,7 @@ async def retained():
                 action_plan=[{"index": 0, "action": {"id": "synthetic-action", "type": "gate.open"},
                     "operation_id": str(uuid.uuid4()), "state": "attempting" if state == "processing" else "pending"}],
                 created_at=old, updated_at=old))
-        incoming = [ProcessedMessagingMessage(provider="whatsapp", provider_message_id="synthetic-hold-" + state,
-            provider_channel_id="synthetic-channel", author_provider_id="synthetic-author", received_at=old,
-            recovery_version=1, state=state, envelope={"message": {"type": "text", "text": {"body": "Synthetic retained input"}}},
-            routing_context={"kind": "admin", "user_id": str(admin.id), "auth_version": admin.auth_session_version},
-            available_at=old, claim_token=uuid.uuid4() if state == "processing" else None,
-            claimed_at=old if state == "processing" else None, lease_expires_at=old if state == "processing" else None,
-            created_at=old, updated_at=old) for state in ("received", "processing")]
-        feedback = [AlfredFeedback(rating="down", actor_user_id=admin.id, actor_role="admin", session_id=chat.id,
-            status=state, original_user_prompt="Synthetic question", original_assistant_response="Synthetic answer",
-            reason="Synthetic retained review", created_at=old, updated_at=old) for state in ("queued", "analyzing")]
-        session.add_all([*approvals.values(), *commands.values(), *notifications, *automations, *incoming, *feedback])
+        session.add_all([*commands.values(), *notifications, *automations])
         await session.commit()
     tokens = {name: (await auth.create_access_token(user))[0] for name, user in users.items()}
     async with AsyncSessionLocal() as session:
@@ -206,7 +175,7 @@ async def retained():
         inactive = await session.get(User, users["inactive"].id)
         inactive.is_active = False
         await session.commit()
-    return SimpleNamespace(users=users, tokens=tokens, chat=chat, approvals=approvals, gate=gate,
+    return SimpleNamespace(users=users, tokens=tokens, gate=gate,
         commands=commands, notifications=notifications, automations=automations)
 
 
@@ -221,10 +190,6 @@ def recovery_paths(data):
         "/api/v1/automations/runs", f"/api/v1/automations/runs/{data.automations[1].id}",
         "/api/v1/notifications/runs", f"/api/v1/notifications/runs/{data.notifications[1].id}",
         "/api/v1/notifications/recovery/gate-outbox",
-        "/api/v1/ai/training/feedback", "/api/v1/ai/training/lessons",
-        "/api/v1/ai/training/eval-examples", "/api/v1/ai/training/eval-export",
-        "/api/v1/ai/chat/approvals",
-        *[f"/api/v1/ai/chat/approvals/{row.id}?session_id={data.chat.id}" for row in data.approvals.values()],
     ]
 
 
@@ -239,22 +204,8 @@ async def test_actual_hold_lifespan_authenticated_recovery_matrix_preserves_ever
                                          trust_env=False, headers=headers) as client:
                 for path in recovery_paths(retained):
                     response = await client.get(path)
-                    approval = "/chat/approvals" in path
-                    expected = 401 if not valid else 403 if identity == "standard" and not approval else 200
+                    expected = 401 if not valid else 403 if identity == "standard" else 200
                     assert response.status_code == expected, (identity, path, response.status_code)
-                    if valid and approval:
-                        result = response.json()
-                        if "?session_id=" not in path:
-                            assert len(result["items"]) == (4 if identity == "admin" else 0)
-                        elif identity != "admin":
-                            assert result == {"status": "unavailable", "pending_action": None, "result": None}
-                        elif retained.approvals["pending"].id in path:
-                            assert result["status"] == "pending"
-                            assert result["pending_action"]["confirmation_id"] == retained.approvals["pending"].id
-                        elif retained.approvals["claimed"].id in path:
-                            assert result["status"] == "unknown" and result["result"] is None
-                        else:
-                            assert result["result"]["text"] == "Retained synthetic result"
                     if expected == 200 and (f"/gate/commands/{retained.gate.id}" in path or
                                             f"/cover/commands/{retained.commands['cover'].id}" in path):
                         assert response.json()["delivery"] == "unknown"
@@ -304,12 +255,10 @@ async def test_hold_blocks_actual_ingress_mutations_and_websockets_without_chang
                 trust_env=False, headers={"Authorization": "Bearer " + retained.tokens["admin"]}) as client:
             for method, path in (
                 ("POST", "/api/v1/integrations/gate/open"), ("POST", "/api/v1/integrations/cover/command"),
-                ("POST", "/api/v1/ai/chat/confirm"), ("POST", "/api/v1/ai/feedback"),
                 ("POST", "/api/v1/auth/setup"), ("PATCH", "/api/v1/settings"),
-                ("POST", "/api/v1/webhooks/ubiquiti/lpr"), ("POST", "/api/v1/webhooks/whatsapp"),
+                ("POST", "/api/v1/webhooks/ubiquiti/lpr"),
                 ("POST", "/api/v1/automations/webhooks/synthetic"),
                 ("GET", "/api/v1/integrations/gate/status"), ("GET", "/api/v1/visitor-passes"),
-                ("GET", "/api/v1/ai/agent/status"),
             ):
                 response = await client.request(method, path, json={})
                 assert response.status_code == 503 and response.json()["recovery_hold"] is True
@@ -317,7 +266,7 @@ async def test_hold_blocks_actual_ingress_mutations_and_websockets_without_chang
                 response = await client.get(path)
                 assert response.status_code == (503 if path.endswith("/ready") else 200)
                 assert response.json()["ready"] is False and response.json()["recovery_readable"] is True
-        for path in ("/api/v1/realtime/ws", "/api/v1/ai/chat/ws"):
+        for path in ("/api/v1/realtime/ws",):
             sent = []
             async def send(message):
                 sent.append(message)

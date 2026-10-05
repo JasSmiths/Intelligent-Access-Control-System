@@ -62,8 +62,8 @@ def safe_destination_outcomes(value: Any) -> list[dict[str, str]]:
         if not isinstance(target, str) or not isinstance(delivery, str):
             continue
         # Apprise is an opaque fan-out. Never retain an Apprise URL or its
-        # credentials. Home Assistant mobile services and numeric Discord
-        # channels are stable, non-secret endpoint labels.
+        # credentials. Home Assistant mobile services and historical numeric provider
+        # IDs are stable, non-secret endpoint labels.
         if not (
             target == "apprise"
             or _MOBILE_RECEIPT_TARGET.fullmatch(target)
@@ -277,7 +277,7 @@ class NotificationRunStore:
             # -> notification run. Never invert the producer handoff order.
             snapshot = await session.get(NotificationRun, run_id)
             authorization = None
-            origins = ("automation_origin", "confirmed_delivery", "visitor_conversation_origin")
+            origins = ("confirmed_delivery",)
             if snapshot is not None and (authorize_origin is not None or any(snapshot.context.get(key) is not None for key in origins)):
                 authorization = (await authorize_origin(session, snapshot.context, run_id)
                                  if authorize_origin is not None else "notification_origin_validator_missing")
@@ -307,9 +307,6 @@ class NotificationRunStore:
                 self._counts(row)
                 row.status = "provider_accepted" if row.delivered_count else "skipped"
                 row.finished_at, row.claim_token, row.lease_expires_at = now, None, None
-                if denial in {"ephemeral_configuration_unavailable", "whatsapp_frozen_recipients_unavailable",
-                              "discord_frozen_recipients_unavailable"}:
-                    self._review(row, denial, now)
                 await self._audit_checkpoint(session, row, "denied", reason=denial)
                 await session.commit()
                 raise ClaimLost("Origin no longer authorizes this notification.")
@@ -337,12 +334,8 @@ class NotificationRunStore:
             await session.commit()
             return NotificationActionStart(attempted=True)
 
-    async def finish_action(self, run_id, token, index: int, outcome: dict[str, Any], *, prepare_output=None) -> None:
+    async def finish_action(self, run_id, token, index: int, outcome: dict[str, Any]) -> None:
         async with self.sessions() as session:
-            # Domain output locks precede the journal row, as in intake. The
-            # returned participant may write only after this claim is verified.
-            snapshot = await session.get(NotificationRun, run_id) if prepare_output is not None else None
-            record_output = await prepare_output(session, snapshot, index, outcome) if prepare_output is not None else None
             row, now = await self._owned(session, run_id, token)
             plan = copy.deepcopy(row.delivery_plan)
             if plan[index]["state"] != "attempting":
@@ -362,8 +355,6 @@ class NotificationRunStore:
                 reason=outcome.get("reason"),
                 checkpoint=outcome,
             )
-            if record_output is not None:
-                await record_output()
             await session.commit()
 
     async def finish(self, run_id, token) -> NotificationRun:
@@ -412,7 +403,7 @@ class NotificationRunStore:
 
     @staticmethod
     async def _audit_checkpoint(session, row, delivery, *, index=None, reason=None, checkpoint=None):
-        origin = row.context.get("confirmed_delivery") or row.context.get("visitor_conversation_origin")
+        origin = row.context.get("confirmed_delivery")
         if not isinstance(origin, dict):
             return
         details = checkpoint if isinstance(checkpoint, dict) else {}

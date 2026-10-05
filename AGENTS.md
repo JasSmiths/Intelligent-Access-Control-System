@@ -2,7 +2,7 @@
 
 Intelligent Access Control + Presence System turns LPR reads into durable movement
 and access decisions, presence, alerts, audited gate/garage orchestration, and
-a realtime console with Alfred operations.
+a realtime console with camera image analysis.
 
 ## Find the relevant context
 
@@ -10,7 +10,7 @@ Read the guides needed for the task; a small edit does not require a full system
 review. Current source and tests define behavior. The [documentation index](docs/README.md)
 routes operational and validation questions.
 
-- Backend, APIs, Alfred, migrations, integrations: [backend guide](docs/agent/backend.md)
+- Backend, APIs, migrations, integrations: [backend guide](docs/agent/backend.md)
 - React, typed API clients, routes, styles: [frontend guide](docs/agent/frontend.md)
 - Gate, garage, LPR, providers, or live checks: [hardware safety](docs/agent/hardware-safety.md)
 - Ownership changes or retirement: [architecture guide](docs/architecture.md)
@@ -20,7 +20,7 @@ routes operational and validation questions.
 
 - Gate commands use `GateCommandCoordinator` in `backend/app/services/gate_commands.py`.
   Garage and access-device commands use `AccessDeviceService` in
-  `backend/app/services/access_devices.py`; Alfred uses those same owners.
+  `backend/app/services/access_devices.py`.
 - Never actuate unknown plates. Validate untrusted LPR input before durable
   side effects. Suppressions are durable and explainable.
 - Treat provider rejection as failure. Keep accepted-but-unverified gate commands

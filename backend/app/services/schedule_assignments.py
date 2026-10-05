@@ -1,4 +1,4 @@
-"""Schedule assignment rules shared by directory, devices, and Alfred.
+"""Schedule assignment rules shared by directory and devices.
 
 Stage the change and its audit in the caller's aggregate transaction. No commit
 occurs here: a failed person/device edit must also roll back its assignment.
@@ -18,7 +18,7 @@ from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, actor_from_user, wri
 
 async def set_schedule_assignment(
     session: AsyncSession, target: Person | Vehicle | AccessDevice, schedule_id: Any, *,
-    user: User, source: Literal["api", "alfred"],
+    user: User, source: Literal["api"],
 ) -> None:
     require_schedule_admin(user)
     try:

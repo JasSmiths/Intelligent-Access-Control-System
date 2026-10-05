@@ -27,7 +27,7 @@ import { mediaSource } from "../lib/media";
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay } from "../lib/viewportPlacement";
 import { Badge } from "../ui/primitives";
 import type { AccessEvent, Person, Presence, TooltipPositionState } from "../api/types";
-import type { VisitorPass } from "./PassesView";
+import type { VisitorPass } from "../features/passes/types";
 
 type QuickRange = "24h" | "3d" | "7d" | "14d" | "custom";
 type ReportOptions = { includeDenied: boolean; includeSnapshots: boolean; includeConfidence: boolean };

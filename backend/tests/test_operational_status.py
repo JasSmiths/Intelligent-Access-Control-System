@@ -165,26 +165,7 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
                 "listener_running": False,
             }
 
-    class FakeDiscord:
-        async def status(self):
-            return {
-                "configured": True,
-                "connected": True,
-                "guild_count": 1,
-                "channel_count": 2,
-                "last_error": None,
-            }
 
-    class FakeWhatsApp:
-        async def status(self):
-            return {
-                "enabled": False,
-                "configured": False,
-                "webhook_configured": False,
-                "signature_configured": False,
-                "admin_target_count": 0,
-                "last_error": None,
-            }
 
     async def fake_maintenance_status():
         return {"is_active": True, "enabled_by": "Admin", "enabled_at": "2026-05-10T10:00:00+00:00"}
@@ -210,8 +191,6 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
     )
     monkeypatch.setattr(health_api, "get_maintenance_status", fake_maintenance_status)
     monkeypatch.setattr(health_api, "get_home_assistant_service", lambda: FakeHomeAssistant())
-    monkeypatch.setattr(health_api, "get_discord_messaging_service", lambda: FakeDiscord())
-    monkeypatch.setattr(health_api, "get_whatsapp_delivery_service", lambda: FakeWhatsApp())
 
     result = await health_api.health()
 
@@ -222,8 +201,6 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
     assert result["checks"]["maintenance"]["status"] == "maintenance"
     assert result["checks"]["home_assistant"]["status"] == "degraded"
     assert result["checks"]["home_assistant"]["last_error"] == "Home Assistant returned 401: Unauthorized"
-    assert result["checks"]["discord"]["guild_count"] == 1
-    assert result["checks"]["discord"]["channel_count"] == 2
 
 
 async def test_home_assistant_client_wraps_network_failures_without_leaking_token(monkeypatch) -> None:

@@ -1,10 +1,9 @@
-"""Feature mutation parity against PostgreSQL; only for the isolated harness."""
+"""Console mutation contracts against PostgreSQL; only for the isolated harness."""
 
 import os
 from pathlib import Path
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -16,8 +15,6 @@ assert {p.name for p in Path("/sys/class/net").iterdir()} == {"lo"}
 assert "@127.0.0.1:5432/iacs_p1_" in os.environ.get("IACS_DATABASE_URL", "")
 pytestmark = pytest.mark.asyncio
 
-from app.ai.context import set_chat_tool_context
-from app.ai.tool_groups import visitor_passes_handlers as alfred
 from app.api.dependencies import current_user
 from app.api.v1 import visitor_passes as api
 from app.db.session import AsyncSessionLocal, engine
@@ -31,13 +28,9 @@ from app.services.telemetry import actor_from_user
 async def isolated(monkeypatch):
     monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **kw: None)
 
-    async def config():
-        return SimpleNamespace(site_timezone="UTC")
-
     async def publish(*args, **kw):
         pass
 
-    monkeypatch.setattr(alfred, "get_runtime_config", config)
     monkeypatch.setattr(owner.event_bus, "publish", publish)
     yield
     await engine.dispose()
@@ -57,16 +50,8 @@ async def user(role=UserRole.ADMIN, active=True):
     return row
 
 
-async def call(channel, action, actor, data=None, row_id=None, confirmed=True):
+async def call(action, actor, data=None, row_id=None, confirmed=True):
     data = dict(data or {})
-    if channel == "alfred":
-        token = set_chat_tool_context({"user_id": str(actor.id), "user_role": "admin"})
-        try:
-            if row_id:
-                data["pass_id"] = str(row_id)
-            return await getattr(alfred, action + "_visitor_pass")({**data, "confirm": confirmed})
-        finally:
-            set_chat_tool_context({}, token=token)
     app = FastAPI()
     app.include_router(api.router, prefix="/api/v1/visitor-passes")
     app.dependency_overrides[current_user] = lambda: actor
@@ -99,6 +84,7 @@ def values():
         "expected_time": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
         "window_minutes": 30,
         "visitor_phone": "447700900123",
+        "number_plate": "SYNTHETIC1",
     }
 
 
@@ -113,19 +99,18 @@ async def audits(actor):
         ).all()
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_pass_crud_shared_fields_actor_and_phone_clear(channel):
+async def test_pass_crud_shared_fields_actor_and_phone_clear():
     actor = await user()
     data = values()
-    created = await call(channel, "create", actor, data)
+    created = await call("create", actor, data)
     row = created["visitor_pass"]
     assert row["visitor_name"] == "Synthetic Visitor"
-    updated = await call(channel, "update", actor, {"visitor_phone": ""}, row["id"])
+    updated = await call("update", actor, {"visitor_phone": ""}, row["id"])
     assert updated["visitor_pass"].get("visitor_phone") is None
     async with AsyncSessionLocal() as s:
         persisted = await s.get(VisitorPass, uuid.UUID(row["id"]))
         assert persisted.visitor_phone is None
-    cancelled = await call(channel, "cancel", actor, {"reason": "synthetic test"}, row["id"])
+    cancelled = await call("cancel", actor, {"reason": "synthetic test"}, row["id"])
     assert cancelled["visitor_pass"]["status"] == "cancelled"
     rows = await audits(actor)
     assert [r.action for r in rows] == [
@@ -138,10 +123,9 @@ async def test_pass_crud_shared_fields_actor_and_phone_clear(channel):
     assert rows[1].diff["new"]["visitor_phone"] is None
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_pass_preview_has_no_mutation(channel):
+async def test_pass_preview_has_no_mutation():
     actor = await user()
-    result = await call(channel, "create", actor, values(), confirmed=False)
+    result = await call("create", actor, values(), confirmed=False)
     assert result.get("error") or result.get("requires_confirmation")
     assert await audits(actor) == []
     async with AsyncSessionLocal() as s:
@@ -155,19 +139,14 @@ async def test_pass_preview_has_no_mutation(channel):
         )
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_pass_audit_failure_rolls_back(channel, monkeypatch):
+async def test_pass_audit_failure_rolls_back(monkeypatch):
     actor = await user()
 
     async def fail(*args, **kw):
         raise RuntimeError("synthetic audit failure")
 
     monkeypatch.setattr(owner, "write_audit_log", fail)
-    if channel == "alfred":
-        with pytest.raises(RuntimeError):
-            await call(channel, "create", actor, values())
-    else:
-        assert "error" in await call(channel, "create", actor, values())
+    assert "error" in await call("create", actor, values())
     async with AsyncSessionLocal() as s:
         assert (
             await s.scalar(
@@ -179,28 +158,20 @@ async def test_pass_audit_failure_rolls_back(channel, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_pass_realtime_failure_keeps_committed_success(channel, monkeypatch):
+async def test_pass_realtime_failure_keeps_committed_success(monkeypatch):
     actor = await user()
 
     async def fail(*args, **kw):
         raise RuntimeError("synthetic realtime failure")
 
     monkeypatch.setattr(owner.event_bus, "publish", fail)
-    result = await call(channel, "create", actor, values())
+    result = await call("create", actor, values())
     assert "visitor_pass" in result
     assert len(await audits(actor)) == 1
 
 
-@pytest.mark.parametrize("role,active", [(UserRole.STANDARD, True), (UserRole.ADMIN, False)])
-async def test_alfred_pass_uses_real_actor_not_claimed_role(role, active):
-    actor = await user(role, active)
-    result = await call("alfred", "create", actor, values())
-    assert "error" in result
-    assert await audits(actor) == []
 
 
-from app.ai.tool_groups import notifications_handlers as notification_alfred
 from app.api.v1 import notifications as notification_api
 from app.models import NotificationRule
 from app.services import notification_rules
@@ -218,18 +189,8 @@ def notification_values():
     }
 
 
-async def notification_call(channel, action, actor, data=None, row_id=None, confirmed=True):
+async def notification_call(action, actor, data=None, row_id=None, confirmed=True):
     data = dict(data or {})
-    if channel == "alfred":
-        token = set_chat_tool_context({"user_id": str(actor.id), "user_role": "admin"})
-        try:
-            if row_id:
-                data["rule_id"] = str(row_id)
-            return await getattr(notification_alfred, action + "_notification_workflow")(
-                {**data, "confirm": confirmed}
-            )
-        finally:
-            set_chat_tool_context({}, token=token)
     app = FastAPI()
     app.include_router(notification_api.router, prefix="/api/v1/notifications")
     app.dependency_overrides[current_user] = lambda: actor
@@ -252,29 +213,18 @@ async def notification_call(channel, action, actor, data=None, row_id=None, conf
     return {"workflow": response.json() if response.content else None}
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def notification_preview(monkeypatch):
-    async def preview(*args, **kw):
-        return {"synthetic": True}
-
-    monkeypatch.setattr(
-        notification_alfred,
-        "get_notification_service",
-        lambda: SimpleNamespace(preview_rule=preview),
-    )
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_notification_mutation_audits_and_fields(channel):
+async def test_notification_mutation_audits_and_fields():
     actor = await user()
-    created = await notification_call(channel, "create", actor, notification_values())
+    created = await notification_call("create", actor, notification_values())
     row = created["workflow"]
     assert row["name"] == "Synthetic Workflow"
     assert row["is_active"] is False
-    updated = await notification_call(channel, "update", actor, {"name": "Renamed"}, row["id"])
+    updated = await notification_call("update", actor, {"name": "Renamed"}, row["id"])
     assert updated["workflow"]["name"] == "Renamed"
     assert updated["workflow"]["actions"] == row["actions"]
-    await notification_call(channel, "delete", actor, row_id=row["id"])
+    await notification_call("delete", actor, row_id=row["id"])
     async with AsyncSessionLocal() as s:
         assert await s.get(NotificationRule, uuid.UUID(row["id"])) is None
         rows = (
@@ -291,15 +241,14 @@ async def test_notification_mutation_audits_and_fields(channel):
         "notification_rule.update",
         "notification_rule.delete",
     ]
-    assert all(x.actor == actor_from_user(actor) and x.metadata_["source"] == channel for x in rows)
+    assert all(x.actor == actor_from_user(actor) and x.metadata_["source"] == "api" for x in rows)
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
 @pytest.mark.parametrize("changes", [{"name": "   "}, {"name": "x" * 161}, {"actions": []}])
-async def test_notification_invalid_update_preserves_row(channel, changes):
+async def test_notification_invalid_update_preserves_row(changes):
     actor = await user()
-    row = (await notification_call(channel, "create", actor, notification_values()))["workflow"]
-    result = await notification_call(channel, "update", actor, changes, row["id"])
+    row = (await notification_call("create", actor, notification_values()))["workflow"]
+    result = await notification_call("update", actor, changes, row["id"])
     assert "error" in result
     async with AsyncSessionLocal() as s:
         persisted = await s.get(NotificationRule, uuid.UUID(row["id"]))
@@ -343,11 +292,10 @@ async def test_notification_audit_failure_is_atomic(action, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_notification_confirmation_prevents_write(channel):
+async def test_notification_confirmation_prevents_write():
     actor = await user()
     result = await notification_call(
-        channel, "create", actor, notification_values(), confirmed=False
+        "create", actor, notification_values(), confirmed=False
     )
     assert result.get("error") or result.get("requires_confirmation")
     async with AsyncSessionLocal() as s:
@@ -366,21 +314,10 @@ async def test_notification_confirmation_prevents_write(channel):
 
 async def test_notification_real_actor_required():
     actor = await user(UserRole.STANDARD)
-    result = await notification_call("alfred", "create", actor, notification_values())
-    assert result["error_code"] == "forbidden"
+    result = await notification_call("create", actor, notification_values())
+    assert result["error"] == "Admin access required"
 
 
-async def test_notification_preview_failure_does_not_fail_mutation(monkeypatch):
-    async def fail(*args, **kw):
-        raise RuntimeError("preview unavailable")
-
-    monkeypatch.setattr(
-        notification_alfred, "get_notification_service", lambda: SimpleNamespace(preview_rule=fail)
-    )
-    actor = await user()
-    result = await notification_call("alfred", "create", actor, notification_values())
-    assert result["created"] is True
-    assert result["warnings"]
 
 
 async def test_notification_concurrent_partial_updates():
@@ -403,7 +340,6 @@ async def test_notification_concurrent_partial_updates():
         assert persisted.is_active is True
 
 
-from app.ai.tool_groups import automations_handlers as automation_alfred
 from app.api.v1 import automations as automation_api
 from app.models import AutomationRule
 from app.services import automations as automation_owner
@@ -430,18 +366,8 @@ async def automation_preview(monkeypatch):
     monkeypatch.setattr(automation_owner.AutomationService, "dry_run_rule", preview)
 
 
-async def automation_call(channel, action, actor, data=None, row_id=None, confirmed=True):
+async def automation_call(action, actor, data=None, row_id=None, confirmed=True):
     data = dict(data or {})
-    if channel == "alfred":
-        token = set_chat_tool_context({"user_id": str(actor.id), "user_role": "admin"})
-        try:
-            if row_id:
-                data["automation_id"] = str(row_id)
-            return await getattr(
-                automation_alfred, ("edit" if action == "update" else action) + "_automation"
-            )({**data, "confirm": confirmed})
-        finally:
-            set_chat_tool_context({}, token=token)
     app = FastAPI()
     app.include_router(automation_api.router, prefix="/api/v1/automations")
     app.dependency_overrides[current_user] = lambda: actor
@@ -465,21 +391,20 @@ async def automation_call(channel, action, actor, data=None, row_id=None, confir
     return {"automation": response.json() if response.content else None}
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_automation_crud_audit_and_action_only_hardening(channel):
+async def test_automation_crud_audit_and_action_only_hardening():
     actor = await user()
-    created = await automation_call(channel, "create", actor, automation_values())
+    created = await automation_call("create", actor, automation_values())
     row = created["automation"]
     assert row["name"] == "Synthetic Automation"
     assert row["triggers"][0]["config"]["require_hmac"] is False
     updated = await automation_call(
-        channel, "update", actor, {"actions": [{"type": "gate.open", "config": {}}]}, row["id"]
+        "update", actor, {"actions": [{"type": "gate.open", "config": {}}]}, row["id"]
     )
     assert updated["automation"]["triggers"][0]["config"]["require_hmac"] is True
     async with AsyncSessionLocal() as s:
         persisted = await s.get(AutomationRule, uuid.UUID(row["id"]))
         assert persisted.triggers[0]["config"]["require_hmac"] is True
-    await automation_call(channel, "delete", actor, row_id=row["id"])
+    await automation_call("delete", actor, row_id=row["id"])
     async with AsyncSessionLocal() as s:
         assert await s.get(AutomationRule, uuid.UUID(row["id"])) is None
         rows = (
@@ -499,14 +424,13 @@ async def test_automation_crud_audit_and_action_only_hardening(channel):
     assert all(x.actor == actor_from_user(actor) for x in rows)
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
 @pytest.mark.parametrize(
     "changes", [{"name": "   "}, {"name": "x" * 161}, {"actions": []}, {"triggers": []}]
 )
-async def test_automation_invalid_updates_roll_back(channel, changes):
+async def test_automation_invalid_updates_roll_back(changes):
     actor = await user()
-    row = (await automation_call(channel, "create", actor, automation_values()))["automation"]
-    result = await automation_call(channel, "update", actor, changes, row["id"])
+    row = (await automation_call("create", actor, automation_values()))["automation"]
+    result = await automation_call("update", actor, changes, row["id"])
     assert "error" in result
     async with AsyncSessionLocal() as s:
         persisted = await s.get(AutomationRule, uuid.UUID(row["id"]))
@@ -551,10 +475,9 @@ async def test_automation_audit_failure_rolls_back(action, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("channel", ["api", "alfred"])
-async def test_automation_confirmation_prevents_mutation(channel):
+async def test_automation_confirmation_prevents_mutation():
     actor = await user()
-    result = await automation_call(channel, "create", actor, automation_values(), confirmed=False)
+    result = await automation_call("create", actor, automation_values(), confirmed=False)
     assert result.get("error") or result.get("requires_confirmation")
     async with AsyncSessionLocal() as s:
         assert (
@@ -569,5 +492,12 @@ async def test_automation_confirmation_prevents_mutation(channel):
 
 async def test_automation_requires_real_admin():
     actor = await user(UserRole.STANDARD)
-    result = await automation_call("alfred", "create", actor, automation_values())
+    result = await automation_call("create", actor, automation_values())
     assert "error" in result
+
+
+async def test_pass_requires_admin():
+    actor = await user(UserRole.STANDARD)
+    result = await call("create", actor, values())
+    assert result["error"] == "Admin access required"
+    assert await audits(actor) == []

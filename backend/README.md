@@ -2,7 +2,7 @@
 
 FastAPI services turn validated LPR observations into durable access/movement
 records, presence and audited gate/garage commands. The backend also owns
-notifications, integrations and Alfred V3 operations.
+notifications, integrations and camera image analysis.
 
 Start with the [backend agent guide](../docs/agent/backend.md) for task-specific
 owners and transaction contracts, [architecture guide](../docs/architecture.md)
@@ -13,7 +13,7 @@ before touching physical effects.
 - `app/api/router.py`: `/api/v1` route registration.
 - `app/services/`: domain policy, transactions and audit.
 - `app/modules/`: hardware and provider protocols.
-- `app/ai/` and `app/services/alfred/`: tool contracts and agent execution.
+- `app/ai/providers.py`: camera image-analysis providers.
 - `app/models/` and `alembic/`: durable schema and migrations.
 - `tests/`: focused behavior and contract tests; `../scripts/phase1/` owns isolated
   PostgreSQL validation.

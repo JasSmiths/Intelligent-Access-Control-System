@@ -1,6 +1,6 @@
 # Backend agent guide
 
-Read this for backend, API, migration, integration, or Alfred work. Paths below
+Read this for backend, API, migration, integration work. Paths below
 are relative to `backend/app/` unless they start with `backend/` or `scripts/`.
 Read [hardware safety](hardware-safety.md) before touching hardware or LPR effects.
 
@@ -16,15 +16,13 @@ Read [hardware safety](hardware-safety.md) before touching hardware or LPR effec
 | Gate and garage commands | `services/gate_commands.py`, `services/access_devices.py` |
 | Device configuration and frozen targets | `services/access_device_configuration.py` |
 | Resident missed-exit recovery | `services/resident_recovery.py`, `services/resident_recovery_evidence.py` |
-| Schedules and assignments | `services/schedule_operations.py`, `services/schedule_assignments.py`, `services/schedule_overrides.py` |
+| Schedules and assignments | `services/schedule_operations.py`, `services/schedule_assignments.py` |
 | Visitor passes, notification rules, automations | `services/visitor_passes.py`, `services/notification_rules.py`, `services/automations.py` |
 | Durable notification delivery | `services/notification_runs.py`, `services/notification_dispatch.py`, `services/notifications.py` |
-| Incoming messages and WhatsApp | `services/messaging/` |
-| Alfred tools and orchestration | `ai/tool_groups/`, `services/alfred/`, `services/chat.py` |
 | Snapshots | `services/snapshots.py`, `services/snapshot_recovery.py` |
 
 Services own business rules and transactions; modules own vendor protocol I/O.
-API and Alfred handlers adapt input, confirmation and presentation to the same
+API handlers adapt input, confirmation and presentation to the same
 operations. Find callers with `rg -l`, then read the owner and relevant tests in
 bounded ranges. Do not duplicate an operation in another adapter.
 
@@ -120,15 +118,15 @@ Detailed policy and tests: [missed-exit recovery](../validation/missed-exit-reco
 
 `services/mutation_context.py` defines the active-Admin invariant and
 machine-readable `MutationError`. Resolve actors from trusted request context,
-never caller-supplied labels or tool arguments. API/Alfred adapters own the
+never caller-supplied labels or tool arguments. API adapters own the
 confirmation interaction; domain owners retain validation and durable audit.
 
-- Schedule CRUD: `services/schedule_operations.py`; standalone temporary overrides:
-  `services/schedule_overrides.py`. Mutation and audit commit together.
+- Schedule CRUD: `services/schedule_operations.py`. Mutation and audit commit together.
+  Existing temporary overrides remain part of access evaluation/history.
 - Schedule assignments: `services/schedule_assignments.py` participates in the caller's
   aggregate transaction. Device assignment stays in `AccessDeviceService`.
   Evaluation/dependency queries remain in `services/schedules.py`.
-- Schedule PATCH is replacement-oriented; Alfred updates are partial. The device
+- Schedule PATCH is replacement-oriented. The device
   UI uses an empty string to clear a schedule because confirmation omits nulls.
   Vehicle clearing preserves owner-schedule inheritance.
 - `VisitorPassService` and `AutomationService` participate in caller-owned
@@ -138,9 +136,12 @@ confirmation interaction; domain owners retain validation and durable audit.
   row-plus-audit transactions. Delivery, preview and tests remain in
   `NotificationService`.
 - Post-commit publication cannot undo a saved mutation. Preserve calendar/visitor
-  actor scopes and active-Admin checks for interactive Alfred operations.
+  actor scopes and active-Admin checks for interactive operations.
 
 ## Notifications and workflows
+
+`services/notifications.py` owns orchestration and delivery;
+`services/notification_rendering.py` owns pure message/context/preview rendering.
 
 Rules live in database tables, not `system_settings`. Shared trigger/action/token
 contracts belong in `services/workflows/catalog.py` and `services/workflows/context.py`.
@@ -168,57 +169,17 @@ sets delivery status. Admin inspection under `/api/v1/notifications` uses
 `/runs?review_only=true`, `/runs/{run_id}` and `/recovery/gate-outbox`; there is no
 retry/resend endpoint. See [recovery boundaries](../validation/recovery-boundaries.md).
 
-## Incoming messaging
+## Camera AI and visitor passes
 
-Concrete WhatsApp owners live in `services/messaging/`: `whatsapp_delivery.py`
-for output, `whatsapp_configuration.py` for typed settings,
-`whatsapp_webhook.py` for validation, `whatsapp_incoming.py` for durable intake,
-and `whatsapp_router.py` for Admin/visitor routing. `incoming_messages.py` owns
-provider-neutral claims/reply checkpoints. Visitor interpretation is in
-`services/messaging/visitor_conversation.py`; shared scoped policy is in
-`services/visitor_conversations.py`.
+Camera image analysis uses `ai/providers.py` through access evidence and UniFi
+snapshot routes. Providers accept images only. Calendar visitor names use the
+existing deterministic title fallback; schedules use structured recurrence or
+cron; investigations use bounded structured activity queries. There is no chat,
+training, conversational command, incoming messaging or Discord/WhatsApp delivery.
 
-An exact normalized active Admin phone routes to Alfred; an active/scheduled
-visitor-pass phone routes to the visitor sandbox; unknown senders are denied and
-audited. Acknowledge accepted work only after durable intake. Preserve operation
-identity through handling, approval and reply. Interrupted handlers and uncertain
-replies require review; never reset attempted work to pending. Revalidate the
-linked actor and auth-session version before buffered Admin work: shared history
-cannot transfer authority. Visitor tools stay scoped to pass details and that
-pass's plate, including privileged-plate refusal, cooldown and privacy rules.
-
-Operational Discord output uses `modules/messaging/discord_transport.py`.
-SDK convenience sends can internally retry a possibly accepted request; preserve
-the transport's per-destination outcomes and view registration contract.
-
-## Alfred V3
-
-Alfred V3 is the supported runtime. `services/chat.py` orchestrates sessions;
-`services/alfred/` owns planning, execution, approvals and streaming.
-The stdlib-only contracts are `ai/tools.py` (`ToolOutcome`/`ToolError`),
-`ai/tool_inputs.py` (validation), and `ai/context.py` (actor context).
-`ai/tool_groups/registry.py` assembles feature catalogs and handlers.
-
-- Keep handler dependencies explicit. `ai/tool_groups/_shared.py` exports its own helpers, not
-  other services/models. Inject fakes or patch the dependency use site before
-  building a registry that captures them.
-- The planner is LLM-owned and scoped. Do not add keyword prefilters,
-  deterministic answer shortcuts or provider-signature compatibility retries.
-- Tool results carry domain `output` plus `outcome.status` and nullable
-  `outcome.error` (`code`, `message`). Statuses are `succeeded`, `failed`,
-  `requires_confirmation`, `requires_details`.
-- Catalogs own status labels, success flags, confirmation summaries/buttons and
-  turn-completion metadata. Presentation callbacks have no side effects.
-- Validate inputs before handlers. Extend the validator and tests before adding
-  unsupported schema constraints. `return_schema` describes answer metadata;
-  it does not validate domain output.
-- State-changing tools return `requires_confirmation` before mutation and use
-  the shared audited owner. Declare permissions, safety and confirmation metadata.
-
-Use `backend/tests/contracts/test_alfred_catalog_contract.py`,
-`backend/tests/test_alfred_architecture.py`, `backend/tests/test_chat_tool_context.py`,
-`backend/tests/test_alfred_provider_contract.py` and touched feature tests to
-check these boundaries.
+Manual duration passes require a registration when created or converted. Existing
+passes remain editable and keep their history; calendar provenance, contact data,
+validity windows and linked movements remain in the pass owner.
 
 ## Settings, snapshots and lifecycle
 
@@ -232,8 +193,7 @@ Use Alembic migrations; never add runtime schema bootstrap or setting aliases.
 `SnapshotManager` in `services/snapshots.py` owns app snapshot writes/compression;
 the access helper delegates to it. Startup repair uses `services/snapshot_recovery.py`.
 
-Shutdown closes producer intake, drains in-flight work and shielded Alfred
-approvals, then closes hardware, delivery sinks and the database. Fence lazy
+Shutdown closes producer intake, drains in-flight work, then closes hardware, delivery sinks and the database. Fence lazy
 provider reconnection after close. `core/task_lifecycle.py` owns existing
 cancellation-resistant cleanup/checkpoints: an outer timeout must not detach a
 child that can still write or send; cleanup may exceed that timeout.

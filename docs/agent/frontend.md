@@ -12,7 +12,7 @@ current uncommitted features are part of the source under review.
 | Routes, URLs, labels, roles and required shell data | `app/navigation.tsx`; lazy view composition in `app/routes.tsx`; `api/types.ts` owns `ViewKey`. |
 | Authentication and account lifetime | `app/auth.tsx`, `app/profile.ts`, `app/useShellRefresh.ts`. |
 | Realtime transport and refresh | `app/useRealtimeConnection.ts`, `realtimeEvents.ts`, `realtimeRefresh.ts`, `refreshCoordinator.ts`, `useShellRefresh.ts`. |
-| Search, theme, toasts and Alfred launcher | Matching modules under `app/`. |
+| Search, theme and toasts | Matching modules under `app/`. |
 | HTTP, errors and confirmation requests | `api/client.ts`; domain contracts under `api/`; shared response types in `api/types.ts`. |
 | Common UI and editor lifecycle | `ui/primitives.tsx`, `ui/useModalFocus.ts`, `ui/useEditorDismiss.ts`, `ui/useModalClose.ts`. |
 | Formatting, media, settings and floating placement | `lib/format.ts`, `lib/media.tsx`, `lib/settings.tsx`, `lib/viewportPlacement.ts`. |
@@ -26,25 +26,26 @@ enforces direct routes and acyclic schedule/workflow dependencies.
 | Feature | Owner and related contracts |
 | --- | --- |
 | Dashboard and Access Pulse | `views/DashboardView.tsx`; `features/dashboard/AccessPulse.tsx` and its colocated CSS. |
-| People, Groups and Vehicles | `views/DirectoryViews.tsx`. |
+| People, Groups and Vehicles | Direct `views/PeopleView.tsx`, `GroupsView.tsx`, `VehiclesView.tsx`; editors and shared directory helpers under `features/directory/`. |
 | Schedules | `features/schedules/SchedulesView.tsx`, `ScheduleEditor.tsx`, `WeeklyScheduleGrid.tsx`, pure `model.ts`; `api/schedules.ts`. |
-| Passes | `views/PassesView.tsx`. |
+| Passes | `views/PassesView.tsx`; editor, details, types and lifecycle presentation under `features/passes/`. New duration passes require a number plate; legacy duration edits can retain a missing plate. |
 | Events, Movements and Alerts | Matching `views/*View.tsx`, `views/useHistoryPage.ts`; `api/history.ts`. |
 | Reports and Top Charts | Matching views; `api/reports.ts`. |
-| Integrations and recovery panels | `views/IntegrationsView.tsx`, `features/integrations/`; `api/integrations.ts`, `api/incomingMessages.ts`. |
+| Integrations and recovery panels | `views/IntegrationsView.tsx`, `features/integrations/`; `api/integrations.ts`; provider forms under `features/integrations/providers/`. Camera AI uses the existing provider settings. |
 | Investigations | `/logs` retains its URL and `logs` view key; `views/LogsView.tsx` composes `features/investigations/`; `api/investigations.ts`. |
-| Settings hub, device settings and Users | `views/SettingsViews.tsx`. |
+| Settings hub, device settings and Users | Direct `views/SettingsView.tsx`, `DynamicSettingsView.tsx`, `AccessDevicesSettingsView.tsx`, `ZonesSettingsView.tsx` and `UsersView.tsx`; supporting panels under `features/settings/`. |
 | Command History | `views/CommandHistoryView.tsx`, shared `features/integrations/CommandReceiptHistory.tsx` and `CommandReceiptDetails.tsx`; `api/integrations.ts`. |
 | Missed Exit Recovery | `features/missedExitRecovery/`; `api/missedExitRecovery.ts`; `/settings/missed-exit-recovery`. |
 | Automations and Notifications | Direct routes to `features/workflows/AutomationsView.tsx` and `NotificationsView.tsx`; `api/workflows.ts`. |
-| Alfred conversation, approvals and training | `views/ChatWidgetView.tsx`, `features/alfred/`, `views/AlfredTrainingView.tsx`; `api/chat.ts`. |
 
 Workflow editors own their specific draft/presentation models. Reuse
 `features/workflows/components.tsx`, `model.ts`, `hooks.ts` and `TemplateEditor.tsx`
 without importing a concrete editor into those shared modules.
 `VariableRichTextEditor.tsx` and `lib/templateRecipients.ts` handle template UI.
 Backend integration/workflow catalogs remain authoritative; do not invent
-fallback catalogs in React.
+fallback catalogs in React. Automations use explicit date/cron schedules.
+Notifications retain mobile, in-app and voice delivery. Investigations uses
+structured filters and retained activity evidence; it has no question interpreter.
 
 ## Contracts to preserve
 
@@ -68,14 +69,19 @@ fallback catalogs in React.
 - Extend realtime impact tests for affected and unaffected routes. Reconnect and
   manual refresh still refresh the active route; avoid a second refresh for
   views already consuming compact events.
+- Alert detail links use a member UUID from `alert_ids` for grouped alerts.
+  The synthetic group `id` identifies the row and confirmation target; it is
+  not valid for `/api/v1/alerts/{alert_id}` detail reads.
 - Keep durable cursor history, direct-record links and expired-history refresh
   behavior separate from recent realtime feeds.
 
 ## Layout and styles
 
 `styles.css` imports global/shell styles. Some features load CSS with their lazy
-entrypoints, including integrations, workflows, investigations, Alfred and
+entrypoints, including integrations, workflows, investigations and
 Access Pulse. Inspect imports and selector consumers before removing styles.
+
+Shared shell and editor responsiveness lives in `styles/responsive.css`; feature styles remain with their owners.
 
 The navigation drawer boundary is **980px** in `app/App.tsx` and responsive CSS;
 the compact content/editor boundary remains **720px**. Keep them distinct and
@@ -90,6 +96,10 @@ text clipping and document overflow; allow deliberate table/calendar scrolling.
 Keep `.badge` inline-flex and scope title styles instead of broad span rules.
 The sample design under `prototypes/premium-dashboard/` is a separate app,
 not the source of production routes or contracts.
+
+Alert filters share 40px control heights and align at their bottom edges. Keep
+dropdown appearance consistent across browsers and date fields contained when
+the filters wrap; the panel and active status tab use a flat visual treatment.
 
 ## Validation
 

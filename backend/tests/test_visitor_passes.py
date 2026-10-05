@@ -7,17 +7,14 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.ai.tool_groups import visitor_passes_handlers as alfred_visitor_passes_handlers
-from app.ai.tool_groups import visitor_passes_handlers as visitor_pass_tools
 from app.models import VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, VisitorPassStatus, VisitorPassType
 from app.services.access.execution import AccessExecution
 from app.services.domain_events import publish_visitor_pass_status_changed
 from app.services.visitor_passes import (
     VisitorPassService,
-    append_visitor_pass_whatsapp_history,
+    VisitorPassError,
     serialize_visitor_pass,
-    visitor_pass_whatsapp_history,
 )
 
 SimpleNamespace = cast(Any, _SimpleNamespace)
@@ -288,7 +285,6 @@ async def test_duration_visitor_pass_arrival_stays_active(monkeypatch) -> None:
     assert row.number_plate == "AB12CDE"
 
 
-
 @pytest.mark.asyncio
 async def test_duration_visitor_pass_candidate_selection_does_not_retime_open_visit(monkeypatch) -> None:
     service = VisitorPassService()
@@ -355,7 +351,6 @@ async def test_duration_visitor_pass_arrival_links_open_claim_without_retiming(m
     assert row.telemetry_trace_id == "trace-1"
 
 
-
 @pytest.mark.asyncio
 async def test_duration_visitor_pass_repeated_arrival_does_not_overwrite_open_visit(monkeypatch) -> None:
     service = VisitorPassService()
@@ -388,7 +383,6 @@ async def test_duration_visitor_pass_repeated_arrival_does_not_overwrite_open_vi
     assert row.arrival_event_id == first_event_id
     assert row.telemetry_trace_id == "trace-first"
     assert row.departure_time is None
-
 
 
 @pytest.mark.asyncio
@@ -430,7 +424,6 @@ async def test_duration_visitor_pass_return_after_departure_starts_new_visit(mon
     assert row.telemetry_trace_id == "trace-return"
 
 
-
 @pytest.mark.asyncio
 async def test_update_visitor_plate_saves_dvla_vehicle_details_and_clears_stale_details(monkeypatch) -> None:
     service = VisitorPassService()
@@ -468,125 +461,6 @@ async def test_update_visitor_plate_saves_dvla_vehicle_details_and_clears_stale_
     assert row.number_plate == "CD34EFG"
     assert row.vehicle_make is None
     assert row.vehicle_colour is None
-
-
-def test_serialize_visitor_pass_includes_concierge_fields() -> None:
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
-    row = visitor_pass(
-        expected_time=start,
-        status=VisitorPassStatus.ACTIVE,
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        number_plate="AB12CDE",
-    )
-    row.valid_from = start
-    row.valid_until = start + timedelta(hours=8)
-
-    payload = serialize_visitor_pass(row, timezone_name="UTC")
-
-    assert payload["pass_type"] == "duration"
-    assert payload["visitor_phone"] == "447700900123"
-    assert payload["number_plate"] == "AB12CDE"
-    assert payload["valid_from"] == "2026-05-01T09:00:00+00:00"
-    assert payload["whatsapp_status"] == "complete"
-    assert payload["whatsapp_status_label"] == "Complete - Vehicle Registration: AB12CDE"
-
-
-def test_serialize_visitor_pass_shows_requested_time_change_before_complete() -> None:
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
-    row = visitor_pass(
-        expected_time=start,
-        status=VisitorPassStatus.ACTIVE,
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        number_plate="AB12CDE",
-    )
-    row.valid_from = start
-    row.valid_until = start + timedelta(hours=8)
-    row.source_metadata = {
-        "whatsapp_concierge_status": "timeframe_confirmation_pending",
-        "whatsapp_concierge_status_detail": "Awaiting visitor confirmation for the requested timeframe change.",
-    }
-
-    payload = serialize_visitor_pass(row, timezone_name="UTC")
-
-    assert payload["whatsapp_status"] == "timeframe_confirmation_pending"
-    assert payload["whatsapp_status_label"] == "Requested Time Change"
-
-
-def test_serialize_visitor_pass_shows_awaiting_time_change_approval_before_complete() -> None:
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
-    row = visitor_pass(
-        expected_time=start,
-        status=VisitorPassStatus.ACTIVE,
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        number_plate="AB12CDE",
-    )
-    row.valid_from = start
-    row.valid_until = start + timedelta(hours=8)
-    row.source_metadata = {
-        "whatsapp_concierge_status": "timeframe_approval_pending",
-        "whatsapp_concierge_status_detail": "Visitor requested a timeframe change that needs Admin approval.",
-    }
-
-    payload = serialize_visitor_pass(row, timezone_name="UTC")
-
-    assert payload["whatsapp_status"] == "timeframe_approval_pending"
-    assert payload["whatsapp_status_label"] == "Awaiting Time Change Approval"
-
-
-def test_visitor_pass_whatsapp_history_is_serialized_from_metadata() -> None:
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
-    row = visitor_pass(
-        expected_time=start,
-        status=VisitorPassStatus.ACTIVE,
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-    )
-
-    append_visitor_pass_whatsapp_history(
-        row,
-        direction="inbound",
-        body="My registration is AB12 CDE",
-        actor_label="Sarah",
-        occurred_at=start,
-    )
-    append_visitor_pass_whatsapp_history(
-        row,
-        direction="outbound",
-        body="Please confirm AB12CDE",
-        actor_label="IACS",
-        occurred_at=start + timedelta(minutes=1),
-    )
-
-    history = visitor_pass_whatsapp_history(row)
-
-    assert [message["direction"] for message in history] == ["inbound", "outbound"]
-    assert history[0]["body"] == "My registration is AB12 CDE"
-    assert history[1]["actor_label"] == "IACS"
-
-
-def test_serialize_visitor_pass_complete_label_includes_time_updated_after_change() -> None:
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
-    row = visitor_pass(
-        expected_time=start,
-        status=VisitorPassStatus.ACTIVE,
-        pass_type=VisitorPassType.DURATION,
-        visitor_phone="447700900123",
-        number_plate="AB12CDE",
-    )
-    row.valid_from = start
-    row.valid_until = start + timedelta(hours=8)
-    row.source_metadata = {
-        "whatsapp_concierge_status": "timeframe_approved",
-        "whatsapp_timeframe_request": {"status": "approved"},
-    }
-
-    payload = serialize_visitor_pass(row, timezone_name="UTC")
-
-    assert payload["whatsapp_status"] == "complete"
-    assert payload["whatsapp_status_label"] == "Complete - Vehicle Registration: AB12CDE Time Updated"
 
 
 def test_overlap_matching_prefers_closest_expected_time_then_oldest_created() -> None:
@@ -664,82 +538,72 @@ async def test_departure_duration_is_recorded_for_same_plate(monkeypatch) -> Non
     assert row.duration_on_site_seconds == 5100
 
 
-def test_api_status_filter_parser_accepts_multi_status_values() -> None:
-    statuses = visitor_pass_tools._visitor_pass_statuses_from_arguments(
-        {"statuses": ["active", "scheduled", "used", "bogus"]}
-    )
-
-    assert statuses == [
-        VisitorPassStatus.ACTIVE,
-        VisitorPassStatus.SCHEDULED,
-        VisitorPassStatus.USED,
-    ]
 
 
 @pytest.mark.asyncio
-async def test_alfred_create_visitor_pass_requires_confirmation(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(site_timezone="Europe/London")
-
-    monkeypatch.setattr(alfred_visitor_passes_handlers, "get_runtime_config", fake_runtime_config)
-
-    result = await alfred_visitor_passes_handlers.create_visitor_pass(
-        {
-            "visitor_name": "Sarah",
-            "expected_time": "2027-04-29T15:00:00+01:00",
-            "window_minutes": 30,
-            "confirm": False,
-        }
-    )
-
-    assert result["requires_confirmation"] is True
-    assert result["confirmation_field"] == "confirm"
-    assert result["visitor_name"] == "Sarah"
-    assert "Europe/London" not in result["detail"]
-    assert result["expected_time_display"] == "29 Apr 2027, 15:00"
-
-
-@pytest.mark.asyncio
-async def test_alfred_create_duration_visitor_pass_allows_missing_optional_contact(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(site_timezone="Europe/London")
-
-    monkeypatch.setattr(alfred_visitor_passes_handlers, "get_runtime_config", fake_runtime_config)
-
-    result = await alfred_visitor_passes_handlers.create_visitor_pass(
-        {
-            "visitor_name": "Dave",
-            "pass_type": "duration",
-            "visitor_phone": None,
-            "number_plate": "ab12 cde",
-            "valid_from": "2027-04-29T14:00:00+01:00",
-            "valid_until": "2027-04-29T17:00:00+01:00",
-            "confirm": False,
-        }
-    )
-
-    assert result["requires_confirmation"] is True
-    assert result["visitor_phone"] is None
-    assert result["number_plate"] == "AB12CDE"
-    assert "phone number" not in result["detail"].lower()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status,offset,mode", [
-    (VisitorPassStatus.SCHEDULED, 0, "active"),
-    (VisitorPassStatus.ACTIVE, 60, "expired"),
-    (VisitorPassStatus.SCHEDULED, -60, "scheduled"),
-    (VisitorPassStatus.CANCELLED, 0, "expired"),
-    (VisitorPassStatus.USED, 0, "expired"),
-])
-async def test_read_only_phone_binding_evaluates_current_window_without_lifecycle_mutation(status, offset, mode):
-    expected = datetime(2026, 9, 12, 12, tzinfo=UTC)
-    row = visitor_pass(expected_time=expected, status=status, pass_type=VisitorPassType.DURATION,
-                       visitor_phone="447700900123")
+async def test_new_duration_pass_requires_plate_before_persistence():
     service = VisitorPassService()
-    service.refresh_statuses = AsyncMock(side_effect=AssertionError("read-only binding must not refresh lifecycle"))
-    selected, actual = await service.messaging_pass_for_phone(FakeVisitorPassSession([row]), "447700900123",
-        now=expected + timedelta(minutes=offset), refresh_status=False)
-    assert selected is row and actual == mode
-    assert row.status == status
-    service.refresh_statuses.assert_not_awaited()
+    start = datetime.now(tz=UTC) + timedelta(days=1)
+    session = SimpleNamespace(add=AsyncMock(), flush=AsyncMock())
+    with pytest.raises(VisitorPassError, match="valid vehicle registration"):
+        await service.create_pass(session, visitor_name="Visitor", pass_type=VisitorPassType.DURATION,
+            valid_from=start, valid_until=start + timedelta(hours=2))
+    session.add.assert_not_called()
+    session.flush.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_duration_pass_normalizes_plate_without_contact_or_concierge(monkeypatch):
+    service = VisitorPassService()
+    start = datetime.now(tz=UTC) + timedelta(days=1)
+    rows = []
+    session = SimpleNamespace(add=rows.append, flush=AsyncMock())
+    audit = AsyncMock()
+    monkeypatch.setattr(service, "_audit_change", audit)
+    row = await service.create_pass(session, visitor_name="Visitor", pass_type=VisitorPassType.DURATION,
+        number_plate="ab12 cde", valid_from=start, valid_until=start + timedelta(hours=2), actor="Admin")
+    assert row.number_plate == "AB12CDE"
+    assert row.visitor_phone is None
+    assert row.source_metadata is None
+    assert rows == [row]
+    assert audit.await_args.kwargs["action"] == "visitor_pass.create"
+
+
+@pytest.mark.asyncio
+async def test_manual_plate_edit_uses_audited_plate_owner(monkeypatch):
+    service = VisitorPassService()
+    start = datetime.now(tz=UTC) + timedelta(days=1)
+    row = visitor_pass(expected_time=start, status=VisitorPassStatus.SCHEDULED,
+        pass_type=VisitorPassType.DURATION, number_plate="AB12CDE")
+    row.valid_from, row.valid_until = start, start + timedelta(hours=2)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, item, **_kw: item))
+    audit = AsyncMock()
+    monkeypatch.setattr(service, "_audit_change", audit)
+    await service.update_pass(SimpleNamespace(), row, number_plate="xy34 zzz", number_plate_provided=True, actor="Admin")
+    assert row.number_plate == "XY34ZZZ"
+    assert [call.kwargs["action"] for call in audit.await_args_list] == ["visitor_pass.vehicle_plate_update", "visitor_pass.update"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_unplated_duration_pass_retains_ordinary_editing(monkeypatch):
+    service = VisitorPassService()
+    start = datetime.now(tz=UTC) + timedelta(days=1)
+    row = visitor_pass(expected_time=start, status=VisitorPassStatus.SCHEDULED, pass_type=VisitorPassType.DURATION)
+    row.valid_from, row.valid_until = start, start + timedelta(hours=2)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, item, **_kw: item))
+    monkeypatch.setattr(service, "_audit_change", AsyncMock())
+    await service.update_pass(SimpleNamespace(), row, visitor_name="Updated")
+    assert row.visitor_name == "Updated"
+    assert row.number_plate is None
+
+
+@pytest.mark.asyncio
+async def test_conversion_to_duration_requires_manual_plate(monkeypatch):
+    service = VisitorPassService()
+    start = datetime.now(tz=UTC) + timedelta(days=1)
+    row = visitor_pass(expected_time=start, status=VisitorPassStatus.SCHEDULED)
+    monkeypatch.setattr(service, "_lock_for_mutation", AsyncMock(side_effect=lambda _session, item, **_kw: item))
+    with pytest.raises(VisitorPassError, match="valid vehicle registration"):
+        await service.update_pass(SimpleNamespace(), row, pass_type=VisitorPassType.DURATION,
+            valid_from=start, valid_until=start + timedelta(hours=2))
+    assert row.pass_type == VisitorPassType.ONE_TIME

@@ -22,10 +22,6 @@ SECRET_KEYS = {
     "home_assistant_token",
     "esphome_devices",
     "apprise_urls",
-    "discord_bot_token",
-    "whatsapp_access_token",
-    "whatsapp_webhook_verify_token",
-    "whatsapp_app_secret",
     "dvla_api_key",
     "unifi_protect_username",
     "unifi_protect_password",
@@ -129,36 +125,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
     "esphome_devices": ("integrations", "[]", "Configured ESPHome native API devices."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
-    "discord_bot_token": ("integrations", "", "Discord bot token."),
-    "discord_guild_allowlist": ("integrations", [], "Allowed Discord guild/server IDs."),
-    "discord_channel_allowlist": ("integrations", [], "Allowed Discord channel IDs."),
-    "discord_user_allowlist": ("integrations", [], "Allowed Discord user IDs."),
-    "discord_role_allowlist": ("integrations", [], "Allowed Discord role IDs."),
-    "discord_admin_role_ids": ("integrations", [], "Discord role IDs allowed to confirm Admin actions."),
-    "discord_default_notification_channel_id": (
-        "integrations",
-        "",
-        "Default Discord channel ID for notification workflows.",
-    ),
-    "discord_allow_direct_messages": ("integrations", False, "Allow direct messages to Alfred from allowed users."),
-    "discord_require_mention": ("integrations", True, "Require @Alfred mentions for guild channel messages."),
-    "whatsapp_enabled": ("integrations", False, "Enable WhatsApp Cloud API messaging."),
-    "whatsapp_access_token": ("integrations", "", "Meta WhatsApp Cloud API access token."),
-    "whatsapp_phone_number_id": ("integrations", "", "WhatsApp Business phone number ID."),
-    "whatsapp_business_account_id": ("integrations", "", "WhatsApp Business Account ID."),
-    "whatsapp_webhook_verify_token": ("integrations", "", "Webhook verification token for Meta setup."),
-    "whatsapp_app_secret": ("integrations", "", "Optional Meta app secret for webhook signature validation."),
-    "whatsapp_graph_api_version": ("integrations", "v25.0", "Meta Graph API version for WhatsApp Cloud API."),
-    "whatsapp_visitor_pass_template_name": (
-        "integrations",
-        "iacs_visitor_welcome",
-        "Approved WhatsApp utility template used to request Visitor Pass vehicle registrations.",
-    ),
-    "whatsapp_visitor_pass_template_language": (
-        "integrations",
-        "en",
-        "Language code for the Visitor Pass WhatsApp outreach template.",
-    ),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -176,71 +142,6 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     "unifi_protect_snapshot_width": ("integrations", 1280, "Default UniFi Protect snapshot width."),
     "unifi_protect_snapshot_height": ("integrations", 720, "Default UniFi Protect snapshot height."),
     "llm_provider": ("llm", settings.llm_provider, "Active LLM provider."),
-    "alfred_learning_mode": (
-        "llm",
-        "review_then_learn",
-        "How Alfred applies response feedback. Use review_then_learn or auto_learn.",
-    ),
-    "alfred_semantic_memory_enabled": (
-        "llm",
-        True,
-        "Enable pgvector-backed semantic memory and lesson retrieval for Alfred.",
-    ),
-    "alfred_memory_extraction_enabled": (
-        "llm",
-        False,
-        "Allow background LLM extraction of durable memories from ordinary Alfred turns. Manual feedback and training are unaffected.",
-    ),
-    "alfred_reflection_enabled": (
-        "llm",
-        False,
-        "Allow Alfred to draft short post-turn reflection lessons through the learning workflow. Disabled by default to avoid background token spend.",
-    ),
-    "alfred_efficiency_mode": (
-        "llm",
-        "balanced",
-        "Token-efficiency posture for Alfred live chat. Use conservative, balanced, or maximum_savings.",
-    ),
-    "alfred_openai_prompt_cache_policy": (
-        "llm",
-        "static_24h",
-        "OpenAI prompt-cache retention policy for Alfred. Use in_memory, static_24h, or all_live_24h.",
-    ),
-    "alfred_interactive_model": (
-        "llm",
-        "gpt-5.4",
-        "Model Alfred uses for live tool reasoning, answer composition, and answer verification.",
-    ),
-    "alfred_planner_model": (
-        "llm",
-        "gpt-5.4-mini",
-        "Fast structured-output model Alfred uses for live tool planning. Must not be a nano model.",
-    ),
-    "alfred_background_model": (
-        "llm",
-        "gpt-5.4-nano",
-        "Optional cheaper model for background reflection and memory tasks. Blank follows the provider default.",
-    ),
-    "alfred_reasoning_effort": (
-        "llm",
-        "medium",
-        "Reasoning effort for Alfred live planning, answer composition, and answer verification.",
-    ),
-    "alfred_embedding_provider": (
-        "llm",
-        "local",
-        "Embedding provider for Alfred semantic memory. Use openai, ollama, local, or disabled.",
-    ),
-    "alfred_embedding_model": (
-        "llm",
-        "text-embedding-3-small",
-        "Embedding model used by Alfred semantic memory.",
-    ),
-    "alfred_embedding_dimension": (
-        "llm",
-        1536,
-        "Embedding vector dimension for Alfred semantic memory.",
-    ),
     "llm_timeout_seconds": ("llm", settings.llm_timeout_seconds, "LLM HTTP timeout."),
     "openai_api_key": ("llm", settings.openai_api_key or "", "OpenAI API key."),
     "openai_model": ("llm", "gpt-4o", "OpenAI model."),
@@ -290,24 +191,6 @@ class RuntimeConfig:
     home_assistant_default_media_player: str
     esphome_devices: list[dict[str, Any]]
     apprise_urls: str
-    discord_bot_token: str
-    discord_guild_allowlist: list[str]
-    discord_channel_allowlist: list[str]
-    discord_user_allowlist: list[str]
-    discord_role_allowlist: list[str]
-    discord_admin_role_ids: list[str]
-    discord_default_notification_channel_id: str
-    discord_allow_direct_messages: bool
-    discord_require_mention: bool
-    whatsapp_enabled: bool
-    whatsapp_access_token: str
-    whatsapp_phone_number_id: str
-    whatsapp_business_account_id: str
-    whatsapp_webhook_verify_token: str
-    whatsapp_app_secret: str
-    whatsapp_graph_api_version: str
-    whatsapp_visitor_pass_template_name: str
-    whatsapp_visitor_pass_template_language: str
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -321,19 +204,6 @@ class RuntimeConfig:
     unifi_protect_snapshot_width: int
     unifi_protect_snapshot_height: int
     llm_provider: str
-    alfred_learning_mode: str
-    alfred_semantic_memory_enabled: bool
-    alfred_memory_extraction_enabled: bool
-    alfred_reflection_enabled: bool
-    alfred_efficiency_mode: str
-    alfred_openai_prompt_cache_policy: str
-    alfred_interactive_model: str
-    alfred_planner_model: str
-    alfred_background_model: str
-    alfred_reasoning_effort: str
-    alfred_embedding_provider: str
-    alfred_embedding_model: str
-    alfred_embedding_dimension: int
     llm_timeout_seconds: float
     openai_api_key: str
     openai_model: str
@@ -580,24 +450,6 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
         esphome_devices=normalize_esphome_devices(values["esphome_devices"]),
         apprise_urls=str(values["apprise_urls"] or ""),
-        discord_bot_token=str(values["discord_bot_token"] or ""),
-        discord_guild_allowlist=string_list_value(values["discord_guild_allowlist"]),
-        discord_channel_allowlist=string_list_value(values["discord_channel_allowlist"]),
-        discord_user_allowlist=string_list_value(values["discord_user_allowlist"]),
-        discord_role_allowlist=string_list_value(values["discord_role_allowlist"]),
-        discord_admin_role_ids=string_list_value(values["discord_admin_role_ids"]),
-        discord_default_notification_channel_id=str(values["discord_default_notification_channel_id"] or ""),
-        discord_allow_direct_messages=bool_value(values["discord_allow_direct_messages"]),
-        discord_require_mention=bool_value(values["discord_require_mention"]),
-        whatsapp_enabled=bool_value(values["whatsapp_enabled"]),
-        whatsapp_access_token=str(values["whatsapp_access_token"] or ""),
-        whatsapp_phone_number_id=str(values["whatsapp_phone_number_id"] or ""),
-        whatsapp_business_account_id=str(values["whatsapp_business_account_id"] or ""),
-        whatsapp_webhook_verify_token=str(values["whatsapp_webhook_verify_token"] or ""),
-        whatsapp_app_secret=str(values["whatsapp_app_secret"] or ""),
-        whatsapp_graph_api_version=str(values["whatsapp_graph_api_version"] or "v25.0"),
-        whatsapp_visitor_pass_template_name=str(values["whatsapp_visitor_pass_template_name"] or ""),
-        whatsapp_visitor_pass_template_language=str(values["whatsapp_visitor_pass_template_language"] or "en"),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),
@@ -611,39 +463,6 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         unifi_protect_snapshot_width=int(values["unifi_protect_snapshot_width"] or 1280),
         unifi_protect_snapshot_height=int(values["unifi_protect_snapshot_height"] or 720),
         llm_provider=str(values["llm_provider"]),
-        alfred_learning_mode=(
-            "auto_learn"
-            if str(values["alfred_learning_mode"]).strip().lower() == "auto_learn"
-            else "review_then_learn"
-        ),
-        alfred_semantic_memory_enabled=bool_value(values["alfred_semantic_memory_enabled"]),
-        alfred_memory_extraction_enabled=bool_value(values["alfred_memory_extraction_enabled"]),
-        alfred_reflection_enabled=bool_value(values["alfred_reflection_enabled"]),
-        alfred_efficiency_mode=(
-            str(values["alfred_efficiency_mode"]).strip().lower()
-            if str(values["alfred_efficiency_mode"]).strip().lower() in {"conservative", "balanced", "maximum_savings"}
-            else "balanced"
-        ),
-        alfred_openai_prompt_cache_policy=(
-            str(values["alfred_openai_prompt_cache_policy"]).strip().lower()
-            if str(values["alfred_openai_prompt_cache_policy"]).strip().lower() in {"in_memory", "static_24h", "all_live_24h"}
-            else "static_24h"
-        ),
-        alfred_interactive_model=str(values["alfred_interactive_model"] or "gpt-5.4"),
-        alfred_planner_model=str(values["alfred_planner_model"] or "gpt-5.4-mini"),
-        alfred_background_model=str(values["alfred_background_model"] or "gpt-5.4-nano"),
-        alfred_reasoning_effort=(
-            str(values["alfred_reasoning_effort"]).strip().lower()
-            if str(values["alfred_reasoning_effort"]).strip().lower() in {"low", "medium", "high", "xhigh"}
-            else "medium"
-        ),
-        alfred_embedding_provider=(
-            str(values["alfred_embedding_provider"]).strip().lower()
-            if str(values["alfred_embedding_provider"]).strip().lower() in {"openai", "ollama", "local", "disabled"}
-            else "openai"
-        ),
-        alfred_embedding_model=str(values["alfred_embedding_model"] or "text-embedding-3-small"),
-        alfred_embedding_dimension=max(1, int(values["alfred_embedding_dimension"] or 1536)),
         llm_timeout_seconds=float(values["llm_timeout_seconds"]),
         openai_api_key=str(values["openai_api_key"] or ""),
         openai_model=str(values["openai_model"]),

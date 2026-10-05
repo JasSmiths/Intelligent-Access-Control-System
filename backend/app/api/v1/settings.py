@@ -18,7 +18,6 @@ from app.services.auth_secret_management import (
     rotate_auth_secret,
 )
 from app.services.access_devices import get_access_device_service
-from app.services.discord_messaging import get_discord_messaging_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import (
@@ -29,13 +28,11 @@ from app.services.settings import (
     validate_dynamic_setting_keys,
 )
 from app.services.telemetry import (
-    TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
     emit_audit_log,
 )
 from app.services.unifi_protect import get_unifi_protect_service
-from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
 
 router = APIRouter()
 
@@ -148,8 +145,6 @@ async def patch_settings(
         await get_access_device_service().restart()
     if any(key.startswith("unifi_protect_") for key in request.values):
         await get_unifi_protect_service().restart()
-    if any(key.startswith("discord_") for key in request.values):
-        await get_discord_messaging_service().restart()
     return rows
 
 
@@ -179,10 +174,6 @@ async def test_connection(
             await _test_esphome(values)
         elif integration == "apprise":
             await _test_apprise(values)
-        elif integration == "discord":
-            await _test_discord(values)
-        elif integration == "whatsapp":
-            await _test_whatsapp(values)
         elif integration == "dvla":
             await _test_dvla(values)
         elif integration == "unifi_protect":
@@ -265,14 +256,6 @@ async def _test_apprise(values: dict[str, Any]) -> None:
     if not urls:
         urls = (await get_runtime_config()).apprise_urls.strip()
     validate_apprise_urls(urls)
-
-
-async def _test_discord(values: dict[str, Any]) -> None:
-    await get_discord_messaging_service().test_connection(values)
-
-
-async def _test_whatsapp(values: dict[str, Any]) -> None:
-    await get_whatsapp_delivery_service().test_connection(values)
 
 
 async def _test_dvla(values: dict[str, Any]) -> None:

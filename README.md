@@ -2,11 +2,12 @@
 
 IACS turns license-plate reads into durable access and movement decisions,
 presence, alerts, and audited gate/garage operations. It includes Home Assistant
-and UniFi Protect integrations, notification workflows, Alfred conversational
-operations, and a realtime React console.
+and UniFi Protect integrations, notification and automation workflows, camera image analysis, and a realtime React console.
 
 Use the [documentation index](docs/README.md) for current guides and
-[AGENTS.md](AGENTS.md) for repository-specific agent instructions.
+[AGENTS.md](AGENTS.md) for repository-specific agent instructions. The
+[project layout](docs/project-layout.md) identifies the current checkout, original
+source archive, runtime data, backups and retained previews.
 
 ## Development setup
 
@@ -14,7 +15,7 @@ For a new local development instance:
 
 ```bash
 cp .env.example .env
-mkdir -p data/backend data/chat_attachments data/postgres data/redis logs/backend logs/frontend
+mkdir -p data/backend data/postgres data/redis logs/backend logs/frontend
 docker compose up --build
 ```
 

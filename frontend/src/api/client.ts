@@ -3,8 +3,6 @@ export type ApiRequestOptions = {
   signal?: AbortSignal;
 };
 const LARGE_JSON_PARSE_YIELD_BYTES = 512 * 1024;
-export const CHAT_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
-export const CHAT_ATTACHMENT_MAX_LABEL = "25 MB";
 export function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }

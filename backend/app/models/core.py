@@ -2,26 +2,10 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_, text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-from sqlalchemy.types import UserDefinedType
-
-try:
-    from pgvector.sqlalchemy import Vector as _PgVector
-except ImportError:  # pragma: no cover - dependency is installed in the backend image.
-    class _FallbackVector(UserDefinedType):
-        cache_ok = True
-
-        def __init__(self, dimensions: int) -> None:
-            self.dimensions = dimensions
-
-        def get_col_spec(self, **_kw: Any) -> str:
-            return f"vector({self.dimensions})"
-
-    _PgVector = _FallbackVector
-
 from app.db.base import Base
 from app.models.enums import (
     AccessDecision,
@@ -221,23 +205,6 @@ class User(Base, TimestampMixin):
     person: Mapped[Person | None] = relationship()
 
 
-class MessagingIdentity(Base, TimestampMixin):
-    __tablename__ = "messaging_identities"
-    __table_args__ = (
-        UniqueConstraint("provider", "provider_user_id", name="ux_messaging_identity_provider_user"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
-    provider_user_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
-    provider_display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
-
-    user: Mapped[User | None] = relationship()
-    person: Mapped[Person | None] = relationship()
 
 
 class SystemSetting(Base, TimestampMixin):
@@ -758,7 +725,7 @@ class ScheduleOverride(Base, TimestampMixin):
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
-    source: Mapped[str] = mapped_column(String(80), default="alfred", nullable=False)
+    source: Mapped[str] = mapped_column(String(80), default="system", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
     person: Mapped[Person] = relationship()
@@ -1152,35 +1119,6 @@ class ReportExport(Base, TimestampMixin):
     created_by: Mapped[User | None] = relationship()
 
 
-class ProcessedMessagingMessage(Base, TimestampMixin):
-    __tablename__ = "processed_messaging_messages"
-    __table_args__ = (
-        UniqueConstraint("provider", "provider_message_id", name="ux_processed_messaging_message_provider_id"),
-        CheckConstraint("recovery_version IS NULL OR (recovery_version = 1 AND state IS NOT NULL AND state IN ('received','processing','handled','review_required') AND envelope IS NOT NULL AND jsonb_typeof(envelope) = 'object' AND routing_context IS NOT NULL AND jsonb_typeof(routing_context) = 'object' AND available_at IS NOT NULL)", name="ck_incoming_message_recovery"),
-        Index("ix_incoming_message_eligible", "state", "available_at", "created_at", postgresql_where=text("recovery_version = 1")),
-        Index("ix_incoming_message_batch", "batch_id"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
-    provider_message_id: Mapped[str] = mapped_column(String(180), nullable=False, index=True)
-    provider_channel_id: Mapped[str | None] = mapped_column(String(180), index=True)
-    author_provider_id: Mapped[str | None] = mapped_column(String(180), index=True)
-    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    # Historical dedupe markers remain NULL and can never become executable.
-    recovery_version: Mapped[int | None] = mapped_column(Integer)
-    state: Mapped[str | None] = mapped_column(String(24))
-    envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    routing_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    batch_id: Mapped[uuid.UUID | None] = mapped_column()
-    claim_token: Mapped[uuid.UUID | None] = mapped_column()
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    reply_plan: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    review_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class VisitorPass(Base, TimestampMixin):
@@ -1389,42 +1327,8 @@ Index(
 )
 
 
-class ChatSession(Base, TimestampMixin):
-    __tablename__ = "chat_sessions"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    title: Mapped[str | None] = mapped_column(String(160))
-    context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-
-    messages: Mapped[list["ChatMessage"]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
-    )
 
 
-class AlfredApproval(Base, TimestampMixin):
-    """Requester-bound executable approval; chat history is never execution state."""
-
-    __tablename__ = "alfred_approvals"
-    __table_args__ = (
-        UniqueConstraint("operation_id", name="uq_alfred_approval_operation"),
-        CheckConstraint("status IN ('pending', 'claimed', 'completed', 'cancelled', 'expired', 'unknown')",
-                        name="ck_alfred_approval_status"),
-        Index("ix_alfred_approval_requester", "session_id", "requester_user_id", "created_at"),
-        Index("uq_alfred_approval_pending", "session_id", "requester_user_id", unique=True,
-              postgresql_where=text("status = 'pending' AND requester_user_id IS NOT NULL")),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    operation_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"))
-    requester_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    requester_auth_session_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RevokedAuthToken(Base, TimestampMixin):
@@ -1439,152 +1343,25 @@ class RevokedAuthToken(Base, TimestampMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
-class ChatMessage(Base, TimestampMixin):
-    __tablename__ = "chat_messages"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True)
-    role: Mapped[str] = mapped_column(String(32), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    tool_name: Mapped[str | None] = mapped_column(String(120))
-    tool_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-
-    session: Mapped[ChatSession] = relationship(back_populates="messages")
 
 
-class AlfredMemory(Base, TimestampMixin):
-    __tablename__ = "alfred_memories"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    kind: Mapped[str] = mapped_column(String(80), nullable=False, default="preference")
-    title: Mapped[str] = mapped_column(String(180), nullable=False)
-    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    source_session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
-    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("chat_messages.id", ondelete="SET NULL"),
-        index=True,
-    )
-    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-
-    owner: Mapped[User | None] = relationship()
 
 
-Index("ix_alfred_memories_scope_owner_deleted", AlfredMemory.scope, AlfredMemory.owner_user_id, AlfredMemory.deleted_at)
-
-Index(
-    "ix_alfred_memories_embedding_hnsw",
-    AlfredMemory.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-    postgresql_where=AlfredMemory.embedding.is_not(None),
-)
 
 
-class AlfredLesson(Base, TimestampMixin):
-    __tablename__ = "alfred_lessons"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    title: Mapped[str] = mapped_column(String(180), nullable=False)
-    lesson: Mapped[str] = mapped_column(Text, nullable=False)
-    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    source_feedback_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
-    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rejected_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    edited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-
-    owner: Mapped[User | None] = relationship(foreign_keys=[owner_user_id])
 
 
-Index("ix_alfred_lessons_scope_status_deleted", AlfredLesson.scope, AlfredLesson.status, AlfredLesson.deleted_at)
-
-Index(
-    "ix_alfred_lessons_embedding_hnsw",
-    AlfredLesson.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-    postgresql_where=AlfredLesson.embedding.is_not(None),
-)
 
 
-class AlfredFeedback(Base, TimestampMixin):
-    __tablename__ = "alfred_feedback"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    rating: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    source_channel: Mapped[str] = mapped_column(String(40), nullable=False, default="dashboard", index=True)
-    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_sessions.id", ondelete="SET NULL"), index=True)
-    user_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True)
-    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True)
-    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    actor_role: Mapped[str] = mapped_column(String(40), nullable=False, default="standard", index=True)
-    provider: Mapped[str | None] = mapped_column(String(80), index=True)
-    model: Mapped[str | None] = mapped_column(String(160))
-    original_user_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    original_assistant_response: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    reason: Mapped[str | None] = mapped_column(Text)
-    ideal_answer: Mapped[str | None] = mapped_column(Text)
-    corrected_answer: Mapped[str | None] = mapped_column(Text)
-    turn_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
-    status: Mapped[str] = mapped_column(String(40), nullable=False, default="received", index=True)
-    lesson_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alfred_lessons.id", ondelete="SET NULL"), index=True)
-
-    actor_user: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
-    lesson: Mapped[AlfredLesson | None] = relationship()
 
 
-Index("ix_alfred_feedback_assistant_actor", AlfredFeedback.assistant_message_id, AlfredFeedback.actor_user_id)
-
-Index(
-    "ix_alfred_feedback_embedding_hnsw",
-    AlfredFeedback.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-    postgresql_where=AlfredFeedback.embedding.is_not(None),
-)
 
 
-class AlfredEvalExample(Base, TimestampMixin):
-    __tablename__ = "alfred_eval_examples"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    feedback_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("alfred_feedback.id", ondelete="SET NULL"), index=True)
-    scope: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    bad_answer: Mapped[str | None] = mapped_column(Text)
-    ideal_answer: Mapped[str | None] = mapped_column(Text)
-    corrected_answer: Mapped[str | None] = mapped_column(Text)
-    lesson: Mapped[str | None] = mapped_column(Text)
-    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(_PgVector(1536))
-
-    feedback: Mapped[AlfredFeedback | None] = relationship()
 
 
-Index(
-    "ix_alfred_eval_examples_embedding_hnsw",
-    AlfredEvalExample.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-    postgresql_where=AlfredEvalExample.embedding.is_not(None),
-)
+
+
+
 
 
 class ResidentRecoveryJourney(Base, TimestampMixin):

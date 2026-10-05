@@ -15,7 +15,7 @@ working tree on 2026-10-04. This is not a live-console validation report.
 The dependency is image-installed. Change it through the repository build and
 release process; there is no runtime updater or disk package overlay. Keep vendor
 I/O behind the wrapper rather than recreating Protect calls in API, access or
-Alfred handlers. Never expose credentials, cookies, API keys, raw media or raw
+API handlers. Never expose credentials, cookies, API keys, raw media or raw
 provider payloads in diagnostics.
 
 ## Client and lifecycle

@@ -104,24 +104,6 @@ export type ESPHomeDeviceSummary = {
   id: string; name: string; host: string; port: number; timeout_seconds: number;
   enabled: boolean; encryption_key_configured: boolean;
 };
-export type DiscordStatus = {
-  configured: boolean; connected: boolean; library_available: boolean; guild_count: number; channel_count: number;
-  default_notification_channel_id: string; allow_direct_messages: boolean; require_mention: boolean;
-  last_error: string | null; ready_at: string | null;
-};
-export type DiscordChannel = { id: string; guild_id: string; name: string; label: string };
-export type DiscordIdentity = {
-  id: string; provider_user_id: string; provider_display_name: string;
-  user_id: string | null; user_label: string | null; person_id: string | null;
-  person_label: string | null; last_seen_at: string | null;
-};
-export type WhatsAppStatus = {
-  enabled: boolean; configured: boolean; webhook_configured: boolean; signature_configured: boolean;
-  phone_number_id: string; business_account_id: string; graph_api_version: string;
-  visitor_pass_template_name: string; visitor_pass_template_language: string;
-  admin_target_count: number; last_error: string | null;
-};
-export type DiscordBundle = { status: DiscordStatus; channels: DiscordChannel[]; identities: DiscordIdentity[] };
 export type UnifiProtectStatus = {
   configured: boolean; connected: boolean; last_error: string | null; camera_count: number;
   realtime_connected: boolean; realtime_error: string | null;
@@ -184,16 +166,6 @@ export const integrationsApi = {
   verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
   syncICloudCalendar: () => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync"),
   removeICloudAccount: (accountId: string) => api.delete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${accountId}`),
-  getDiscordBundle: async (): Promise<DiscordBundle> => {
-    const [status, channelResult, identityResult] = await Promise.all([
-      api.get<DiscordStatus>("/api/v1/integrations/discord/status"),
-      api.get<{ channels: DiscordChannel[] }>("/api/v1/integrations/discord/channels"),
-      api.get<{ identities: DiscordIdentity[] }>("/api/v1/integrations/discord/identities")
-    ]);
-    return { status, channels: channelResult.channels, identities: identityResult.identities };
-  },
-  updateDiscordIdentity: (identityId: string, body: { user_id: string | null; person_id: string | null }) => api.patch<DiscordIdentity>(`/api/v1/integrations/discord/identities/${identityId}`, body),
-  getWhatsAppStatus: () => api.get<WhatsAppStatus>("/api/v1/integrations/whatsapp/status"),
   getAppriseUrls: async () => {
     const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls");
     return result.urls;
@@ -241,29 +213,6 @@ export async function removeAppriseUrl(url: AppriseUrlSummary) {
     reason: "Remove notification URL"
   });
   return integrationsApi.getAppriseUrls();
-}
-export function sendDiscordTestNotification(channelId: string | undefined) {
-  const payload = {
-    channel_id: channelId,
-    message: "This is a test Discord notification from API & Integrations."
-  };
-  return confirmedPost("/api/v1/integrations/discord/test", "discord.test_notification", payload, {
-    target_entity: "Discord",
-    target_id: payload.channel_id,
-    target_label: "Discord test notification",
-    reason: "Send Discord test notification"
-  });
-}
-export function sendWhatsAppTestMessage(values: Record<string, unknown>) {
-  const payload = {
-    message: "This is a test WhatsApp notification from API & Integrations.",
-    values
-  };
-  return confirmedPost("/api/v1/integrations/whatsapp/test", "whatsapp.test_message", payload, {
-    target_entity: "WhatsApp",
-    target_label: "WhatsApp test message",
-    reason: "Send WhatsApp test message"
-  });
 }
 export function sendAppriseTestNotification() {
   const payload = {

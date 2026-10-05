@@ -2,7 +2,6 @@ import { api, type ApiRequestOptions } from "./client";
 import type {
   ActivityEpisodeDetail,
   ActivityPage,
-  InvestigationAnswer,
   InvestigationFilterCatalog,
   InvestigationOverview,
   InvestigationQuery
@@ -51,38 +50,4 @@ export function getActivityPage(
 
 export function getActivityEpisode(episodeId: string, options: ApiRequestOptions = {}) {
   return api.get<ActivityEpisodeDetail>(`${BASE}/activity/${encodeURIComponent(episodeId)}`, options);
-}
-
-export function investigateQuestion(
-  question: string,
-  scope: InvestigationQuery,
-  timezone: string,
-  options: ApiRequestOptions = {}
-) {
-  return api.post<InvestigationAnswer>(`${BASE}/investigate`, {
-    question,
-    scope: {
-      time: {
-        today: "today",
-        yesterday: "yesterday",
-        "24h": "last_24_hours",
-        "7d": "last_7_days",
-        custom: "custom"
-      }[scope.range],
-      from_at: scope.from ? zonedWallTimeToIso(scope.from, timezone) : undefined,
-      to_at: scope.to ? zonedWallTimeToIso(scope.to, timezone) : undefined,
-      device: scope.device || undefined,
-      automation: scope.automation || undefined,
-      schedule: scope.schedule || undefined,
-      integration: scope.integration || undefined,
-      category: scope.category || undefined,
-      outcome: scope.outcome || undefined,
-      severity: scope.severity || undefined,
-      actor: scope.actor || undefined,
-      trigger: scope.trigger || undefined,
-      trace: scope.trace || undefined,
-      q: scope.q || undefined,
-      include_routine: scope.includeRoutine
-    }
-  }, options);
 }

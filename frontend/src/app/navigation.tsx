@@ -1,4 +1,4 @@
-import { BarChart3, Bell, Bot, CalendarDays, Car, ClipboardPaste, Clock3, DoorOpen, FileText, Gauge, GitBranch, History, Home, Lock, MapPinned, MoveHorizontal, PlugZap, Settings, SlidersHorizontal, Trophy, UserRound, Users, Warehouse } from "lucide-react";
+import { BarChart3, Bell, CalendarDays, Car, ClipboardPaste, Clock3, DoorOpen, FileText, Gauge, GitBranch, History, Home, Lock, MapPinned, MoveHorizontal, PlugZap, Settings, SlidersHorizontal, Trophy, UserRound, Users, Warehouse } from "lucide-react";
 import type React from "react";
 import type { UserAccount, ViewKey } from "../api/types";
 export type ShellDataKey =
@@ -25,7 +25,7 @@ const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
   movements: [],
   alerts: [],
   reports: ["people", "presence"],
-  integrations: ["people", "integrationStatus"],
+  integrations: ["integrationStatus"],
   logs: [],
   settings: ["groups", "schedules", "vehicles"],
   settings_general: [],
@@ -34,7 +34,6 @@ const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
   settings_command_history: [],
   settings_missed_exit_recovery: ["people"],
   settings_auth: [],
-  alfred_training: [],
   settings_automations: ["people", "vehicles"],
   settings_notifications: ["people", "schedules"],
   settings_lpr: [],
@@ -44,7 +43,7 @@ const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
 export function shellDataKeysForView(view: ViewKey, currentUser: UserAccount | null) {
   const keys = new Set<ShellDataKey>(UNIVERSAL_SHELL_DATA_KEYS);
   (ROUTE_SHELL_DATA_KEYS[view] ?? ROUTE_SHELL_DATA_KEYS.dashboard).forEach((key) => keys.add(key));
-  if ((view === "users" || view === "alfred_training") && currentUser?.role !== "admin") {
+  if (view === "users" && currentUser?.role !== "admin") {
     ROUTE_SHELL_DATA_KEYS.settings.forEach((key) => keys.add(key));
   }
   return keys;
@@ -84,7 +83,6 @@ export const settingsNavItems: Array<{ key: ViewKey; label: string; icon: React.
   { key: "settings_lpr", label: "LPR Tuning", icon: Gauge },
   { key: "settings_zones", label: "Zones", icon: MapPinned },
   { key: "users", label: "Users", icon: Users, adminOnly: true },
-  { key: "alfred_training", label: "Alfred Training", icon: Bot, adminOnly: true }
 ];
 export const settingsNavViewKeys = new Set<ViewKey>(settingsNavItems.map((item) => item.key));
 export const navigationItems: NavigationItem[] = [...primaryNavItems, ...settingsNavItems.map((item) => ({ ...item, group: "Settings" as const }))];
@@ -113,7 +111,6 @@ export const viewPaths: Record<ViewKey, string> = {
   settings_command_history: "/settings/command-history",
   settings_missed_exit_recovery: "/settings/missed-exit-recovery",
   settings_auth: "/settings/auth-security",
-  alfred_training: "/settings/alfred-training",
   settings_automations: "/settings/automations",
   settings_notifications: "/settings/notifications",
   settings_lpr: "/settings/lpr-tuning",

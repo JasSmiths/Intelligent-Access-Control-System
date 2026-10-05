@@ -245,7 +245,7 @@ class AccessDeviceService:
             return self._configuration.entity_from_row(row)
 
     async def assign_schedule(
-        self, device_id: str, schedule_id: str | None, *, user: User, source: Literal["api", "alfred"],
+        self, device_id: str, schedule_id: str | None, *, user: User, source: Literal["api"],
     ) -> AccessDeviceEntity:
         from app.services.schedule_assignments import set_schedule_assignment
 

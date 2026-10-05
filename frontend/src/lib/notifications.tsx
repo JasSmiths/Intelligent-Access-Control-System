@@ -26,16 +26,4 @@ export const notificationChannelMeta: Record<NotificationChannelId, {
     tone: "amber",
     description: "Home Assistant TTS announcement to media players."
   },
-  discord: {
-    label: "Discord Notification",
-    icon: MessageCircle,
-    tone: "purple",
-    description: "Discord embed delivery to selected channels."
-  },
-  whatsapp: {
-    label: "WhatsApp Message",
-    icon: MessageCircle,
-    tone: "green",
-    description: "WhatsApp Cloud API delivery to Admin users or dynamic phone-number variables."
-  }
 };

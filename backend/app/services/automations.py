@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import hmac
-import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -15,7 +14,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import ChatMessageInput, complete_with_provider_options, get_llm_provider
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
@@ -36,7 +34,7 @@ from app.services.mutation_context import MutationError, require_active_admin
 from app.services.access_devices import get_access_device_service
 from app.services.access.authorization import assert_current_recognition_authorization, recognition_deadline_for_event
 from app.services.access_device_commands import AccessDeviceCommandJournal
-from app.services.automation_authorization import automation_rule_fingerprint, current_rule_denial, evaluate_current_condition
+from app.services.automation_authorization import current_rule_denial, evaluate_current_condition
 from app.services.automation_dispatch import AutomationDispatcher
 from app.services.automation_intake import public_automation_context, reserve_occurrence, reserve_trigger
 from app.services.workflows.automation_definition import (
@@ -64,7 +62,6 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active, set_mode as set_maintenance_mode
 from app.services.notification_rules import set_automation_activation
-from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_AUTOMATION,
     TELEMETRY_CATEGORY_CRUD,
@@ -73,8 +70,6 @@ from app.services.telemetry import (
     current_trace_id,
     emit_audit_log,
     payload_shape,
-    sanitize_payload,
-    telemetry,
     write_audit_log,
 )
 from app.services.type_helpers import as_dict
@@ -90,7 +85,6 @@ logger = get_logger(__name__)
 
 SCHEDULER_INTERVAL_SECONDS = 15
 MAX_DUE_RULES_PER_TICK = 25
-AI_SCHEDULE_CONFIDENCE_THRESHOLD = 0.65
 WEBHOOK_RATE_WINDOW_SECONDS = 60
 WEBHOOK_SIGNATURE_HEADER = "X-IACS-Webhook-Signature"
 WEBHOOK_TIMESTAMP_HEADER = "X-IACS-Webhook-Timestamp"
@@ -556,7 +550,7 @@ class AutomationService:
                 denial = workflow_action_result(item["action"], "skipped", reason="recognition_hardware_expired",
                     reason_code="recognition_hardware_expired", command_sent=False, requires_review=True)
             action, context = item["action"], restored_automation_context(current.context)
-            if denial is not None or action["type"] in {"notification.enable", "notification.disable", "integration.whatsapp.send_message"}:
+            if denial is not None or action["type"] in {"notification.enable", "notification.disable"}:
                 outcome = denial if denial is not None else await self._execute_action(session, action, context, rule=rule, execution={**item, "run_id": str(current.id), "rule_fingerprint": current.context["rule_fingerprint"]})
                 if outcome.get("requires_review"):
                     current.review_reason = outcome.get("reason") or "preflight_requires_review"
@@ -725,53 +719,6 @@ class AutomationService:
             payload = await self._fresh_visitor_pass_payload(payload)
         return captured_automation_context(trigger_key, payload)
 
-    async def parse_ai_schedule(self, text: str) -> dict[str, Any]:
-        runtime = await get_runtime_config()
-        timezone_name = runtime.site_timezone or "Europe/London"
-        now = datetime.now(ZoneInfo(timezone_name))
-        prompt = (
-            "Convert this natural-language automation schedule into JSON only. "
-            "Return compact JSON with keys: cron_expression, run_at, start_at, end_at, timezone, "
-            "summary, confidence, ambiguity_notes. Use a five-field cron expression or null. "
-            "Use ISO-8601 datetimes with timezone offsets. Do not include markdown."
-        )
-        raw_text = ""
-        try:
-            provider = get_llm_provider(runtime.llm_provider)
-            result = await complete_with_provider_options(
-                provider,
-                [
-                    ChatMessageInput("system", prompt),
-                    ChatMessageInput(
-                        "user",
-                        json.dumps(
-                            {
-                                "schedule_text": text,
-                                "current_datetime": now.isoformat(),
-                                "site_timezone": timezone_name,
-                            }
-                        ),
-                    ),
-                ],
-                max_output_tokens=500,
-                request_purpose="automations.parse_schedule",
-            )
-            raw_text = result.text
-            parsed = json_object_from_text(raw_text)
-        except Exception as exc:
-            parsed = {
-                "summary": text,
-                "confidence": 0.0,
-                "ambiguity_notes": [f"Schedule parser failed: {exc}"],
-            }
-
-        if not parsed:
-            parsed = {
-                "summary": text,
-                "confidence": 0.0,
-                "ambiguity_notes": ["Schedule parser returned no usable JSON."],
-            }
-        return validate_schedule_parse(parsed, now=now, timezone_name=timezone_name, raw_text=raw_text)
 
     async def handle_webhook(
         self,
@@ -987,8 +934,7 @@ class AutomationService:
             return await self._command_garage_doors(action, context, rule=rule, execution=execution)
         if integration_action_for_type(action_type):
             return await execute_integration_action(session, action, context, rule=rule,
-                operation_id=execution["operation_id"] if execution else None,
-                origin={key: execution[key] for key in ("run_id", "rule_fingerprint")} if execution and action_type == "integration.whatsapp.send_message" else None)
+                operation_id=execution["operation_id"] if execution else None)
         if action_type in {"maintenance_mode.enable", "maintenance_mode.disable"}:
             reason = render_action_reason(action, context, rule)
             status = await set_maintenance_mode(
@@ -1057,7 +1003,6 @@ def action_paused_by_maintenance_mode(action_type: str) -> bool:
         or action_type.startswith("gate.")
         or action_type.startswith("garage_door.")
         or action_type == "maintenance_mode.enable"
-        or action_type == "integration.whatsapp.send_message"
     )
 
 
@@ -1479,7 +1424,7 @@ def next_run_for_trigger(
         candidate = start_at if start_at > now else ((last_fired_at or now) + delta)
         while candidate <= now:
             candidate += delta
-    elif trigger_type in {"time.cron", "time.ai_text"}:
+    elif trigger_type == "time.cron":
         expression = str(config.get("cron_expression") or "").strip()
         if not expression or not croniter.is_valid(expression):
             return None
@@ -1508,55 +1453,6 @@ def cron_next(expression: str, now: datetime, timezone: Any) -> datetime:
     return croniter(expression, localized).get_next(datetime)
 
 
-def validate_schedule_parse(
-    parsed: dict[str, Any],
-    *,
-    now: datetime,
-    timezone_name: str,
-    raw_text: str,
-) -> dict[str, Any]:
-    cron_expression = optional_text(parsed.get("cron_expression"))
-    run_at = optional_text(parsed.get("run_at"))
-    timezone = optional_text(parsed.get("timezone")) or timezone_name
-    try:
-        tz = timezone_for(timezone)
-    except Exception:
-        tz = timezone_for(timezone_name)
-        timezone = timezone_name
-    end_at = parse_datetime(parsed.get("end_at"))
-    confidence = float(parsed.get("confidence") or 0)
-    errors: list[str] = []
-    next_run = None
-    if cron_expression:
-        if croniter.is_valid(cron_expression):
-            next_run = cron_next(cron_expression, now, tz)
-        else:
-            errors.append("Cron expression is invalid.")
-    elif run_at:
-        next_run = parse_datetime(run_at)
-        if not next_run:
-            errors.append("run_at is invalid.")
-    else:
-        errors.append("No cron_expression or run_at was returned.")
-    if next_run and next_run <= now:
-        errors.append("Next run is not in the future.")
-    if end_at and next_run and end_at <= next_run:
-        errors.append("End date is before the first run.")
-    requires_review = bool(errors) or confidence < AI_SCHEDULE_CONFIDENCE_THRESHOLD
-    return {
-        "cron_expression": cron_expression,
-        "run_at": run_at,
-        "start_at": optional_text(parsed.get("start_at")),
-        "end_at": end_at.isoformat() if end_at else None,
-        "timezone": timezone,
-        "summary": optional_text(parsed.get("summary")),
-        "confidence": confidence,
-        "ambiguity_notes": parsed.get("ambiguity_notes") if isinstance(parsed.get("ambiguity_notes"), list) else [],
-        "next_run_at": next_run.astimezone(UTC).isoformat() if next_run else None,
-        "requires_review": requires_review,
-        "errors": errors,
-        "raw_text": raw_text,
-    }
 
 
 def timezone_for(value: Any) -> ZoneInfo:
@@ -1573,19 +1469,6 @@ def parse_uuid(value: Any) -> uuid.UUID | None:
         return None
 
 
-def json_object_from_text(text: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return {}
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
 
 
 _automation_service = AutomationService()

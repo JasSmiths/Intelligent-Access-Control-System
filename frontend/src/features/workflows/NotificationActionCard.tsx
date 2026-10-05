@@ -34,7 +34,7 @@ export function NotificationActionCard({
   const Icon = meta.icon;
   const supportsTitle = action.type !== "voice" && !isGateMalfunctionWorkflow;
   const supportsMessageTemplate = !isGateMalfunctionWorkflow;
-  const supportsMedia = action.type === "mobile" || action.type === "in_app" || action.type === "discord";
+  const supportsMedia = action.type === "mobile" || action.type === "in_app";
   const supportsActionable = action.type === "mobile" && actionableOptions.length > 0;
   const variableRecipients = action.type === "in_app" ? undefined : variableRecipientChoices(action, integration);
   const updateTemplate = (field: "title_template" | "message_template", value: string, restrictions?: import("../../api/workflows").VariableRecipientRestriction[]) => {
@@ -71,25 +71,6 @@ export function NotificationActionCard({
   const removeRecipient = (id: string) => {
     const target_ids = editableTargetIds.filter((target) => target !== id);
     if (target_ids.length) onChange({ ...action, target_mode: "selected", target_ids });
-  };
-  const whatsappNumberTargets = action.target_ids
-    .filter((target) => target.startsWith("whatsapp:number:"))
-    .map((target) => target.replace(/^whatsapp:number:/, ""))
-    .join("\n");
-  const updateWhatsAppNumberTargets = (value: string) => {
-    const manualTargets = value
-      .split(/\r?\n/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .map((item) => `whatsapp:number:${item}`);
-    onChange({
-      ...action,
-      target_mode: "selected",
-      target_ids: [
-        ...action.target_ids.filter((target) => !target.startsWith("whatsapp:number:")),
-        ...manualTargets,
-      ],
-    });
   };
   const selectedGateStages = normalizeGateMalfunctionStages(action.gate_malfunction_stages);
   const activeGateStages = selectedGateStages.length
@@ -185,15 +166,7 @@ export function NotificationActionCard({
         </section>
       ) : null}
 
-      {action.type === "whatsapp" ? (
-        <PlainTemplateEditor
-          label="Phone numbers or @Variables"
-          multiline
-          value={whatsappNumberTargets}
-          variables={variables}
-          onChange={updateWhatsAppNumberTargets}
-        />
-      ) : null}
+
 
       {supportsTitle ? (
         <SafeVariableRichTextEditor

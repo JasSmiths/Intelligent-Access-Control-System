@@ -51,8 +51,6 @@ class AutomationDryRunRequest(BaseModel):
     trigger_payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class AutomationScheduleParseRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=500)
 
 
 class AutomationRuleDeleteRequest(BaseModel):
@@ -243,12 +241,6 @@ async def dry_run_unsaved_automation_rule(
     )
 
 
-@router.post("/parse-schedule")
-async def parse_automation_schedule(
-    request: AutomationScheduleParseRequest,
-    _: User = Depends(admin_user),
-) -> dict[str, Any]:
-    return await get_automation_service().parse_ai_schedule(request.text)
 
 
 @router.post("/webhooks/{webhook_key}")

@@ -164,18 +164,18 @@ async def normalized_schema(connection, raw):
 
 async def prepare(connection):
     """Seed linked records plus uncertainty that must survive restoration intact."""
-    for name in ("users", "processed_messaging_messages", "access_device_command_records"):
+    for name in ("users", "notification_runs", "access_device_command_records"):
         if await connection.fetchval(f'SELECT count(*) FROM "{name}"'):
             raise ValueError("Restore rehearsal requires a fresh synthetic base database")
-    actor, message, command, target = [uuid.uuid4() for _ in range(4)]
+    actor, notification, command, target = [uuid.uuid4() for _ in range(4)]
     await connection.execute("""INSERT INTO users(id,username,first_name,last_name,full_name,password_hash,role,is_active)
         VALUES($1,'synthetic-restore-actor','Synthetic','Admin','Synthetic Restore Admin','unused','ADMIN',true)""", actor)
-    await connection.execute("""INSERT INTO processed_messaging_messages
-        (id,provider,provider_message_id,provider_channel_id,author_provider_id,recovery_version,state,envelope,routing_context,
-         available_at,claimed_at,reply_plan,review_reason)
-        VALUES($1,'synthetic','synthetic-interrupted-message','synthetic-channel','synthetic-author',1,'review_required',
-        '{"text":"Synthetic test only"}'::jsonb,'{"kind":"denied"}'::jsonb,now(),now(),
-        '[{"state":"unknown","recipient":"synthetic"}]'::jsonb,'synthetic interrupted reply')""", message)
+    await connection.execute("""INSERT INTO notification_runs
+        (id,trigger_event,subject,severity,status,recovery_version,context,delivery_plan,
+         queued_at,started_at,delivered_count,failed_count,skipped_count,failures,skipped_reasons,review_reason)
+        VALUES($1,'synthetic.restore','Synthetic interrupted notification','info','review_required',1,
+        '{}'::jsonb,'[{"state":"unknown","action":{"type":"mobile"}}]'::jsonb,
+        now(),now(),0,0,0,'[]'::jsonb,'[]'::jsonb,'synthetic interrupted notification')""", notification)
     await connection.execute("""INSERT INTO access_device_command_records
         (id,target_device_id,device_key,action,intent_id,idempotency_key,state,binding_snapshot,binding_fingerprint,attempted_at,
          provider_receipts,origin_context)

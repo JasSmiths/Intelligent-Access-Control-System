@@ -1,8 +1,8 @@
 import { ArrowLeft, CheckCircle2, MessageCircle, Play, PlugZap, Plus, Sparkles, Trash2 } from "lucide-react";
 import React from "react";
-import type { Person, UserAccount, Vehicle } from "../../api/types";
+import type { Person, Vehicle } from "../../api/types";
 import type { AutomationAction, AutomationCatalogGroup, AutomationCatalogItem, AutomationNode, AutomationVariable } from "../../api/workflows";
-import { displayUserName, fromDateTimeLocal, titleCase, toDateTimeLocal } from "../../lib/format";
+import { fromDateTimeLocal, titleCase, toDateTimeLocal } from "../../lib/format";
 import { Badge } from "../../ui/primitives";
 import { automationCategoryIcon, automationNodeIcon, createAutomationNode } from "./automationModel";
 import { TwoPaneSelectionModal } from "./components";
@@ -18,12 +18,10 @@ export function AutomationNodeStack({
   notificationRules = [],
   people,
   triggerMeta,
-  users,
   variables = [],
   vehicles,
   onAdd,
   onChange,
-  onParseAiSchedule,
   onRemove
 }: {
   actionMeta: Map<string, AutomationCatalogItem>;
@@ -34,12 +32,10 @@ export function AutomationNodeStack({
   notificationRules?: Array<{ id: string; name: string }>;
   people: Person[];
   triggerMeta: Map<string, AutomationCatalogItem>;
-  users: UserAccount[];
   variables?: Array<AutomationVariable & { group: string }>;
   vehicles: Vehicle[];
   onAdd: () => void;
   onChange: (node: AutomationNode | AutomationAction) => void;
-  onParseAiSchedule?: (node: AutomationNode) => void;
   onRemove: (node: AutomationNode | AutomationAction) => void;
 }) {
   const metaMap = kind === "trigger" ? triggerMeta : kind === "condition" ? conditionMeta : actionMeta;
@@ -55,10 +51,8 @@ export function AutomationNodeStack({
           notificationRules={notificationRules}
           people={people}
           variables={variables}
-          users={users}
           vehicles={vehicles}
           onChange={onChange}
-          onParseAiSchedule={onParseAiSchedule}
           onRemove={() => onRemove(node)}
         />
       ))}
@@ -76,11 +70,9 @@ function AutomationNodeCard({
   node,
   notificationRules,
   people,
-  users,
   variables,
   vehicles,
   onChange,
-  onParseAiSchedule,
   onRemove
 }: {
   garageDoors: Array<{ entity_id: string; name: string }>;
@@ -89,18 +81,13 @@ function AutomationNodeCard({
   node: AutomationNode | AutomationAction;
   notificationRules: Array<{ id: string; name: string }>;
   people: Person[];
-  users: UserAccount[];
   variables: Array<AutomationVariable & { group: string }>;
   vehicles: Vehicle[];
   onChange: (node: AutomationNode | AutomationAction) => void;
-  onParseAiSchedule?: (node: AutomationNode) => void;
   onRemove: () => void;
 }) {
   const Icon = automationNodeIcon(node.type);
   const updateConfig = (config: Record<string, unknown>) => onChange({ ...node, config: { ...node.config, ...config } });
-  const activeWhatsappAdmins = users.filter((user) => user.is_active && user.role === "admin" && user.mobile_phone_number);
-  const whatsappTargetMode = String(node.config.target_mode ?? "selected");
-  const whatsappSelectedUserIds = Array.isArray(node.config.target_user_ids) ? node.config.target_user_ids.map(String) : [];
   return (
     <article className="workflow-action-card">
       <div className="workflow-card-title">
@@ -153,21 +140,14 @@ function AutomationNodeCard({
         </div>
       ) : null}
 
-      {node.type === "time.cron" || node.type === "time.ai_text" ? (
+      {node.type === "time.cron" ? (
         <div className="field-grid compact-field-grid">
-          {node.type === "time.ai_text" ? <label className="field compact-field wide-field"><span>AI schedule text</span><input value={String(node.config.natural_text ?? "")} onChange={(event) => updateConfig({ natural_text: event.target.value })} placeholder="Every Thursday at 9pm until 4th June" /></label> : null}
           <label className="field compact-field"><span>Cron</span><input value={String(node.config.cron_expression ?? "")} onChange={(event) => updateConfig({ cron_expression: event.target.value })} placeholder="0 21 * * 4" /></label>
           <label className="field compact-field"><span>End date</span><input type="datetime-local" value={toDateTimeLocal(String(node.config.end_at ?? ""))} onChange={(event) => updateConfig({ end_at: fromDateTimeLocal(event.target.value) })} /></label>
-          {node.type === "time.ai_text" ? <button className="secondary-button compact" onClick={() => onParseAiSchedule?.(node)} type="button"><Sparkles size={14} /> Parse</button> : null}
         </div>
       ) : null}
 
-      {node.type === "ai.phrase_received" ? (
-        <div className="field-grid compact-field-grid">
-          <label className="field compact-field"><span>Phrase</span><input value={String(node.config.phrase ?? "")} onChange={(event) => updateConfig({ phrase: event.target.value })} /></label>
-          <label className="field compact-field"><span>Match</span><select value={String(node.config.match_mode ?? "contains")} onChange={(event) => updateConfig({ match_mode: event.target.value })}><option value="contains">Contains</option><option value="exact">Exact</option></select></label>
-        </div>
-      ) : null}
+
 
       {node.type.startsWith("webhook.") ? (
         <label className="field compact-field">
@@ -186,71 +166,7 @@ function AutomationNodeCard({
         </label>
       ) : null}
 
-      {node.type === "integration.whatsapp.send_message" ? (
-        <div className="automation-integration-action-summary">
-          <MessageCircle size={15} />
-          <span>
-            <strong>WhatsApp</strong>
-            <small>Send text to Admin users or a dynamic phone number.</small>
-          </span>
-          <div className="field-grid compact-field-grid wide-field">
-            <label className="field compact-field">
-              <span>Target mode</span>
-              <select
-                value={whatsappTargetMode}
-                onChange={(event) => updateConfig({
-                  target_mode: event.target.value,
-                  target_user_ids: event.target.value === "selected" ? whatsappSelectedUserIds : [],
-                })}
-              >
-                <option value="selected">Selected Admins</option>
-                <option value="all">All Admins</option>
-                <option value="dynamic">Dynamic number</option>
-              </select>
-            </label>
-          </div>
-          {whatsappTargetMode === "selected" ? (
-            <div className="workflow-target-chips">
-              {activeWhatsappAdmins.length ? activeWhatsappAdmins.map((user) => {
-                const selected = whatsappSelectedUserIds.includes(user.id);
-                return (
-                  <button
-                    className={selected ? "workflow-target-chip selected" : "workflow-target-chip"}
-                    key={user.id}
-                    onClick={() => updateConfig({ target_user_ids: toggleStringList(node.config.target_user_ids, user.id) })}
-                    type="button"
-                  >
-                    <strong>Admin</strong>{displayUserName(user) || user.username}
-                  </button>
-                );
-              }) : <span className="workflow-target-chip unavailable"><strong>Admin</strong>No Admin mobile numbers</span>}
-            </div>
-          ) : null}
-          {whatsappTargetMode === "dynamic" ? (
-            <PlainTemplateEditor
-              label="Phone number template"
-              value={String(node.config.phone_number_template ?? "")}
-              variables={variables}
-              onChange={(phone_number_template) => updateConfig({ phone_number_template })}
-            />
-          ) : null}
-          <PlainTemplateEditor
-            label="Message template"
-            multiline
-            value={String(node.config.message_template ?? "@Subject")}
-            variables={variables}
-            onChange={(message_template) => updateConfig({ message_template })}
-          />
-        </div>
-      ) : node.type.startsWith("integration.") ? (
-        <div className="automation-integration-action-summary">
-          <PlugZap size={15} />
-          <span>
-            <strong>{String(node.config.provider ?? "Integration").replace(/_/g, " ")}</strong>
-            <small>{String(node.config.action ?? node.type).replace(/_/g, " ")}</small>
-          </span>
-        </div>
-      ) : null}
+
 
       {node.type.startsWith("garage_door.") ? (
         <div className="workflow-target-chips">

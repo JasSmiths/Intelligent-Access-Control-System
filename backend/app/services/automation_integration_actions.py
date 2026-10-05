@@ -9,11 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, ICloudCalendarAccount
 from app.services.icloud_calendar import ICloudCalendarError, get_icloud_calendar_service
-from app.services.notification_runs import NotificationRunStore
 from app.services.workflows.automation_definition import INTEGRATION_ACTION_KEYS
-from app.services.workflows.context import normalize_string_list
-from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
-from app.services.messaging.whatsapp_helpers import normalize_whatsapp_phone_number, render_token_template
 
 
 IntegrationEnabledCheck = Callable[[], Awaitable[bool]]
@@ -111,8 +107,6 @@ def integration_action_for_type(action_type: str) -> IntegrationActionDefinition
     return INTEGRATION_ACTION_BY_TYPE.get(action_type)
 
 
-
-
 async def execute_integration_action(
     session: AsyncSession,
     action: dict[str, Any],
@@ -156,11 +150,6 @@ async def _icloud_calendar_enabled() -> bool:
                 .limit(1)
             )
     )
-
-
-async def _whatsapp_enabled() -> bool:
-    status = await get_whatsapp_delivery_service().status()
-    return bool(status.get("configured"))
 
 
 async def _execute_icloud_calendar_sync(
@@ -208,51 +197,11 @@ async def _execute_icloud_calendar_sync(
     return response
 
 
-async def _execute_whatsapp_send_message(
-    session: AsyncSession, action: dict[str, Any], context: Any, rule: AutomationRule,
-    *, operation_id: str | None = None, origin: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Transfer accepted delivery to the notification journal, without transport.
-
-    The caller commits this row with the automation action receipt and audit.
-    An empty selected/dynamic recipient set must never become 'all Admins'.
-    """
-    if operation_id is None or origin is None:
-        raise ValueError("A durable automation action identity is required for notification delivery.")
-    identity = uuid.UUID(operation_id)
-    config = action.get("config") or {}
-    variables = context.variables
-    mode = str(config.get("target_mode") or "selected")
-    if mode == "all":
-        targets = ["whatsapp:*"]
-    elif mode == "dynamic":
-        phone = normalize_whatsapp_phone_number(render_token_template(str(config.get("phone_number_template") or ""), variables))
-        targets = [f"whatsapp:number:{phone}"] if phone else []
-    else:
-        targets = [f"whatsapp:admin:{target_id}" for value in normalize_string_list(config.get("target_user_ids"), allow_scalar=False)
-                   if (target_id := _coerce_uuid(value)) is not None]
-    common = {"id": action["id"], "type": action["type"], "integration_provider": "whatsapp", "integration_action": "send_message"}
-    if not targets:
-        return {**common, "status": "skipped", "reason": "no_whatsapp_targets"}
-    message = render_token_template(str(config.get("message_template") or "@Subject"), variables) or context.subject or rule.name
-    identity = uuid.UUID(operation_id)
-    payload = {"event_type": "automation.whatsapp", "subject": context.subject, "severity": "info",
-               "facts": {"message": message, "automation_rule_id": str(rule.id), "automation_operation_id": operation_id},
-               "automation_origin": {**origin, "rule_id": str(rule.id), "operation_id": operation_id}}
-    override = [{"id": f"automation:{operation_id}", "name": rule.name, "trigger_event": "automation.whatsapp",
-        "conditions": [], "actions": [{"id": action["id"], "type": "whatsapp", "target_mode": "selected",
-            "target_ids": targets, "title_template": "@Message", "message_template": ""}]}]
-    await NotificationRunStore().enqueue_in_session(session, payload, run_id=identity, rules_override=override)
-    return {**common, "status": "queued", "notification_run_id": str(identity), "delivered_count": 0}
-
-
 def _coerce_uuid(value: Any) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(value))
     except (TypeError, ValueError):
         return None
-
-
 
 
 INTEGRATION_ACTIONS = [
@@ -268,26 +217,7 @@ INTEGRATION_ACTIONS = [
         execute=_execute_icloud_calendar_sync,
         disabled_reason="No active connected iCloud Calendar account has a valid session.",
     ),
-    IntegrationActionDefinition(
-        type="integration.whatsapp.send_message",
-        provider=INTEGRATION_ACTION_KEYS["integration.whatsapp.send_message"][0],
-        provider_label="WhatsApp",
-        provider_description="Send WhatsApp messages through the Meta Cloud API.",
-        action=INTEGRATION_ACTION_KEYS["integration.whatsapp.send_message"][1],
-        label="Send WhatsApp Message",
-        description="Send a WhatsApp text message to Admin users or a dynamic phone-number variable.",
-        is_enabled=_whatsapp_enabled,
-        execute=_execute_whatsapp_send_message,
-        disabled_reason="WhatsApp is not enabled or is missing an access token and phone number ID.",
-        default_config={
-            "provider": "whatsapp",
-            "action": "send_message",
-            "target_mode": "selected",
-            "target_user_ids": [],
-            "phone_number_template": "",
-            "message_template": "@Subject",
-        },
-    ),
+
 ]
 
 INTEGRATION_ACTION_BY_TYPE = {action.type: action for action in INTEGRATION_ACTIONS}

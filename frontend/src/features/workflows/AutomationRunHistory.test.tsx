@@ -23,7 +23,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it("opens run history from the automation owner only when requested", async () => {
-  vi.spyOn(workflowApi, "getAutomationData").mockResolvedValue({ rules: [], users: [], catalog: {
+  vi.spyOn(workflowApi, "getAutomationData").mockResolvedValue({ rules: [], catalog: {
     triggers: [], conditions: [], actions: [], variables: [], notification_rules: [], garage_doors: [], mock_context: {},
   } });
   render(<AutomationsView currentUser={admin} people={[]} vehicles={[]} refreshToken={0} />);
@@ -66,7 +66,7 @@ it("distinguishes queued messaging handoff from confirmed delivery", () => {
   const notificationId = "90000000-0000-4000-8000-000000000001";
   const view = render(<AutomationRunDetails run={{ ...run, status: "success", requires_review: false, review_reason: null,
     error: null, action_states: [{ ...run.action_states[0], id: "message", state: "succeeded" }],
-    action_results: [{ id: "message", type: "integration.whatsapp.send", status: "queued", delivered_count: 0, notification_run_id: notificationId }] }} />);
+    action_results: [{ id: "message", type: "notification.send", status: "queued", delivered_count: 0, notification_run_id: notificationId }] }} />);
   expect(screen.getByText("Delivery queued")).toBeInTheDocument();
   expect(screen.getByText(/Queued for notification delivery — delivery is not confirmed/)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Inspect notification delivery" })).toHaveAttribute("href", `/api/v1/notifications/runs/${notificationId}`);

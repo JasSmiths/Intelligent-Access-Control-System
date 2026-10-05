@@ -1,7 +1,7 @@
 # Hardware safety
 
 Read this before gate, garage, cover, HA/ESPHome provider, LPR effects,
-reconciliation, Alfred hardware tools or live validation work.
+reconciliation or live validation work.
 
 ## Authorization boundary
 
@@ -30,7 +30,7 @@ payloads. Keep diagnostics bounded and redacted.
 | Target configuration/preview | `backend/app/services/access_device_configuration.py` | `/api/v1/access-devices` | Confirmed configuration and frozen target plans |
 
 The gate adapter is `backend/app/modules/gate/access_devices.py`; HA and ESPHome
-providers are under `backend/app/modules/access_devices/`. Alfred uses these same
+providers are under `backend/app/modules/access_devices/`. All API and workflow callers use these same
 owners and returns `requires_confirmation` before state-changing execution.
 
 Inspect authenticated Admin receipts through `GET` routes under

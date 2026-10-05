@@ -1,4 +1,4 @@
-import type { ActivityEpisode, ActivityEpisodeDetail, InvestigationAnswer, InvestigationFilterCatalog, InvestigationOverview } from "./types";
+import type { ActivityEpisode, ActivityEpisodeDetail, InvestigationFilterCatalog, InvestigationOverview } from "./types";
 
 export const SITE_TIMEZONE = "Europe/London";
 
@@ -164,40 +164,4 @@ export const defaultOverview: InvestigationOverview = {
   incomplete_runs: [unverifiedEpisode],
   repeated_problems: [{ key: "provider_rejected", count: 4, title: "Home Assistant command rejection", reason_code: "provider_rejected", latest_at: integrationRejectedEpisode.occurred_at, episode_id: integrationRejectedEpisode.episode_id }],
   important_activity: [successfulEpisode]
-};
-
-export const groundedAnswer: InvestigationAnswer = {
-  question: "Why didn't the main garage door open when I came home last night?",
-  answer: "Presence was detected at 22:47 and the arrival automation was evaluated. Its permitted opening schedule ended at 22:30, so IACS blocked the action and did not dispatch an open command.",
-  most_likely_reason: "The garage-door schedule condition failed.",
-  outcome: "blocked",
-  dispatch_state: "withheld",
-  certainty: "high",
-  evidence: [scheduleBlockedDetail.timeline[0], scheduleBlockedDetail.timeline[2], scheduleBlockedDetail.timeline[3]],
-  citations: scheduleBlockedDetail.citations,
-  episodes: [scheduleBlockedEpisode],
-  interpreted_filters: { device: "main-garage", time: "yesterday" },
-  missing_evidence: [],
-  site_timezone: SITE_TIMEZONE,
-  resolved_range: { key: "yesterday", from: "2026-07-13T00:00:00+01:00", to: "2026-07-14T00:00:00+01:00" },
-  ai_used: false,
-  mode: "structured_fallback"
-};
-
-export const insufficientAnswer: InvestigationAnswer = {
-  question: "Why did the side door change state?",
-  answer: "IACS cannot determine why the side door changed state from the retained evidence.",
-  most_likely_reason: null,
-  outcome: "unknown",
-  dispatch_state: "unknown",
-  certainty: "low",
-  evidence: [],
-  citations: [],
-  episodes: [],
-  interpreted_filters: { device: "side-door" },
-  missing_evidence: ["No correlated command or automation execution was retained.", "No initiator was recorded for the state observation."],
-  site_timezone: SITE_TIMEZONE,
-  resolved_range: { key: "last_24_hours" },
-  ai_used: false,
-  mode: "structured_fallback"
 };

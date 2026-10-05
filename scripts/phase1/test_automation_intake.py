@@ -17,7 +17,7 @@ from sqlalchemy import func, select, text
 
 from app.api.v1 import automations as api
 from app.db.session import AsyncSessionLocal
-from app.models import AutomationRule, AutomationRun, RevokedAuthToken, User
+from app.models import AutomationRule, AutomationRun, NotificationRule, RevokedAuthToken, User
 from app.models.enums import UserRole
 from app.services import auth, automation_intake, automations
 from app.services.automation_execution import AutomationRunStore
@@ -25,15 +25,19 @@ from app.services.automation_execution import AutomationRunStore
 pytestmark = pytest.mark.asyncio
 
 
-def notice_action():
-    return {"id": "notice", "type": "integration.whatsapp.send_message", "config": {"target_mode": "all"}}
+def notice_action(target_id):
+    return {"id": "notice", "type": "notification.disable", "config": {"notification_rule_id": str(target_id)}}
 
 
 async def rule(*, trigger="visitor_pass.created", config=None, active=True):
     async with AsyncSessionLocal() as session:
+        notice = NotificationRule(name="Synthetic intake target", trigger_event="authorized_entry",
+            conditions=[], actions=[{"type": "in_app"}], is_active=True)
+        session.add(notice)
+        await session.flush()
         row = AutomationRule(name="Synthetic intake rule", is_active=active,
             triggers=[{"id": "source", "type": trigger, "config": config or {}}], trigger_keys=[trigger],
-            conditions=[], actions=[notice_action()])
+            conditions=[], actions=[notice_action(notice.id)])
         session.add(row)
         await session.commit()
         return row.id

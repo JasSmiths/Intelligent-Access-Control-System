@@ -32,7 +32,7 @@ async def require_confirmed_action(
 
 async def send_confirmed_notification(
     session, *, user, action, payload, confirmation_token, context,
-    direct_action=None, rules_override=None, ephemeral_config=None,
+    direct_action=None, rules_override=None,
 ):
     """Commit accepted notification work before starting the common dispatcher."""
     from app.services.notifications import get_notification_service
@@ -42,7 +42,6 @@ async def send_confirmed_notification(
         identity, claimed = await service.reserve_confirmed_request(
             session, user=user, action=action, payload=payload, confirmation_token=confirmation_token,
             context=context, direct_action=direct_action, rules_override=rules_override,
-            ephemeral_config=ephemeral_config,
         )
         await session.commit()
     except ActionConfirmationError as exc:
@@ -51,7 +50,7 @@ async def send_confirmed_notification(
     except MutationError as exc:
         await session.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    result = await service.dispatch_reserved(identity, claimed, ephemeral_config=ephemeral_config)
+    result = await service.dispatch_reserved(identity, claimed)
     if result.status != "sent" or result.failed_count:
         reason = "; ".join(result.failures or result.skipped_reasons)
         raise HTTPException(

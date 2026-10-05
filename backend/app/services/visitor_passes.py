@@ -34,21 +34,6 @@ MAX_WINDOW_MINUTES = 24 * 60
 VISITOR_PASS_WORKER_INTERVAL_SECONDS = 30.0
 VISITOR_PASS_ACTIVE_STATUSES = (VisitorPassStatus.SCHEDULED, VisitorPassStatus.ACTIVE)
 VISITOR_PASS_LOCKED_STATUSES = (VisitorPassStatus.USED, VisitorPassStatus.CANCELLED)
-VISITOR_PASS_WHATSAPP_HISTORY_KEY = "whatsapp_chat_history"
-VISITOR_PASS_WHATSAPP_HISTORY_LIMIT = 250
-VISITOR_PASS_WHATSAPP_STATUS_LABELS = {
-    "welcome_message_sent": "Welcome Message Sent",
-    "message_received": "Message Received",
-    "message_read": "Message Read",
-    "visitor_replied": "Visitor Replied",
-    "awaiting_visitor_reply": "Awaiting Visitor Reply",
-    "message_sending_failed": "Message Sending Failed",
-    "user_not_on_whatsapp": "User Not On WhatsApp",
-    "timeframe_approval_pending": "Awaiting Time Change Approval",
-    "timeframe_confirmation_pending": "Requested Time Change",
-    "timeframe_approved": "Timeframe Change Approved",
-    "timeframe_denied": "Timeframe Change Denied",
-}
 
 
 class VisitorPassError(ValueError):
@@ -192,6 +177,8 @@ class VisitorPassService:
         window = _bounded_window_minutes(window_minutes)
         explicit_valid_from, explicit_valid_until = _valid_window(valid_from, valid_until)
         if normalized_pass_type == VisitorPassType.DURATION:
+            if not normalized_plate:
+                raise VisitorPassError("Duration Visitor Passes require a valid vehicle registration.")
             if explicit_valid_from is None or explicit_valid_until is None:
                 raise VisitorPassError("Duration Visitor Passes require valid_from and valid_until.")
             expected = _ensure_aware(expected_time) if expected_time else explicit_valid_from
@@ -200,12 +187,6 @@ class VisitorPassService:
                 raise VisitorPassError("Expected time is required for one-time Visitor Passes.")
             expected = _ensure_aware(expected_time)
         metadata = dict(source_metadata or {})
-        if normalized_pass_type == VisitorPassType.DURATION and normalized_phone:
-            metadata.setdefault("whatsapp_concierge_status", "awaiting_visitor_reply")
-            metadata.setdefault(
-                "whatsapp_concierge_status_detail",
-                "Waiting for the visitor to reply with their vehicle registration.",
-            )
         visitor_pass = VisitorPass(
             visitor_name=name,
             pass_type=normalized_pass_type,
@@ -251,6 +232,8 @@ class VisitorPassService:
         pass_type: VisitorPassType | str | None = None,
         visitor_phone: str | None = None,
         visitor_phone_provided: bool | None = None,
+        number_plate: str | None = None,
+        number_plate_provided: bool = False,
         valid_from: datetime | None = None,
         valid_from_provided: bool | None = None,
         valid_until: datetime | None = None,
@@ -285,6 +268,10 @@ class VisitorPassService:
             next_valid_until,
             require_pair=next_pass_type == VisitorPassType.DURATION,
         )
+        if next_pass_type == VisitorPassType.DURATION and visitor_pass.pass_type != VisitorPassType.DURATION:
+            next_plate = normalize_registration_number(number_plate) if number_plate_provided else visitor_pass.number_plate
+            if not next_plate:
+                raise VisitorPassError("Duration Visitor Passes require a valid vehicle registration.")
         if next_pass_type == VisitorPassType.DURATION:
             if next_valid_from is None or next_valid_until is None:
                 raise VisitorPassError("Duration Visitor Passes require valid_from and valid_until.")
@@ -309,6 +296,11 @@ class VisitorPassService:
             valid_from=visitor_pass.valid_from,
             valid_until=visitor_pass.valid_until,
         )
+        if number_plate_provided:
+            await self.update_visitor_plate(
+                session, visitor_pass, new_plate=number_plate or "", actor=actor,
+                metadata={"source": "ui", "actor_user_id": str(actor_user_id) if actor_user_id else None},
+            )
         await self._audit_change(
             session,
             visitor_pass,
@@ -413,52 +405,6 @@ class VisitorPassService:
             .where(VisitorPass.id == pass_id)
         )
 
-    async def messaging_pass_for_phone(
-        self,
-        session: AsyncSession,
-        phone_number: str,
-        *,
-        now: datetime | None = None,
-        refresh_status: bool = True,
-    ) -> tuple[VisitorPass | None, str]:
-        """Resolve the canonical phone binding; read-only callers never refresh lifecycle."""
-        phone = _normalize_phone_number(phone_number)
-        if not phone:
-            return None, "not_found"
-        checked_at = _ensure_aware(now or datetime.now(tz=UTC))
-        if refresh_status:
-            await self.refresh_statuses(session=session, now=checked_at, publish=False)
-        rows = (
-            await session.scalars(
-                select(VisitorPass)
-                .where(
-                    VisitorPass.pass_type == VisitorPassType.DURATION,
-                    VisitorPass.visitor_phone == phone,
-                )
-                .order_by(
-                    VisitorPass.valid_from.asc().nulls_last(),
-                    VisitorPass.expected_time.asc(),
-                    VisitorPass.created_at.desc(),
-                ).execution_options(autoflush=False)
-            )
-        ).all()
-        eligible = [
-            visitor_pass
-            for visitor_pass in rows
-            if self.status_for(visitor_pass, checked_at) in VISITOR_PASS_ACTIVE_STATUSES
-        ]
-        active = [
-            visitor_pass
-            for visitor_pass in eligible
-            if self.is_within_window(visitor_pass, checked_at)
-        ]
-        if active:
-            return self.select_best_active_match(active, checked_at), "active"
-        if eligible:
-            return sorted(eligible, key=lambda pass_: _ensure_aware(pass_.expected_time))[0], "scheduled"
-        if rows:
-            return rows[-1], "expired"
-        return None, "not_found"
 
     async def update_visitor_plate(
         self,
@@ -468,7 +414,7 @@ class VisitorPassService:
         new_plate: str,
         vehicle_make: str | None = None,
         vehicle_colour: str | None = None,
-        actor: str = "Visitor Concierge",
+        actor: str = "System",
         metadata: dict[str, Any] | None = None,
     ) -> VisitorPass:
         visitor_pass = await self._lock_for_mutation(session, visitor_pass, allow_reservation=False)
@@ -497,7 +443,7 @@ class VisitorPassService:
             action="visitor_pass.vehicle_plate_update",
             actor=actor,
             before=before,
-            metadata=metadata or {"source": "visitor_concierge"},
+            metadata=metadata or {"source": "ui"},
             category=TELEMETRY_CATEGORY_CRUD,
         )
         return visitor_pass
@@ -1026,7 +972,6 @@ def serialize_visitor_pass(
     window_start = _window_start_for_pass(visitor_pass)
     window_end = _window_end_for_pass(visitor_pass)
     created_by = _loaded_relationship(visitor_pass, "created_by")
-    whatsapp_status = visitor_pass_whatsapp_status_payload(visitor_pass)
     return {
         "id": str(visitor_pass.id),
         "visitor_name": visitor_pass.visitor_name,
@@ -1054,123 +999,8 @@ def serialize_visitor_pass(
         "telemetry_trace_id": visitor_pass.telemetry_trace_id,
         "source_reference": visitor_pass.source_reference,
         "source_metadata": visitor_pass.source_metadata or None,
-        "whatsapp_status": whatsapp_status["status"],
-        "whatsapp_status_label": whatsapp_status["label"],
-        "whatsapp_status_detail": whatsapp_status["detail"],
         "created_at": _datetime_iso(visitor_pass.created_at, timezone),
         "updated_at": _datetime_iso(visitor_pass.updated_at, timezone),
-    }
-
-
-def visitor_pass_whatsapp_status_payload(visitor_pass: VisitorPass) -> dict[str, str | None]:
-    if visitor_pass.pass_type != VisitorPassType.DURATION or not visitor_pass.visitor_phone:
-        return {"status": None, "label": None, "detail": None}
-    metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
-    raw_status = str(metadata.get("whatsapp_concierge_status") or "").strip()
-    detail = str(metadata.get("whatsapp_concierge_status_detail") or "").strip()
-    error = str(metadata.get("whatsapp_last_error") or "").strip()
-    status = raw_status or "awaiting_visitor_reply"
-    if visitor_pass.number_plate and status not in {
-        "message_sending_failed",
-        "user_not_on_whatsapp",
-        "failed",
-        "timeframe_approval_pending",
-        "timeframe_confirmation_pending",
-        "timeframe_denied",
-    }:
-        status = "complete"
-    if status == "complete":
-        time_updated = visitor_pass_whatsapp_time_was_updated(metadata)
-        suffix = " Time Updated" if time_updated else ""
-        label = f"Complete - Vehicle Registration: {visitor_pass.number_plate or 'Pending'}{suffix}"
-    elif status == "failed":
-        failure = error or detail or "Unknown error"
-        label = f"Failed: {failure}"
-    else:
-        label = VISITOR_PASS_WHATSAPP_STATUS_LABELS.get(status, status.replace("_", " ").title())
-    return {"status": status, "label": label, "detail": detail or error or None}
-
-
-def visitor_pass_whatsapp_time_was_updated(metadata: dict[str, Any]) -> bool:
-    confirmation = metadata.get("whatsapp_timeframe_confirmation")
-    if isinstance(confirmation, dict) and str(confirmation.get("status") or "") == "confirmed":
-        return True
-    last_change = metadata.get("whatsapp_timeframe_last_change")
-    if isinstance(last_change, dict) and str(last_change.get("status") or "") in {"visitor_confirmed", "admin_approved"}:
-        return True
-    request = metadata.get("whatsapp_timeframe_request")
-    return isinstance(request, dict) and str(request.get("status") or "") == "approved"
-
-
-def visitor_pass_whatsapp_history(visitor_pass: VisitorPass) -> list[dict[str, Any]]:
-    metadata = visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}
-    raw_history = metadata.get(VISITOR_PASS_WHATSAPP_HISTORY_KEY)
-    if not isinstance(raw_history, list):
-        return []
-    messages = [_normalize_whatsapp_history_entry(item) for item in raw_history]
-    return sorted(
-        [message for message in messages if message],
-        key=lambda item: str(item.get("created_at") or ""),
-    )[-VISITOR_PASS_WHATSAPP_HISTORY_LIMIT:]
-
-
-def append_visitor_pass_whatsapp_history(
-    visitor_pass: VisitorPass,
-    *,
-    direction: str,
-    body: str,
-    kind: str = "text",
-    actor_label: str | None = None,
-    provider_message_id: str | None = None,
-    status: str | None = None,
-    occurred_at: datetime | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    normalized_body = str(body or "").strip()
-    if not normalized_body:
-        return None
-    normalized_direction = str(direction or "").strip().lower()
-    if normalized_direction not in {"inbound", "outbound", "status"}:
-        normalized_direction = "status"
-    entry = {
-        "id": uuid.uuid4().hex,
-        "direction": normalized_direction,
-        "kind": str(kind or "text").strip().lower()[:40] or "text",
-        "body": normalized_body[:4096],
-        "actor_label": str(actor_label or ("Visitor" if normalized_direction == "inbound" else "IACS")).strip()[:120],
-        "provider_message_id": _optional_text(provider_message_id),
-        "status": _optional_text(status),
-        "created_at": _ensure_aware(occurred_at or datetime.now(tz=UTC)).isoformat(),
-        "metadata": metadata or None,
-    }
-    history = [*visitor_pass_whatsapp_history(visitor_pass), entry][-VISITOR_PASS_WHATSAPP_HISTORY_LIMIT:]
-    visitor_pass.source_metadata = {
-        **(visitor_pass.source_metadata if isinstance(visitor_pass.source_metadata, dict) else {}),
-        VISITOR_PASS_WHATSAPP_HISTORY_KEY: history,
-    }
-    return entry
-
-
-def _normalize_whatsapp_history_entry(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    body = str(value.get("body") or "").strip()
-    created_at = str(value.get("created_at") or "").strip()
-    if not body or not created_at:
-        return None
-    direction = str(value.get("direction") or "").strip().lower()
-    if direction not in {"inbound", "outbound", "status"}:
-        direction = "status"
-    return {
-        "id": str(value.get("id") or uuid.uuid4().hex),
-        "direction": direction,
-        "kind": str(value.get("kind") or "text").strip().lower()[:40] or "text",
-        "body": body[:4096],
-        "actor_label": str(value.get("actor_label") or ("Visitor" if direction == "inbound" else "IACS")).strip()[:120],
-        "provider_message_id": str(value.get("provider_message_id") or "").strip() or None,
-        "status": str(value.get("status") or "").strip() or None,
-        "created_at": created_at,
-        "metadata": value.get("metadata") if isinstance(value.get("metadata"), dict) else None,
     }
 
 

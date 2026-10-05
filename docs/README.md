@@ -7,14 +7,18 @@ retained results are the authority for those claims.
 | Task | Start here |
 | --- | --- |
 | Local setup, ports, proxy, authentication | [Project README](../README.md) |
+| Current checkout, original archive, data and backups | [Project layout](project-layout.md) |
+| Implemented reset, migration and rollback | [Core reset](releases/core-reset.md) |
 | Agent work and safety boundaries | [AGENTS.md](../AGENTS.md) |
 | Service ownership, extension, retirement | [Architecture](architecture.md) |
-| Backend, API, Alfred, workflows, integrations | [Backend guide](agent/backend.md) |
+| Historical maintainability review, superseded by the reset | [2026-10-04 brief](code-review/2026-10-04-maintainability-brief.md) |
+| Backend, API, workflows, integrations | [Backend guide](agent/backend.md) |
 | React routes, typed clients, styles, realtime | [Frontend guide](agent/frontend.md) |
 | LPR, gates, garages, supervised hardware tests | [Hardware safety](agent/hardware-safety.md) |
 | ESPHome gate controller integration | [ESPHome](../ESPHOME.md) |
 | UniFi Protect wrapper and private protocol notes | [UniFi Protect](unifi-protect-private-api.md) |
 | Isolated tests and retained evidence | [Validation harness](validation/phase1.md) |
+| Separate image builds and copied-data browser preview | [Reset preview](validation/preview.md) |
 | Recovery invariants and diagnostics | [Recovery boundaries](validation/recovery-boundaries.md) |
 | Schema comparison, upgrades, restore rehearsal | [Recovery schema](validation/recovery-schema.md) |
 | Resident missed-exit behavior and evidence | [Missed-exit recovery](validation/missed-exit-recovery.md) |

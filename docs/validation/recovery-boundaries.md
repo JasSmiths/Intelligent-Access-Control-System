@@ -1,6 +1,6 @@
 # Recovery boundary diagnostics
 
-`scripts/phase1/test_recovery_boundaries.py` exercises six recovery boundaries
+`scripts/phase1/test_recovery_boundaries.py` exercises retained recovery boundaries
 with synthetic records, real disposable PostgreSQL transactions and inert
 provider transports. It is a required full-mode suite in
 `scripts/phase1/recovery_checks.py`. Its assertions are current regression
@@ -28,7 +28,7 @@ no Docker socket or copied runtime files, synthetic test credentials, disabled
 schema bootstrap/demo seeding and the isolated PostgreSQL database identity. The
 fixture rejects persisted runtime settings, unmocked HTTP transports and sockets
 other than its PostgreSQL connection. It stubs event publication, optional
-telemetry/memory and command/message transports. It does not start the application
+telemetry and command transports. It does not start the application
 lifespan or workers, invoke production endpoints or send hardware commands.
 
 ## What the probes establish
@@ -38,14 +38,14 @@ lifespan or workers, invoke production endpoints or send hardware commands.
 | `probe_01` | Adapter, coordinator and command ledger preserve each selected target receipt. Aggregate verification is independent of target order; partial/uncertain delivery stays truthful and replay does not issue another command. |
 | `probe_02` | Home Assistant response loss or failed post-command state reads cannot trigger fallback after possible transmission. A definitely unsent connection failure retains configured fallback. |
 | `probe_03` | An expired command lease cannot execute the same intent again, regardless of whether retry or reconciliation happens first. Completed duplicates also remain inert. |
-| `probe_04` | Persisted recognition-triggered rules retain the originating authorization. Unknown denied input cannot actuate gates or garages in either action order, while safe messaging remains possible. Authorized, historical and dry-run controls constrain the result. |
-| `probe_05` | Concurrent calls through the real Alfred V3 confirmation route claim one persisted approval and execute it once. Preview and sequential replay are inert. |
-| `probe_06` | Historical admission does not promote an incomplete/failed gate grant or overwrite newer committed presence. Alfred historical repair preserves ordering and suppresses hardware, automation and notification actions. |
+| `probe_04` | Persisted recognition-triggered rules retain the originating authorization. Unknown denied input cannot actuate gates or garages in either action order, while independent non-hardware actions retain their ordering. Authorized, historical and dry-run controls constrain the result. |
 
 The fixture scenarios live in
 `scripts/phase1/fixtures/recovery_boundaries/scenarios.json`. Owner implementations
 are mapped in [the backend guide](../agent/backend.md); hardware policy is in
 [the hardware guide](../agent/hardware-safety.md).
+
+Historical admission/backfill checks preserve committed ordering and never replay hardware.
 
 ## Interpret results
 

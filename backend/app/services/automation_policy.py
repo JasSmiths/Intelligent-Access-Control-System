@@ -18,8 +18,7 @@ HISTORICAL_ACTIONS_SUPPRESSED = "historical_actions_suppressed"
 HARDWARE_DENIAL_DETAILS = {
     UNKNOWN_PLATE_HARDWARE_FORBIDDEN: "Unknown plates cannot trigger gate or garage commands.",
     REQUESTER_CONFIRMATION_REQUIRED: (
-        "Phrase-triggered hardware needs confirmation by the requesting active Admin. "
-        "Ask Alfred to prepare the hardware action for confirmation."
+        "Retired phrase triggers cannot issue gate or garage commands."
     ),
     HISTORICAL_ACTIONS_SUPPRESSED: "Historical observations cannot replay hardware commands.",
 }

@@ -31,8 +31,8 @@ binaries rather than copying old local runtime paths.
 
 | Suite | What it checks |
 | --- | --- |
-| `frontend/e2e/gui-completion.spec.ts` | Fixture-backed route sweep, Settings navigation/search/theme, Admin and standard-user access, landscape drawer, long directory labels, short-screen editors, dirty/pending saves, settings category isolation, read-failure retry, account reset, Alfred attachment failure and Movement detail scrolling. |
-| `frontend/e2e/responsive.spec.ts` | Resize without reload, 720px/980px boundaries, sidebar preferences, snapshots, profile menus, modal focus/drafts, date popovers, Alfred composer, safe areas, coarse pointers and reduced motion. |
+| `frontend/e2e/gui-completion.spec.ts` | Fixture-backed route sweep, Settings navigation/search/theme, Admin and standard-user access, landscape drawer, long directory labels, short-screen editors, dirty/pending saves, settings category isolation, read-failure retry, account reset and Movement detail scrolling. |
+| `frontend/e2e/responsive.spec.ts` | Resize without reload, 720px/980px boundaries, sidebar preferences, snapshots, profile menus, modal focus/drafts, date popovers, safe areas, coarse pointers and reduced motion. |
 | `frontend/e2e/directory-layout.spec.ts` | Long labels, enlarged text, overlap/overflow and keyboard row activation in People, Groups and Vehicles. |
 
 The route sweep uses a fixed list in the test: when adding a route, compare it
@@ -57,7 +57,7 @@ npm run test:e2e -- gui-completion.spec.ts --project=webkit
   counts or machine-specific temporary paths as current evidence.
 - Fixtures validate browser behavior and layout. They do not prove provider
   health, physical outcomes, production migrations, live notification delivery,
-  backend cursor consistency or live Alfred approval/reconnect recovery.
+  backend cursor consistency or live hardware recovery.
   Backend invariants use [Phase 1](phase1.md). Live deployment and operational
   checks need separate authorization under the
   [hardware safety guide](../agent/hardware-safety.md).

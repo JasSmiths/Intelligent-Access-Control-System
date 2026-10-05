@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 async def realtime_websocket(websocket: WebSocket) -> None:
     """Stream system events to dashboards.
 
-    The shared event bus carries access, gate, notification, log, and chat
+    The shared event bus carries access, gate, notification, and log
     events so the dashboard can refresh without polling every view.
     """
 

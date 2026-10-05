@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { Person } from "../api/types";
-import type { VisitorPass } from "./PassesView";
+import type { VisitorPass } from "../features/passes/types";
 import { reportsApi, type ReportPreviewResponse, type ReportSnapshotEvent, type ReportExportResponse, type ReportSnapshotTimelineEvent } from "../api/reports";
 // Generated fixture copy: backend tests enforce equality with the canonical report contract.
 import contract from "../api/fixtures/reportPreview.generated.json";

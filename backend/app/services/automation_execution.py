@@ -29,7 +29,7 @@ ACTION_TERMINAL_STATES = frozenset({"succeeded", "failed", "skipped", "unknown"}
 # These may continue after an uncertain earlier hardware action. Their own
 # attempting checkpoint still prevents an ambiguous delivery from being retried.
 NOTIFICATION_ACTION_TYPES = frozenset({
-    "notification.enable", "notification.disable", "integration.whatsapp.send_message",
+    "notification.enable", "notification.disable",
 })
 
 
@@ -259,7 +259,7 @@ class AutomationRunStore:
             raise ValueError("Local actions cannot report uncertain external delivery.")
         row, now = await self.owned(session, run_id, token)
         item = self._next_pending(row.action_plan, index)
-        if state == "succeeded" and item["action"]["type"] not in {"notification.enable", "notification.disable", "integration.whatsapp.send_message"}:
+        if state == "succeeded" and item["action"]["type"] not in {"notification.enable", "notification.disable"}:
             raise ValueError("Only transactional notification activation or durable delivery handoff can complete without an external attempt.")
         self._checkpoint(row, index, result, state=state, expected="pending", now=now)
         await session.flush()

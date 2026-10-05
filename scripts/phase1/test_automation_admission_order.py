@@ -18,7 +18,7 @@ import pytest_asyncio
 from sqlalchemy import func, select, text, update
 
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, AccessDeviceCommandRecord, AutomationRule, AutomationRun, GateCommandRecord, LprIngestEvent, MovementSagaRecord, NotificationRun, Vehicle
+from app.models import AccessEvent, AccessDeviceCommandRecord, AutomationRule, AutomationRun, GateCommandRecord, LprIngestEvent, MovementSagaRecord, NotificationRule, Vehicle
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
 from app.modules.gate.base import CommandDelivery, GateState
 from app.services import automation_intake, automations
@@ -45,6 +45,9 @@ async def inert_configuration(monkeypatch, isolated_resources):
         site_timezone="Europe/London", schedule_default_policy="allow")))
     monkeypatch.setattr(automation_integration_actions, "integration_action_status",
         AsyncMock(return_value=SimpleNamespace(enabled=True, disabled_reason=None)))
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("TRUNCATE notification_rules CASCADE"))
+        await session.commit()
     previews = []
 
     async def preview(**kwargs):
@@ -82,7 +85,12 @@ async def origin(*, notice_first=False, trigger="vehicle.known_plate", decision=
                 state=MovementSagaState.PHYSICAL_COMMAND_PENDING, gate_command_required=True,
                 admission_status="pending", reconciliation_required=True)
             session.add(saga)
-        hardware, notice = action(), action("integration.whatsapp.send_message", "notice")
+        target_notice = NotificationRule(name="Synthetic ordering target", trigger_event="authorized_entry",
+            conditions=[], actions=[{"type": "in_app"}], is_active=True)
+        session.add(target_notice)
+        await session.flush()
+        hardware, notice = action(), action("notification.disable", "notice")
+        notice["config"] = {"notification_rule_id": str(target_notice.id)}
         rule = AutomationRule(name="Synthetic admission ordering", is_active=True,
             triggers=[{"type": trigger, "config": {}}], trigger_keys=[trigger], conditions=[],
             actions=[notice, hardware] if notice_first else [hardware, notice])
@@ -96,7 +104,7 @@ async def origin(*, notice_first=False, trigger="vehicle.known_plate", decision=
         assert len(runs) == 1
         await session.commit()
         return SimpleNamespace(event_id=event.id, saga_id=saga.id if saga else None,
-            run_id=runs[0], rule_id=rule.id, observed_at=now)
+            run_id=runs[0], rule_id=rule.id, notification_rule_id=target_notice.id, observed_at=now)
 
 
 async def primary_receipts(origin, states, *, leased=False, finalize=True):
@@ -189,6 +197,8 @@ async def test_origin_commit_cannot_race_primary_command_and_restart_preserves_o
         assert hardware["automatic_entry_policy"] is True
         assert [part["state"] for part in waiting.action_plan] == (["succeeded", "pending"] if notice_first else ["pending", "pending"])
         assert not calls
+        async with AsyncSessionLocal() as session:
+            assert (await session.get(NotificationRule, item.notification_rule_id)).is_active is (not notice_first)
         for _ in range(3):
             assert await automations.AutomationService().dispatcher.run_once(item.run_id) is False
         unchanged = await service.run_store.get(item.run_id)
@@ -256,7 +266,7 @@ async def test_exact_sixty_seconds_retains_policy_and_later_is_reviewable_skip(s
         assert expired["command_sent"] is False and expired["requires_review"] is True
 
 
-async def test_expired_wait_skips_unattempted_hardware_then_hands_off_notice(monkeypatch):
+async def test_expired_wait_skips_unattempted_hardware_then_commits_safe_activation(monkeypatch):
     item, calls, service = await origin(), [], automations.AutomationService()
     gate_sink(monkeypatch, calls)
     await service.dispatcher.run_once(item.run_id)
@@ -274,8 +284,10 @@ async def test_expired_wait_skips_unattempted_hardware_then_hands_off_notice(mon
     assert run.status == "review_required" and run.review_reason == "recognition_hardware_expired"
     assert not calls and not run.action_plan[0].get("attempted_at") and run.queued_at == queued_at
     async with AsyncSessionLocal() as session:
-        notice = await session.get(NotificationRun, uuid.UUID(run.action_results[1]["notification_run_id"]))
-        assert notice.status == "queued" and notice.claim_token is None
+        notice = await session.get(NotificationRule, item.notification_rule_id)
+        assert notice.is_active is False
+        assert run.action_results[1]["notification_rule_id"] == str(notice.id)
+        assert run.action_results[1]["is_active"] is False
 
 
 async def test_waiting_run_does_not_starve_other_due_rule(monkeypatch):

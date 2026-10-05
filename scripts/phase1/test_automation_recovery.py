@@ -139,7 +139,7 @@ async def test_attempt_checkpoint_commits_before_sink_and_late_worker_cannot_rep
 async def test_recovery_skips_further_hardware_but_keeps_independent_notifications_and_review_marker(notice_index):
     store = AutomationRunStore()
     ordered = ["gate.open", "garage_door.open", "garage_door.open"]
-    ordered[notice_index] = "integration.whatsapp.send_message"
+    ordered[notice_index] = "notification.disable"
     identity = await reserve(store, await rule(), planned=actions(*ordered))
     first = await store.claim(identity)
     await begin(store, first)
@@ -160,7 +160,7 @@ async def test_recovery_skips_further_hardware_but_keeps_independent_notificatio
 
 async def test_accepted_first_action_is_not_repeated_after_restart_before_second():
     store = AutomationRunStore()
-    identity = await reserve(store, await rule(), planned=actions("integration.whatsapp.send_message", "integration.whatsapp.send_message"))
+    identity = await reserve(store, await rule(), planned=actions("notification.disable", "notification.disable"))
     first = await store.claim(identity)
     first_plan = copy.deepcopy(first.action_plan)
     await begin(store, first)
@@ -178,13 +178,13 @@ async def test_accepted_first_action_is_not_repeated_after_restart_before_second
 
 async def test_definite_failure_stops_and_skip_continues():
     store, rule_id = AutomationRunStore(), await rule()
-    failed_id = await reserve(store, rule_id, planned=actions("gate.open", "integration.whatsapp.send_message"))
+    failed_id = await reserve(store, rule_id, planned=actions("gate.open", "notification.disable"))
     failed = await store.claim(failed_id)
     await begin(store, failed)
     await store.finish_action(failed_id, failed.claim_token, 0, {"status": "failed", "delivery": "rejected"}, state="failed")
     final = await store.finish(failed_id, failed.claim_token)
     assert final.status == "failed" and final.action_plan[1]["result"]["reason"] == "earlier_action_failed"
-    skipped_id = await reserve(store, rule_id, planned=actions("gate.open", "integration.whatsapp.send_message"))
+    skipped_id = await reserve(store, rule_id, planned=actions("gate.open", "notification.disable"))
     skipped = await store.claim(skipped_id)
     async with AsyncSessionLocal() as session:
         await store.complete_local_action(session, skipped_id, skipped.claim_token, 0, {"status": "skipped", "reason": "expired"}, state="skipped")
@@ -304,7 +304,7 @@ async def test_downgrade_refuses_any_non_null_recovery_version_and_preserves_che
 @pytest.mark.parametrize("corruption", ["operation", "idempotency", "double_attempt", "overtaken_pending", "failed_then_pending", "index"])
 async def test_malformed_v1_plan_is_reviewed_without_dispatch(corruption):
     store = AutomationRunStore()
-    identity = await reserve(store, await rule(), planned=actions("gate.open", "integration.whatsapp.send_message"))
+    identity = await reserve(store, await rule(), planned=actions("gate.open", "notification.disable"))
     row = await store.get(identity)
     plan = copy.deepcopy(row.action_plan)
     if corruption == "operation":

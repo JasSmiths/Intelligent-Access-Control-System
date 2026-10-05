@@ -28,7 +28,7 @@ def test_invalid_values_raise_domain_errors(changes):
     assert exc.value.code == 'invalid_schedule'
 
 
-@pytest.mark.parametrize('relative', ['api/v1/schedules.py', 'ai/tool_groups/schedules_handlers.py'])
+@pytest.mark.parametrize('relative', ['api/v1/schedules.py'])
 def test_crud_adapters_delegate_persistence_to_schedule_operations(relative):
     app = Path(__file__).resolve().parents[1] / 'app'
     tree = ast.parse((app / relative).read_text())

@@ -303,7 +303,7 @@
   min-width: 0;
   margin-inline: auto;
   gap: 16px;
-  padding-bottom: calc(24px + var(--alfred-launcher-clearance));
+  padding-bottom: 24px;
 }
 
 @media (max-width: 640px) {

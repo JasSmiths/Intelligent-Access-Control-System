@@ -14,7 +14,7 @@ synthetic API reads, reject unexpected requests/mutations and close WebSockets.
 | Available space | No document overflow, clipped text or unreachable actions. Preserve intentional local table/calendar scrolling and short-height editor scrolling. |
 | Dialogs | `ui/useModalFocus.ts` owns containment/restoration and `ui/useEditorDismiss.ts` owns dirty/pending dismissal. Preserve nested dialogs, drafts and selected records across resize. |
 | Floating content | `lib/viewportPlacement.ts` handles per-edge and visual-viewport placement. Inspect report, schedule, workflow, snapshot and chat consumers when it changes. |
-| State and input | Snapshot selection/keyboard use, Alfred draft/scroll-lock cleanup, named navigation controls, coarse-pointer targets, usable input text and reduced motion. |
+| State and input | Snapshot selection/keyboard use, named navigation controls, coarse-pointer targets, usable input text and reduced motion. |
 
 Paths without a prefix in the table are relative to `frontend/src/`. Read the
 test's viewport matrix rather than copying old browser/device version numbers.
