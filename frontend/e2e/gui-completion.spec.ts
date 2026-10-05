@@ -79,6 +79,89 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
   return unexpected;
 }
 
+test("keeps alert filters level and contained across themes and viewport sizes", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  await page.goto("/alerts");
+  await expect(page.getByRole("tab", { name: "Open", exact: true })).toBeVisible();
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    for (const [width, height] of [[1680, 900], [1280, 800], [981, 640], [979, 640], [768, 1024], [721, 800], [720, 800], [390, 844], [280, 640], [640, 360]]) {
+      await page.setViewportSize({ width, height });
+      const controls = await page.locator(".alert-status-tabs, .alerts-search, .alerts-controls select, .alerts-controls input[type=date]").evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { height: rect.height, top: rect.top, left: rect.left, right: rect.right };
+      }));
+      expect(controls).toHaveLength(6);
+      for (const control of controls) {
+        expect(control.height, `${theme} ${width}px control height`).toBeCloseTo(40, 0);
+        expect(control.left).toBeGreaterThanOrEqual(0);
+        expect(control.right).toBeLessThanOrEqual(width);
+      }
+      if (width === 1680) {
+        expect(Math.max(...controls.map((control) => control.top)) - Math.min(...controls.map((control) => control.top))).toBeLessThanOrEqual(1);
+      }
+      if (width <= 360) {
+        const dates = await page.locator(".alerts-controls input[type=date]").evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().width));
+        expect(Math.min(...dates)).toBeGreaterThanOrEqual(140);
+      }
+      const placeholder = await page.getByRole("textbox", { name: "Search alerts" }).evaluate((input) => getComputedStyle(input, "::placeholder").color);
+      expect(placeholder).not.toBe("rgba(0, 0, 0, 0)");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath(`alert-filters-${theme}-${width}x${height}.png`), animations: "disabled" });
+    }
+  }
+  await page.getByRole("combobox", { name: "Filter by severity" }).selectOption("warning");
+  await expect(page.getByRole("combobox", { name: "Filter by severity" })).toHaveValue("warning");
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByRole("combobox", { name: "Filter by severity" })).toHaveValue("all");
+  expect(unexpected).toEqual([]);
+});
+
+test("resolves a dashboard-linked alert group without a UUID error", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";
+  const member = {
+    id: memberId, alert_ids: [memberId], grouped: false, type: "unauthorized_plate",
+    severity: "warning", status: "open", message: "Unauthorised Plate, Access Denied",
+    registration_number: "TEST123", count: 1, local_date: null,
+    created_at: now, first_seen_at: now, last_seen_at: now, resolved_at: null,
+    resolved_by_user_id: null, resolved_by: null, resolution_note: null, snapshot_url: null
+  };
+  const groupAlert = { ...member, id: "group:unauthorized_plate:2026-09-23:TEST123",
+    grouped: true, local_date: "2026-09-23", member_hash: "reviewed-members" };
+  let resolved = false;
+  const detailReads: string[] = [];
+  await page.route("**/api/v1/alerts**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    let body: unknown;
+    if (request.method() === "GET" && path === "/api/v1/alerts") body = resolved ? [] : [groupAlert];
+    else if (request.method() === "GET" && path === "/api/v1/alerts/history") body = history(resolved ? [] : [groupAlert]);
+    else if (request.method() === "GET" && path === `/api/v1/alerts/${memberId}`) {
+      detailReads.push(path);
+      body = resolved ? { ...member, status: "resolved", resolved_at: now } : groupAlert;
+    } else if (request.method() === "POST" && path === "/api/v1/alerts/groups/confirmation") {
+      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, count: 1, member_hash: groupAlert.member_hash });
+      body = { confirmation_token: "reviewed-group", count: 1 };
+    } else if (request.method() === "PATCH" && path === "/api/v1/alerts/action") {
+      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, action: "resolve", confirmation_token: "reviewed-group" });
+      resolved = true;
+      body = { updated: 1, alert_ids: [memberId] };
+    } else { await route.fallback(); return; }
+    await route.fulfill({ json: body });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Unauthorised Plate, Access Denied/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/alerts\\?alert=${memberId}$`));
+  await page.getByRole("button", { name: "Resolve", exact: true }).click();
+  await page.getByRole("button", { name: "Resolve Alert", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  expect(detailReads).toContain(`/api/v1/alerts/${memberId}`);
+  expect(unexpected).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("resolved-alert-after.png"), fullPage: false, animations: "disabled" });
+});
+
 test("opens all route families with isolated loaded fixtures across viewport sizes", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const unexpected = await installFixtures(page);

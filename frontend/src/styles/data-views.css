@@ -5,26 +5,26 @@
 .alerts-controls {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: var(--shadow);
 }
 
 .alert-status-tabs {
   display: inline-flex;
+  height: 40px;
   gap: 4px;
-  padding: 4px;
+  padding: 3px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
 }
 
 .alert-status-tabs button {
-  min-height: 30px;
+  min-height: 32px;
   padding: 0 12px;
   border: 0;
   border-radius: 6px;
@@ -37,22 +37,73 @@
 .alert-status-tabs button.active {
   background: var(--surface);
   color: var(--text);
-  box-shadow: var(--shadow);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .alerts-search {
   flex: 1 1 280px;
   width: auto;
+  height: 40px;
+  min-width: 0;
+}
+
+.alerts-controls .alerts-search input::placeholder {
+  color: var(--muted);
+}
+
+.alerts-select {
+  position: relative;
 }
 
 .alerts-controls select {
-  min-height: 36px;
+  appearance: none;
+  height: 40px;
+  min-height: 40px;
+  width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0 10px;
+  padding: 0 34px 0 12px;
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
+}
+
+.alerts-select > svg {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.alerts-controls .history-date-range {
+  flex: 0 1 280px;
+  min-width: 0;
+  gap: 12px;
+}
+
+.alerts-controls .history-date-field {
+  min-width: 0;
+}
+
+.alerts-controls .history-date-field input {
+  height: 40px;
+  min-height: 40px;
+  width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.alerts-controls > .secondary-button {
+  min-height: 40px;
+}
+
+@media (max-width: 360px) {
+  .alerts-controls .history-date-range {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .alerts-list {

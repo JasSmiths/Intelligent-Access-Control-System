@@ -68,6 +68,9 @@ fallback catalogs in React.
 - Extend realtime impact tests for affected and unaffected routes. Reconnect and
   manual refresh still refresh the active route; avoid a second refresh for
   views already consuming compact events.
+- Alert detail links use a member UUID from `alert_ids` for grouped alerts.
+  The synthetic group `id` identifies the row and confirmation target; it is
+  not valid for `/api/v1/alerts/{alert_id}` detail reads.
 - Keep durable cursor history, direct-record links and expired-history refresh
   behavior separate from recent realtime feeds.
 
@@ -90,6 +93,10 @@ text clipping and document overflow; allow deliberate table/calendar scrolling.
 Keep `.badge` inline-flex and scope title styles instead of broad span rules.
 The sample design under `prototypes/premium-dashboard/` is a separate app,
 not the source of production routes or contracts.
+
+Alert filters share 40px control heights and align at their bottom edges. Keep
+dropdown appearance consistent across browsers and date fields contained when
+the filters wrap; the panel and active status tab use a flat visual treatment.
 
 ## Validation
 

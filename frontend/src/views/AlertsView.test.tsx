@@ -14,6 +14,45 @@ const alert = (id: string, message: string): Anomaly => ({
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it("refreshes a dashboard-linked group by member UUID after resolving it", async () => {
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: vi.fn(), configurable: true });
+  const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";
+  const member = { ...alert(memberId, "Unauthorised Plate, Access Denied"), type: "unauthorized_plate" };
+  const group = { ...member, id: "group:unauthorized_plate:2026-10-05:TEST123",
+    grouped: true, member_hash: "reviewed-members", count: 1, local_date: "2026-10-05" };
+  let resolved = false;
+  const fetcher = vi.fn(async (path: string, options?: RequestInit) => {
+    if (path.startsWith("/api/v1/alerts/history?")) return new Response(JSON.stringify({
+      items: resolved ? [] : [group], next_cursor: null, as_of: "2026-10-05T12:00:00Z",
+    }));
+    if (path === "/api/v1/alerts/groups/confirmation") return new Response(JSON.stringify({
+      confirmation_token: "reviewed-group", count: 1,
+    }));
+    if (path === "/api/v1/alerts/action" && options?.method === "PATCH") {
+      resolved = true;
+      return new Response(JSON.stringify({ updated: 1, alert_ids: [memberId] }));
+    }
+    if (path === `/api/v1/alerts/${memberId}`) return new Response(JSON.stringify({
+      ...member, status: "resolved", resolved_at: "2026-10-05T12:01:00Z",
+    }));
+    throw new Error(`Unexpected URL: ${path}`);
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const refreshDashboard = vi.fn().mockResolvedValue(undefined);
+  render(<AlertsView refreshDashboard={refreshDashboard} refreshToken={0} resetToken={0} targetId={memberId} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
+  fireEvent.click(screen.getByRole("button", { name: "Resolve Alert" }));
+  await screen.findByRole("button", { name: "Reopen" });
+  expect(refreshDashboard).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(fetcher.mock.calls.map(([path]) => path)).toContain(`/api/v1/alerts/${memberId}`);
+  expect(fetcher.mock.calls.map(([path]) => path)).not.toContain(`/api/v1/alerts/${encodeURIComponent(group.id)}`);
+  const action = fetcher.mock.calls.find(([path]) => path === "/api/v1/alerts/action");
+  expect(JSON.parse(action![1]!.body as string)).toMatchObject({
+    group_id: group.id, action: "resolve", confirmation_token: "reviewed-group",
+  });
+});
+
 it("loads a second older alert from same-route search navigation", async () => {
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: vi.fn(), configurable: true });
   const fetcher = vi.fn(async (path: string) => {

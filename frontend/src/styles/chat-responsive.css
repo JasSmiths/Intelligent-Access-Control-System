@@ -513,6 +513,7 @@
   }
 
   .alert-status-tabs,
+  .alerts-select,
   .alerts-controls select,
   .alerts-search,
   .alert-review-actions {
@@ -521,6 +522,10 @@
 
   .alert-status-tabs button {
     flex: 1;
+  }
+
+  .alerts-controls .history-date-range {
+    flex-basis: 100%;
   }
 
   .alert-review-side {

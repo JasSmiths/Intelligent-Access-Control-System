@@ -9,6 +9,7 @@ retained results are the authority for those claims.
 | Local setup, ports, proxy, authentication | [Project README](../README.md) |
 | Agent work and safety boundaries | [AGENTS.md](../AGENTS.md) |
 | Service ownership, extension, retirement | [Architecture](architecture.md) |
+| Maintainability cuts an agent can implement | [2026-10-04 brief](code-review/2026-10-04-maintainability-brief.md) |
 | Backend, API, Alfred, workflows, integrations | [Backend guide](agent/backend.md) |
 | React routes, typed clients, styles, realtime | [Frontend guide](agent/frontend.md) |
 | LPR, gates, garages, supervised hardware tests | [Hardware safety](agent/hardware-safety.md) |

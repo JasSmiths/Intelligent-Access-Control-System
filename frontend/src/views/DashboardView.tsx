@@ -502,7 +502,7 @@ function DashboardSession({
               <button
                 className="anomaly-feed-row"
                 key={item.id}
-                onClick={() => navigateToView("alerts", { search: `?alert=${encodeURIComponent(item.id)}` })}
+                onClick={() => navigateToView("alerts", { search: `?alert=${encodeURIComponent(item.alertId)}` })}
                 type="button"
               >
                 <span className={`anomaly-icon ${item.severity}`}>
@@ -1123,6 +1123,7 @@ export function EventStatusBadge({ event }: { event: DashboardEvent }) {
 
 export type DashboardAnomaly = {
   id: string;
+  alertId: string;
   title: string;
   detail: string;
   time: string;
@@ -1132,6 +1133,7 @@ export type DashboardAnomaly = {
 export function getDashboardAnomalies(anomalies: Anomaly[]): DashboardAnomaly[] {
   return anomalies.slice(0, 4).map((item) => ({
     id: item.id,
+    alertId: item.grouped ? item.alert_ids[0] : item.id,
     title: titleCase(item.type),
     detail: item.message,
     time: formatTime(item.last_seen_at || item.created_at),
