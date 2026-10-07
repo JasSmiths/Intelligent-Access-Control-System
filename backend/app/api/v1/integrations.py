@@ -15,11 +15,6 @@ from app.db.session import get_db_session
 from app.models import Person, User
 from app.modules.access_devices.base import resolve_legacy_cover_key
 from app.modules.access_devices.registry import get_access_device_provider
-from app.modules.dvla.vehicle_enquiry import (
-    DvlaVehicleEnquiryError,
-    display_vehicle_record,
-    normalize_registration_number,
-)
 from app.modules.home_assistant.client import (
     HomeAssistantClient as DefaultHomeAssistantClient,
 )
@@ -43,7 +38,6 @@ from app.modules.notifications.apprise_client import (
 )
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.access_devices import get_access_device_service
-from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
@@ -58,6 +52,8 @@ from app.services.telemetry import (
     emit_audit_log,
     write_audit_log,
 )
+from app.services.vehicle_information import get_vehicle_information_service
+from app.services.vehicle_information_contracts import VehicleInformation, VehicleLookupRequest
 
 router = APIRouter()
 HomeAssistantClient = DefaultHomeAssistantClient
@@ -162,10 +158,6 @@ class ESPHomeDevicePatchRequest(BaseModel):
 
 class IntegrationConfirmationRequest(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=160)
-
-
-class DvlaLookupRequest(BaseModel):
-    registration_number: str = Field(min_length=1, max_length=20)
 
 
 @router.get("/home-assistant/status")
@@ -568,59 +560,19 @@ async def remove_apprise_url(
     return {"urls": [summarize_apprise_url(row_index, url) for row_index, url in enumerate(urls)]}
 
 
-@router.post("/dvla/lookup")
-async def dvla_lookup(
-    request: DvlaLookupRequest, user: Annotated[User, Depends(current_user)]
-) -> dict[str, object]:
-    registration_number = normalize_registration_number(request.registration_number)
+@router.post("/vehicles/lookup", response_model=VehicleInformation)
+async def vehicle_lookup(
+    request: VehicleLookupRequest, user: Annotated[User, Depends(admin_user)]
+) -> VehicleInformation:
     try:
-        vehicle = await lookup_vehicle_registration(registration_number)
-    except DvlaVehicleEnquiryError as exc:
-        emit_audit_log(
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action="dvla.lookup",
-            actor=actor_from_user(user),
-            actor_user_id=user.id,
-            target_entity="DVLA",
-            target_id=registration_number,
-            target_label=registration_number,
-            outcome="failed",
-            level="error",
-            metadata={
-                "registration_number": registration_number,
-                "status_code": exc.status_code,
-                "error": str(exc),
-            },
-        )
-        status_code = exc.status_code if exc.status_code and exc.status_code >= 400 else 503
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    display_vehicle = display_vehicle_record(vehicle, registration_number)
-    normalized_vehicle = normalize_vehicle_enquiry_response(
-        vehicle,
-        registration_number,
-        display_vehicle=display_vehicle,
-    )
-    emit_audit_log(
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="dvla.lookup",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity="DVLA",
-        target_id=registration_number,
-        target_label=display_vehicle,
-        outcome="success",
-        level="info",
-        metadata={
-            "registration_number": registration_number,
-            "display_vehicle": display_vehicle,
-        },
-    )
-    return {
-        "registration_number": registration_number,
-        "vehicle": vehicle,
-        "display_vehicle": display_vehicle,
-        "normalized_vehicle": normalized_vehicle.as_payload(),
-    }
+        lookup = await get_vehicle_information_service().lookup(request.registration_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid vehicle registration") from exc
+    emit_audit_log(category=TELEMETRY_CATEGORY_INTEGRATIONS, action="vehicle.information_lookup",
+        actor=actor_from_user(user), actor_user_id=user.id, target_entity="Vehicle",
+        target_id=lookup.information.registration_number, target_label=lookup.information.registration_number,
+        metadata={"providers": {name: outcome.status for name, outcome in lookup.information.providers.items()}})
+    return lookup.information
 
 
 @router.post("/gate/open", response_model=None)

@@ -67,7 +67,7 @@ export function View(props: {
       content = <PassesView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "vehicles":
-      content = <VehiclesView refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <VehiclesView canRefreshInformation={props.currentUser.role === "admin"} refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "top_charts":
       content = <TopChartsView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;

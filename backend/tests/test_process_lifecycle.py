@@ -14,7 +14,7 @@ from app.api.v1 import health
 
 SERVICE_NAMES = (
     "notification", "automation", "visitor_pass",
-    "access_device", "access_event", "movement_reconciliation", "home_assistant",
+    "access_device", "vehicle_information", "access_event", "movement_reconciliation", "home_assistant",
     "gate_malfunction", "unifi_protect",
 )
 
@@ -44,7 +44,7 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "event_bus", service("realtime"))
     for name in SERVICE_NAMES:
         instance = service(name)
-        monkeypatch.setattr(main, f"get_{name}_service", lambda instance=instance: instance)
+        monkeypatch.setattr(main, f"get_{name}_worker" if name == "vehicle_information" else f"get_{name}_service", lambda instance=instance: instance)
     monkeypatch.setattr(main, "read_backend_runtime_state", lambda: {})
 
     async def task(**_kwargs):
@@ -70,7 +70,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
             pytest.fail("Failed startup must not accept requests")
     started = [name for action, name in events if action == "start"]
     stopped = [name for action, name in events if action == "stop"]
-    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation"}
+    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information"}
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],
@@ -103,7 +103,7 @@ async def test_normal_shutdown_drains_owned_tasks_before_services_and_database(o
     first_stop = next(i for i, event in enumerate(events) if event[0] == "stop")
     assert all(i < first_stop for i, event in enumerate(events) if event == ("task", "stopped"))
     assert events[-1] == ("stop", "database")
-    for producer in ("automation", "unifi_protect", "access_event", "movement_reconciliation"):
+    for producer in ("automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information"):
         for sink in ("access_device", "notification", "database"):
             assert events.index(("stop", producer)) < events.index(("stop", sink))
 

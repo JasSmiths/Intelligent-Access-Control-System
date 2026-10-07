@@ -24,8 +24,8 @@ def notice(**facts):
 
 
 async def test_unknown_notice_enriches_before_rendering(monkeypatch):
-    lookup = AsyncMock(return_value=SimpleNamespace(make="FORD", colour="BLUE"))
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", lookup)
+    lookup = AsyncMock(return_value=SimpleNamespace(information=SimpleNamespace(make="FORD", colour="BLUE", model="Focus")))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
     row = notice()
     plan = await owner.NotificationService().prepare_delivery_plan(row)
     assert plan[0]["action"]["message"] == "BLUE FORD AB12CDE"
@@ -36,15 +36,15 @@ async def test_unknown_notice_enriches_before_rendering(monkeypatch):
 
 @pytest.mark.parametrize("error", [RuntimeError("provider unavailable"), TimeoutError()])
 async def test_failed_lookup_still_prepares_alert(monkeypatch, error):
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", AsyncMock(side_effect=error))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=AsyncMock(side_effect=error)))
     plan = await owner.NotificationService().prepare_delivery_plan(notice())
     assert plan[0]["state"] == "pending"
     assert "AB12CDE" in plan[0]["action"]["message"]
 
 
 async def test_existing_colour_is_preserved(monkeypatch):
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration",
-                        AsyncMock(return_value=SimpleNamespace(make="FORD", colour="BLUE")))
+    monkeypatch.setattr(owner, "get_vehicle_information_service",
+                        lambda: SimpleNamespace(lookup=AsyncMock(return_value=SimpleNamespace(information=SimpleNamespace(make="FORD", colour="BLUE", model="Focus")))))
     row = notice(vehicle_colour="Silver", vehicle_color="Silver")
     await owner.NotificationService().prepare_delivery_plan(row)
     assert row.context["facts"]["vehicle_colour"] == "Silver"
@@ -52,12 +52,12 @@ async def test_existing_colour_is_preserved(monkeypatch):
 
 async def test_complete_details_skip_lookup(monkeypatch):
     lookup = AsyncMock()
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", lookup)
-    await owner.NotificationService().prepare_delivery_plan(notice(vehicle_make="FORD", vehicle_colour="BLUE"))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
+    await owner.NotificationService().prepare_delivery_plan(notice(vehicle_make="FORD", vehicle_colour="BLUE", vehicle_model="Focus"))
     lookup.assert_not_awaited()
 
 
 async def test_cancellation_propagates(monkeypatch):
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", AsyncMock(side_effect=asyncio.CancelledError))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=AsyncMock(side_effect=asyncio.CancelledError)))
     with pytest.raises(asyncio.CancelledError):
         await owner.NotificationService().prepare_delivery_plan(notice())

@@ -184,7 +184,7 @@ class AccessExecution:
             await session.refresh(movement_saga, with_for_update=True)
             if movement_saga.access_event_id:
                 return None
-            dvla_enrichment = None
+            vehicle_information = None
             vehicle_visual_detection = None
             persistence_span = trace.start_span(
                 "Persist Access Event, Presence, and Anomalies",
@@ -318,7 +318,7 @@ class AccessExecution:
                 person,
                 open_garage_doors=True,
                 trace=trace,
-                dvla_enrichment=dvla_enrichment,
+                vehicle_information=vehicle_information,
                 movement_saga_id=str(movement_saga.id) if movement_saga else None,
             )
             async with AsyncSessionLocal() as session:

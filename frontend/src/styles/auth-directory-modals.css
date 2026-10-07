@@ -1483,3 +1483,11 @@
 
 .directory-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
 .directory-pagination > span:first-child { margin-right: auto; }
+
+.mot-history { border-top: 1px solid var(--border); padding-top: 1rem; min-width: 0; }
+.mot-history summary { cursor: pointer; padding: .6rem 0; font-weight: 600; }
+.mot-history-tests { list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem; }
+.mot-history-tests > li { border: 1px solid var(--border); border-radius: .75rem; padding: .8rem; overflow-wrap: anywhere; }
+.mot-history-result, .mot-history-pagination { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
+.mot-history-pagination { margin-top: .8rem; }
+.mot-history p { margin: .5rem 0; }

@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Person, User, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import CreatePersonRequest, PersonResponse, UpdatePersonRequest
+from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
@@ -107,7 +108,7 @@ async def add_person(
     if not refreshed_person:
         raise DirectoryOperationError(status_code=500, detail="Unable to load saved person")
 
-    return PersonResponse(**serialize_person(refreshed_person, include_media=False))
+    return PersonResponse(**serialize_person(refreshed_person, include_media=False, timezone_name=(await get_runtime_config()).site_timezone))
 
 
 async def update_person(
@@ -238,4 +239,4 @@ async def update_person(
     if not refreshed_person:
         raise DirectoryOperationError(status_code=500, detail="Unable to load saved person")
 
-    return PersonResponse(**serialize_person(refreshed_person, include_media=False))
+    return PersonResponse(**serialize_person(refreshed_person, include_media=False, timezone_name=(await get_runtime_config()).site_timezone))

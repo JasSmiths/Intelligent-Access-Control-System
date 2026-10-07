@@ -35,25 +35,6 @@ class NormalizedDvlaVehicle:
         }
 
 
-async def lookup_vehicle_registration(registration_number: str) -> dict[str, Any]:
-    config = await get_runtime_config()
-    client = DvlaVehicleEnquiryClient(
-        api_key=config.dvla_api_key,
-        endpoint_url=config.dvla_vehicle_enquiry_url or DEFAULT_VEHICLE_ENQUIRY_URL,
-        timeout_seconds=config.dvla_timeout_seconds,
-    )
-    return await client.lookup(registration_number)
-
-
-async def lookup_normalized_vehicle_registration(
-    registration_number: str,
-    *,
-    today: date | None = None,
-) -> NormalizedDvlaVehicle:
-    vehicle = await lookup_vehicle_registration(registration_number)
-    return normalize_vehicle_enquiry_response(vehicle, registration_number, today=today)
-
-
 def normalize_vehicle_enquiry_response(
     vehicle: dict[str, Any],
     registration_number: str,

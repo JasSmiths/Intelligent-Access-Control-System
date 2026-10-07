@@ -54,10 +54,9 @@ export type LeaderboardKnownEntry = {
   vehicle: LeaderboardVehicle;
 };
 
-export type LeaderboardDvla = {
+export type LeaderboardVehicleInformation = {
   status: string;
-  vehicle: Record<string, unknown> | null;
-  display_vehicle: Record<string, unknown> | null;
+  information?: Record<string, unknown> | null;
   label: string;
   error?: string;
 };
@@ -79,7 +78,7 @@ export type LeaderboardUnknownEntry = {
   first_seen_at: string | null;
   last_seen_at: string | null;
   latest_snapshot: LeaderboardSnapshot | null;
-  dvla: LeaderboardDvla;
+  vehicle_information: LeaderboardVehicleInformation;
 };
 
 export type LeaderboardResponse = {
@@ -291,8 +290,8 @@ function LeaderboardKnownRow({ entry }: { entry: LeaderboardKnownEntry }) {
 }
 
 function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
-  const label = entry.dvla.label || "DVLA details unavailable";
-  const showStatus = entry.dvla.status && entry.dvla.status !== "ok";
+  const label = entry.vehicle_information.label || "Vehicle information details unavailable";
+  const showStatus = entry.vehicle_information.status && entry.vehicle_information.status !== "ok";
   return (
     <article className="top-charts-row">
       <span className={rankBadgeClass(entry.rank)}>{entry.rank}</span>
@@ -303,7 +302,7 @@ function LeaderboardUnknownRow({ entry }: { entry: LeaderboardUnknownEntry }) {
         <small>{entry.last_seen_at ? `Last seen ${formatDate(entry.last_seen_at)}` : "Last seen time unavailable"}</small>
       </div>
       <div className="top-charts-read-count">
-        {showStatus ? <Badge tone={leaderboardDvlaTone(entry.dvla.status)}>{leaderboardDvlaLabel(entry.dvla.status)}</Badge> : null}
+        {showStatus ? <Badge tone={leaderboardDvlaTone(entry.vehicle_information.status)}>{leaderboardDvlaLabel(entry.vehicle_information.status)}</Badge> : null}
         <strong>{entry.read_count}</strong>
         <span>{entry.read_count === 1 ? "Detection" : "Detections"}</span>
       </div>
@@ -446,8 +445,8 @@ function leaderboardKnownMatches(entry: LeaderboardKnownEntry, query: string) {
 function leaderboardUnknownMatches(entry: LeaderboardUnknownEntry, query: string) {
   return (
     matches(entry.registration_number, query) ||
-    matches(entry.dvla.label, query) ||
-    matches(String(entry.dvla.error ?? ""), query)
+    matches(entry.vehicle_information.label, query) ||
+    matches(String(entry.vehicle_information.error ?? ""), query)
   );
 }
 
@@ -465,7 +464,7 @@ function leaderboardDvlaTone(status: string): BadgeTone {
 }
 
 function leaderboardDvlaLabel(status: string) {
-  if (status === "unconfigured") return "DVLA off";
-  if (status === "failed") return "DVLA failed";
+  if (status === "unconfigured") return "Vehicle information off";
+  if (status === "failed") return "Vehicle information failed";
   return titleCase(status);
 }

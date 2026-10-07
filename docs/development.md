@@ -222,3 +222,11 @@ retired. External consumers must adopt the page contract before deployment.
 The normalized active-plate index is migration `20261006_0011`. It adds no
 columns or data transformations, and its downgrade removes only that index.
 Production migration and deployment remain separately authorized operations.
+
+Vehicle information uses additive migration `20261007_0012`: nullable summary
+provenance fields, separate per-vehicle snapshots and leased arrival jobs. It does
+not backfill or contact providers. Downgrade refuses populated snapshots/jobs;
+use a matching backup/source restore instead of deleting durable work. DVSA is
+disabled by default. Configure it only through the existing confirmed settings
+workflow; local credential files are not runtime dependencies. Public contracts
+and cache/recovery behaviour are documented in [integrations](integrations.md#vehicle-information-and-mot-history).

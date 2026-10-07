@@ -11,22 +11,18 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, LeaderboardState, Person, Vehicle
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity
-from app.modules.dvla.vehicle_enquiry import (
-    DvlaVehicleEnquiryError,
-    display_vehicle_record,
-)
 from app.modules.notifications.base import NotificationContext
-from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
 from app.services.event_bus import event_bus
 from app.services.notifications import get_notification_service
 from app.services.profile_photos import stored_image_url
 from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
 from app.services.type_helpers import as_dict
+from app.services.vehicle_information import get_vehicle_information_service
 
 logger = get_logger(__name__)
 
 KNOWN_TOP_STATE_KEY = "known_top_plate"
-UNKNOWN_DVLA_CONCURRENCY = 4
+UNKNOWN_INFORMATION_CONCURRENCY = 4
 
 
 class LeaderboardService:
@@ -46,10 +42,9 @@ class LeaderboardService:
             unknown = [
                 {
                     **row,
-                    "dvla": {
+                    "vehicle_information": {
                         "status": "skipped",
-                        "vehicle": None,
-                        "display_vehicle": None,
+                        "information": None,
                         "label": "",
                     },
                 }
@@ -256,7 +251,7 @@ class LeaderboardService:
                     height=snapshot_height,
                     camera=snapshot_camera,
                 ),
-                "dvla": {
+                "vehicle_information": {
                     "status": "pending",
                     "vehicle": None,
                     "display_vehicle": None,
@@ -303,54 +298,22 @@ class LeaderboardService:
         )
 
     async def _enrich_unknowns(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        semaphore = asyncio.Semaphore(UNKNOWN_DVLA_CONCURRENCY)
+        semaphore = asyncio.Semaphore(UNKNOWN_INFORMATION_CONCURRENCY)
 
         async def enrich(row: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
                 return {
                     **row,
-                    "dvla": await self._lookup_unknown_vehicle(row["registration_number"]),
+                    "vehicle_information": await self._lookup_unknown_vehicle(row["registration_number"]),
                 }
 
         return list(await asyncio.gather(*(enrich(row) for row in rows)))
 
     async def _lookup_unknown_vehicle(self, registration_number: str) -> dict[str, Any]:
-        try:
-            vehicle = await lookup_vehicle_registration(registration_number)
-        except DvlaVehicleEnquiryError as exc:
-            status = "unconfigured" if _looks_like_unconfigured_dvla(exc) else "failed"
-            return {
-                "status": status,
-                "vehicle": None,
-                "display_vehicle": None,
-                "label": "",
-                "error": str(exc),
-            }
-        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-            logger.warning(
-                "leaderboard_dvla_lookup_failed",
-                extra={"registration_number": registration_number, "error": str(exc)},
-            )
-            return {
-                "status": "failed",
-                "vehicle": None,
-                "display_vehicle": None,
-                "label": "",
-                "error": str(exc),
-            }
-
-        display_vehicle = display_vehicle_record(vehicle, registration_number)
-        return {
-            "status": "ok",
-            "vehicle": vehicle,
-            "display_vehicle": display_vehicle,
-            "normalized_vehicle": normalize_vehicle_enquiry_response(
-                vehicle,
-                registration_number,
-                display_vehicle=display_vehicle,
-            ).as_payload(),
-            "label": _dvla_vehicle_label(display_vehicle),
-        }
+        info = (await get_vehicle_information_service().lookup(registration_number, cached_only=True)).information
+        return {"status": "ok" if info.make or info.model else "unavailable",
+                "information": info.model_dump(mode="json"),
+                "label": " ".join(part for part in (info.colour, info.make, info.model) if part)}
 
     def _serialize_known_leader(
         self,
@@ -491,15 +454,6 @@ def _vehicle_display_name(vehicle: Vehicle | None, fallback: str) -> str:
     return label or vehicle.registration_number or fallback
 
 
-def _dvla_vehicle_label(display_vehicle: dict[str, Any]) -> str:
-    parts = [
-        display_vehicle.get("colour") or display_vehicle.get("color"),
-        display_vehicle.get("make"),
-        display_vehicle.get("model"),
-    ]
-    return " ".join(str(part).strip() for part in parts if str(part or "").strip())
-
-
 def _winner_name(leader: dict[str, Any] | None) -> str:
     if not leader:
         return "Unknown"
@@ -553,10 +507,6 @@ def _coerce_uuid(value: uuid.UUID | str | Any | None) -> uuid.UUID | None:
         return uuid.UUID(str(value))
     except ValueError:
         return None
-
-
-def _looks_like_unconfigured_dvla(exc: DvlaVehicleEnquiryError) -> bool:
-    return exc.status_code == 400 and "not configured" in str(exc).lower()
 
 
 @lru_cache

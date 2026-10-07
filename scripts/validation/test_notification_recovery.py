@@ -643,8 +643,8 @@ async def test_enriched_facts_and_plan_survive_reclaim(monkeypatch):
     from unittest.mock import AsyncMock
 
     service = NotificationService()
-    lookup = AsyncMock(return_value=SimpleNamespace(make="FORD", colour="BLUE"))
-    monkeypatch.setattr(owner, "lookup_normalized_vehicle_registration", lookup)
+    lookup = AsyncMock(return_value=SimpleNamespace(information=SimpleNamespace(make="FORD", colour="BLUE", model="Focus")))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
     payload = owner.notification_context_payload(NotificationContext(
         event_type="unauthorized_plate", subject="AB12CDE", severity="warning",
         facts={"access_event_id": str(uuid.uuid4()), "registration_number": "AB12CDE"},

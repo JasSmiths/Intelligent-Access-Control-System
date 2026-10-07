@@ -1,3 +1,4 @@
+import type { VehicleInformationSummary } from "./vehicleInformation";
 export type ScheduleTimeBlock = {
   start: string;
   end: string;
@@ -137,7 +138,7 @@ export type Person = {
   home_assistant_presence_input_boolean_exit_action: "turn_on" | "turn_off";
   vehicles: Vehicle[];
 };
-export type Vehicle = {
+export type Vehicle = VehicleInformationSummary & {
   id: string;
   registration_number: string;
   vehicle_photo_data_url?: string | null;

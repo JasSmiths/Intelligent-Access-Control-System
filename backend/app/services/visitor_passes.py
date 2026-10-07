@@ -939,7 +939,7 @@ class VisitorPassService:
         visitor_pass: VisitorPass,
         *,
         event: AccessEvent,
-        dvla_enrichment: dict[str, Any] | None = None,
+        vehicle_information: dict[str, Any] | None = None,
         visual_detection: dict[str, Any] | None = None,
         trace_id: str | None = None,
         terminal_status: VisitorPassStatus | None = None,
@@ -954,7 +954,7 @@ class VisitorPassService:
             visitor_pass.number_plate = normalize_registration_number(event.registration_number)
         if arrival_linked:
             visitor_pass.telemetry_trace_id = trace_id or visitor_pass.telemetry_trace_id
-        self._apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection)
+        self._apply_vehicle_enrichment(visitor_pass, vehicle_information, visual_detection)
         await self._audit_change(
             session,
             visitor_pass,
@@ -975,9 +975,9 @@ class VisitorPassService:
         return visitor_pass
 
     @staticmethod
-    def _apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection) -> None:
-        vehicle_make = _optional_text((dvla_enrichment or {}).get("make"))
-        vehicle_colour = _optional_text((dvla_enrichment or {}).get("colour"))
+    def _apply_vehicle_enrichment(visitor_pass, vehicle_information, visual_detection) -> None:
+        vehicle_make = _optional_text((vehicle_information or {}).get("make"))
+        vehicle_colour = _optional_text((vehicle_information or {}).get("colour"))
         if not vehicle_colour and visual_detection:
             vehicle_colour = _optional_text(
                 visual_detection.get("observed_vehicle_color")
@@ -996,14 +996,14 @@ class VisitorPassService:
         visitor_pass: VisitorPass,
         *,
         event_id: uuid.UUID,
-        dvla_enrichment: dict[str, Any] | None,
+        vehicle_information: dict[str, Any] | None,
         visual_detection: dict[str, Any] | None,
     ) -> VisitorPass:
         """Enrich a linked arrival without replaying its state transition or audit."""
         if visitor_pass.arrival_event_id != event_id:
             return visitor_pass
         before = visitor_pass_audit_snapshot(visitor_pass)
-        self._apply_vehicle_enrichment(visitor_pass, dvla_enrichment, visual_detection)
+        self._apply_vehicle_enrichment(visitor_pass, vehicle_information, visual_detection)
         if before != visitor_pass_audit_snapshot(visitor_pass):
             await self._audit_change(
                 session,

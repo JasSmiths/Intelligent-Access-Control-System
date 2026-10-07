@@ -31,6 +31,8 @@ SECRET_KEYS = {
     "esphome_devices",
     "apprise_urls",
     "dvla_api_key",
+    "dvsa_client_secret",
+    "dvsa_api_key",
     "unifi_protect_username",
     "unifi_protect_password",
     "unifi_protect_api_key",
@@ -191,6 +193,14 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "esphome_devices": ("integrations", "[]", "Configured ESPHome native API devices."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
+    "dvsa_enabled": ("integrations", False, "Enable DVSA MOT History enrichment."),
+    "dvsa_client_id": ("integrations", "", "DVSA client ID."),
+    "dvsa_client_secret": ("integrations", "", "DVSA client secret."),
+    "dvsa_api_key": ("integrations", "", "DVSA API key."),
+    "dvsa_token_url": ("integrations", "", "Microsoft token URL supplied by DVSA."),
+    "dvsa_scope": ("integrations", "https://tapi.dvsa.gov.uk/.default", "DVSA OAuth scope."),
+    "dvsa_timeout_seconds": ("integrations", 10.0, "DVSA HTTP timeout."),
+    "dvsa_test_registration_number": ("integrations", "AA19AAA", "Connection test registration."),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
     "dvla_vehicle_enquiry_url": (
         "integrations",
@@ -269,6 +279,14 @@ class RuntimeConfig:
     home_assistant_default_media_player: str
     esphome_devices: list[dict[str, Any]]
     apprise_urls: str
+    dvsa_enabled: bool
+    dvsa_client_id: str
+    dvsa_client_secret: str
+    dvsa_api_key: str
+    dvsa_token_url: str
+    dvsa_scope: str
+    dvsa_timeout_seconds: float
+    dvsa_test_registration_number: str
     dvla_api_key: str
     dvla_vehicle_enquiry_url: str
     dvla_test_registration_number: str
@@ -536,6 +554,14 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         ),
         esphome_devices=normalize_esphome_devices(values["esphome_devices"]),
         apprise_urls=str(values["apprise_urls"] or ""),
+        dvsa_enabled=bool_value(values["dvsa_enabled"]),
+        dvsa_client_id=str(values["dvsa_client_id"] or ""),
+        dvsa_client_secret=str(values["dvsa_client_secret"] or ""),
+        dvsa_api_key=str(values["dvsa_api_key"] or ""),
+        dvsa_token_url=str(values["dvsa_token_url"] or ""),
+        dvsa_scope=str(values["dvsa_scope"] or ""),
+        dvsa_timeout_seconds=min(20.0, max(1.0, float(values["dvsa_timeout_seconds"]))),
+        dvsa_test_registration_number=str(values["dvsa_test_registration_number"] or ""),
         dvla_api_key=str(values["dvla_api_key"] or ""),
         dvla_vehicle_enquiry_url=str(values["dvla_vehicle_enquiry_url"] or ""),
         dvla_test_registration_number=str(values["dvla_test_registration_number"] or ""),

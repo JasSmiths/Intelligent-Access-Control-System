@@ -26,6 +26,7 @@ from app.schemas.directory import (
 )
 from app.services.directory import groups, people, reads, vehicles
 from app.services.directory.errors import DirectoryOperationError
+from app.services.vehicle_information_contracts import MotHistoryPage
 
 router = APIRouter()
 
@@ -137,9 +138,9 @@ async def update_vehicle(
     )
 
 
-@router.post("/vehicles/{vehicle_id}/dvla-refresh", response_model=VehicleResponse)
+@router.post("/vehicles/{vehicle_id}/refresh-information", response_model=VehicleResponse)
 @directory_errors
-async def refresh_vehicle_dvla(
+async def refresh_vehicle_information(
     user: Annotated[User, Depends(admin_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     vehicle_id: uuid.UUID,
@@ -149,11 +150,11 @@ async def refresh_vehicle_dvla(
     await require_confirmed_action(
         session,
         user=user,
-        action="vehicle.dvla_refresh",
+        action="vehicle.information_refresh",
         payload={"vehicle_id": str(vehicle_id)},
         confirmation_token=request.confirmation_token if request else None,
     )
-    return await vehicles.refresh_vehicle_dvla(vehicle_id=vehicle_id, user=user, session=session)
+    return await vehicles.refresh_vehicle_information(vehicle_id=vehicle_id, user=user, session=session)
 
 
 @router.delete("/vehicles/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -316,3 +317,14 @@ async def get_vehicle(
     item_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db_session)]
 ) -> VehicleResponse:
     return await reads.get_vehicle(session, item_id)
+
+
+@router.get("/vehicles/{vehicle_id}/mot-history", response_model=MotHistoryPage)
+@directory_errors
+async def vehicle_mot_history(
+    vehicle_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    cursor: Annotated[str | None, Query(max_length=512)] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> MotHistoryPage:
+    return await vehicles.mot_history(session, vehicle_id, cursor=cursor, limit=limit)

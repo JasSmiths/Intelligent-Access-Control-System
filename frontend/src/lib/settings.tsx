@@ -18,6 +18,8 @@ export const secretSettingKeys = new Set([
   "esphome_devices",
   "apprise_urls",
   "dvla_api_key",
+  "dvsa_api_key",
+  "dvsa_client_secret",
   "unifi_protect_username",
   "unifi_protect_password",
   "unifi_protect_api_key",
@@ -175,7 +177,7 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
       payload[key] = parsed;
     } else if (listSettingKeys.has(key)) {
       payload[key] = value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl"].includes(key)) {
+    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "dvsa_enabled"].includes(key)) {
       payload[key] = value === "true";
     } else if ([
       "auth_access_token_minutes",
@@ -186,6 +188,7 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
       "lpr_similarity_threshold",
       "llm_timeout_seconds",
       "dvla_timeout_seconds",
+      "dvsa_timeout_seconds",
       "unifi_protect_port",
       "unifi_protect_snapshot_width",
       "unifi_protect_snapshot_height"

@@ -99,7 +99,7 @@ VARIABLE_DEFINITIONS: tuple[WorkflowVariableDefinition, ...] = (
 
 NOTIFICATION_TRIGGER_DEFINITIONS = (
     ("compliance", "Compliance", (
-        ("expired_mot_detected", "Expired MOT Detected", "warning", "DVLA reports a vehicle MOT status other than Valid or Not Required on arrival."),
+        ("expired_mot_detected", "Expired MOT Detected", "warning", "Fresh vehicle information reports an expired MOT or overdue first test on arrival."),
         ("expired_tax_detected", "Expired Tax Detected", "warning", "DVLA reports a vehicle tax status other than Taxed or SORN on arrival."),
     )),
     ("gate_actions", "Gate Actions", (

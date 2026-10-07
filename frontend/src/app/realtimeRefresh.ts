@@ -30,6 +30,7 @@ const auditImpacts: Record<string, Impact> = {
 export function refreshSelectionForEvent(event: RealtimeMessage, view: ViewKey, required: Set<ShellDataKey>): RefreshSelection {
   let impact: Impact | undefined;
   if (event.type === "access_event.finalized" || event.type === "access_event.finalize_failed") impact = accessImpact;
+  else if (event.type === "vehicle_information.updated") impact = auditImpacts.vehicle;
   else if (event.type.startsWith("missed_exit_recovery.")) impact = { keys: [], views: ["settings_missed_exit_recovery"] };
   else if (event.type === "alerts.updated") impact = { keys: ["anomalies"], views: ["alerts"] };
   else if (event.type.startsWith("automation.run.")) impact = { keys: [], views: ["settings_automations", "logs"] };

@@ -225,3 +225,22 @@ check routes, settings, models and workflow catalogs alongside retained provider
 contracts. [Populated retirement checks](../scripts/validation/test_feature_retirement.py)
 verify that queued captured work from retired features is held for review while
 completed delivery history is preserved.
+
+## Vehicle information enrichment
+
+[Vehicle information](../backend/app/services/vehicle_information.py) coordinates
+DVLA/DVSA cache and requests; [pure contracts](../backend/app/services/vehicle_information_contracts.py)
+own normalization and MOT precedence. The DVSA module owns HTTP/token I/O only.
+The [arrival worker](../backend/app/services/vehicle_information_jobs.py) owns a
+small leased database queue and post-lookup transactions. It runs outside the
+serial LPR worker and never holds a database connection over provider I/O.
+Required access notifications, admission, presence and hardware keep their owners.
+MOT/tax notice handoffs use stable event identities and the originating job deadline.
+
+The [snapshot owner](../backend/app/services/vehicle_information_store.py) stores
+allowlisted results separately from vehicle rows and pages history on the server.
+Summary reads do not join or load history. Vehicle registration and request-time
+checks prevent late refreshes overwriting a changed plate or newer data. Existing
+models are preserved; DVSA fills blanks. Editor request cancellation and individual
+field edits remain owned by the directory feature. Source and freshness travel
+with summaries; raw provider responses never become API or audit data.

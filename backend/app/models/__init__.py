@@ -46,6 +46,7 @@ from app.models.core import (
     VisitorPass,
     VisitorPassReservationRecord,
 )
+from app.models.vehicle_information import VehicleInformationJob, VehicleInformationSnapshot
 
 __all__ = [
     "AccessDevice",
@@ -89,6 +90,8 @@ __all__ = [
     "TelemetryTrace",
     "User",
     "Vehicle",
+    "VehicleInformationJob",
+    "VehicleInformationSnapshot",
     "VehiclePersonAssignment",
     "VisitorPass",
     "VisitorPassReservationRecord",

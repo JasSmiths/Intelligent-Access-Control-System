@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Select, String, column, select, true, values
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models import AccessEvent, Group, Person, Vehicle
 from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
-from app.services.dvla import NormalizedDvlaVehicle
 from app.services.person_presence_input_booleans import (
     normalize_input_boolean_action,
     normalize_input_boolean_entity_ids,
@@ -20,6 +20,7 @@ from app.services.profile_photos import (
     normalize_profile_photo_data_url,
     stored_image_url,
 )
+from app.services.vehicle_information_store import information_summary
 
 from .errors import DirectoryOperationError
 
@@ -78,24 +79,6 @@ def local_today(timezone_name: str | None) -> date:
     except ZoneInfoNotFoundError:
         timezone = ZoneInfo("UTC")
     return datetime.now(tz=timezone).date()
-
-
-def apply_dvla_vehicle_details(
-    vehicle: Vehicle,
-    normalized: NormalizedDvlaVehicle,
-    *,
-    lookup_date: date,
-) -> None:
-    if normalized.make:
-        vehicle.make = normalize_vehicle_text(normalized.make)
-    if normalized.colour:
-        vehicle.color = normalize_vehicle_text(normalized.colour)
-    vehicle.mot_status = normalize_vehicle_text(normalized.mot_status)
-    vehicle.tax_status = normalize_vehicle_text(normalized.tax_status)
-    vehicle.fuel_type = normalize_vehicle_text(normalized.fuel_type)
-    vehicle.mot_expiry = normalized.mot_expiry
-    vehicle.tax_expiry = normalized.tax_expiry
-    vehicle.last_dvla_lookup_date = lookup_date
 
 
 def normalize_home_assistant_mobile_notify_service(service_name: str | None) -> str | None:
@@ -229,6 +212,7 @@ def serialize_vehicle(
     include_media: bool = True,
     fallback_photo_urls: Mapping[str, str] | None = None,
     photo_references: DirectoryPhotoReferences | None = None,
+    timezone_name: str | None = None,
 ) -> dict:
     assigned_people = assigned_people_for_vehicle(vehicle)
     owners = [person.display_name for person in assigned_people]
@@ -242,7 +226,7 @@ def serialize_vehicle(
         "model": vehicle.model,
         "color": vehicle.color,
         "fuel_type": vehicle.fuel_type,
-        "mot_status": vehicle.mot_status,
+        **information_summary(vehicle, timezone=timezone_name or settings.site_timezone),
         "tax_status": vehicle.tax_status,
         "mot_expiry": vehicle.mot_expiry,
         "tax_expiry": vehicle.tax_expiry,
@@ -265,6 +249,7 @@ def serialize_person(
     include_media: bool = True,
     fallback_vehicle_photo_urls: Mapping[str, str] | None = None,
     photo_references: DirectoryPhotoReferences | None = None,
+    timezone_name: str | None = None,
 ) -> dict:
     assigned_vehicles = assigned_vehicles_for_person(person)
     return {
@@ -314,7 +299,7 @@ def serialize_person(
                 "model": vehicle.model,
                 "color": vehicle.color,
                 "fuel_type": vehicle.fuel_type,
-                "mot_status": vehicle.mot_status,
+                **information_summary(vehicle, timezone=timezone_name or settings.site_timezone),
                 "tax_status": vehicle.tax_status,
                 "mot_expiry": vehicle.mot_expiry,
                 "tax_expiry": vehicle.tax_expiry,
@@ -364,7 +349,7 @@ def vehicle_audit_snapshot(vehicle: Vehicle) -> dict:
         "model": vehicle.model,
         "color": vehicle.color,
         "fuel_type": vehicle.fuel_type,
-        "mot_status": vehicle.mot_status,
+        **information_summary(vehicle, timezone=settings.site_timezone),
         "tax_status": vehicle.tax_status,
         "mot_expiry": vehicle.mot_expiry.isoformat() if vehicle.mot_expiry else None,
         "tax_expiry": vehicle.tax_expiry.isoformat() if vehicle.tax_expiry else None,

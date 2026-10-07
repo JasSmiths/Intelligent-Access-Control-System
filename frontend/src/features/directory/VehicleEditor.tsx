@@ -12,8 +12,10 @@ import { fileToDataUrl, mediaSource } from "../../lib/media";
 import { Badge } from "../../ui/primitives";
 import type { Group, Person, Schedule, Vehicle } from "../../api/types";
 
-import type { DvlaLookupResponse } from "./types";
-import { groupPeopleByDirectoryGroup, motComplianceTone, taxComplianceTone, vehicleComplianceExpiryLabel, vehicleLastDvlaCheckLabel, normalizePlateInput, localDateKey } from "./model";
+import { refreshVehicleInformation, type VehicleInformation, type VehicleInformationSummary } from "../../api/vehicleInformation";
+import { useVehicleInformation } from "./useVehicleInformation";
+import { MotHistory } from "./MotHistory";
+import { groupPeopleByDirectoryGroup, motComplianceTone, taxComplianceTone, vehicleComplianceExpiryLabel, vehicleLastDvlaCheckLabel, normalizePlateInput } from "./model";
 import { PersonAvatar, VehiclePhoto } from "./components";
 
 export function VehiclePeoplePicker({
@@ -120,6 +122,7 @@ export function VehiclePeoplePicker({
 }
 
 export function VehicleModal({
+  canRefreshInformation,
   defaultPolicyOptionLabel,
   groups,
   mode,
@@ -131,6 +134,7 @@ export function VehicleModal({
   setPageError,
   vehicle
 }: {
+  canRefreshInformation: boolean;
   defaultPolicyOptionLabel: string;
   groups: Group[];
   mode: "create" | "edit";
@@ -166,21 +170,64 @@ export function VehicleModal({
   const [vehiclePhotoChanged, setVehiclePhotoChanged] = React.useState(false);
   const vehiclePhotoPreview = form.vehicle_photo_data_url || (!vehiclePhotoChanged ? existingVehiclePhotoSource : "");
   const [error, setError] = React.useState("");
+  const [complianceRefreshing, setComplianceRefreshing] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const [dirty, setDirty] = React.useState(false);
-  const requestClose = useEditorDismiss(onClose, dirty, submitting, "vehicle changes");
+  const requestClose = useEditorDismiss(onClose, dirty, submitting || complianceRefreshing, "vehicle changes");
   useModalFocus(modalRef, true, requestClose);
-  const [complianceRefreshing, setComplianceRefreshing] = React.useState(false);
-  const [dvlaLookup, setDvlaLookup] = React.useState<{ status: "idle" | "loading" | "found" | "error"; message: string }>({
-    status: "idle",
-    message: ""
-  });
-  const lookupRequestRef = React.useRef(0);
-  const lastLookupRegistrationRef = React.useRef("");
-  const initialRegistrationRef = React.useRef(vehicle?.registration_number ?? "");
 
-  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => { setDirty(true); setForm((current) => ({ ...current, [field]: value })); };
+  const [information, setInformation] = React.useState<VehicleInformationSummary>(vehicle ?? {});
+  const alive = React.useRef(true);
+  const currentPlate = React.useRef(form.registration_number);
+  currentPlate.current = form.registration_number;
+  React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const editedFields = React.useRef(new Set<string>());
+  const initialRegistration = mode === "edit" ? vehicle?.registration_number ?? "" : null;
+  const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => {
+    setDirty(true);
+    editedFields.current.add(field);
+    if (field === "registration_number") setInformation({});
+    setForm((current) => {
+      if (field !== "registration_number" || normalizePlateInput(String(value)) === normalizePlateInput(current.registration_number)) return { ...current, [field]: value };
+      return { ...current, [field]: value, mot_status: "", mot_expiry: "", tax_status: "", tax_expiry: "", last_dvla_lookup_date: "",
+        make: editedFields.current.has("make") ? current.make : "",
+        model: editedFields.current.has("model") ? current.model : "",
+        color: editedFields.current.has("color") ? current.color : "",
+        fuel_type: editedFields.current.has("fuel_type") ? current.fuel_type : "" };
+    });
+  };
+  const applyInformation = (result: VehicleInformation) => {
+    if (normalizePlateInput(currentPlate.current) !== result.registration_number) return;
+    setInformation({ ...result, information_outcome: result.providers });
+    setForm((current) => {
+      if (normalizePlateInput(current.registration_number) !== result.registration_number) return current;
+      return { ...current,
+        make: editedFields.current.has("make") ? current.make : result.make ?? current.make,
+        model: editedFields.current.has("model") ? current.model : result.model ?? current.model,
+        color: editedFields.current.has("color") ? current.color : result.colour ?? current.color,
+        fuel_type: editedFields.current.has("fuel_type") ? current.fuel_type : result.fuel_type ?? current.fuel_type,
+        mot_status: result.mot_status ?? "", mot_expiry: result.mot_expiry ?? "",
+        tax_status: result.tax_status ?? "", tax_expiry: result.tax_expiry ?? "",
+        last_dvla_lookup_date: result.last_dvla_lookup_date ?? ""
+      };
+    });
+  };
+  React.useEffect(() => {
+    if (vehicle && normalizePlateInput(form.registration_number) === normalizePlateInput(vehicle.registration_number)) {
+      setInformation(vehicle);
+      setForm((current) => ({ ...current,
+        mot_status: vehicle.mot_status ?? "", mot_expiry: vehicle.mot_expiry ?? "",
+        tax_status: vehicle.tax_status ?? "", tax_expiry: vehicle.tax_expiry ?? "",
+        last_dvla_lookup_date: vehicle.last_dvla_lookup_date ?? "",
+        make: editedFields.current.has("make") ? current.make : vehicle.make ?? "",
+        model: editedFields.current.has("model") ? current.model : vehicle.model ?? "",
+        color: editedFields.current.has("color") ? current.color : vehicle.color ?? "",
+        fuel_type: editedFields.current.has("fuel_type") ? current.fuel_type : vehicle.fuel_type ?? ""
+      }));
+    }
+  }, [vehicle, form.registration_number]);
+  const vehicleLookup = useVehicleInformation(form.registration_number, initialRegistration, applyInformation, canRefreshInformation);
 
   const toggleAssignedPerson = (personId: string) => {
     update(
@@ -191,65 +238,6 @@ export function VehicleModal({
     );
   };
 
-  React.useEffect(() => {
-    const requestId = ++lookupRequestRef.current;
-    const registrationNumber = normalizePlateInput(form.registration_number);
-    const initialRegistration = normalizePlateInput(initialRegistrationRef.current);
-    if (registrationNumber.length < 2 || (mode === "edit" && registrationNumber === initialRegistration)) {
-      setDvlaLookup({ status: "idle", message: "" });
-      return;
-    }
-    if (registrationNumber === lastLookupRegistrationRef.current) return;
-
-    const controller = new AbortController();
-    setDvlaLookup({ status: "loading", message: "Looking up DVLA vehicle details" });
-
-    const timer = window.setTimeout(async () => {
-      try {
-          const result = await api.post<DvlaLookupResponse>("/api/v1/integrations/dvla/lookup", {
-            registration_number: registrationNumber
-          }, { signal: controller.signal });
-          if (controller.signal.aborted || lookupRequestRef.current !== requestId) return;
-          lastLookupRegistrationRef.current = registrationNumber;
-          const displayVehicle = result.display_vehicle ?? result.vehicle;
-          const normalizedVehicle = result.normalized_vehicle;
-          const make = normalizedVehicle?.make || (typeof displayVehicle.make === "string" ? displayVehicle.make : "");
-          const model = typeof displayVehicle.model === "string" ? displayVehicle.model : "";
-          const normalizedColor = normalizedVehicle?.colour ?? normalizedVehicle?.color;
-          const color = normalizedColor || (typeof (displayVehicle.colour ?? displayVehicle.color) === "string" ? String(displayVehicle.colour ?? displayVehicle.color) : "");
-          const fuelType = normalizedVehicle?.fuel_type || (typeof displayVehicle.fuelType === "string" ? displayVehicle.fuelType : "");
-          setForm((current) => ({
-            ...current,
-            registration_number: result.registration_number || current.registration_number,
-            make: make || current.make,
-            model: model || current.model,
-            color: color || current.color,
-            fuel_type: fuelType || current.fuel_type,
-            mot_status: normalizedVehicle?.mot_status ?? current.mot_status,
-            tax_status: normalizedVehicle?.tax_status ?? current.tax_status,
-            mot_expiry: normalizedVehicle?.mot_expiry ?? current.mot_expiry,
-            tax_expiry: normalizedVehicle?.tax_expiry ?? current.tax_expiry,
-            last_dvla_lookup_date: normalizedVehicle ? localDateKey() : current.last_dvla_lookup_date
-          }));
-        setDvlaLookup({ status: "found", message: "DVLA details applied" });
-      } catch (lookupError) {
-        if (controller.signal.aborted || lookupRequestRef.current !== requestId) return;
-        const message = lookupError instanceof Error ? lookupError.message : "DVLA lookup failed";
-        if (message.toLowerCase().includes("api key is not configured")) {
-          lastLookupRegistrationRef.current = registrationNumber;
-          setDvlaLookup({ status: "idle", message: "" });
-          return;
-        }
-        setDvlaLookup({ status: "error", message });
-      }
-    }, 850);
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-      ++lookupRequestRef.current;
-    };
-  }, [form.registration_number, mode]);
 
   const uploadPhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -268,26 +256,21 @@ export function VehicleModal({
     };
 
     const refreshCompliance = async () => {
+    if (!canRefreshInformation) return;
       if (mode !== "edit" || !vehicle) return;
       setError("");
       setPageError("");
       setComplianceRefreshing(true);
       try {
-        const confirmationPayload = { vehicle_id: vehicle.id };
-        const confirmation = await createActionConfirmation("vehicle.dvla_refresh", confirmationPayload, {
-          target_entity: "Vehicle",
-          target_id: vehicle.id,
-          target_label: vehicle.registration_number,
-          reason: "Refresh DVLA compliance data"
-        });
-        const refreshed = await api.post<Vehicle>(`/api/v1/vehicles/${vehicle.id}/dvla-refresh`, {
-          confirmation_token: confirmation.confirmation_token
-        });
+        const refreshed = await refreshVehicleInformation(vehicle);
+        if (!alive.current || normalizePlateInput(currentPlate.current) !== normalizePlateInput(vehicle.registration_number)) return;
+        setInformation(refreshed);
         setForm((current) => ({
           ...current,
-          make: refreshed.make ?? current.make,
-          color: refreshed.color ?? current.color,
-          fuel_type: refreshed.fuel_type ?? current.fuel_type,
+          make: editedFields.current.has("make") ? current.make : refreshed.make ?? current.make,
+          model: editedFields.current.has("model") ? current.model : refreshed.model ?? current.model,
+          color: editedFields.current.has("color") ? current.color : refreshed.color ?? current.color,
+          fuel_type: editedFields.current.has("fuel_type") ? current.fuel_type : refreshed.fuel_type ?? current.fuel_type,
           mot_status: refreshed.mot_status ?? "",
           tax_status: refreshed.tax_status ?? "",
           mot_expiry: refreshed.mot_expiry ?? "",
@@ -296,11 +279,12 @@ export function VehicleModal({
         }));
         await refreshVehicles();
       } catch (lookupError) {
-        const message = lookupError instanceof Error ? lookupError.message : "Unable to refresh DVLA compliance";
+        if (!alive.current) return;
+        const message = lookupError instanceof Error ? lookupError.message : "Unable to refresh vehicle information";
         setError(message);
         setPageError(message);
       } finally {
-        setComplianceRefreshing(false);
+        if (alive.current) setComplianceRefreshing(false);
       }
     };
 
@@ -317,11 +301,11 @@ export function VehicleModal({
         model: form.model || null,
         color: form.color || null,
         fuel_type: form.fuel_type || null,
-        mot_status: form.mot_status || null,
-        tax_status: form.tax_status || null,
-        mot_expiry: form.mot_expiry || null,
-        tax_expiry: form.tax_expiry || null,
-        last_dvla_lookup_date: form.last_dvla_lookup_date || null,
+
+
+
+
+
         description: form.description || null,
         person_ids: form.person_ids,
         schedule_id: form.schedule_id || null,
@@ -373,11 +357,11 @@ export function VehicleModal({
     make: form.make || null,
     model: form.model || null,
     color: form.color || null,
-      mot_status: form.mot_status || null,
-      tax_status: form.tax_status || null,
-      mot_expiry: form.mot_expiry || null,
-      tax_expiry: form.tax_expiry || null,
-      last_dvla_lookup_date: form.last_dvla_lookup_date || null,
+
+
+
+
+
     person_id: form.person_ids.length === 1 ? form.person_ids[0] : null,
     owner: form.person_ids.length === 1
       ? people.find((person) => person.id === form.person_ids[0])?.display_name ?? null
@@ -430,10 +414,10 @@ export function VehicleModal({
             <Car size={17} />
             <input value={form.registration_number} onChange={(event) => update("registration_number", event.target.value.toUpperCase())} required />
           </div>
-          {dvlaLookup.status !== "idle" ? (
-            <small className={`field-hint dvla-lookup-hint ${dvlaLookup.status}`}>
-              {dvlaLookup.status === "loading" ? <span className="inline-spinner" aria-hidden="true" /> : null}
-              {dvlaLookup.message}
+          {vehicleLookup.status !== "idle" ? (
+            <small className={`field-hint dvla-lookup-hint ${vehicleLookup.status}`}>
+              {vehicleLookup.status === "loading" ? <span className="inline-spinner" aria-hidden="true" /> : null}
+              {vehicleLookup.message}
             </small>
           ) : null}
         </label>
@@ -496,26 +480,28 @@ export function VehicleModal({
               <ShieldCheck size={17} />
               <div>
                 <strong>Compliance</strong>
-                <span>{vehicleLastDvlaCheckLabel(form.last_dvla_lookup_date || null)}</span>
+                <span>{form.last_dvla_lookup_date ? vehicleLastDvlaCheckLabel(form.last_dvla_lookup_date) : "DVLA not checked"}</span>
+                <span>{information.mot_source?.toUpperCase() ?? "MOT"}{information.mot_checked_at ? ` checked ${new Date(information.mot_checked_at).toLocaleString()}` : " not checked"}{information.mot_freshness === "stale" ? " · Stale" : ""}</span>
               </div>
-              {mode === "edit" ? (
+              {mode === "edit" && canRefreshInformation ? (
                 <button
-                  aria-label="Refresh DVLA compliance"
+                  aria-label="Refresh vehicle information"
                   className="icon-button vehicle-compliance-refresh"
-                  disabled={complianceRefreshing}
+                  disabled={complianceRefreshing || submitting || normalizePlateInput(form.registration_number) !== normalizePlateInput(vehicle?.registration_number ?? "")}
                   onClick={refreshCompliance}
-                  title="Refresh DVLA compliance"
+                  title="Refresh vehicle information"
                   type="button"
                 >
                   <RefreshCw className={complianceRefreshing ? "spin" : undefined} size={15} />
                 </button>
               ) : null}
             </div>
+            {Object.entries(information.information_outcome ?? {}).filter(([, outcome]) => outcome && ["failed", "deferred", "not_found"].includes(outcome.status)).map(([provider, outcome]) => <p key={provider} className="field-hint" role="status">{provider.toUpperCase()}: {outcome?.status.replaceAll("_", " ")}. Saved information is retained.</p>)}
             <div className="vehicle-compliance-grid">
               <div className="vehicle-compliance-row">
                 <span className="vehicle-compliance-label">MOT</span>
                 <Badge tone={motComplianceTone(motStatus)}>{motStatus || "Unknown"}</Badge>
-                <span className="vehicle-compliance-expiry">{vehicleComplianceExpiryLabel(form.mot_expiry || null)}</span>
+                <span className="vehicle-compliance-expiry">{information.mot_expiry_kind === "first_test" && form.mot_expiry ? `First MOT due ${form.mot_expiry}` : vehicleComplianceExpiryLabel(form.mot_expiry || null)}</span>
               </div>
               <div className="vehicle-compliance-row">
                 <span className="vehicle-compliance-label">Tax</span>
@@ -524,9 +510,10 @@ export function VehicleModal({
               </div>
           </div>
         </div>
+        {mode === "edit" && vehicle && normalizePlateInput(form.registration_number) === normalizePlateInput(vehicle.registration_number) && <MotHistory vehicleId={vehicle.id} revision={information.information_checked_at ?? null} />}
         <div className="modal-actions">
           <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
-          <button className="primary-button" disabled={submitting} type="submit">
+          <button className="primary-button" disabled={submitting || complianceRefreshing} type="submit">
             {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
             {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Vehicle"}
           </button>

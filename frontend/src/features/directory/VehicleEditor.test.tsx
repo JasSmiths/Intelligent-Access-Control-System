@@ -4,7 +4,7 @@ import { api } from "../../api/client";
 import * as directory from "../../api/directory";
 import type { Person, Vehicle } from "../../api/types";
 import { VehicleModal, VehiclePeoplePicker } from "./VehicleEditor";
-import type { DvlaLookupResponse } from "./types";
+import type { VehicleInformation } from "../../api/vehicleInformation";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -13,20 +13,20 @@ function deferred<T>() {
 }
 
 function modal(vehicle: Vehicle | null = null) {
-  return render(<VehicleModal defaultPolicyOptionLabel="Default" groups={[]} mode={vehicle ? "edit" : "create"}
+  return render(<VehicleModal canRefreshInformation={true} defaultPolicyOptionLabel="Default" groups={[]} mode={vehicle ? "edit" : "create"}
     onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} people={[]}
     refreshVehicles={vi.fn().mockResolvedValue(undefined)} schedules={[]} setPageError={vi.fn()} vehicle={vehicle} />);
 }
 
-function result(registration: string, make = "Lookup Make"): DvlaLookupResponse {
-  return { registration_number: registration, vehicle: { make } };
+function result(registration: string, make = "Lookup Make"): VehicleInformation {
+  return { registration_number: registration, make, model: "Focus", colour: "Blue", fuel_type: "Petrol", mot_status: "Valid", mot_expiry: "2027-01-01", tax_status: "Taxed", tax_expiry: null, last_dvla_lookup_date: "2026-10-07", providers: { dvla: { status: "found", checked_at: null, retry_at: null, error: null }, dvsa: { status: "found", checked_at: null, retry_at: null, error: null } } };
 }
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 it.each(["", "X"])("invalidates an in-flight lookup when the plate becomes %j", async (nextPlate) => {
-  const lookup = deferred<DvlaLookupResponse>();
+  const lookup = deferred<VehicleInformation>();
   const post = vi.spyOn(api, "post").mockReturnValue(lookup.promise);
   modal();
   const registration = screen.getByLabelText(/^Vehicle Registration/);
@@ -45,7 +45,7 @@ it.each(["", "X"])("invalidates an in-flight lookup when the plate becomes %j", 
 });
 
 it("keeps a restored original plate and draft when an edit's old lookup finishes", async () => {
-  const lookup = deferred<DvlaLookupResponse>();
+  const lookup = deferred<VehicleInformation>();
   const post = vi.spyOn(api, "post").mockReturnValue(lookup.promise);
   modal({ id: "synthetic", registration_number: "ORIGINAL", make: "Original Make", model: null, description: null });
   const registration = screen.getByLabelText(/^Vehicle Registration/);
@@ -59,8 +59,8 @@ it("keeps a restored original plate and draft when an edit's old lookup finishes
 });
 
 it("applies only the newest lookup when responses finish out of order", async () => {
-  const old = deferred<DvlaLookupResponse>();
-  const current = deferred<DvlaLookupResponse>();
+  const old = deferred<VehicleInformation>();
+  const current = deferred<VehicleInformation>();
   vi.spyOn(api, "post").mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
   modal();
   const registration = screen.getByLabelText(/^Vehicle Registration/);
@@ -75,7 +75,7 @@ it("applies only the newest lookup when responses finish out of order", async ()
 });
 
 it("aborts the lookup and clears the debounce timer on unmount", async () => {
-  const lookup = deferred<DvlaLookupResponse>();
+  const lookup = deferred<VehicleInformation>();
   const post = vi.spyOn(api, "post").mockReturnValue(lookup.promise);
   const view = modal();
   fireEvent.change(screen.getByLabelText(/^Vehicle Registration/), { target: { value: "SYNTH01" } });

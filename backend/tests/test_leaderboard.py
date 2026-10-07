@@ -146,7 +146,7 @@ async def test_get_leaderboard_returns_shape_and_enriches_unknowns(monkeypatch) 
             "read_count": 2,
             "first_seen_at": "2026-04-27T10:00:00+00:00",
             "last_seen_at": "2026-04-27T10:05:00+00:00",
-            "dvla": {"status": "pending"},
+            "vehicle_information": {"status": "pending"},
         }
     ]
 
@@ -176,22 +176,20 @@ async def test_get_leaderboard_returns_shape_and_enriches_unknowns(monkeypatch) 
 
     assert result["top_known"] == known[0]
     assert result["known"] == known
-    assert result["unknown"][0]["dvla"]["label"] == "Silver Ford"
+    assert result["unknown"][0]["vehicle_information"]["label"] == "Silver Ford"
     assert result["generated_at"]
 
 
 @pytest.mark.asyncio
-async def test_unknown_dvla_enrichment_failure_is_non_fatal(monkeypatch) -> None:
-    async def fake_lookup(_registration_number):
-        raise DvlaVehicleEnquiryError("DVLA API key is not configured.", status_code=400)
-
-    monkeypatch.setattr(leaderboard_module, "lookup_vehicle_registration", fake_lookup)
-
+async def test_unknown_information_uses_only_shared_cache(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from app.services.vehicle_information_contracts import VehicleInformation
+    lookup = AsyncMock(return_value=SimpleNamespace(information=VehicleInformation(registration_number="NOPE123")))
+    monkeypatch.setattr(leaderboard_module, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
     result = await LeaderboardService()._lookup_unknown_vehicle("NOPE123")
-
-    assert result["status"] == "unconfigured"
-    assert result["vehicle"] is None
-    assert "not configured" in result["error"]
+    assert result["status"] == "unavailable"
+    assert "vehicle" not in result
+    lookup.assert_awaited_once_with("NOPE123", cached_only=True)
 
 
 @pytest.mark.asyncio

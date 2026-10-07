@@ -18,7 +18,8 @@ checks.
 | Camera image analysis | OpenAI, Gemini, Claude/Anthropic and vision-capable Ollama models analyze images through their native APIs. The `local` selection does not support image analysis. Configure the provider, model, endpoint and applicable credentials. [Providers](../backend/app/ai/providers.py). |
 | Notifications | Home Assistant mobile services and Apprise URLs deliver messages through the durable notification service. Rules and automations select recipients and actions; configured URLs can contain credentials. [Delivery owner](../backend/app/services/notifications.py), [adapters](../backend/app/modules/notifications/). |
 | iCloud Calendar | Authenticated calendar accounts synchronize calendar events into visitor-pass workflows, including account authentication and 2FA when required. Account state belongs to the calendar service. [Service](../backend/app/services/icloud_calendar.py). |
-| DVLA | Optional vehicle enquiry enriches vehicle information; it does not grant access. Configure the API key, endpoint and timeout. [Service](../backend/app/services/dvla.py). |
+| DVLA | Tax and basic vehicle details through the [shared vehicle information owner](../backend/app/services/vehicle_information.py). API key, endpoint and timeout retain their separate configuration and connection test. |
+| DVSA | Optional MOT history and model enrichment through the same owner. Disabled by default; uses OAuth and an API key. [Adapter](../backend/app/modules/dvsa/client.py), [configuration and behavior](#vehicle-information-and-mot-history). |
 
 ESPHome uses the encrypted native handshake with `noise_psk` and
 `finish_connection(login=False)`. Keep vendor calls inside the adapter; adding a
@@ -133,3 +134,54 @@ For a user-requested supervised hardware test:
 Status/discovery requests may contact a configured provider. Use the
 [isolated harness](validation.md) for regression validation rather than live
 integration tests or simulation endpoints.
+
+## Vehicle information and MOT History
+
+DVLA supplies tax and basic vehicle details; optional DVSA MOT History supplies
+vehicle models and normalized test history. The shared
+[vehicle information owner](../backend/app/services/vehicle_information.py)
+coordinates both. Configure DVSA in Integrations with the client ID, client
+secret, API key, Microsoft token URL supplied by DVSA, and OAuth scope
+`https://tapi.dvsa.gov.uk/.default`. It defaults disabled. The endpoint is the
+[official registration API](https://documentation.history.mot.api.gov.uk/mot-history-api/api-specification/).
+Secrets use the existing encrypted settings and masked public responses. Never
+copy registration-email credentials into source, fixtures, or documentation.
+Connection tests require the existing Admin confirmation and audit.
+
+Fresh usable DVSA MOT dates take precedence, then fresh DVLA information, then
+retained data explicitly marked stale. The first-test due date is used when
+provided; latest test result and certificate expiry remain separate facts.
+A failed latest test is shown even if an earlier passing test has a future expiry.
+Missing records and provider errors never imply an expired MOT, and MOT data never
+grants or denies access. Provider expiry/due dates are evaluated in the site timezone.
+
+Live eligible arrivals enqueue optional refresh work after access execution.
+Unknown plates use a temporary cache and a compact event summary; they do not
+create directory vehicles. The database worker claims at most two jobs from a
+bounded page, leases them for 120 seconds and expires them after five minutes.
+It never owns hardware or presence. Completion preserves newer information and
+registration edits and atomically reserves existing MOT/tax notification intents.
+Their originating deadline is checked again before delivery. Historical replay
+does not enqueue provider jobs. Recovery hold leaves the worker stopped.
+
+Provider results are shared through Redis for the site-local day. Same-plate
+requests coalesce, not-found results wait six hours, and failures back off for
+1, 5 and 15 minutes. Deferred jobs release their lease and retry within their
+five-minute deadline. Cache entries expire within 24 hours. DVSA requests share a
+five-per-second, burst-five limit and honour `Retry-After`; manual refresh cannot
+bypass coordination. Redis failure defers lookups instead of sending without a
+limit. Saved registered-vehicle snapshots remain available. Top Charts reads
+this cache without starting provider requests.
+
+`POST /api/v1/integrations/vehicles/lookup` is an Admin setup lookup;
+`POST /api/v1/vehicles/{id}/refresh-information` is a confirmed, audited Admin
+refresh. `GET /api/v1/vehicles/{id}/mot-history?limit=10` reads saved history,
+returns `items`, `total`, and `next_cursor`, and never calls DVSA. Pages allow
+1–50 tests and cursors are invalidated when the snapshot changes. Full history
+is excluded from directory summaries. Client-submitted MOT/tax fields and lookup
+timestamps are no longer accepted by vehicle creation/update contracts.
+The old DVLA-only lookup and refresh routes have been retired.
+
+Enabling the integration does not sweep existing vehicles. They refresh on the
+next eligible arrival, setup lookup or manual action. Deployment, production
+migration, enabling credentials and live provider tests require separate authorization.

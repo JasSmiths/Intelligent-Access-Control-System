@@ -21,6 +21,7 @@ from app.services.notification_planning import notification_rule_origin
 from app.services.notification_requests import confirmed_attempt_denial
 from app.services.notification_runs import NotificationActionAuthorization
 from app.services.settings import RuntimeConfig
+from app.services.vehicle_information_authorization import vehicle_information_notice_denial
 from app.services.workflow_dispatch_ports import NotificationPolicy
 from app.services.workflows.execution_contracts import NotificationPlanItem
 
@@ -58,6 +59,9 @@ class NotificationAuthorization:
         item: NotificationPlanItem | None = None,
     ) -> str | NotificationActionAuthorization | None:
         """Current originating domain authority joins the durable attempt transaction."""
+        vehicle_denial = await vehicle_information_notice_denial(session, payload, run_id)
+        if vehicle_denial:
+            return vehicle_denial
         if payload.get("resident_recovery_origin") is not None:
             from app.services.resident_recovery import authorize_mobile_output
 
@@ -100,6 +104,9 @@ class NotificationAuthorization:
         a mutable saved rule is never re-locked in the inverse order.
         """
         if final:
+            vehicle_denial = await vehicle_information_notice_denial(session, payload, run_id)
+            if vehicle_denial:
+                return None, vehicle_denial
             config = await self.config(session)
             return config, await self._authorize_action_config_in_session(
                 session,

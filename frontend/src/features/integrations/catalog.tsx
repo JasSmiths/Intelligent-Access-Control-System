@@ -97,6 +97,16 @@ const integrationFieldSets: Record<string, SettingFieldDefinition[]> = {
     { key: "home_assistant_default_media_player", label: "Default media player" }
   ],
   apprise: [{ key: "apprise_urls", label: "Apprise URLs", type: "textarea", href: "https://github.com/caronc/apprise/wiki", help: "For Pushover use pover://USER_KEY@APP_TOKEN. The app also accepts pushover://USER_KEY/APP_TOKEN and normalizes it." }],
+  dvsa: [
+    { key: "dvsa_enabled", label: "Enable MOT History", type: "select", options: ["false", "true"] },
+    { key: "dvsa_client_id", label: "Client ID" },
+    { key: "dvsa_client_secret", label: "Client secret", type: "password" },
+    { key: "dvsa_api_key", label: "API key", type: "password", href: "https://documentation.history.mot.api.gov.uk/" },
+    { key: "dvsa_token_url", label: "Token URL", help: "Microsoft token URL supplied by DVSA." },
+    { key: "dvsa_scope", label: "OAuth scope" },
+    { key: "dvsa_timeout_seconds", label: "Timeout seconds", type: "number", min: 1, step: 1 },
+    { key: "dvsa_test_registration_number", label: "Test registration" }
+  ],
   dvla: [
     { key: "dvla_api_key", label: "DVLA API Key", type: "password", href: "https://developer-portal.driver-vehicle-licensing.api.gov.uk/apis/vehicle-enquiry-service/vehicle-enquiry-service-description.html" },
     { key: "dvla_vehicle_enquiry_url", label: "Vehicle enquiry URL", help: "Production endpoint for the DVLA Vehicle Enquiry Service API." },
@@ -158,6 +168,7 @@ export function integrationDefinitions(
     { key: "esphome", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
     { key: "icloud_calendar", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
     { key: "apprise", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
+    { key: "dvsa", title: "DVSA MOT History", description: "MOT tests, advisories and vehicle models.", category: "data", icon: Search, fields: integrationFieldSets.dvsa, statusLabel: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "Enabled" : "Disabled", statusTone: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "blue" : "gray" },
     { key: "dvla", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },
     { key: "unifi_protect", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray" }
   ];
@@ -183,6 +194,10 @@ export function integrationInitialValues(definition: IntegrationDefinition, valu
     dvla_vehicle_enquiry_url: "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
     dvla_test_registration_number: "AA19AAA",
     dvla_timeout_seconds: "10",
+    dvsa_enabled: "false",
+    dvsa_timeout_seconds: "10",
+    dvsa_scope: "https://tapi.dvsa.gov.uk/.default",
+    dvsa_test_registration_number: "AA19AAA",
     unifi_protect_port: "443",
     unifi_protect_verify_ssl: "false",
     unifi_protect_snapshot_width: "1280",

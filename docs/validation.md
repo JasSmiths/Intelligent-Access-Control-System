@@ -247,3 +247,20 @@ Timings vary with host contention; these are relative structural checks, not
 production latency budgets. Report output/PDF costs and PostgreSQL memory are
 not included in the report predecessor benchmark. Small datasets can incur a
 fixed allocation increase from the additional bounded queries.
+
+The required [vehicle information persistence suite](../scripts/validation/test_vehicle_information.py)
+checks leased jobs, notification handoff/deadlines, stale registration writes,
+server-paged snapshots, Redis throttling and bounded summary reads at 2,000 vehicles.
+Provider/token, date precedence and cache coalescing tests use synthetic responses.
+The [MOT browser suite](../frontend/e2e/mot-history.spec.ts) uses fixture-only HTTP
+and closed WebSockets, covering lazy history, pagination and retained editor drafts
+in Chromium/WebKit at desktop, tablet, phone and short landscape sizes. Screenshots
+remain under the existing Playwright evidence directory. No test contacts DVSA,
+DVLA, notification providers or hardware; passing fixtures do not validate live credentials.
+
+The MOT persistence suite also retains `mot-scale-20.json` and
+`mot-scale-2000.json` in its test artifact folders. These compare identical
+directory pages before and after adding 25 tests per stored snapshot, including
+query count, returned rows, payload size, Python allocation peaks and the indexed
+snapshot-read plan. Nullable NI/commercial fields are inert fixtures, never live
+provider calls.

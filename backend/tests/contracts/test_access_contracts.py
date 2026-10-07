@@ -174,7 +174,7 @@ def test_known_resident_vehicle_contract_preserves_access_decision_facts() -> No
         person,
         vehicle,
         "Steph arrived.",
-        dvla_enrichment={
+        vehicle_information={
             "make": "TESLA",
             "colour": "BLUE",
             "mot_status": "Valid",

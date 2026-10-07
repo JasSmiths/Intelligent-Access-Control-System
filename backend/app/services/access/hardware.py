@@ -34,7 +34,7 @@ async def open_gate_for_access_event(
     *,
     open_garage_doors: bool,
     trace: Any | None = None,
-    dvla_enrichment: dict[str, str | None] | None = None,
+    vehicle_information: dict[str, str | None] | None = None,
     movement_saga_id: str | None = None,
 ) -> GateCommandOutcome:
     reason = f"Automatic LPR grant for {event.registration_number}{f' ({person.display_name})' if person else ''}"
@@ -88,7 +88,7 @@ async def open_gate_for_access_event(
             output_payload=outcome.as_payload(),
             error=None if completed_without_failure else outcome.detail,
         )
-    await _record_gate_outcome(event, person, reason, outcome, dvla_enrichment)
+    await _record_gate_outcome(event, person, reason, outcome, vehicle_information)
     precondition = outcome.metadata.get("automatic_entry_precondition") or {}
     if outcome.admission_verified and open_garage_doors and precondition.get("mode") == "fanout":
         await open_garage_doors_for_access_event(
@@ -96,7 +96,7 @@ async def open_gate_for_access_event(
             person,
             reason,
             trace=trace,
-            dvla_enrichment=dvla_enrichment,
+            vehicle_information=vehicle_information,
         )
     return outcome
 
@@ -153,7 +153,7 @@ async def open_garage_doors_for_access_event(
     reason: str,
     *,
     trace: Any | None = None,
-    dvla_enrichment: dict[str, str | None] | None = None,
+    vehicle_information: dict[str, str | None] | None = None,
 ) -> None:
     if not person or not person.garage_door_entity_ids:
         return
@@ -198,7 +198,7 @@ async def open_garage_doors_for_access_event(
                 output_payload=outcome.as_payload(),
                 error=None if completed_without_failure else outcome.detail,
             )
-        await _record_garage_outcome(event, person, device, outcome, reason, dvla_enrichment)
+        await _record_garage_outcome(event, person, device, outcome, reason, vehicle_information)
 
 
 async def audit_automatic_hardware_command(
@@ -252,7 +252,7 @@ async def _record_gate_outcome(
     person: Any | None,
     reason: str,
     outcome: GateCommandOutcome,
-    dvla_enrichment: dict[str, str | None] | None,
+    vehicle_information: dict[str, str | None] | None,
 ) -> None:
     # Required audit/notice is recovered by the admission transaction participant.
     # Realtime is a projection of the receipt and cannot reinterpret its boolean.
@@ -269,7 +269,7 @@ async def _record_garage_outcome(
     device: Any,
     outcome: Any,
     reason: str,
-    dvla_enrichment: dict[str, str | None] | None,
+    vehicle_information: dict[str, str | None] | None,
 ) -> None:
     delivery = str(outcome.delivery)
     verified = bool(getattr(outcome, "verified", False) or outcome.metadata.get("verified"))

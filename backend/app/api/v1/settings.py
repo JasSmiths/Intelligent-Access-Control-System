@@ -33,6 +33,7 @@ from app.services.telemetry import (
     emit_audit_log,
 )
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.vehicle_information import get_vehicle_information_service
 
 router = APIRouter()
 
@@ -173,6 +174,8 @@ async def test_connection(
             await _test_esphome(values)
         elif integration == "apprise":
             await _test_apprise(values)
+        elif integration == "dvsa":
+            await get_vehicle_information_service().test_connection(values)
         elif integration == "dvla":
             await _test_dvla(values)
         elif integration == "unifi_protect":

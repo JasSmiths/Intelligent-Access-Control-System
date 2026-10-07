@@ -44,6 +44,7 @@ from app.services.telemetry import (
     telemetry_request_id,
 )
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.vehicle_information_jobs import get_vehicle_information_worker
 from app.services.visitor_passes import get_visitor_pass_service
 
 logger = get_logger(__name__)
@@ -115,6 +116,7 @@ async def lifespan(app: FastAPI):
                 ("automations", get_automation_service()),
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
+                ("vehicle_information", get_vehicle_information_worker()),
                 ("access_events", get_access_event_service()),
                 ("movement_reconciliation", get_movement_reconciliation_service()),
                 ("home_assistant", get_home_assistant_service()),
@@ -124,7 +126,7 @@ async def lifespan(app: FastAPI):
                 owner = (
                     producers
                     if name
-                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation"}
+                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information"}
                     else resources
                 )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)

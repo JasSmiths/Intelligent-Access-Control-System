@@ -30,7 +30,6 @@ from app.services import access_events as owner
 from app.services.access import hardware, enrichment, execution, authorization
 from app.services.access.reads import GATE_OBSERVATION_PAYLOAD_KEY
 from app.services import movement_reconciliation as reconciliation
-from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandCoordinator
 from app.services.notifications import NotificationService
 from app.services.settings import get_runtime_config
@@ -113,8 +112,8 @@ class Harness:
             observation={"provider": "home_assistant", "state": "open", "observed_at": datetime.now(UTC)})
 
     async def lookup(self, registration_number, **kwargs):
-        self.enrichment_calls.append('dvla')
-        return NormalizedDvlaVehicle(registration_number=registration_number, make='Synthetic', colour='Blue', mot_status='Valid', tax_status='Taxed', mot_expiry=None, tax_expiry=None)
+        self.enrichment_calls.append('vehicle_job')
+        return None
 
     async def snapshot(self, event, **kwargs):
         self.enrichment_calls.append('snapshot')
@@ -163,14 +162,13 @@ async def h(monkeypatch):
     monkeypatch.setattr(devices_owner, 'emit_audit_log', lambda **kwargs: None)
     monkeypatch.setattr(owner, 'is_maintenance_mode_active', AsyncMock(return_value=False))
     monkeypatch.setattr(owner.telemetry, 'start_trace', lambda *a, **kw: Trace())
-    monkeypatch.setattr(enrichment, 'lookup_normalized_vehicle_registration', fake.lookup)
+    monkeypatch.setattr(enrichment, 'enqueue_arrival', fake.lookup)
     monkeypatch.setattr(enrichment, 'capture_access_event_snapshot', fake.snapshot)
     monkeypatch.setattr(enrichment, 'get_vehicle_visual_detection_recorder', lambda: SimpleNamespace(recent_match=fake.visual))
     monkeypatch.setattr(owner, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))
     monkeypatch.setattr(enrichment, 'get_leaderboard_service', lambda: SimpleNamespace(evaluate_known_overtake=AsyncMock()))
     monkeypatch.setattr(owner, 'get_gate_controller', lambda name: fake)
     monkeypatch.setattr(owner, 'get_notification_service', lambda: fake.notifications)
-    monkeypatch.setattr(enrichment, 'get_notification_service', lambda: fake.notifications)
     monkeypatch.setattr(enrichment, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))
     monkeypatch.setattr(hardware, 'get_gate_command_coordinator', lambda: GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController(fake.devices)))
     monkeypatch.setattr(hardware, 'get_access_device_service', lambda: fake.devices)
@@ -253,7 +251,7 @@ async def test_departure_persists_presence_without_hardware_or_dvla(h):
     await process(h.service(), read(gate='closing'))
     event, = await rows(AccessEvent); presence, = await rows(Presence)
     assert event.direction==AccessDirection.EXIT and presence.state==PresenceState.EXITED and presence.last_event_id==event.id
-    assert not h.gate_calls and not await rows(GateCommandRecord) and 'dvla' not in h.enrichment_calls
+    assert not h.gate_calls and not await rows(GateCommandRecord) and 'vehicle_job' not in h.enrichment_calls
 
 
 async def test_gate_already_open_arrival_records_verified_no_send_receipt_and_presence(h):
@@ -305,7 +303,7 @@ async def test_visitor_arrival_and_departure_keep_pass_links_and_audit(h):
         visitor=await s.get(VisitorPass,identity)
         assert visitor.status==VisitorPassStatus.USED and visitor.number_plate=='VISIT01'
         assert visitor.arrival_event_id and visitor.departure_event_id and visitor.duration_on_site_seconds==300
-        assert visitor.vehicle_make=='Synthetic' and visitor.vehicle_colour=='Blue'
+        assert visitor.vehicle_make is None and visitor.vehicle_colour=='Blue'  # Provider data arrives through its worker.
     assert len(await rows(AccessEvent))==3 and len(h.gate_calls)==1 and not await rows(Presence)
     arrivals = [notice for notice in await rows(NotificationRun)
                 if notice.trigger_event in {'visitor_pass_used', 'visitor_pass_vehicle_arrived'}]
@@ -410,14 +408,14 @@ async def test_enrichment_runs_after_durable_outcome_and_preserves_concurrent_ev
     assert event.raw_payload['concurrent_owner'] == {'retained': True}
     assert event.raw_payload['vehicle_visual_detection']['observed_vehicle_color'] == 'Blue'
     assert event.raw_payload['movement_saga']['presence_committed']
-    assert vehicle.make == 'Synthetic' and vehicle.color == 'Blue'
-    assert h.enrichment_calls == ['dvla', 'visual']
+    assert vehicle.make != 'Synthetic'  # Only the separate worker can apply provider data.
+    assert h.enrichment_calls == ['vehicle_job', 'visual']
 
 
 async def test_failed_optional_providers_and_realtime_do_not_block_other_stages_or_enqueue(h, monkeypatch):
     await resident()
     async def fail(*args, **kwargs): raise RuntimeError('Synthetic optional failure')
-    monkeypatch.setattr(enrichment, 'lookup_normalized_vehicle_registration', fail)
+    monkeypatch.setattr(enrichment, 'enqueue_arrival', fail)
     monkeypatch.setattr(enrichment, 'event_bus', SimpleNamespace(publish=fail))
     monkeypatch.setattr(hardware, 'event_bus', SimpleNamespace(publish=fail))
     await process(h.service(), read())
@@ -431,7 +429,7 @@ async def test_failed_optional_providers_and_realtime_do_not_block_other_stages_
 async def test_cancelled_enrichment_keeps_committed_access_and_does_not_replay(h, monkeypatch):
     await resident(); plate_read = read()
     async def cancel(*args, **kwargs): raise asyncio.CancelledError()
-    monkeypatch.setattr(enrichment, 'lookup_normalized_vehicle_registration', cancel)
+    monkeypatch.setattr(enrichment, 'enqueue_arrival', cancel)
     with pytest.raises(asyncio.CancelledError): await process(h.service(), plate_read)
     event, = await rows(AccessEvent); saga, = await rows(MovementSagaRecord); ingest, = await rows(LprIngestEvent)
     assert saga.state == MovementSagaState.COMPLETED and saga.presence_committed
@@ -659,3 +657,32 @@ async def test_optional_visitor_enrichment_failure_keeps_committed_transition_sn
     assert payload['visitor_pass']['arrival_event_id'] == str(event.id)
     triggers = {row.trigger_event for row in await rows(NotificationRun)}
     assert {'visitor_pass_used', 'visitor_pass_vehicle_arrived'} <= triggers
+
+
+async def test_blocked_vehicle_provider_does_not_delay_next_lpr_decision(h, monkeypatch):
+    from app.services import vehicle_information_jobs as jobs
+    await resident()
+    monkeypatch.setattr(enrichment, "enqueue_arrival", jobs.enqueue_arrival)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await release.wait()
+    monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=blocked))
+    arrival = read()
+    await process(h.service(), arrival)
+    worker = jobs.VehicleInformationWorker()
+    claimed = await worker._claim()
+    assert len(claimed) == 1
+    task = asyncio.create_task(worker._process(*claimed[0]))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        # A distinct movement must pass the existing gate-cycle suppression rules.
+        departure = read(gate="closing", at=arrival.captured_at+timedelta(minutes=5))
+        await asyncio.wait_for(process(h.service(), departure), timeout=5)
+        events = await rows(AccessEvent)
+        assert len(events) == 2 and any(event.direction == AccessDirection.EXIT for event in events)
+        assert len(h.gate_calls) == 1 and not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

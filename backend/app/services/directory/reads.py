@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import Group, Person, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import DirectoryPage, GroupResponse, PersonResponse, VehicleResponse
+from app.services.settings import get_runtime_config
 
 from .errors import DirectoryOperationError
 from .representation import (
@@ -108,6 +109,7 @@ async def list_people(
     include_media: bool = False,
 ) -> DirectoryPage[PersonResponse]:
     _validate_read(limit, ids)
+    timezone_name = (await get_runtime_config()).site_timezone
     label = func.lower(Person.display_name).label("sort_label")
     query = select(Person, label)
     if not include_media:
@@ -198,6 +200,7 @@ async def list_people(
                     include_media=include_media,
                     fallback_vehicle_photo_urls=photo_urls,
                     photo_references=photo_references,
+                    timezone_name=timezone_name,
                 )
             )
             for person in rows
@@ -221,6 +224,7 @@ async def list_vehicles(
     include_media: bool = False,
 ) -> DirectoryPage[VehicleResponse]:
     _validate_read(limit, ids)
+    timezone_name = (await get_runtime_config()).site_timezone
     if registrations is not None and len(registrations) > 200:
         raise DirectoryOperationError(
             status_code=422, detail="Directory reads are limited to 200 registrations"
@@ -311,6 +315,7 @@ async def list_vehicles(
                     include_media=include_media,
                     fallback_photo_urls=photo_urls,
                     photo_references=photo_references,
+                    timezone_name=timezone_name,
                 )
             )
             for vehicle in rows

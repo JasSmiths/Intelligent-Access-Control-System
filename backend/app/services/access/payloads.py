@@ -80,14 +80,14 @@ def notification_facts(
     vehicle: Any | None,
     message: str,
     *,
-    dvla_enrichment: dict[str, Any] | None = None,
+    vehicle_information: dict[str, Any] | None = None,
     schedule_allowed: bool | None = None,
     garage_binding: str | None = None,
     compliance_summary: str | None = None,
     garage_door: str | None = None,
     entity_id: str | None = None,
 ) -> dict[str, Any]:
-    dvla = dvla_enrichment or {}
+    information = vehicle_information if vehicle_information is not None else (event.raw_payload or {}).get("vehicle_information", {})
     external_admission = external_admission_from_event(event)
     visual = vehicle_visual_detection_from_event(event)
     detected_vehicle_type = fact_text(
@@ -104,12 +104,12 @@ def notification_facts(
         or visual.get("detected_vehicle_colour")
     )
     vehicle_display = vehicle_display_name(vehicle, event.registration_number)
-    vehicle_make = fact_text(dvla.get("make")) or (getattr(vehicle, "make", "") if vehicle else "") or ""
-    dvla_colour = fact_text(dvla.get("colour"))
+    vehicle_make = fact_text(information.get("make")) or (getattr(vehicle, "make", "") if vehicle else "") or ""
+    provider_colour = fact_text(information.get("colour"))
     vehicle_colour = (
-        (dvla_colour or (getattr(vehicle, "color", "") if vehicle else "") or detected_vehicle_colour)
+        (provider_colour or (getattr(vehicle, "color", "") if vehicle else "") or detected_vehicle_colour)
         if vehicle
-        else (detected_vehicle_colour or dvla_colour)
+        else (detected_vehicle_colour or provider_colour)
     )
     object_pronoun, possessive_determiner = person_notification_pronouns(person)
     group_name = getattr(getattr(person, "group", None), "name", "") if person else ""
@@ -126,16 +126,16 @@ def notification_facts(
         "vehicle_display_name": vehicle_display,
         "vehicle_make": vehicle_make,
         "vehicle_type": detected_vehicle_type,
-        "vehicle_model": getattr(vehicle, "model", "") if vehicle and getattr(vehicle, "model", None) else "",
+        "vehicle_model": (getattr(vehicle, "model", "") if vehicle else "") or fact_text(information.get("model")) or "",
         "vehicle_color": vehicle_colour or "",
         "vehicle_colour": vehicle_colour or "",
         "detected_vehicle_type": detected_vehicle_type,
         "detected_vehicle_color": detected_vehicle_colour,
         "detected_vehicle_colour": detected_vehicle_colour,
-        "mot_status": fact_text(dvla.get("mot_status")),
-        "mot_expiry": fact_text(dvla.get("mot_expiry")),
-        "tax_status": fact_text(dvla.get("tax_status")),
-        "tax_expiry": fact_text(dvla.get("tax_expiry")),
+        "mot_status": fact_text(information.get("mot_status")),
+        "mot_expiry": fact_text(information.get("mot_expiry")),
+        "tax_status": fact_text(information.get("tax_status")),
+        "tax_expiry": fact_text(information.get("tax_expiry")),
         "object_pronoun": object_pronoun,
         "possessive_determiner": possessive_determiner,
         "direction": event.direction.value,

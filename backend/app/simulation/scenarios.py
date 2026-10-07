@@ -321,10 +321,11 @@ class HardwareFreeAccessEventService(AccessEventService):
         )
 
 
-class HardwareFreeEnrichment(access_enrichment_module.AccessEnrichment):
-    async def _dvla_enrichment_for_event(self, **_kwargs: Any) -> dict[str, str | None] | None:
-        return None
+async def _skip_vehicle_information(_event: AccessEvent) -> None:
+    """Synthetic replay never enqueues provider work."""
 
+
+class HardwareFreeEnrichment(access_enrichment_module.AccessEnrichment):
     async def _vehicle_visual_detection_for_read(
         self,
         read: PlateRead,
@@ -518,7 +519,7 @@ class HardwareFreePatchScope:
         self._had_publish_attr = "publish" in event_bus.__dict__
         self._original_publish_attr = event_bus.__dict__.get("publish")
         self._original_notification_service = access_events_module.get_notification_service
-        self._original_enrichment_notifications = access_enrichment_module.get_notification_service
+        self._original_enrichment_enqueue = access_enrichment_module.enqueue_arrival
         self._original_enrichment = access_events_module.AccessEnrichment
         self._original_evidence = access_execution_module.AccessEvidenceResolver
         self._original_leaderboard_service = access_enrichment_module.get_leaderboard_service
@@ -545,7 +546,7 @@ class HardwareFreePatchScope:
             *,
             open_garage_doors: bool,
             trace: Any | None = None,
-            dvla_enrichment: dict[str, str | None] | None = None,
+            vehicle_information: dict[str, str | None] | None = None,
             movement_saga_id: str | None = None,
         ) -> GateCommandOutcome:
             started_at = datetime.now(tz=UTC)
@@ -637,7 +638,7 @@ class HardwareFreePatchScope:
 
         access_events_module.AccessEnrichment = HardwareFreeEnrichment
         access_execution_module.AccessEvidenceResolver = HardwareFreeEvidence
-        access_enrichment_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)
+        access_enrichment_module.enqueue_arrival = _skip_vehicle_information
         event_bus.publish = capture_publish  # type: ignore[method-assign]
         access_events_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)  # type: ignore[assignment]
         access_enrichment_module.get_leaderboard_service = lambda: _FakeLeaderboardService()  # type: ignore[assignment]
@@ -654,7 +655,7 @@ class HardwareFreePatchScope:
     ) -> None:
         access_events_module.AccessEnrichment = self._original_enrichment
         access_execution_module.AccessEvidenceResolver = self._original_evidence
-        access_enrichment_module.get_notification_service = self._original_enrichment_notifications
+        access_enrichment_module.enqueue_arrival = self._original_enrichment_enqueue
         access_execution_module.publish_gate_open_skipped = self._original_gate_skip
         access_execution_module.open_gate_for_access_event = self._original_gate_open
         access_enrichment_module.capture_access_event_snapshot = self._original_snapshot_capture

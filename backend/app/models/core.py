@@ -179,6 +179,12 @@ class Vehicle(Base, TimestampMixin):
     mot_expiry: Mapped[date | None] = mapped_column(Date)
     tax_expiry: Mapped[date | None] = mapped_column(Date)
     last_dvla_lookup_date: Mapped[date | None] = mapped_column(Date)
+    mot_source: Mapped[str | None] = mapped_column(String(12))
+    mot_expiry_kind: Mapped[str | None] = mapped_column(String(16))
+    mot_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mot_valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    information_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    information_outcome: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     description: Mapped[str | None] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

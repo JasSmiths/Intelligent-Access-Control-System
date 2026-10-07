@@ -14,6 +14,7 @@ import { DirectoryGroupAccordion, VehiclePhoto } from "../features/directory/com
 import { VehicleModal } from "../features/directory/VehicleEditor";
 
 export function VehiclesView({
+  canRefreshInformation,
   groups,
   people,
   query,
@@ -22,6 +23,7 @@ export function VehiclesView({
   schedules,
   vehicles
 }: {
+  canRefreshInformation: boolean;
   groups: Group[];
   people: Person[];
   query: string;
@@ -149,6 +151,7 @@ export function VehiclesView({
 
       {modalOpen ? (
         <VehicleModal
+            canRefreshInformation={canRefreshInformation}
           defaultPolicyOptionLabel={defaultPolicyOptionLabel}
           groups={groups}
           mode={selectedVehicle ? "edit" : "create"}

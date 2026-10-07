@@ -69,39 +69,3 @@ def test_normalize_vehicle_enquiry_response_keeps_mot_status_after_first_due_dat
 
     assert normalized.mot_status == "Expired"
     assert normalized.mot_expiry == date(2026, 4, 1)
-
-
-@pytest.mark.asyncio
-async def test_manual_dvla_lookup_preserves_response_shape_and_adds_normalized_view(monkeypatch) -> None:
-    async def fake_lookup(registration_number):
-        assert registration_number == "PE70DHX"
-        return {
-            "registrationNumber": registration_number,
-            "make": "PEUGEOT",
-            "colour": "SILVER",
-            "motStatus": "VALID",
-            "motExpiryDate": "2026-10-14",
-            "taxStatus": "SORN",
-        }
-
-    monkeypatch.setattr(integrations_api, "lookup_vehicle_registration", fake_lookup)
-    monkeypatch.setattr(integrations_api, "emit_audit_log", lambda **_kwargs: None)
-
-    response = await integrations_api.dvla_lookup(
-        integrations_api.DvlaLookupRequest(registration_number="pe70 dhx"),
-        user=SimpleNamespace(id=None, username="tester", full_name="Tester"),
-    )
-
-    assert response["registration_number"] == "PE70DHX"
-    assert response["vehicle"]["make"] == "PEUGEOT"
-    assert response["display_vehicle"]["make"] == "Peugeot"
-    assert response["normalized_vehicle"] == {
-        "registration_number": "PE70DHX",
-        "make": "Peugeot",
-        "colour": "Silver",
-        "fuel_type": None,
-        "mot_status": "Valid",
-        "tax_status": "SORN",
-        "mot_expiry": "2026-10-14",
-        "tax_expiry": None,
-    }

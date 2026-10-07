@@ -21,8 +21,6 @@ from app.services.access import snapshots as access_snapshots_module
 from app.services.access.decision import plan_access
 from app.services.access.enrichment import (
     AccessEnrichment,
-    dvla_mot_alert_required,
-    dvla_tax_alert_required,
 )
 from app.services.access.evidence import AccessEvidenceResolver, PreparedCameraEvidence
 from app.services.access.execution import AccessExecution
@@ -2269,198 +2267,6 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
 
 
 
-@pytest.mark.asyncio
-async def test_known_arrival_uses_same_day_dvla_cache(monkeypatch) -> None:
-    service = AccessEnrichment()
-    vehicle = SimpleNamespace(
-        id=uuid.uuid4(),
-        registration_number="PE70DHX",
-        make="Peugeot",
-        color="White",
-        mot_status="Valid",
-        tax_status="Taxed",
-        fuel_type="Electric",
-        mot_expiry=date(2026, 10, 14),
-        tax_expiry=date(2027, 1, 1),
-        last_dvla_lookup_date=date(2026, 4, 27),
-    )
-
-    async def fail_lookup(_registration_number, **_kwargs):
-        raise AssertionError("same-day cache should skip DVLA")
-
-    monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
-    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fail_lookup)
-
-    result = await service._dvla_enrichment_for_event(
-        vehicle=vehicle,
-        registration_number="PE70DHX",
-        direction=AccessDirection.ENTRY,
-        direction_resolution={},
-        runtime=SimpleNamespace(site_timezone="Europe/London"),
-    )
-
-    assert result == {
-        "registration_number": "PE70DHX",
-        "make": "Peugeot",
-        "colour": "White",
-        "fuel_type": "Electric",
-        "mot_status": "Valid",
-        "tax_status": "Taxed",
-        "mot_expiry": "2026-10-14",
-        "tax_expiry": "2027-01-01",
-    }
-
-
-
-@pytest.mark.asyncio
-async def test_known_arrival_refreshes_stale_dvla_cache(monkeypatch) -> None:
-    service = AccessEnrichment()
-    vehicle = SimpleNamespace(
-        id=uuid.uuid4(),
-        registration_number="MD25VNO",
-        make="Old",
-        color="Black",
-        mot_status=None,
-        tax_status=None,
-        mot_expiry=None,
-        tax_expiry=None,
-        last_dvla_lookup_date=date(2026, 4, 26),
-    )
-    calls = []
-
-    async def fake_lookup(registration_number, **_kwargs):
-        calls.append(registration_number)
-        return NormalizedDvlaVehicle(
-            registration_number=registration_number,
-            make="Tesla",
-            colour="Blue",
-            mot_status="Expired",
-            tax_status="Untaxed",
-            mot_expiry=date(2026, 1, 1),
-            tax_expiry=date(2026, 2, 1),
-        )
-
-    monkeypatch.setattr(service, "_dvla_cache_date", lambda _timezone_name: date(2026, 4, 27))
-    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
-
-    result = await service._dvla_enrichment_for_event(
-        vehicle=vehicle,
-        registration_number="MD25VNO",
-        direction=AccessDirection.ENTRY,
-        direction_resolution={},
-        runtime=SimpleNamespace(site_timezone="Europe/London"),
-    )
-
-    assert calls == ["MD25VNO"]
-    assert vehicle.make == "Tesla"
-    assert vehicle.color == "Blue"
-    assert vehicle.mot_status == "Expired"
-    assert vehicle.tax_status == "Untaxed"
-    assert vehicle.last_dvla_lookup_date == date(2026, 4, 27)
-    assert result is not None
-    assert result["mot_expiry"] == "2026-01-01"
-
-
-
-@pytest.mark.asyncio
-async def test_unknown_closed_gate_arrival_gets_ephemeral_dvla_payload(monkeypatch) -> None:
-    service = AccessEnrichment()
-
-    async def fake_lookup(registration_number, **_kwargs):
-        return NormalizedDvlaVehicle(
-            registration_number=registration_number,
-            make="Ford",
-            colour="Silver",
-            mot_status="Valid",
-            tax_status="Taxed",
-            mot_expiry=None,
-            tax_expiry=None,
-        )
-
-    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
-
-    result = await service._dvla_enrichment_for_event(
-        vehicle=None,
-        registration_number="UNKNOWN1",
-        direction=AccessDirection.DENIED,
-        direction_resolution={"gate_observation": {"state": "closed"}},
-        runtime=SimpleNamespace(site_timezone="Europe/London"),
-    )
-
-    assert result is not None
-    assert result["registration_number"] == "UNKNOWN1"
-    assert result["make"] == "Ford"
-    assert result["colour"] == "Silver"
-
-
-
-@pytest.mark.asyncio
-async def test_exit_events_skip_dvla_lookup(monkeypatch) -> None:
-    service = AccessEnrichment()
-
-    async def fail_lookup(_registration_number, **_kwargs):
-        raise AssertionError("exits should not call DVLA")
-
-    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fail_lookup)
-
-    result = await service._dvla_enrichment_for_event(
-        vehicle=None,
-        registration_number="PE70DHX",
-        direction=AccessDirection.EXIT,
-        direction_resolution={"gate_observation": {"state": "open"}},
-        runtime=SimpleNamespace(site_timezone="Europe/London"),
-    )
-
-    assert result is None
-
-
-
-@pytest.mark.asyncio
-async def test_dvla_failure_does_not_block_event_enrichment(monkeypatch) -> None:
-    service = AccessEnrichment()
-    published = []
-
-    async def fake_lookup(_registration_number, **_kwargs):
-        raise DvlaVehicleEnquiryError("DVLA API key is not configured.", status_code=400)
-
-    async def fake_publish(event_type, payload):
-        published.append((event_type, payload))
-
-    monkeypatch.setattr(access_enrichment_module, "lookup_normalized_vehicle_registration", fake_lookup)
-    monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
-
-    result = await service._dvla_enrichment_for_event(
-        vehicle=None,
-        registration_number="PE70DHX",
-        direction=AccessDirection.ENTRY,
-        direction_resolution={},
-        runtime=SimpleNamespace(site_timezone="Europe/London"),
-    )
-
-    assert result is None
-    assert published == [
-        (
-            "dvla.enrichment_failed",
-            {
-                "registration_number": "PE70DHX",
-                "status_code": 400,
-                "error": "DVLA API key is not configured.",
-            },
-        )
-    ]
-
-
-
-def test_dvla_compliance_alert_helpers() -> None:
-    assert not dvla_mot_alert_required("Valid")
-    assert not dvla_mot_alert_required("Not Required")
-    assert dvla_mot_alert_required("Expired")
-    assert not dvla_tax_alert_required("Taxed")
-    assert not dvla_tax_alert_required("SORN")
-    assert dvla_tax_alert_required("Untaxed")
-
-
-
 def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -> None:
     event = SimpleNamespace(
         id=uuid.uuid4(),
@@ -2485,7 +2291,7 @@ def test_unknown_notification_facts_prefer_visual_detection_colour_over_dvla() -
         person=None,
         vehicle=None,
         message="Unauthorised Plate, Access Denied",
-        dvla_enrichment={"make": "Tesla", "colour": "White"},
+        vehicle_information={"make": "Tesla", "colour": "White"},
     )
 
     assert facts["vehicle_make"] == "Tesla"

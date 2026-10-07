@@ -1,14 +1,24 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import GroupCategory
 from app.services.person_presence_input_booleans import DEFAULT_INPUT_BOOLEAN_ACTION
+from app.services.vehicle_information_contracts import ProviderOutcome
 
 
-class PersonVehicleResponse(BaseModel):
+class VehicleInformationSummary(BaseModel):
+    mot_source: str | None = None
+    mot_expiry_kind: str | None = None
+    mot_checked_at: datetime | None = None
+    mot_freshness: str = "unknown"
+    information_checked_at: datetime | None = None
+    information_outcome: dict[str, ProviderOutcome] = Field(default_factory=dict)
+
+
+class PersonVehicleResponse(VehicleInformationSummary):
     id: str
     registration_number: str
     description: str | None
@@ -104,7 +114,7 @@ class UpdatePersonRequest(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
-class VehicleResponse(BaseModel):
+class VehicleResponse(VehicleInformationSummary):
     id: str
     registration_number: str
     vehicle_photo_data_url: str | None
@@ -129,17 +139,13 @@ class VehicleResponse(BaseModel):
 
 
 class CreateVehicleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     registration_number: str = Field(min_length=1, max_length=32)
     vehicle_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
     fuel_type: str | None = Field(default=None, max_length=80)
-    mot_status: str | None = Field(default=None, max_length=80)
-    tax_status: str | None = Field(default=None, max_length=80)
-    mot_expiry: date | None = None
-    tax_expiry: date | None = None
-    last_dvla_lookup_date: date | None = None
     description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     person_ids: list[uuid.UUID] | None = None
@@ -149,17 +155,13 @@ class CreateVehicleRequest(BaseModel):
 
 
 class UpdateVehicleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     registration_number: str | None = Field(default=None, min_length=1, max_length=32)
     vehicle_photo_data_url: str | None = Field(default=None, max_length=11_200_000)
     make: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     color: str | None = Field(default=None, max_length=80)
     fuel_type: str | None = Field(default=None, max_length=80)
-    mot_status: str | None = Field(default=None, max_length=80)
-    tax_status: str | None = Field(default=None, max_length=80)
-    mot_expiry: date | None = None
-    tax_expiry: date | None = None
-    last_dvla_lookup_date: date | None = None
     description: str | None = Field(default=None, max_length=255)
     person_id: uuid.UUID | None = None
     person_ids: list[uuid.UUID] | None = None

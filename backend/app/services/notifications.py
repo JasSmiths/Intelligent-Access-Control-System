@@ -36,7 +36,6 @@ from app.services.action_confirmations import consume_action_confirmation
 from app.services.actionable_notifications import (
     get_actionable_notification_service,
 )
-from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.mutation_context import load_active_admin
 from app.services.notification_authorization import NotificationAuthorization
@@ -68,6 +67,7 @@ from app.services.telemetry import (
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.type_helpers import as_dict
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.vehicle_information import get_vehicle_information_service
 from app.services.workflow_dispatch_ports import NotificationPolicy
 from app.services.workflows import notification_payloads
 from app.services.workflows.catalog import (
@@ -595,12 +595,12 @@ class NotificationService:
             row.context.get("event_type") != "unauthorized_plate"
             or not facts.get("access_event_id")
             or not registration
-            or (facts.get("vehicle_make") and facts.get("vehicle_colour"))
+            or (facts.get("vehicle_make") and facts.get("vehicle_colour") and facts.get("vehicle_model"))
         ):
             return
         try:
             async with asyncio.timeout(3):
-                vehicle = await lookup_normalized_vehicle_registration(registration)
+                vehicle = (await get_vehicle_information_service().lookup(registration)).information
         except Exception as exc:  # noqa: BLE001 - optional enrichment cannot block an alert.
             logger.warning(
                 "notification_vehicle_enrichment_failed",
@@ -609,6 +609,8 @@ class NotificationService:
             return
         if not facts.get("vehicle_make") and vehicle.make:
             facts["vehicle_make"] = vehicle.make
+        if not facts.get("vehicle_model") and vehicle.model:
+            facts["vehicle_model"] = vehicle.model
         colour = facts.get("vehicle_colour") or facts.get("vehicle_color") or vehicle.colour
         if colour:
             facts["vehicle_colour"] = colour
