@@ -2,7 +2,7 @@ import { DoorOpen, Gauge, Lock, MapPinned, SlidersHorizontal, Warehouse } from "
 import React from "react";
 import { LoadingState } from "../ui/primitives";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
-import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
+import type { Anomaly, IntegrationStatus, MaintenanceStatus, NavigateToView, UserAccount, ViewKey } from "../api/types";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
 const GroupsView = React.lazy(() => import("../views/GroupsView").then((module) => ({ default: module.GroupsView })));
 const PeopleView = React.lazy(() => import("../views/PeopleView").then((module) => ({ default: module.PeopleView })));
@@ -32,18 +32,11 @@ export function View(props: {
   view: ViewKey;
   locationSearch: string;
   search: string;
-  presence: Presence[];
-  expectedPresence: ExpectedPresenceSummary | null;
-  events: AccessEvent[];
   anomalies: Anomaly[];
-  people: Person[];
-  vehicles: Vehicle[];
-  groups: Group[];
-  schedules: Schedule[];
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
-  dataRefreshToken: number;
-  refresh: () => Promise<void>;
+  refreshAlerts: () => Promise<void>;
+  refreshOverview: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
   onCurrentUserUpdated: (user: UserAccount) => void;
@@ -76,7 +69,7 @@ export function View(props: {
       content = <MovementsView targetId={new URLSearchParams(props.locationSearch).get("movement")} />;
       break;
     case "alerts":
-      content = <AlertsView refreshDashboard={props.refresh} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
+      content = <AlertsView refreshAlerts={props.refreshAlerts} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
       break;
     case "reports":
       content = <ReportsView />;
@@ -97,7 +90,7 @@ export function View(props: {
       content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} />;
       break;
     case "settings_missed_exit_recovery":
-      content = <MissedExitRecoveryView targetId={new URLSearchParams(props.locationSearch).get("attempt")} key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} refresh={props.refresh} />;
+      content = <MissedExitRecoveryView targetId={new URLSearchParams(props.locationSearch).get("attempt")} key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} />;
       break;
     case "settings_command_history":
       content = <CommandHistoryView currentUser={props.currentUser} targetId={new URLSearchParams(props.locationSearch).get("command")} />;
@@ -106,10 +99,10 @@ export function View(props: {
       content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} />;
       break;
     case "settings_automations":
-      content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
+      content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} />;
       break;
     case "settings_notifications":
-      content = <NotificationsView currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      content = <NotificationsView currentUser={props.currentUser} />;
       break;
     case "settings_lpr":
       content = <DynamicSettingsView key={`${props.currentUser.id}:lpr`} category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} />;

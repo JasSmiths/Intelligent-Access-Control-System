@@ -1,6 +1,6 @@
 const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
-vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "" }) }));
-vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "" }) }));
+vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
+vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 import * as directoryApi from "../api/directory";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -10,7 +10,7 @@ import { Dashboard } from "./DashboardView";
 const integrationStatus = { configured: true, connected: true, gate_entities: [], garage_door_entities: [] } as unknown as IntegrationStatus;
 const props = {
   presence: [], expectedPresence: null, events: [], anomalies: [], integrationStatus,
-  maintenanceStatus: null, people: [], vehicles: [], refresh: vi.fn(),
+  maintenanceStatus: null, people: [], vehicles: [], refreshOverview: vi.fn(),
   currentUser: { id: "dashboard-presentation", role: "admin", first_name: "Test" } as UserAccount,
   navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn()
 };

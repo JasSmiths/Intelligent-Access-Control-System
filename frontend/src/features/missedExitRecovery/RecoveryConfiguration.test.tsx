@@ -20,15 +20,14 @@ const latitude = () => screen.getByRole("spinbutton", { name: "Gate latitude" })
 const longitude = () => screen.getByRole("spinbutton", { name: "Gate longitude" });
 const ownerToggle = () => screen.getByRole("combobox", { name: "Owner recovery opt-in" });
 const tracker = () => screen.getByRole("textbox", { name: "Home Assistant phone tracker entity" });
-const props = () => ({ refresh: vi.fn().mockResolvedValue(undefined) });
 let signals = createReadSignals("test");
 function serverPeople(people: Person[]) {
   vi.mocked(directory.readDirectory).mockResolvedValue({ items: people, total: people.length, next_cursor: null });
   vi.mocked(directory.lookupDirectory).mockImplementation(async (_kind, ids) => people.filter((item) => ids.includes(item.id)));
 }
-function configuration(value: ReturnType<typeof props>, people?: Person[]) {
+function configuration(people?: Person[]) {
   if (people) serverPeople(people);
-  return <ReadSignalsContext.Provider value={signals}><RecoveryConfiguration {...value} /></ReadSignalsContext.Provider>;
+  return <ReadSignalsContext.Provider value={signals}><RecoveryConfiguration /></ReadSignalsContext.Provider>;
 }
 function invalidate(people?: Person[]) {
   if (people) serverPeople(people);
@@ -60,8 +59,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it("preserves global drafts through identical realtime settings responses", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editGlobal();
   await act(async () => invalidate());
   expect(globalToggle()).toHaveValue("true"); expect(latitude()).toHaveValue(51.5); expect(longitude()).toHaveValue(-0.1);
@@ -69,8 +68,8 @@ it("preserves global drafts through identical realtime settings responses", asyn
 });
 
 it("keeps editing usable while a background reload is in flight and retains drafts on reload failure", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   const pending = deferred<SystemSetting[]>(); vi.mocked(client.api.get).mockReturnValueOnce(pending.promise);
   await act(async () => invalidate());
   expect(latitude()).not.toBeDisabled();
@@ -84,8 +83,8 @@ it("keeps editing usable while a background reload is in flight and retains draf
 
 it("loads initial and clean changed configuration from the server", async () => {
   vi.mocked(client.api.get).mockResolvedValueOnce(rows(true, 51, -1));
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   expect(globalToggle()).toHaveValue("true"); expect(latitude()).toHaveValue(51);
   vi.mocked(client.api.get).mockResolvedValueOnce(rows(false, 52, -2));
   await act(async () => invalidate());
@@ -93,8 +92,8 @@ it("loads initial and clean changed configuration from the server", async () => 
 });
 
 it("preserves drafts during save and fences a stale read after successful save", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editGlobal();
   const saved = deferred<SystemSetting[]>(); vi.mocked(client.api.patch).mockReturnValueOnce(saved.promise);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save global configuration" })));
@@ -111,8 +110,8 @@ it("preserves drafts during save and fences a stale read after successful save",
 });
 
 it("keeps a rejected global save editable across later refreshes", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editGlobal(); vi.mocked(client.api.patch).mockRejectedValueOnce(new Error("Save rejected"));
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save global configuration" })));
   await act(async () => invalidate());
@@ -120,8 +119,8 @@ it("keeps a rejected global save editable across later refreshes", async () => {
 });
 
 it("preserves owner drafts across refreshed owner objects and loads explicit owner switches", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editOwner();
   await act(async () => invalidate([{ ...owner }, { ...second }]));
   expect(ownerToggle()).toHaveValue("true"); expect(tracker()).toHaveValue("device_tracker.first");
@@ -132,8 +131,8 @@ it("preserves owner drafts across refreshed owner objects and loads explicit own
 });
 
 it("preserves owner drafts during save and displays the saved response until directory refresh catches up", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editOwner(); const pending = deferred<Person>(); vi.mocked(missedExitRecoveryApi.saveOwner).mockReturnValueOnce(pending.promise);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save owner configuration" })));
   await act(async () => invalidate([{ ...owner }, second]));
@@ -152,8 +151,8 @@ it("preserves owner drafts during save and displays the saved response until dir
 });
 
 it("retains rejected owner drafts through directory refreshes", async () => {
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   editOwner(); vi.mocked(missedExitRecoveryApi.saveOwner).mockRejectedValueOnce(new Error("Owner save rejected"));
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save owner configuration" })));
   await act(async () => invalidate([{ ...owner }, second]));
@@ -162,7 +161,7 @@ it("retains rejected owner drafts through directory refreshes", async () => {
 
 it("offers the exact matched tracker without saving or enabling recovery", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
-  await act(async () => render(configuration(props())));
+  await act(async () => render(configuration()));
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone"); expect(ownerToggle()).toHaveValue("false");
   expect(screen.getByText(/matched to this owner's saved notification destination/)).toBeInTheDocument();
@@ -172,7 +171,7 @@ it("offers the exact matched tracker without saving or enabling recovery", async
 it("preserves configured trackers, manual changes and deliberate clearing on discovery refresh", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValue(matched);
   const configured = { ...owner, missed_exit_recovery_tracker_entity_id: "device_tracker.configured" };
-  await act(async () => render(configuration(props(), [configured, second])));
+  await act(async () => render(configuration([configured, second])));
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(tracker()).toHaveValue("device_tracker.configured");
   fireEvent.change(tracker(), { target: { value: "device_tracker.manual" } });
@@ -185,7 +184,7 @@ it("preserves configured trackers, manual changes and deliberate clearing on dis
 
 it.each(["ambiguous", "not_found", "unavailable"] as const)("keeps manual selection when association is %s", async (status) => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce({ ...matched, mappings: [{ ...matched.mappings[0], status, suggested_tracker_entity_id: null, reason: "No unique association" }] });
-  await act(async () => render(configuration(props())));
+  await act(async () => render(configuration()));
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(tracker()).toHaveValue("");
   fireEvent.change(screen.getByRole("combobox", { name: "Discovered phone tracker" }), { target: { value: "device_tracker.renamed_iphone" } });
@@ -194,8 +193,8 @@ it.each(["ambiguous", "not_found", "unavailable"] as const)("keeps manual select
 
 it("does not use a stale discovery response after the saved notification destination changes", async () => {
   const pending = deferred<RecoveryTrackerDiscovery>(); vi.mocked(integrationsApi.getRecoveryTrackers).mockReturnValueOnce(pending.promise);
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
   await act(async () => invalidate([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }, second]));
@@ -205,8 +204,8 @@ it("does not use a stale discovery response after the saved notification destina
 
 it("revokes an untouched automatic suggestion when the saved destination changes", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
-  const value = props(); let view!: ReturnType<typeof render>;
-  await act(async () => { view = render(configuration(value)); });
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(configuration()); });
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone");
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
@@ -216,7 +215,7 @@ it("revokes an untouched automatic suggestion when the saved destination changes
 
 it("aborts and ignores discovery after unmount", async () => {
   const pending = deferred<RecoveryTrackerDiscovery>(); vi.mocked(integrationsApi.getRecoveryTrackers).mockReturnValueOnce(pending.promise);
-  const view = render(configuration(props()));
+  const view = render(configuration());
   const signal = vi.mocked(integrationsApi.getRecoveryTrackers).mock.calls[0][0]!.signal!;
   view.unmount(); expect(signal.aborted).toBe(true);
   await act(async () => pending.resolve(matched));
@@ -227,7 +226,7 @@ it("hides ineligible entities from phone choices and explains a missing destinat
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce({ ...matched,
     trackers: [{ ...matched.trackers[0], eligible: false, reason: "not_gps" }],
     mappings: [{ ...matched.mappings[0], status: "not_found", suggested_tracker_entity_id: null, reason: "saved_notify_service_missing" }] });
-  await act(async () => render(configuration(props())));
+  await act(async () => render(configuration()));
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(screen.queryByRole("option", { name: /Synthetic iPhone/ })).not.toBeInTheDocument();
   expect(screen.getByText(/Configure this resident's phone notification destination in People/)).toBeInTheDocument();
@@ -238,7 +237,7 @@ it("hides ineligible entities from phone choices and explains a missing destinat
 
 it("shows discovery failure despite a previous association and removes the proposal hint after save", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
-  const value = props(); await act(async () => render(configuration(value)));
+  await act(async () => render(configuration()));
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   vi.mocked(missedExitRecoveryApi.saveOwner).mockResolvedValueOnce({ ...owner, missed_exit_recovery_tracker_entity_id: "device_tracker.renamed_iphone" });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save owner configuration" })));

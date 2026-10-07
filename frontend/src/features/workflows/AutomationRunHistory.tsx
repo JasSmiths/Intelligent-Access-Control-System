@@ -3,6 +3,8 @@ import { gateCommandReceiptUrl } from "../../api/integrations";
 import type { UserAccount } from "../../api/types";
 import { notificationRunReceiptUrl, workflowApi, type AutomationRule, type AutomationRun } from "../../api/workflows";
 import { formatDate, titleCase } from "../../lib/format";
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
+import { automationRunEventMatches } from "./invalidation";
 import { Badge, type BadgeTone } from "../../ui/primitives";
 
 const actionLabels: Record<string, string> = {
@@ -26,44 +28,46 @@ function runStatus(run: AutomationRun): { label: string; tone: BadgeTone } {
   return known[run.status] ?? { label: "Status unavailable — review required", tone: "amber" };
 }
 
-export function AutomationRunHistory(props: { currentUser: UserAccount; refreshToken: number; rules: AutomationRule[] }) {
+export function AutomationRunHistory(props: { currentUser: UserAccount; rules: AutomationRule[] }) {
   return props.currentUser.role === "admin"
     ? <RunHistorySession key={`${props.currentUser.id}:${props.currentUser.role}`} {...props} /> : null;
 }
 
-function RunHistorySession({ refreshToken, rules }: { refreshToken: number; rules: AutomationRule[] }) {
+function RunHistorySession({ rules }: { rules: AutomationRule[] }) {
   const [runs, setRuns] = React.useState<AutomationRun[]>([]);
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [revision, setRevision] = React.useState(0);
   const [selected, setSelected] = React.useState<string | null>(null);
-  const request = React.useRef<AbortController | null>(null);
-  const load = React.useCallback(async (beforeId?: string) => {
-    request.current?.abort();
-    const controller = new AbortController();
-    request.current = controller;
+  const pendingCursor = React.useRef<string | undefined>(undefined);
+  const read = React.useCallback(async (signal: AbortSignal) => {
+    const beforeId = pendingCursor.current;
+    pendingCursor.current = undefined;
     setLoading(true);
     setError("");
     try {
-      const page = await workflowApi.getAutomationRuns(beforeId, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+      const page = await workflowApi.getAutomationRuns(beforeId, { signal });
+      if (signal.aborted) return;
       if (beforeId && page.next_cursor === beforeId) throw new Error("Run history did not advance. Refresh the history to continue.");
       setRuns((current) => beforeId ? [...current, ...page.items.filter((run) => !current.some((item) => item.id === run.id))] : page.items);
       setCursor(page.next_cursor);
     } catch (failure) {
-      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Unable to read automation runs.");
+      if (!signal.aborted) {
+        setError(failure instanceof Error ? failure.message : "Unable to read automation runs.");
+        throw failure;
+      }
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
   }, []);
-  React.useEffect(() => {
-    void load();
-    return () => request.current?.abort();
-  }, [load, refreshToken, revision]);
+  const refresh = useCoordinatedRead(read, automationRunEventMatches);
+  const load = (beforeId?: string) => {
+    pendingCursor.current = beforeId;
+    void refresh().catch(() => undefined);
+  };
 
   return <section className="card" aria-label="Automation run history">
-    <div className="panel-header"><h2>Run history</h2><button className="secondary-button" type="button" onClick={() => setRevision((value) => value + 1)}>Refresh run history</button></div>
+    <div className="panel-header"><h2>Run history</h2><button className="secondary-button" type="button" onClick={() => load()}>Refresh run history</button></div>
     <p>Recorded attempts and outcomes. Opening a result does not run its actions again.</p>
     {error ? <p role="alert">{error}{runs.length ? " Displayed results may be older." : ""}</p> : null}
     {loading ? <p role="status">Loading run history…</p> : null}
@@ -80,27 +84,31 @@ function RunHistorySession({ refreshToken, rules }: { refreshToken: number; rule
       })}
     </ul>
     {cursor ? <button className="secondary-button" type="button" disabled={loading} onClick={() => void load(cursor)}>Load older runs</button> : null}
-    {selected ? <RunInspection key={selected} runId={selected} refreshToken={`${refreshToken}:${revision}`} onClose={() => setSelected(null)} /> : null}
+    {selected ? <RunInspection key={selected} runId={selected} onClose={() => setSelected(null)} /> : null}
   </section>;
 }
 
-function RunInspection({ runId, refreshToken, onClose }: { runId: string; refreshToken: string; onClose: () => void }) {
+function RunInspection({ runId, onClose }: { runId: string; onClose: () => void }) {
   const [run, setRun] = React.useState<AutomationRun | null>(null);
   const [error, setError] = React.useState("");
-  const [revision, setRevision] = React.useState(0);
-  React.useEffect(() => {
-    const controller = new AbortController();
+  const read = React.useCallback(async (signal: AbortSignal) => {
     setRun(null);
     setError("");
-    workflowApi.getAutomationRun(runId, { signal: controller.signal })
-      .then((result) => { if (!controller.signal.aborted) setRun(result); })
-      .catch((failure) => { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Unable to read the run result."); });
-    return () => controller.abort();
-  }, [runId, refreshToken, revision]);
+    try {
+      const result = await workflowApi.getAutomationRun(runId, { signal });
+      if (!signal.aborted) setRun(result);
+    } catch (failure) {
+      if (!signal.aborted) {
+        setError(failure instanceof Error ? failure.message : "Unable to read the run result.");
+        throw failure;
+      }
+    }
+  }, [runId]);
+  const refresh = useCoordinatedRead(read, automationRunEventMatches);
   return <section aria-label="Selected automation run">
     <div className="panel-header"><h3>Run result</h3><button className="secondary-button" type="button" onClick={onClose}>Close run result</button></div>
     {error ? <p role="alert">{error} This does not establish whether any action was sent. Do not repeat an uncertain action.</p> : !run ? <p role="status">Loading run result…</p> : <AutomationRunDetails run={run} />}
-    <button className="secondary-button" type="button" onClick={() => setRevision((value) => value + 1)}>Refresh run result</button>
+    <button className="secondary-button" type="button" onClick={() => void refresh().catch(() => undefined)}>Refresh run result</button>
   </section>;
 }
 

@@ -40,9 +40,10 @@ export function useDashboardDirectory({ presence, expectedPresence, events }: {
       if (!signal.aborted) { setResolvedVehicles(vehicles); setResolvedPeople(people); setActiveVehicleCount(active.total); }
     } catch (failure) { if (!signal.aborted) setError(failure instanceof Error ? failure.message : "Dashboard directory details could not be refreshed."); throw failure; }
   }, [visiblePeopleKey, visiblePlatesKey]);
-  useCoordinatedRead(read, dashboardEventMatches);
+  const refresh = useCoordinatedRead(read, dashboardEventMatches);
 
   return {
+    refresh,
     people: resolvedPeople,
     vehicles: resolvedVehicles,
     activeVehicleCount: activeVehicleCount ?? 0,

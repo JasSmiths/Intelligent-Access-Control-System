@@ -208,7 +208,7 @@ export function AccessDevicesSettingsView({
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
       dirtyDeviceIds.current.delete(saved.id);
       setMessage("Device saved.");
-      await loadDevices();
+      try { await loadDevices(); } catch { setError("Device saved, but device data could not be refreshed. Refresh to retry the read."); }
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
     } finally {

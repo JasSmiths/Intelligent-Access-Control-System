@@ -16,8 +16,8 @@ import { renderWorkflowTemplate } from "./model";
 import { titleCase } from "../../lib/format";
 import { AutomationRunHistory } from "./AutomationRunHistory";
 
-export function AutomationsView({ currentUser, people, refreshToken, vehicles }: { currentUser: UserAccount; people: Person[]; refreshToken: number; vehicles: Vehicle[] }) {
-  const { data, rules, setRules, loading, error, load } = useWorkflowData(workflowApi.getAutomationData, refreshToken);
+export function AutomationsView({ currentUser }: { currentUser: UserAccount }) {
+  const { data, rules, setRules, loading, error, load } = useWorkflowData(workflowApi.getAutomationData);
   const catalog = data?.catalog ?? null;
   const [draft, setDraft] = React.useState<AutomationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
@@ -161,7 +161,7 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
       </Toolbar>
       {error ? <ErrorState title="Automations unavailable" description={error} onRetry={() => void load()} /> : null}
       {feedback && !draft ? <div className={`notification-feedback ${feedback.tone}`}>{feedback.text}</div> : null}
-      {showRuns ? <AutomationRunHistory currentUser={currentUser} refreshToken={refreshToken} rules={rules} /> : null}
+      {showRuns ? <AutomationRunHistory currentUser={currentUser} rules={rules} /> : null}
 
       <WorkflowStatusFilters
         activeFilter={statusFilter}
@@ -250,9 +250,9 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 garageDoors={catalog?.garage_doors ?? []}
                                 kind="trigger"
                                 nodes={draft.triggers}
-                                people={people}
+
                                 triggerMeta={triggerByType}
-                                vehicles={vehicles}
+
                                 onAdd={() => setModal("trigger")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.map((item) => item.id === node.id ? node : item) }))}
                                 onRemove={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.filter((item) => item.id !== node.id) }))}
@@ -265,9 +265,9 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 garageDoors={catalog?.garage_doors ?? []}
                                 kind="condition"
                                 nodes={draft.conditions}
-                                people={people}
+
                                 triggerMeta={triggerByType}
-                                vehicles={vehicles}
+
                                 onAdd={() => setModal("condition")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.map((item) => item.id === node.id ? node : item) }))}
                                 onRemove={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.filter((item) => item.id !== node.id) }))}
@@ -281,10 +281,10 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 kind="action"
                                 nodes={draft.actions}
                                 notificationRules={catalog?.notification_rules ?? []}
-                                people={people}
+
                                 triggerMeta={triggerByType}
                                 variables={variables}
-                                vehicles={vehicles}
+
                                 onAdd={() => setModal("action")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, actions: rule.actions.map((item) => item.id === node.id ? node as AutomationAction : item) }))}
                                 onRemove={(node) => updateDraft((rule) => ({ ...rule, actions: rule.actions.filter((item) => item.id !== node.id) }))}

@@ -118,7 +118,7 @@ export function ZonesSettingsView({
             ))}
           </div>
           <Badge tone="gray">{observations.length}</Badge>
-          <button className="icon-button" type="button" onClick={() => loadObservations()} disabled={loading} title="Refresh zone shadow observations">
+          <button className="icon-button" type="button" onClick={() => void loadObservations().catch(() => undefined)} disabled={loading} title="Refresh zone shadow observations">
             {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
           </button>
         </div>

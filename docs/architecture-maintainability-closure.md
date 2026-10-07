@@ -37,12 +37,51 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   142,385-byte PDF; source, image, hash, size and timing identities retained.
 - Deployment, production migrations and live provider/hardware tests are excluded.
 
+## P3 frontend candidate evidence
+
+The separate frontend branch is rebased onto approved P2 commit
+`834daa7f2a59707dd5788de6caf4fa71aae8e4f8`. Feature-owned actual-HTTP reads replace
+shell collections, seed props, numeric invalidation tokens and central feature
+route/event mappings. Directory/history/report/dashboard and remaining settings,
+integration, recovery, log, pass, chart and workflow readers subscribe locally.
+Local save/delete/retry refreshes use the required feature owners; global manual
+and connection signals remain explicit shell composition. Accepted mutations keep
+their receipts when a subsequent read fails; local retry reads remain feature-owned.
+
+The corrected frozen frontend passed the locked Node 22 build and 311 unit tests
+in 54 files. Browser coverage consists of the earlier 140-case Chromium/WebKit
+run, 78 passing affected cases after the receipt correction, and eight passing
+new integration receipt cases after correcting their HTTP-status-prefixed error
+selectors. The initial eight selector failures remain retained. Hash mappings
+carry forward the 62 unchanged browser cases; the final coverage is 148 distinct
+cases, not the sum of repeated runs. The Node snapshot differs from the final
+frontend only in four selectors in that browser fixture.
+
+Equivalent-output production assets, built with the same locked Node 22 image,
+passed the identical inert 12/2,000-record workflow against baseline `03f56bed`
+and the corrected candidate in Chromium. Initial/mutation/navigation/100-event
+burst GET counts changed from 10/10/9/8 to 8/3/5/4 at both sizes. All requested
+GETs completed, with no aborted, failed or pending requests. At 2,000 records,
+loaded UTF-8 JSON bytes changed from 92,219/122,105/121,891/243,328 to
+31,299/61,030/60,934/121,656. These synthetic response-body bytes do not establish
+database work or production latency. The development server comparison remains
+separate, including its initial 12-to-13 request increase under StrictMode.
+Beyond-500 subject search is separate correctness evidence. Existing unpaged
+group/schedule catalog contracts remain unchanged; full Dashboard presence awaits
+P7.
+
+Evidence under the retained programme root: `p3-corrected-node22/`,
+`p3-corrected-browser.json`, `p3-corrected-receipt-browser.json`,
+`p3-corrected-receipt-source.json`, `p3-production-comparison/` and the final
+candidate/coverage mapping receipts. Exact final candidate Astra sign-off remains
+pending; this paragraph does not close AM-02 or P3 until that receipt is accepted.
+
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
 | --- | --- | --- | --- |
 | AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Implemented, validation/review pending / pending |
-| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
+| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Implemented and validated; exact candidate review pending / pending |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Pending / pending |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |

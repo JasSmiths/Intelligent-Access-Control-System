@@ -157,7 +157,7 @@ export function TopChartsView({ query }: { query: string }) {
       </Toolbar>
       <p className="top-charts-scope">All recorded access events through {leaderboard?.generated_at ? formatDate(leaderboard.generated_at) : "the latest refresh"}. Known counts include granted entries linked to a vehicle; unknown counts include denied events without a linked vehicle. Each chart shows up to 25 plates.</p>
 
-      {error ? <ErrorState title="Top Charts unavailable" description={error} onRetry={() => void load()} retrying={refreshing} /> : null}
+      {error ? <ErrorState title="Top Charts unavailable" description={error} onRetry={() => void load().catch(() => undefined)} retrying={refreshing} /> : null}
       {loading || (!leaderboard && refreshing) ? (
         <LoadingState label="Loading Top Charts" />
       ) : leaderboard ? (

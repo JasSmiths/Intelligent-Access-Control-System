@@ -123,8 +123,8 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     }
   }), [signals]);
   const reloadSettingsAndProtect = React.useCallback(async () => {
-    const results = await Promise.allSettled([reload(), loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(true), loadICloudCalendar()]);
-    const failure = results.find((result) => result.status === "rejected"); if (failure?.status === "rejected") throw failure.reason;
+    // These callbacks follow accepted provider mutations. Reads retain their own errors.
+    await Promise.allSettled([reload(), loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(true), loadICloudCalendar()]);
   }, [loadAccessDeviceStatus, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, reload]);
 
   const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError);
@@ -223,13 +223,13 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
           icloudPayload={icloudPayload}
           values={values}
           onClose={() => setActive(null)}
-          onICloudChanged={loadICloudCalendar}
-          onProtectRefresh={() => loadProtect(true, true)}
+          onICloudChanged={() => loadICloudCalendar().catch(() => undefined)}
+          onProtectRefresh={() => loadProtect(true, true).catch(() => undefined)}
           onSettingsChanged={reloadSettingsAndProtect}
           onAccessDeviceStatusChanged={setAccessDeviceStatus}
           onSaved={async (updates, confirmationToken) => {
             await save(updates, confirmationToken ? { confirmationToken } : {});
-            await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
+            await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current).catch(() => undefined);
           }}
         />
       ) : null}
@@ -238,8 +238,8 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
         error={protectError || protectStatus?.last_error || protectStatus?.realtime_error || ""}
         loaded={protectCamerasLoaded}
         loading={protectLoading}
-        onLoad={() => loadProtect(false, true)}
-        onRefresh={() => loadProtect(true, true)}
+        onLoad={() => loadProtect(false, true).catch(() => undefined)}
+        onRefresh={() => loadProtect(true, true).catch(() => undefined)}
         refreshToken={protectSnapshotRefreshToken}
         status={protectStatus}
       />

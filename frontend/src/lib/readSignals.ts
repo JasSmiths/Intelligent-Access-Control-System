@@ -11,18 +11,35 @@ type Listener = (signal: ReadSignal) => Promise<void> | void;
 // Transport delivers every signal. Feature owners select policy and await their own reads.
 export function createReadSignals(accountKey: string) {
   const listeners = new Set<Listener>();
-  return {
-    accountKey,
-    subscribe(listener: Listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    async publish(signal: ReadSignal) {
-      const pending = [...listeners].map((listener) => {
-        try { return Promise.resolve(listener(signal)); }
-        catch (error) { return Promise.reject(error); }
-      });
-      const results = await Promise.allSettled(pending);
+  const observed = new WeakSet<Promise<void>>();
+  function publish(signal: Extract<ReadSignal, { type: "realtime" }>): void;
+  function publish(signal: Extract<ReadSignal, { type: "refresh" }>): Promise<void>;
+  function publish(signal: ReadSignal): Promise<void> | void {
+    if (signal.type === "realtime") {
+      // Scheduling is synchronous. A blocked batch gets one rejection observer,
+      // regardless of how many stream messages coalesce into that same batch.
+      for (const listener of listeners) {
+        try {
+          const completion = listener(signal);
+          if (completion && !observed.has(completion)) {
+            observed.add(completion);
+            void completion.catch(() => undefined); // Errors remain with each read owner.
+          }
+        } catch { /* Keep independent realtime owners schedulable. */ }
+      }
+      return;
+    }
+    const pending = [...listeners].map((listener) => {
+      try { return Promise.resolve(listener(signal)); }
+      catch (error) { return Promise.reject(error); }
+    });
+    return Promise.allSettled(pending).then((results) => {
       const failed = results.find((result) => result.status === "rejected");
       if (failed?.status === "rejected") throw failed.reason;
-    },
+    });
+  }
+  return { accountKey, publish,
+    subscribe(listener: Listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose() { listeners.clear(); }
   };
 }

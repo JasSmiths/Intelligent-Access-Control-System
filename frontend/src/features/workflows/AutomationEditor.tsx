@@ -19,10 +19,8 @@ export function AutomationNodeStack({
   kind,
   nodes,
   notificationRules = [],
-  people,
   triggerMeta,
   variables = [],
-  vehicles,
   onAdd,
   onChange,
   onRemove
@@ -33,10 +31,8 @@ export function AutomationNodeStack({
   kind: "trigger" | "condition" | "action";
   nodes: Array<AutomationNode | AutomationAction>;
   notificationRules?: Array<{ id: string; name: string }>;
-  people: Person[];
   triggerMeta: Map<string, AutomationCatalogItem>;
   variables?: Array<AutomationVariable & { group: string }>;
-  vehicles: Vehicle[];
   onAdd: () => void;
   onChange: (node: AutomationNode | AutomationAction) => void;
   onRemove: (node: AutomationNode | AutomationAction) => void;
@@ -52,9 +48,9 @@ export function AutomationNodeStack({
           meta={metaMap.get(node.type)}
           node={node}
           notificationRules={notificationRules}
-          people={people}
+
           variables={variables}
-          vehicles={vehicles}
+
           onChange={onChange}
           onRemove={() => onRemove(node)}
         />
@@ -72,9 +68,7 @@ function AutomationNodeCard({
   meta,
   node,
   notificationRules,
-  people,
   variables,
-  vehicles,
   onChange,
   onRemove
 }: {
@@ -83,15 +77,13 @@ function AutomationNodeCard({
   meta?: AutomationCatalogItem;
   node: AutomationNode | AutomationAction;
   notificationRules: Array<{ id: string; name: string }>;
-  people: Person[];
   variables: Array<AutomationVariable & { group: string }>;
-  vehicles: Vehicle[];
   onChange: (node: AutomationNode | AutomationAction) => void;
   onRemove: () => void;
 }) {
   const directoryNode = node.type.includes("person.") || node.type.includes("vehicle.");
-  const personOptions = useDirectoryOptions("people", people, node.config.person_id ? [String(node.config.person_id)] : [], directoryNode);
-  const vehicleOptions = useDirectoryOptions("vehicles", vehicles, node.config.vehicle_id ? [String(node.config.vehicle_id)] : [], directoryNode);
+  const personOptions = useDirectoryOptions("people", node.config.person_id ? [String(node.config.person_id)] : [], directoryNode);
+  const vehicleOptions = useDirectoryOptions("vehicles", node.config.vehicle_id ? [String(node.config.vehicle_id)] : [], directoryNode);
   const Icon = automationNodeIcon(node.type);
   const updateConfig = (config: Record<string, unknown>) => onChange({ ...node, config: { ...node.config, ...config } });
   return (
