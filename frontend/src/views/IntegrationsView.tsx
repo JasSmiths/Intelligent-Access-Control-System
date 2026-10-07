@@ -15,41 +15,34 @@ import {
   ICloudCalendarPayload,
   ICloudCalendarSyncRun,
   integrationsApi,
-  UnifiProtectStatus,
-  confirmIntegrationAction
+  UnifiProtectStatus
 } from "../api/integrations";
 import {
   integrationCategories,
   integrationDefinitions,
   IntegrationDefinition,
-  CameraAiProviderSelector,
-  ProtectIntegrationTab
 } from "../features/integrations/catalog";
+import { CameraAiProviderSettings } from "../features/integrations/providers/CameraAiProviderSettings";
 import { IntegrationModal } from "../features/integrations/IntegrationModal";
 import { UnifiProtectCameraSection } from "../features/integrations/unifiProtect";
 
 const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
 
 export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) {
-  const { values, loading, error: settingsError, save, reload } = useSettings(undefined, integrationEventMatches);
-  const isAdmin = currentUser.role === "admin";
+  const { values, loading, error: settingsError, reload } = useSettings(undefined, integrationEventMatches);
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(null);
   const [homeAssistantError, setHomeAssistantError] = React.useState("");
   const [loadedStatuses, setLoadedStatuses] = React.useState<Set<string>>(() => new Set());
-  const initialStatusesLoaded = loadedStatuses.size === 4;
+  const initialStatusesLoaded = loadedStatuses.size === 3;
   const markLoaded = React.useCallback((key: string) => setLoadedStatuses((current) => new Set(current).add(key)), []);
   const signals = React.useContext(ReadSignalsContext);
-  const [accessDeviceStatus, setAccessDeviceStatus] = React.useState<IntegrationStatus | null>(null);
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
-  const [activeTab, setActiveTab] = React.useState<ProtectIntegrationTab>("general");
-  const [llmProviderSaving, setLlmProviderSaving] = React.useState(false);
   const [protectStatus, setProtectStatus] = React.useState<UnifiProtectStatus | null>(null);
   const [protectCameras, setProtectCameras] = React.useState<UnifiProtectCamera[]>([]);
   const [protectSnapshotRefreshToken, setProtectSnapshotRefreshToken] = React.useState(0);
   const [protectLoading, setProtectLoading] = React.useState(false);
   const [protectError, setProtectError] = React.useState("");
   const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
-  const [icloudLoading, setIcloudLoading] = React.useState(false);
   const [icloudError, setIcloudError] = React.useState("");
   const [protectCamerasLoaded, setProtectCamerasLoaded] = React.useState(false);
   const protectCamerasLoadedRef = React.useRef(false);
@@ -82,10 +75,10 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     protectOptions.current = { force, includeCameras }; return refreshProtect();
   }, [refreshProtect]);
   const readICloudCalendar = React.useCallback(async (signal: AbortSignal) => {
-    setIcloudLoading(true); setIcloudError("");
+    setIcloudError("");
     try { const payload = await integrationsApi.getICloudCalendar({ signal }); if (!signal.aborted) setIcloudPayload(payload); }
     catch (error) { if (!signal.aborted) setIcloudError(error instanceof Error ? error.message : "Unable to load iCloud Calendar accounts."); throw error; }
-    finally { if (!signal.aborted) { setIcloudLoading(false); markLoaded("icloud"); } }
+    finally { if (!signal.aborted) { markLoaded("icloud"); } }
   }, [markLoaded]);
   const loadICloudCalendar = useCoordinatedRead(readICloudCalendar, integrationEventMatches);
   const readHomeAssistantStatus = React.useCallback(async (signal: AbortSignal) => {
@@ -95,19 +88,9 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     finally { if (!signal.aborted) markLoaded("home_assistant"); }
   }, [markLoaded]);
   const loadHomeAssistantStatus = useCoordinatedRead(readHomeAssistantStatus, integrationEventMatches);
-  const readAccessDeviceStatus = React.useCallback(async (signal: AbortSignal) => {
-    try { const result = await integrationsApi.getAccessDeviceStatus({ signal }); if (!signal.aborted) setAccessDeviceStatus(result); }
-    catch (error) { if (!signal.aborted) setAccessDeviceStatus(null); throw error; }
-    finally { if (!signal.aborted) markLoaded("access_device"); }
-  }, [markLoaded]);
-  const loadAccessDeviceStatus = useCoordinatedRead(readAccessDeviceStatus, integrationEventMatches);
   React.useLayoutEffect(() => signals?.subscribe((signal) => {
     if (signal.type !== "realtime") return;
     const message = signal.message;
-    if (message.type === "access_device.status") {
-      const payload = isRecord(message.payload.status) ? message.payload.status : message.payload;
-      setAccessDeviceStatus((current) => ({ ...current, ...(payload as Partial<IntegrationStatus>) } as IntegrationStatus));
-    }
     if (message.type === "home_assistant.status") setHomeAssistantStatus((current) => current ? { ...current, ...message.payload } : current);
     if (message.type !== "icloud_calendar.accounts_changed" && message.type !== "icloud_calendar.sync_completed") return;
     const key = `${message.type}-${message.created_at ?? ""}`;
@@ -122,10 +105,17 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
       setIcloudPayload((current) => ({ ...current, recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5) }));
     }
   }), [signals]);
-  const reloadSettingsAndProtect = React.useCallback(async () => {
-    // These callbacks follow accepted provider mutations. Reads retain their own errors.
-    await Promise.allSettled([reload(), loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(true), loadICloudCalendar()]);
-  }, [loadAccessDeviceStatus, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, reload]);
+  const editorLeaveGuard = React.useRef<(() => boolean) | null>(null);
+  const setEditorLeaveGuard = React.useCallback((guard: (() => boolean) | null) => { editorLeaveGuard.current = guard; }, []);
+  const refreshProviderCard = React.useCallback(async (provider: string) => {
+    // Accepted writes refresh only their own card and saved settings. Read errors
+    // remain in those owners and cannot reverse a provider mutation receipt.
+    const reads = [reload()];
+    if (provider === "home_assistant") reads.push(loadHomeAssistantStatus());
+    if (provider === "unifi_protect") reads.push(loadProtect(true));
+    if (provider === "icloud_calendar") reads.push(loadICloudCalendar());
+    await Promise.allSettled(reads);
+  }, [reload, loadHomeAssistantStatus, loadProtect, loadICloudCalendar]);
 
   const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError);
   const groupedTiles = integrationCategories
@@ -149,25 +139,7 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
               </div>
               <div className="integration-category-actions">
                 {category.key === "ai" ? (
-                  <CameraAiProviderSelector
-                    saving={!isAdmin || llmProviderSaving || loading}
-                    values={values}
-                    onChange={async (provider) => {
-                      setLlmProviderSaving(true);
-                      try {
-                        const updates = { llm_provider: provider };
-                        const confirmation = await confirmIntegrationAction("settings.update", { values: updates }, {
-                          target_entity: "SystemSetting",
-                          target_id: "llm_provider",
-                          target_label: provider,
-                          reason: "Update LLM provider"
-                        });
-                        await save(updates, { confirmationToken: confirmation.confirmation_token });
-                      } finally {
-                        setLlmProviderSaving(false);
-                      }
-                    }}
-                  />
+                  <CameraAiProviderSettings currentUser={currentUser} loading={loading} values={values} onChanged={reload} />
                 ) : null}
                 <Badge tone="gray">{category.tiles.length}</Badge>
               </div>
@@ -181,9 +153,10 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
                   <article className="card integration-tile" key={tile.key}>
                     <button
                       className="integration-tile-main"
+                      disabled={loading || Boolean(settingsError)}
                       onClick={() => {
+                        if (active?.key !== tile.key && editorLeaveGuard.current && !editorLeaveGuard.current()) return;
                         setActive(tile);
-                        setActiveTab("general");
                       }}
                       type="button"
                     >
@@ -210,27 +183,12 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
         <IntegrationModal
           definition={active}
           currentUser={currentUser}
-          initialTab={activeTab}
+          initialTab="general"
           loading={loading}
-          protectCameras={protectCameras}
-          protectError={protectError || protectStatus?.last_error || protectStatus?.realtime_error || ""}
-          protectLoading={protectLoading}
-          protectStatus={protectStatus}
-          accessDeviceStatus={accessDeviceStatus}
-          homeAssistantStatus={homeAssistantStatus}
-          icloudError={icloudError}
-          icloudLoading={icloudLoading}
-          icloudPayload={icloudPayload}
           values={values}
           onClose={() => setActive(null)}
-          onICloudChanged={() => loadICloudCalendar().catch(() => undefined)}
-          onProtectRefresh={() => loadProtect(true, true).catch(() => undefined)}
-          onSettingsChanged={reloadSettingsAndProtect}
-          onAccessDeviceStatusChanged={setAccessDeviceStatus}
-          onSaved={async (updates, confirmationToken) => {
-            await save(updates, confirmationToken ? { confirmationToken } : {});
-            await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current).catch(() => undefined);
-          }}
+          onGuardChange={setEditorLeaveGuard}
+          onChanged={() => refreshProviderCard(active.key)}
         />
       ) : null}
       <UnifiProtectCameraSection

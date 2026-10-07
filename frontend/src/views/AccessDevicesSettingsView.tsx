@@ -34,6 +34,8 @@ export function AccessDevicesSettingsView({
   const [admissionChoices, setAdmissionChoices] = React.useState<Array<{ key: string; name: string }>>([]);
   const [devicesLoading, setDevicesLoading] = React.useState(true);
   const [savingKey, setSavingKey] = React.useState("");
+  const [removingKey, setRemovingKey] = React.useState("");
+  const [creating, setCreating] = React.useState(false);
   const [providerSavingKey, setProviderSavingKey] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -44,6 +46,8 @@ export function AccessDevicesSettingsView({
   const accessSettings = useSettings("access", devicesEventMatches);
   const dirtyDeviceIds = React.useRef(new Set<string>());
   const savingKeyRef = React.useRef("");
+  const creatingRef = React.useRef(false);
+  const providerPendingRef = React.useRef(false);
   const isAdmin = currentUser.role === "admin";
 
   const readDevices = React.useCallback(async (signal: AbortSignal) => {
@@ -65,8 +69,8 @@ export function AccessDevicesSettingsView({
 
   const loadDevices = useCoordinatedRead(readDevices, devicesEventMatches);
   React.useLayoutEffect(() => {
-    savingKeyRef.current = ""; dirtyDeviceIds.current.clear();
-    setSavingKey(""); setProviderSavingKey(""); setDevices([]); setMessage(""); setError("");
+    savingKeyRef.current = ""; creatingRef.current = false; providerPendingRef.current = false; dirtyDeviceIds.current.clear();
+    setSavingKey(""); setRemovingKey(""); setCreating(false); setProviderSavingKey(""); setDevices([]); setMessage(""); setError("");
   }, [lifetime]);
 
   const enabledCount = React.useMemo(() => devices.filter((device) => device.enabled).length, [devices]);
@@ -92,11 +96,13 @@ export function AccessDevicesSettingsView({
   };
 
   const addDevice = async () => {
+    if (creatingRef.current || !lifetime.isCurrent()) return;
     if (!isAdmin) {
       setError("Administrator access is required to add access devices.");
       return;
     }
-    setError("");
+    creatingRef.current = true; setCreating(true);
+    setError(""); setMessage("");
     const suffix = devices.length + 1;
     const baseKey = kind === "gate" ? `gate_${suffix}` : `garage_door_${suffix}`;
     const payload = {
@@ -123,14 +129,15 @@ export function AccessDevicesSettingsView({
       if (!lifetime.isCurrent()) return;
       setDevices((current) => [...current, created]);
       setMessage("Device added.");
+      try { await loadDevices(); } catch { if (lifetime.isCurrent()) setError("Device added, but device data could not be refreshed. Refresh to retry the read."); }
     } catch (addError) {
       if (!lifetime.isCurrent()) return;
       setError(addError instanceof Error ? addError.message : "Unable to add access device.");
-    }
+    } finally { if (lifetime.isCurrent()) { creatingRef.current = false; setCreating(false); } }
   };
 
   const saveDevice = async (device: AccessDevice) => {
-    if (savingKeyRef.current) return;
+    if (savingKeyRef.current || !lifetime.isCurrent()) return;
     if (!isAdmin) {
       setError("Administrator access is required to save access devices.");
       return;
@@ -161,11 +168,13 @@ export function AccessDevicesSettingsView({
   };
 
   const saveProviderSetting = async (key: "gate_control_provider" | "gate_failover_provider" | "gate_admission_device_key", value: string) => {
+    if (providerPendingRef.current || !lifetime.isCurrent()) return;
     const isAdmissionSelection = key === "gate_admission_device_key";
     if (!isAdmin) {
       setError("Administrator access is required to save provider preferences.");
       return;
     }
+    providerPendingRef.current = true;
     setProviderSavingKey(key);
     setError("");
     setMessage("");
@@ -185,18 +194,19 @@ export function AccessDevicesSettingsView({
       if (!lifetime.isCurrent()) return;
       setError(providerError instanceof Error ? providerError.message : isAdmissionSelection ? "Unable to save entry gate selection." : "Unable to save provider preference.");
     } finally {
-      if (lifetime.isCurrent()) setProviderSavingKey("");
+      if (lifetime.isCurrent()) { providerPendingRef.current = false; setProviderSavingKey(""); }
     }
   };
 
   const deleteDevice = async (device: AccessDevice) => {
-    if (savingKeyRef.current === device.id) return;
+    if (savingKeyRef.current || !lifetime.isCurrent()) return;
     if (!isAdmin) {
       setError("Administrator access is required to remove access devices.");
       return;
     }
     if (!window.confirm(`Remove ${device.name}?`)) return;
-    setError("");
+    savingKeyRef.current = device.id; setSavingKey(device.id); setRemovingKey(device.id);
+    setError(""); setMessage("");
     try {
       const payload = { device_id: device.id };
       const confirmation = await createActionConfirmation("access_device.delete", payload, {
@@ -211,11 +221,14 @@ export function AccessDevicesSettingsView({
       });
       if (!lifetime.isCurrent()) return;
       setDevices((current) => current.filter((item) => item.id !== device.id));
+      dirtyDeviceIds.current.delete(device.id);
+      setAdmissionChoices((current) => current.filter((item) => item.key !== device.key));
       setMessage("Device removed.");
+      try { await loadDevices(); } catch { if (lifetime.isCurrent()) setError("Device removed, but device data could not be refreshed. Refresh to retry the read."); }
     } catch (deleteError) {
       if (!lifetime.isCurrent()) return;
       setError(deleteError instanceof Error ? deleteError.message : "Unable to remove access device.");
-    }
+    } finally { if (lifetime.isCurrent()) { savingKeyRef.current = ""; setSavingKey(""); setRemovingKey(""); } }
   };
 
   return (
@@ -307,7 +320,7 @@ export function AccessDevicesSettingsView({
               </div>
             </div>
             {isAdmin ? (
-              <button className="secondary-button" onClick={addDevice} disabled={devicesLoading || !scheduleCatalog.ready} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
+              <button className="secondary-button" onClick={addDevice} disabled={creating || devicesLoading || !scheduleCatalog.ready} type="button"><Plus size={15} /> {creating ? "Adding..." : `Add ${kind === "gate" ? "Gate" : "Door"}`}</button>
             ) : null}
           </div>
           {(devicesLoading || bindings.loading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
@@ -324,7 +337,7 @@ export function AccessDevicesSettingsView({
                 key={device.id}
                 schedules={schedules}
                 scheduleLabel={device.schedule_id ? scheduleNameById.get(device.schedule_id) ?? "Custom schedule" : "Default policy"}
-                saving={savingKey === device.id}
+                saving={savingKey === device.id && removingKey !== device.id}
                 disabled={!isAdmin || savingKey === device.id}
                 onDelete={() => deleteDevice(device)}
                 onSave={() => saveDevice(device)}

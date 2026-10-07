@@ -76,6 +76,26 @@ after a provider metadata read fails, while rejected mutations remain failures.
 Composed owner tests also cover accepted pass/device/user changes, local refresh
 isolation and observed retry errors. These inert fixtures do not send to providers.
 
+The [provider editor browser suite](../frontend/e2e/provider-editors.spec.ts)
+drives actual realtime invalidation while preserving each complete provider draft,
+checks dirty and pending dismissal, and retains desktop, phone, short landscape
+and dark tablet screenshots in Chromium/WebKit. It exercises iCloud handshake protection after
+password clearing and accepted protected writes. The
+[composed editor tests](../frontend/src/features/integrations/providerEditors.test.tsx)
+cover account/provider replacement during confirmation and after write acceptance,
+late ESPHome stream reads, explicit managed/scalar coverage and provider-local
+metadata failure. [Client lifetime tests](../frontend/src/api/integrationMutationLifetime.test.ts)
+prove stopped-before-write outcomes and continued observation of started requests.
+
+The [frontend descriptor fixture](../frontend/src/features/settings/accessDeviceProviders.test.tsx)
+injects an inert third provider through the real discovery/editor/conversion/save
+owner and confirmed binding write. It also checks HA/ESPHome order and conversion,
+missing/blank bindings, partial accepted phases with fresh-confirmation retry,
+blocked save/delete/create races and late pre-mutation reads. This fixture is
+synthetic; it does not register or actuate a live provider. Backend provider-policy
+extension evidence and final integrated E1 conformance remain separate gates.
+
+
 ## Final runtime PDF capability
 
 The [runtime PDF smoke](../scripts/validation/runtime_pdf_smoke.py) checks the final

@@ -147,7 +147,7 @@ export const integrationsApi = {
   getCoverCommand: (commandId: string, options: ApiRequestOptions = {}) =>
     api.get<DeviceCommandReceipt>(`/api/v1/integrations/cover/commands/${encodeURIComponent(commandId)}`, options),
   getHomeAssistantStatus: (options: ApiRequestOptions = {}) => api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status", options),
-  getHomeAssistantDiscovery: () => api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities"),
+  getHomeAssistantDiscovery: (options: ApiRequestOptions = {}) => api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities", options),
   getRecoveryTrackers: (options: ApiRequestOptions = {}) => api.get<RecoveryTrackerDiscovery>("/api/v1/integrations/home-assistant/recovery-trackers", options),
   getAccessDeviceStatus: (options: ApiRequestOptions = {}) => api.get<IntegrationStatus>("/api/v1/integrations/gate/status", options),
   getProtectStatus: (options: ApiRequestOptions = {}) => api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status", options),
@@ -166,12 +166,12 @@ export const integrationsApi = {
   verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
   syncICloudCalendar: () => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync"),
   removeICloudAccount: (accountId: string) => api.delete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${accountId}`),
-  getAppriseUrls: async () => {
-    const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls");
+  getAppriseUrls: async (options: ApiRequestOptions = {}) => {
+    const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", options);
     return result.urls;
   },
-  getESPHomeDevices: async () => {
-    const result = await api.get<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices");
+  getESPHomeDevices: async (options: ApiRequestOptions = {}) => {
+    const result = await api.get<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", options);
     return result.devices;
   },
   getUsers: () => api.get<UserAccount[]>("/api/v1/users")
@@ -179,42 +179,52 @@ export const integrationsApi = {
 export async function confirmIntegrationAction(action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions) {
   return createActionConfirmation(action, payload, options);
 }
-export async function confirmedPost<T>(path: string, action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, body: Record<string, unknown> = payload) {
-  const confirmation = await confirmIntegrationAction(action, payload, options);
-  return api.post<T>(path, { ...body, confirmation_token: confirmation.confirmation_token });
+export type MutationStartGuard = () => boolean;
+export type MutationNotStarted = { mutationStarted: false; reason: "owner_disposed" };
+export function isMutationNotStarted(value: unknown): value is MutationNotStarted {
+  return Boolean(value && typeof value === "object" && "mutationStarted" in value && value.mutationStarted === false && "reason" in value && value.reason === "owner_disposed");
 }
-export async function confirmedDelete<T = void>(path: string, action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, body: Record<string, unknown> = {}) {
+async function confirmThenWrite<T>(action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, write: (confirmationToken: string) => Promise<T>, beforeWrite: MutationStartGuard): Promise<T | MutationNotStarted> {
+  const stopped: MutationNotStarted = { mutationStarted: false, reason: "owner_disposed" };
+  if (!beforeWrite()) return stopped;
   const confirmation = await confirmIntegrationAction(action, payload, options);
-  return api.delete<T>(path, { ...body, confirmation_token: confirmation.confirmation_token });
+  if (!beforeWrite()) return stopped;
+  // Once the request starts, observe its result even if the editor is disposed.
+  return write(confirmation.confirmation_token);
 }
-export function testIntegrationSettings(payload: { integration: string; values: Record<string, unknown> }, label = payload.integration) {
+export function confirmedPost<T>(path: string, action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, body: Record<string, unknown> = payload, beforeWrite: MutationStartGuard = () => true) {
+  return confirmThenWrite(action, payload, options, (token) => api.post<T>(path, { ...body, confirmation_token: token }), beforeWrite);
+}
+export function confirmedPatch<T>(path: string, action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, body: Record<string, unknown> = payload, beforeWrite: MutationStartGuard = () => true) {
+  return confirmThenWrite(action, payload, options, (token) => api.patch<T>(path, { ...body, confirmation_token: token }), beforeWrite);
+}
+export function confirmedDelete<T = void>(path: string, action: string, payload: Record<string, unknown>, options: ActionConfirmationOptions, body: Record<string, unknown> = {}, beforeWrite: MutationStartGuard = () => true) {
+  return confirmThenWrite(action, payload, options, (token) => api.delete<T>(path, { ...body, confirmation_token: token }), beforeWrite);
+}
+export function testIntegrationSettings(payload: { integration: string; values: Record<string, unknown> }, label = payload.integration, beforeWrite: MutationStartGuard = () => true) {
   return confirmedPost<{ ok: boolean; message: string }>("/api/v1/settings/test", "integration.test", payload, {
     target_entity: "Integration",
     target_id: payload.integration,
     target_label: label,
     reason: "Run integration connection test"
-  });
+  }, payload, beforeWrite);
 }
-export async function addAppriseUrl(url: string) {
+export async function addAppriseUrl(url: string, beforeWrite: MutationStartGuard = () => true) {
   const payload = { url };
   const result = await confirmedPost<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", "apprise.url.create", payload, {
     target_entity: "AppriseURL",
     target_label: "Notification URL",
     reason: "Add notification URL"
-  });
-  return result.urls;
+  }, payload, beforeWrite);
+  return isMutationNotStarted(result) ? result : result.urls;
 }
-export async function removeAppriseUrl(url: AppriseUrlSummary) {
+export function removeAppriseUrl(url: AppriseUrlSummary, beforeWrite: MutationStartGuard = () => true) {
   const payload = { index: url.index };
-  await confirmedDelete(`/api/v1/integrations/apprise/urls/${url.index}`, "apprise.url.delete", payload, {
-    target_entity: "AppriseURL",
-    target_id: String(url.index),
-    target_label: url.preview || "Notification URL",
-    reason: "Remove notification URL"
-  });
-  return integrationsApi.getAppriseUrls();
+  return confirmedDelete(`/api/v1/integrations/apprise/urls/${url.index}`, "apprise.url.delete", payload, {
+    target_entity: "AppriseURL", target_id: String(url.index), target_label: url.preview || "Notification URL", reason: "Remove notification URL"
+  }, {}, beforeWrite);
 }
-export function sendAppriseTestNotification() {
+export function sendAppriseTestNotification(beforeWrite: MutationStartGuard = () => true) {
   const payload = {
     subject: "IACS test notification",
     severity: "info",
@@ -224,7 +234,7 @@ export function sendAppriseTestNotification() {
     target_entity: "Notification",
     target_label: payload.subject,
     reason: "Send Apprise test notification"
-  });
+  }, payload, beforeWrite);
 }
 export async function addESPHomeDevice(payload: {
   name: string;
@@ -233,30 +243,30 @@ export async function addESPHomeDevice(payload: {
   encryption_key: string;
   timeout_seconds: number;
   enabled: boolean;
-}) {
+}, beforeWrite: MutationStartGuard = () => true) {
   const result = await confirmedPost<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", "esphome.device.create", payload, {
     target_entity: "ESPHomeDevice",
     target_label: payload.name,
     reason: "Add ESPHome access device"
-  });
-  return result.devices;
+  }, payload, beforeWrite);
+  return isMutationNotStarted(result) ? result : result.devices;
 }
-export async function removeESPHomeDevice(device: ESPHomeDeviceSummary) {
+export async function removeESPHomeDevice(device: ESPHomeDeviceSummary, beforeWrite: MutationStartGuard = () => true) {
   const payload = { device_id: device.id };
   const result = await confirmedDelete<{ devices: ESPHomeDeviceSummary[] }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`, "esphome.device.delete", payload, {
     target_entity: "ESPHomeDevice",
     target_id: device.id,
     target_label: device.name,
     reason: "Remove ESPHome access device"
-  });
-  return result.devices;
+  }, {}, beforeWrite);
+  return isMutationNotStarted(result) ? result : result.devices;
 }
-export function testESPHomeDevice(device: ESPHomeDeviceSummary) {
+export function testESPHomeDevice(device: ESPHomeDeviceSummary, beforeWrite: MutationStartGuard = () => true) {
   const payload = { device_id: device.id };
   return confirmedPost<{ ok: boolean; cover_count: number; stream?: string }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}/test`, "esphome.device.test", payload, {
     target_entity: "ESPHomeDevice",
     target_id: device.id,
     target_label: device.name,
     reason: "Test ESPHome access device"
-  }, {});
+  }, {}, beforeWrite);
 }

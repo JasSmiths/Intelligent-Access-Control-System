@@ -5,6 +5,7 @@ import type { SettingFieldDefinition } from "../../lib/settings";
 import { IntegrationFeedback } from "./catalog";
 
 export function ProviderSettingsGrid({
+  disabled = false,
   fieldAction,
   fields,
   form,
@@ -12,6 +13,7 @@ export function ProviderSettingsGrid({
   onChange,
   revealPasswordValue
 }: {
+  disabled?: boolean;
   fieldAction?: (field: SettingFieldDefinition) => React.ReactNode;
   fields: SettingFieldDefinition[];
   form: Record<string, string>;
@@ -23,6 +25,7 @@ export function ProviderSettingsGrid({
     <div className="settings-form-grid">
       {fields.map((field) => (
         <SettingField
+          disabled={disabled}
           action={fieldAction?.(field)}
           field={field}
           key={field.key}
@@ -63,8 +66,4 @@ export function IntegrationFeedbackPanel({ feedback }: { feedback: IntegrationFe
       </div>
     </div>
   );
-}
-
-export function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
