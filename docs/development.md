@@ -100,7 +100,9 @@ lock, and builds both images.
 
 The backend lock includes `multidict` 6.9.1, which fixes the C-extension
 reference leak in [GHSA-54p9-h82j-f925](https://github.com/aio-libs/multidict/security/advisories/GHSA-54p9-h82j-f925).
-Preserve this fix when refreshing the dependency lock.
+The frontend lock includes `source-map-js` 1.2.2, which rejects malformed or
+oversized indexed source-map offsets ([GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)).
+Preserve these fixes when refreshing the dependency locks.
 
 Use the [isolated validation harness](validation.md) for backend regression.
 If backend source is mounted into a running installation, perform code changes
