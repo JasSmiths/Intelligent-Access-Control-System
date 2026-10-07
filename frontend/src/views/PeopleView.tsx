@@ -7,7 +7,7 @@ import { useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { activeManagedCovers, titleCase, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
-import { Badge, EmptyState } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState } from "../ui/primitives";
 import type { HomeAssistantManagedCover, Person } from "../api/types";
 
 import { directoryGroupDefaultOpen, groupPeopleByDirectoryGroup } from "../features/directory/model";
@@ -19,7 +19,8 @@ export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantM
   const directoryPage = useDirectoryPage("people", [], { query });
   const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
   const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
-  const referencesReady = groupCatalog.ready && scheduleCatalog.ready;
+  const readError = directoryPage.error || groupCatalog.error || scheduleCatalog.error;
+  const referencesReady = directoryPage.ready && groupCatalog.ready && scheduleCatalog.ready;
   const signals = React.useContext(ReadSignalsContext);
   const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
@@ -61,7 +62,7 @@ export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantM
         </button>
       </div>
 
-      {groupCatalog.error || scheduleCatalog.error ? <div role="alert">{groupCatalog.error || scheduleCatalog.error}</div> : null}
+      {readError ? <ErrorState title="People data unavailable" description={readError} onRetry={() => void refresh().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
@@ -114,7 +115,7 @@ export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantM
               </DirectoryGroupAccordion>
             ))}
           </div>
-        ) : (
+        ) : readError ? null : !directoryPage.ready ? <LoadingState label="Loading people" /> : (
           <EmptyState icon={Users} label="No people match this view" description={query ? "Try another name, group, or registration in search." : "Add people to connect their vehicles, schedules, and access preferences."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!referencesReady} type="button"><Plus size={15} /> Create person</button> : undefined} />
         )}
       </div>
@@ -134,7 +135,6 @@ export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantM
           person={selectedPerson}
           schedules={schedules}
           setPageError={setError}
-          vehicles={[]}
         />
       ) : null}
     </section>

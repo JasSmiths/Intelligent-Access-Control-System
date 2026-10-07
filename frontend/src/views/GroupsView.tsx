@@ -10,7 +10,7 @@ import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
 import { matches, titleCase } from "../lib/format";
-import { Badge, EmptyState, PanelHeader } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState, PanelHeader } from "../ui/primitives";
 import type { Group, Person } from "../api/types";
 
 import { groupCategoryTone } from "../features/directory/model";
@@ -65,7 +65,7 @@ export function GroupsView({ query }: { query: string }) {
         </button>
       </div>
 
-      {catalog.error ? <div role="alert">{catalog.error}</div> : null}
+      {catalog.error ? <ErrorState title="Groups unavailable" description={catalog.error} onRetry={() => void refresh().catch(() => undefined)} retrying={catalog.loading} /> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
@@ -96,7 +96,7 @@ export function GroupsView({ query }: { query: string }) {
               );
             })}
           </div>
-        ) : (
+        ) : catalog.error ? null : !catalog.ready ? <LoadingState label="Loading groups" /> : (
           <EmptyState icon={Users} label="No groups match this view" description={query ? "Try another group name or category in search." : "Organise people into groups to keep access policies easier to manage."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!catalog.ready} type="button"><Plus size={15} /> Create group</button> : undefined} />
         )}
       </div>
@@ -104,8 +104,6 @@ export function GroupsView({ query }: { query: string }) {
       {modalOpen ? (
         <GroupModal
           group={selectedGroup}
-          refreshToken={0}
-          members={[]}
           mode={selectedGroup ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
@@ -122,22 +120,18 @@ export function GroupsView({ query }: { query: string }) {
 
 export function GroupModal({
   group,
-  members: initialMembers,
-  refreshToken = 0,
   mode,
   onClose: finishClose,
   onSaved: finishSaved,
   setPageError
 }: {
   group: Group | null;
-  members: Person[];
-  refreshToken?: number;
   mode: "create" | "edit";
   onClose: () => void;
   onSaved: () => Promise<void>;
   setPageError: (message: string) => void;
 }) {
-  const memberPage = useDirectoryPage("people", initialMembers, { groupId: group?.id, enabled: Boolean(group), refreshToken });
+  const memberPage = useDirectoryPage("people", [], { groupId: group?.id, enabled: Boolean(group) });
   const members = memberPage.items;
   const modalRef = React.useRef<HTMLFormElement>(null);
   const onClose = useModalClose(modalRef, finishClose);

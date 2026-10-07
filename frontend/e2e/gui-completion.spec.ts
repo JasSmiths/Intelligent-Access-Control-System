@@ -398,10 +398,11 @@ test("blocks dependent editors after an initial read failure and recovers on ret
     else await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([schedule]) });
   });
   await page.goto("/schedules");
-  await expect(page.getByRole("heading", { name: "Site data unavailable" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New Schedule" })).toHaveCount(0);
+  const failure = page.getByRole("alert").filter({ hasText: "Schedules unavailable" });
+  await expect(failure).toBeVisible();
+  await expect(page.getByRole("button", { name: "New Schedule" })).toBeDisabled();
   unavailable = false;
-  await page.getByRole("button", { name: "Retry" }).click();
+  await failure.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("button", { name: "New Schedule" })).toBeVisible();
   await expect(page.getByText("Weekday access").first()).toBeVisible();
   expect(unexpected).toEqual([]);

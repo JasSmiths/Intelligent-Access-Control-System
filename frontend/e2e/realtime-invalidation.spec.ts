@@ -5,15 +5,17 @@ const vehicle = { id: "vehicle", registration_number: "AB12 CDE", make: "Ford", 
 const person = { id: "person", first_name: "Ada", last_name: "Resident", display_name: "Ada Resident", group_id: null, group: null, category: null, schedule_id: null, schedule: null, vehicles: [], is_active: true, profile_photo_url: null, garage_door_entity_ids: [], home_assistant_presence_input_boolean_entity_ids: [] };
 const event = { id: "event", registration_number: "AB12 CDE", direction: "entry", decision: "granted", confidence: .98, occurred_at: now, anomaly_count: 0, visitor_name: null, snapshot_url: null, movement_saga: null };
 
-async function fixtures(page: Page) {
+async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicles") {
   const unexpected: string[] = [];
   let changed = false;
+  let directoryUnavailable = Boolean(initialDirectoryFailure);
   let connected = false;
   let send: (type: string, payload: Record<string, unknown>) => void = () => { throw new Error("Fixture stream has not connected"); };
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() !== "GET") { unexpected.push(`${request.method()} ${url.pathname}`); await route.abort("blockedbyclient"); return; }
+    if (directoryUnavailable && url.pathname === `/api/v1/${initialDirectoryFailure}`) { await route.fulfill({ status: 503, json: { detail: "Synthetic directory outage" } }); return; }
     if (changed && url.pathname === "/api/v1/groups") { await route.fulfill({ status: 503, json: { detail: "Synthetic unrelated groups outage" } }); return; }
     let body: unknown;
     switch (url.pathname) {
@@ -40,6 +42,7 @@ async function fixtures(page: Page) {
   });
   return {
     unexpected,
+    recoverDirectory: () => { directoryUnavailable = false; },
     async update(type: string, payload: Record<string, unknown> = {}) {
       await expect.poll(() => connected).toBe(true);
       changed = true;
@@ -100,6 +103,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.locator(".events-table-card").getByText("LATEST", { exact: true })).toBeVisible();
     await expect(activity).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath(`events-realtime-${viewport.width}.png`), fullPage: true });
+    expect(fixture.unexpected).toEqual([]);
+  });
+}
+
+for (const kind of ["people", "vehicles"] as const) {
+  test(`${kind} distinguishes an initial failed page from empty results and recovers locally`, async ({ page }) => {
+    const fixture = await fixtures(page, kind);
+    await page.goto(`/${kind}`);
+    const failure = page.getByRole("alert").filter({ hasText: `${kind === "people" ? "People" : "Vehicles"} data unavailable` });
+    await expect(failure).toContainText("Synthetic directory outage");
+    await expect(page.getByRole("button", { name: kind === "people" ? "Add Person" : "Add Vehicle", exact: true })).toBeDisabled();
+    await expect(page.getByText(`No ${kind} match this view`, { exact: true })).toHaveCount(0);
+    fixture.recoverDirectory();
+    await failure.getByRole("button", { name: "Try again" }).click();
+    await expect(failure).toHaveCount(0);
+    await expect(page.getByRole("button", { name: kind === "people" ? "Add Person" : "Add Vehicle", exact: true })).toBeEnabled();
     expect(fixture.unexpected).toEqual([]);
   });
 }
