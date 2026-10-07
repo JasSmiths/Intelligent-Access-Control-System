@@ -53,7 +53,7 @@ describe("generated workflow contracts", () => {
       });
       observed = rule;
       return <NotificationWorkflowEditor rule={rule} actionableOptions={[]} cameras={[]} feedback={null}
-        gateMalfunctionStageOptions={[]} integrations={[]} people={[]} schedules={[]} saving={false} testing={false}
+        gateMalfunctionStageOptions={[]} integrations={[]} schedules={[]} saving={false} testing={false}
         trigger={undefined} variables={[]} previewActions={renderWorkflowPreview(rule.actions, {})}
         onUpdate={setRule} onAddAction={() => setRule((current) => ({...current, actions: [createWorkflowAction("in_app")]}))}
         onAddCondition={vi.fn()} onCancel={vi.fn()} onDelete={vi.fn()} onSave={vi.fn()} onSendTest={vi.fn()}

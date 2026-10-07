@@ -21,5 +21,5 @@ export function useSchedules() {
     } finally { if (!signal.aborted) setLoading(false); }
   }, []);
   const refresh = useCoordinatedRead(read, schedulesEventMatches);
-  return { items, ready, loading, error, refresh };
+  return { items, ready, loading, error, refresh, removeAccepted: (id: string) => setItems((current) => current.filter((item) => item.id !== id)) };
 }

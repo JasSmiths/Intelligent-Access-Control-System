@@ -1,3 +1,4 @@
+import { useSchedules } from "../schedules/reads";
 import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
@@ -16,9 +17,11 @@ import { NotificationWorkflowEditor } from "./NotificationEditor";
 import { notificationActionLabel, cloneNotificationRule, createWorkflowDraft, groupNotificationRulesByTriggerCategory, notificationActionWithSupportedActionable, renderWorkflowPreview, workflowRulePayload } from "./notificationModel";
 import { NotificationActionModal, NotificationConditionModal, NotificationTriggerModal } from "./NotificationSelection";
 
-export function NotificationsView({ currentUser, people, refreshToken, schedules }: { currentUser: UserAccount; people: Person[]; refreshToken: number; schedules: Schedule[] }) {
-  const { data, rules, setRules, loading, error, load } = useWorkflowData(workflowApi.getNotificationData, refreshToken);
+export function NotificationsView({ currentUser }: { currentUser: UserAccount }) {
+  const { data, rules, setRules, loading, error, load } = useWorkflowData(workflowApi.getNotificationData);
   const catalog = data?.catalog ?? null;
+  const scheduleCatalog = useSchedules();
+  const schedules = scheduleCatalog.items;
   const [draft, setDraft] = React.useState<NotificationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
@@ -48,7 +51,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   const activeDraft = draft;
   const cameras = useNotificationCameras(Boolean(draft?.actions.some((action) =>
     action.type === "mobile" || action.type === "in_app"
-  )), refreshToken);
+  )));
   const workflowModalMode: "editor" | "trigger" | "action" = modal === "trigger" || modal === "action" ? modal : "editor";
   const previewContext = catalog?.mock_context ?? {};
   const previewActions = activeDraft
@@ -270,7 +273,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                     embedded
                     currentUser={currentUser}
                     integrations={catalog?.integrations ?? []}
-                    people={people}
+
                     onClose={() => setModal(null)}
                     onDirtyChange={setSelectorDirty}
                     onSelect={(action) => {
@@ -293,7 +296,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
                       cameras={cameras}
                       feedback={feedback}
                       integrations={catalog?.integrations ?? []}
-                      people={people}
+
                       previewActions={previewActions}
                       rule={activeDraft}
                       saving={saving}
@@ -322,7 +325,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
 
       {activeDraft && modal === "condition" ? (
         <NotificationConditionModal
-          people={people}
+
           schedules={schedules}
           onClose={() => setModal(null)}
           onSelect={(condition) => {

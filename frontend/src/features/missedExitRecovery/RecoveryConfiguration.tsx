@@ -15,13 +15,13 @@ const ownerValues = (person?: Person): OwnerConfig => ({ enabled: person?.missed
 const sameOwnerValues = (a: OwnerConfig, b: OwnerConfig) => a.enabled === b.enabled && a.tracker === b.tracker;
 const newOwnerDraft = (person?: Person): OwnerDraft => ({ config: ownerValues(person), dirty: false, trackerTouched: false, saved: null, autoTarget: null });
 
-export function RecoveryConfiguration({ refresh }: { refresh: () => Promise<void> }) {
+export function RecoveryConfiguration() {
   const settings = useSettings("missed_exit_recovery", settingsEventMatches);
   const [config, setConfig] = React.useState({ enabled: false, latitude: "", longitude: "" });
   const [globalDirty, setGlobalDirty] = React.useState(false);
   const [settingsKnown, setSettingsKnown] = React.useState(false);
   const [ownerId, setOwnerId] = React.useState("");
-  const personOptions = useDirectoryOptions("people", [], ownerId ? [ownerId] : []);
+  const personOptions = useDirectoryOptions("people", ownerId ? [ownerId] : []);
   const owner = personOptions.items.find((person) => person.id === ownerId);
   const [ownerDraft, setOwnerDraft] = React.useState<OwnerDraft>(() => newOwnerDraft());
   const ownerConfig = ownerDraft.config;
@@ -109,7 +109,7 @@ export function RecoveryConfiguration({ refresh }: { refresh: () => Promise<void
       const values = ownerValues(result);
       setOwnerDraft({ ...ownerDraft, config: values, dirty: false, saved: values, autoTarget: null });
       setSaved("Owner recovery settings saved.");
-      try { await refresh(); } catch { setError("Owner settings were saved, but the directory could not be refreshed."); }
+      try { await personOptions.refresh(); } catch { setError("Owner settings were saved, but the directory could not be refreshed."); }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save owner settings"); }
     finally { setSaving(false); }
   }

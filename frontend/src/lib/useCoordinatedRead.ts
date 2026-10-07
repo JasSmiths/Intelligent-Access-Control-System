@@ -44,12 +44,13 @@ export function useCoordinatedRead(
     return () => owner.dispose();
   }, [owner]);
   React.useLayoutEffect(() => {
+    if (!enabled) return;
     const unsubscribe = signals?.subscribe((signal) => {
       if (signal.type === "realtime") return matchesRef.current(signal.message) ? owner.request(true) : undefined;
       return owner.request(signal.reason === "connection", signal.reason === "manual");
     });
     return () => unsubscribe?.();
-  }, [owner, signals]);
+  }, [owner, signals, enabled]);
   React.useEffect(() => { void owner.request().catch(() => undefined); }, [owner]);
   return React.useCallback(() => owner.request(false, true), [owner]);
 }

@@ -33,7 +33,7 @@ export type AlertActionTarget = {
   action: "resolve" | "reopen";
 };
 
-export function AlertsView({ refreshDashboard, targetId }: { refreshDashboard: () => Promise<void>; targetId: string | null }) {
+export function AlertsView({ refreshAlerts, targetId }: { refreshAlerts: () => Promise<void>; targetId: string | null }) {
   const [focused, setFocused] = React.useState<Anomaly | null>(null);
   const [statusFilter, setStatusFilter] = React.useState<"open" | "resolved" | "all">("open");
   const [severityFilter, setSeverityFilter] = React.useState<"all" | AlertSeverity>("all");
@@ -111,8 +111,8 @@ export function AlertsView({ refreshDashboard, targetId }: { refreshDashboard: (
         });
       }
       await closeResolution();
-      history.refresh();
-      try { await refreshDashboard(); } catch { setError("Alert saved, but dashboard refresh is unavailable."); }
+      const reads = await Promise.allSettled([history.reload(), refreshAlerts()]);
+      if (reads.some((result) => result.status === "rejected")) setError("Alert saved, but alert data could not be refreshed. Refresh alerts to retry the read.");
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Unable to update alert");
     } finally {

@@ -43,12 +43,23 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   A mapped closure-only sentence correction passed docs checks with all runtime,
   test, frontend, schema and harness bytes unchanged. All 727 committed source
   hashes equal the approved candidate; source, cleanup and operational state are clean.
-- Current checkpoint: P5 bounded cleanup and in-session information reset are
-  implemented, awaiting the required full gate and Astra exact patch approval.
-  P3 frontend reads develop separately from approved P2, with sequential workflow
-  ownership. P4 integration editor lifetime remains a separate frontend slice.
+- Approved P5 checkpoint: `208f3813b1e4c942662116d349529d5a26d40744`,
+  tree `ba52d8b379f56be8551adec3906d35e84115cd0f`. Astra Ultra approved
+  final mapped source `b2a13f1f3e1daeff9dec241d06f4040dbe126e2b08bff9ad6b6a1c41d310d414`
+  and patch `f43b63827222051f882e5ec3d9578dcfa4336d71fba934950f211234a824067d`.
+  The full gate retained 148 entries: its sole old fake missing the now-required
+  commit was repaired with a correctly specced AsyncSession. All 39 complete
+  affected action-confirmation/hardware HTTP tests passed; F821, host 22/29,
+  docs 111 links and diff checks passed. The final two-file test/docs mapping
+  preserves all runtime/schema/dependency/frontend/harness bytes from the full
+  run; every other full-gate check passed. All 727 committed source hashes equal
+  the approved candidate, with clean source/cleanup and unchanged operational state.
+  Retention dispositions were accepted; E4 integrated conformance remains pending.
+- Current checkpoint: approved P3 frontend range is being integrated sequentially
+  after P5. Its 244 frontend hashes remain unchanged; backend source retains the
+  approved P5 tree. P4 integration editor lifetime remains a separate frontend slice.
   The brief initial shared-checkout editing period was separated before the first
-  validation checkpoint; integration remains sequential.
+  validation checkpoint; integration remains sequential and separately reviewed.
 - Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
   `runtime-pdf/iacs-runtime-pdf-ssq2ubtb`, `p0-p1-snapshot-to-candidate.json`,
   `p0-p1-astra-approval.json` and `p0-p1-integration.json`, relative to the
@@ -63,15 +74,63 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   `p4-candidate-final.json`, `p4-docs-only-source-mapping.json`,
   `p4-evidence-summary.json`, `p4-astra-approval.json`,
   `p4-commit-equivalence.json` and `p4-benchmark-coordination.json`.
-  P5 evidence is retained separately; design approval is not patch approval.
+- P5 retained evidence: `p5-validation/iacs-validation-64wf0zqw`,
+  `p5-candidate-final.json`, `p5-snapshot-to-candidate.json`,
+  `p5-corrected-required-ports.log`, `p5-evidence-summary.json`,
+  `p5-astra-approval.json`, `p5-commit-equivalence.json` and
+  `p5-benchmark-coordination.json`. The failed original snapshot stays retained.
 - Deployment, production migrations and live provider/hardware tests are excluded.
+
+## P3 frontend evidence
+
+The separate frontend branch was implemented from approved P2 commit
+`834daa7f2a59707dd5788de6caf4fa71aae8e4f8` and rebased onto approved backend P4
+commit `3416d577169943e1c9a7f4db240c051e525cc7da`. Feature-owned actual-HTTP reads replace
+shell collections, seed props, numeric invalidation tokens and central feature
+route/event mappings. Directory/history/report/dashboard and remaining settings,
+integration, recovery, log, pass, chart and workflow readers subscribe locally.
+Local save/delete/retry refreshes use the required feature owners; global manual
+and connection signals remain explicit shell composition. Accepted mutations keep
+their receipts when a subsequent read fails; local retry reads remain feature-owned.
+
+The corrected frozen frontend passed the locked Node 22 build and 311 unit tests
+in 54 files. Browser coverage consists of the earlier 140-case Chromium/WebKit
+run, 78 passing affected cases after the receipt correction, and eight passing
+new integration receipt cases after correcting their HTTP-status-prefixed error
+selectors. The initial eight selector failures remain retained. Hash mappings
+carry forward the 62 unchanged browser cases; the final coverage is 148 distinct
+cases, not the sum of repeated runs. The Node snapshot differs from the final
+frontend only in four selectors in that browser fixture.
+
+Equivalent-output production assets, built with the same locked Node 22 image,
+passed the identical inert 12/2,000-record workflow against baseline `03f56bed`
+and the corrected candidate in Chromium. Initial/mutation/navigation/100-event
+burst GET counts changed from 10/10/9/8 to 8/3/5/4 at both sizes. All requested
+GETs completed, with no aborted, failed or pending requests. At 2,000 records,
+loaded UTF-8 JSON bytes changed from 92,219/122,105/121,891/243,328 to
+31,299/61,030/60,934/121,656. These synthetic response-body bytes do not establish
+database work or production latency. The development server comparison remains
+separate, including its initial 12-to-13 request increase under StrictMode.
+Beyond-500 subject search is separate correctness evidence. Existing unpaged
+group/schedule catalog contracts remain unchanged; full Dashboard presence awaits
+P7.
+
+Evidence under the retained programme root: `p3-corrected-node22/`,
+`p3-corrected-browser.json`, `p3-corrected-receipt-browser.json`,
+`p3-corrected-receipt-source.json`, `p3-production-comparison/` and the final
+candidate/coverage mapping receipts. Astra Ultra approved the complete 100-path
+P3 delta, tree `13e9fb2c51313b8b2e24567491a22e5f0b9b1093`, patch
+`e9244ce6dd986e41229d9f4f2c88585e1b15736be876f9679d4dc3627ded51dc`.
+Commit `aeedb724046c8d7a5b67ed0a7094eb8e21941745` preserves that exact tree.
+`p3-astra-approval.json` retains the verbatim approval and immutable frontend
+archive equivalence; the rebased source/docs mapping is retained separately.
 
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
 | --- | --- | --- | --- |
 | AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Closed / Astra approved P2 exact candidate |
-| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
+| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
@@ -79,36 +138,36 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Pending / pending |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2/P4 coverage/evidence approved; continuous P3–P9 checks pending / Astra approved P0/P2/P4 |
-| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Implemented; full validation/review pending / pending |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2/P3/P4/P5 evidence approved; continuous P6–P9 checks pending / Astra approved P0/P2/P3/P4/P5 |
+| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Pending / pending |
-| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Implemented; full validation/review pending / pending |
+| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 
 ## Simplification candidates
 
 | Candidate | Disposition and owner | Required evidence or retention reason | Status / Astra approval |
 | --- | --- | --- | --- |
-| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Implemented; full validation/review pending / pending |
-| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Implemented; full validation/review pending / pending |
-| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Implemented; full validation/review pending / pending |
+| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | External-admission private method | Explicit supported admission interface; P6 | One admission implementation; preserve execution/admission ordering | Pending / pending |
-| Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Pending / pending |
+| Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Closed / Astra approved P3 |
 | OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Pending / pending |
 | Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Pending / pending |
-| Report first-500/secondary subject filtering | Replace with bounded server search and selected hydration; P3 | Subject beyond 500 and server-only searchable-field fixtures | Pending / pending |
-| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Implemented; full validation/review pending / pending |
-| IACS_SEED_DEMO_DATA | Retain pending external-consumer evidence; P5 | Parsed public deployment option; audit did not establish all external configuration users | Planned retention / pending |
-| Calendar SDK fallback shapes | Retain unless locked-SDK/serialized-session fixtures prove obsolete; P5/P8 | Vendor/data compatibility not established by absence of one call path | Planned retention / pending |
-| Public legacy cover aliases | Retain; P5 | External consumers unknown; confirmation bindings remain supported | Planned retention / pending |
-| Vehicle.person_id and assignments | Retain; P5 | Derived only for exactly one assignee; attribution/authority semantics require it | Planned retention / pending |
-| Camera provider interfaces and explicit unsupported local mode | Retain; P5 | Active isolation contract and deliberate no-external-analysis behavior | Planned retention / pending |
-| Python Playwright and pgvector image | Retain and fix browser packaging; P1/P5 | Active PDF renderer and supported historical vector migration chain | Planned retention / pending |
-| Historical retired names, upgrade snapshots and redaction | Retain; P5 | Upgrade checksums and durable audit interpretation; active retired operations stay unavailable | Planned retention / pending |
-| Prototype and screenshots | Retain; P5 | Separate fixture/design evidence; no production import; no evidence-retirement request | Planned retention / pending |
-| scripts/backend-pytest and scripts/load-test.mjs | Retain; P5 | External operational use unknown; neither used for this programme's isolated validation | Planned retention / pending |
-| V2 privacy CI workflow | Retain; P5 | External candidate-bundle process; process retirement not established | Planned retention / pending |
+| Report first-500/secondary subject filtering | Replace with bounded server search and selected hydration; P3 | Subject beyond 500 and server-only searchable-field fixtures | Closed / Astra approved P3 |
+| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| IACS_SEED_DEMO_DATA | Retain pending external-consumer evidence; P5 | Parsed public deployment option; audit did not establish all external configuration users | Retained / Astra approved P5 |
+| Calendar SDK fallback shapes | Retain unless locked-SDK/serialized-session fixtures prove obsolete; P5/P8 | Vendor/data compatibility not established by absence of one call path | Retained / Astra approved P5 |
+| Public legacy cover aliases | Retain; P5 | External consumers unknown; confirmation bindings remain supported | Retained / Astra approved P5 |
+| Vehicle.person_id and assignments | Retain; P5 | Derived only for exactly one assignee; attribution/authority semantics require it | Retained / Astra approved P5 |
+| Camera provider interfaces and explicit unsupported local mode | Retain; P5 | Active isolation contract and deliberate no-external-analysis behavior | Retained / Astra approved P5 |
+| Python Playwright and pgvector image | Retain and fix browser packaging; P1/P5 | Active PDF renderer and supported historical vector migration chain | Retained / Astra approved P5 |
+| Historical retired names, upgrade snapshots and redaction | Retain; P5 | Upgrade checksums and durable audit interpretation; active retired operations stay unavailable | Retained / Astra approved P5 |
+| Prototype and screenshots | Retain; P5 | Separate fixture/design evidence; no production import; no evidence-retirement request | Retained / Astra approved P5 |
+| scripts/backend-pytest and scripts/load-test.mjs | Retain; P5 | External operational use unknown; neither used for this programme's isolated validation | Retained / Astra approved P5 |
+| V2 privacy CI workflow | Retain; P5 | External candidate-bundle process; process retirement not established | Retained / Astra approved P5 |
 | Empty retired catalog group | Removed early by definition-derived catalog; P2/AM-11 | Catalog omits empty groups; historical names and upgrade fixtures retained | Closed / Astra approved P2 |
-| Speculative runtime dependency deletion | Retain locked dependencies; P5 | No package proven unused; preserve supported migrations and relevant security fixes | Planned retention / pending |
+| Speculative runtime dependency deletion | Retain locked dependencies; P5 | No package proven unused; preserve supported migrations and relevant security fixes | Retained / Astra approved P5 |
 
 ## Extension conformance and final gate
 
@@ -196,5 +255,5 @@ attribution and camera interfaces remain active contracts; Python Playwright,
 pgvector and exact locked dependencies support active rendering/migration paths;
 historical names/checksums/redaction preserve audit interpretation; the prototype,
 screenshots and V2 privacy workflow are separate retained evidence/processes.
-These are explicit retention decisions awaiting Astra's P5 exact-candidate review,
-not claims of deletion or completed final integrated conformance.
+Astra accepted these explicit retention decisions in the exact P5 review; they
+are not claims of deletion or completed final integrated conformance.

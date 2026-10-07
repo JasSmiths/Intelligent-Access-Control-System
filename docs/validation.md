@@ -25,7 +25,7 @@ With the locked frontend dependencies installed, run from `frontend/`:
 
 ```sh
 npx playwright install chromium webkit
-npm run test:e2e
+CI=1 npm run test:e2e
 ```
 
 Browser installation can download packages. The
@@ -34,7 +34,8 @@ WebKit on loopback port 5174. Its [Vite configuration](../frontend/vite.e2e.conf
 has no backend proxy. The [browser suites](../frontend/e2e/) fulfill synthetic
 `/api/v1` requests, reject unexpected requests and close WebSockets. Outside CI,
 Playwright may reuse an existing server: check that port 5174 belongs to this
-fixture-only configuration before running.
+fixture-only configuration before running. Final candidate gates use `CI=1` so
+a stale server cannot silently test a different checkout.
 
 Review affected screens at desktop, tablet, narrow phone and short landscape
 sizes. Check overflow, readable text, reachable actions, focus, editor dismissal
@@ -51,6 +52,29 @@ desktop previews, tablet/landscape resizing, animated dismissal and focus
 restoration, and reduced motion.
 It retains light/dark phone and desktop screenshots. Verify keyboard opening and
 closing on a physical iPhone before claiming device-specific keyboard coverage.
+
+The [feature-read fixtures](../frontend/e2e/feature-reads.spec.ts) exercise remote
+subject search beyond the former first-500 boundary, selected-ID hydration and
+coalesced preview reads. The [ownership evidence fixture](../frontend/e2e/ownership-evidence.spec.ts)
+records request counts and loaded JSON bytes for equivalent initial-page,
+confirmed mutation, navigation and realtime-burst workflows at small and target
+scale. Run the identical fixture against the preserved baseline and candidate,
+retain source/runtime/lock/fixture identities, and compare equivalent visible
+outputs. Report the beyond-500 case separately as correctness evidence. Loaded
+payload changes do not establish reduced database work or production speedups;
+unchanged unpaged group/schedule contracts and temporary full presence reads must
+remain explicit limitations. Build and unit evidence uses the guide's locked
+Node 22 runtime; host browser runtime identity is recorded separately. If development
+effect replay changes request counts, retain those results and compare the same
+fixture against locked production assets served sequentially from disposable
+preview servers. Record requested/completed/aborted reads and define the payload
+measurement.
+
+The [integration receipt fixtures](../frontend/e2e/integration-receipts.spec.ts)
+verify that accepted settings, Apprise and calendar mutations retain their result
+after a provider metadata read fails, while rejected mutations remain failures.
+Composed owner tests also cover accepted pass/device/user changes, local refresh
+isolation and observed retry errors. These inert fixtures do not send to providers.
 
 ## Final runtime PDF capability
 

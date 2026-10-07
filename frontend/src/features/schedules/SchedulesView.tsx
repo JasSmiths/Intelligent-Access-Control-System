@@ -1,6 +1,5 @@
 import { schedulesEventMatches } from "../directory/invalidation";
 import { useSchedules } from "./reads";
-import { ReadSignalsContext } from "../../lib/readSignals";
 import { CalendarDays, CheckCircle2, Clock3, Lock, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import React from "react";
 import { createActionConfirmation } from "../../api/client";
@@ -14,8 +13,7 @@ import { ScheduleEditor } from "./ScheduleEditor";
 
 export function SchedulesView({ query }: { query: string }) {
   const catalog = useSchedules(); const schedules = catalog.items;
-  const signals = React.useContext(ReadSignalsContext);
-  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? catalog.refresh(), [signals, catalog.refresh]);
+  const refresh = catalog.refresh;
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedSchedule, setSelectedSchedule] = React.useState<Schedule | null>(null);
   const [error, setError] = React.useState("");
@@ -57,10 +55,14 @@ export function SchedulesView({ query }: { query: string }) {
     setError("");
     try {
       await schedulesApi.delete(schedule);
-      await refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete schedule");
+      return;
     }
+    catalog.removeAccepted(schedule.id);
+    setSaved("Schedule deleted.");
+    try { await refresh(); }
+    catch { setError("Schedule deleted, but the list could not be refreshed. Try again to reload the list."); }
   };
 
   const updateDefaultPolicy = async (policy: "allow" | "deny") => {

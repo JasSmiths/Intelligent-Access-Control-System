@@ -9,7 +9,7 @@ import { AutomationRunDetails, AutomationRunHistory } from "./AutomationRunHisto
 const admin = { id: "synthetic-admin", role: "admin" } as UserAccount;
 const run: AutomationRun = contract;
 const page: AutomationRunPage = { items: [run], next_cursor: null };
-const props = { currentUser: admin, refreshToken: 0, rules: [] };
+const props = { currentUser: admin, rules: [] };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((yes) => { resolve = yes; });
@@ -26,7 +26,7 @@ it("opens run history from the automation owner only when requested", async () =
   vi.spyOn(workflowApi, "getAutomationData").mockResolvedValue({ rules: [], catalog: {
     triggers: [], conditions: [], actions: [], variables: [], notification_rules: [], garage_doors: [], mock_context: {},
   } });
-  render(<AutomationsView currentUser={admin} people={[]} vehicles={[]} refreshToken={0} />);
+  render(<AutomationsView currentUser={admin} />);
   const open = await screen.findByRole("button", { name: "Run history" });
   expect(workflowApi.getAutomationRuns).not.toHaveBeenCalled();
   fireEvent.click(open);
@@ -95,7 +95,7 @@ it("aborts pagination on refresh and ignores a late older-page result", async ()
   fireEvent.click(await screen.findByRole("button", { name: "Load older runs" }));
   const signal = vi.mocked(workflowApi.getAutomationRuns).mock.calls[1][1]!.signal!;
   expect(workflowApi.getAutomationRuns).toHaveBeenLastCalledWith(cursor, { signal });
-  view.rerender(<AutomationRunHistory {...props} refreshToken={1} />);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh run history" }));
   expect(signal.aborted).toBe(true);
   await act(async () => older.resolve({ items: [{ ...run, id: staleId }], next_cursor: null }));
   await waitFor(() => expect(screen.queryByText("Loading run history…")).not.toBeInTheDocument());

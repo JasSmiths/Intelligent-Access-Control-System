@@ -15,8 +15,8 @@ function useDashboardRead<T>(path: string, initial: T) {
     try { const result = await api.get<T>(path, { signal }); if (!signal.aborted) setValue(result); }
     catch (failure) { if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Dashboard read unavailable"); throw failure; }
   }, [path]);
-  useCoordinatedRead(read, dashboardEventMatches);
-  return { value, setValue, error };
+  const refresh = useCoordinatedRead(read, dashboardEventMatches);
+  return { value, setValue, error, refresh };
 }
 export function useDashboardReads() {
   // Presence retains the current unpaged contract until the P7 bounded summary migration.
@@ -29,5 +29,10 @@ export function useDashboardReads() {
     const finalized = accessEventFromRealtime(signal.message);
     if (finalized) events.setValue((current) => [finalized, ...current.filter((item) => item.id !== finalized.id)].slice(0, 40));
   }), [signals, events.setValue]);
-  return { presence: presence.value, expectedPresence: expected.value, events: events.value, error: presence.error || expected.error || events.error };
+  const refresh = React.useCallback(async () => {
+    const results = await Promise.allSettled([presence.refresh(), expected.refresh(), events.refresh()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }, [presence.refresh, expected.refresh, events.refresh]);
+  return { refresh, presence: presence.value, expectedPresence: expected.value, events: events.value, error: presence.error || expected.error || events.error };
 }

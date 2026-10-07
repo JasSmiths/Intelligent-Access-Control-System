@@ -26,14 +26,14 @@ for (const kind of ["people", "vehicles"] as const) {
       if (url.searchParams.has("cursor")) return page([row("second", changed ? "Fresh page" : "Page two")]);
       return page([row("first", "First")], "page-two");
     });
-    const { result } = renderHook(() => ({ directory: useDirectoryPage(kind, [], { query: "keep-filter" }), selected: useDirectoryIdentities(kind, [], ["selected"]), groups: useGroups() }), { wrapper });
+    const { result } = renderHook(() => ({ directory: useDirectoryPage(kind, { query: "keep-filter" }), selected: useDirectoryIdentities(kind, ["selected"]), groups: useGroups() }), { wrapper });
     await waitFor(() => expect(result.current.directory.items[0]?.id).toBe("first"));
     act(() => result.current.directory.next());
     await waitFor(() => expect(result.current.directory.items[0]?.id).toBe("second"));
     const before = read.mock.calls.filter(([path]) => path.includes("cursor=page-two")).length;
     changed = true; advance();
     const message: RealtimeMessage = { type: "audit.log.created", payload: { log: { action: "person.update" } } };
-    await act(async () => { await expect(signals.publish({ type: "realtime", message })).rejects.toThrow("Catalog offline"); });
+    await act(async () => { signals.publish({ type: "realtime", message }); });
     expect(result.current.directory.items).toEqual([row("second", "Fresh page")]);
     expect(result.current.selected.items).toEqual([row("selected", "Fresh selected")]);
     expect(result.current.directory.canPrevious).toBe(true);
@@ -50,18 +50,17 @@ it("awaits actual directory HTTP and retains exactly one trailing read for a 100
     try { return count === 1 ? await blocked.promise : page([{ id: "fresh", display_name: "Fresh" } as Person]); }
     finally { active -= 1; }
   });
-  const { result } = renderHook(() => useDirectoryPage("people", []), { wrapper });
+  const { result } = renderHook(() => useDirectoryPage("people"), { wrapper });
   expect(read).toHaveBeenCalledOnce(); advance();
-  let pending!: Promise<void>[];
-  act(() => { pending = Array.from({ length: 100 }, () => signals.publish({ type: "realtime", message: { type: "vehicle_information.updated", payload: {} } })); });
+  act(() => { Array.from({ length: 100 }, () => signals.publish({ type: "realtime", message: { type: "vehicle_information.updated", payload: {} } })); });
   expect(read).toHaveBeenCalledOnce();
-  await act(async () => { blocked.resolve(page([{ id: "old", display_name: "Old" } as Person])); await Promise.all(pending); });
+  await act(async () => { blocked.resolve(page([{ id: "old", display_name: "Old" } as Person])); });
   expect(read).toHaveBeenCalledTimes(2); expect(maximum).toBe(1); expect(result.current.items[0]?.id).toBe("fresh");
 });
 it("aborts a stale mutation-era response before the single queued authoritative refresh", async () => {
   const { signals, wrapper } = setup(); const old = deferred<ReturnType<typeof page<Person>>>();
   const read = vi.spyOn(api, "get").mockReturnValueOnce(old.promise).mockResolvedValue(page([{ id: "saved", display_name: "Saved" } as Person]));
-  const { result } = renderHook(() => useDirectoryPage("people", []), { wrapper });
+  const { result } = renderHook(() => useDirectoryPage("people"), { wrapper });
   const oldSignal = read.mock.calls[0][1]!.signal!;
   let pending!: Promise<void>; act(() => { pending = signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   expect(oldSignal.aborted).toBe(true); expect(read).toHaveBeenCalledOnce();

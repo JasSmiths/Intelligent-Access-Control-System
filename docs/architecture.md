@@ -116,34 +116,51 @@ flow; its policy and safety limits are in [integrations](integrations.md).
 
 ## Frontend ownership
 
-[App](../frontend/src/app/App.tsx) composes the shell.
-[Navigation](../frontend/src/app/navigation.tsx) owns URLs, labels, role gates,
-and required shell data; [routes](../frontend/src/app/routes.tsx) lazily compose
-views. Route views live in `frontend/src/views/`; editors and feature logic live
-in `frontend/src/features/`. The dashboard prototype is a separate fixture app.
+[App](../frontend/src/app/App.tsx) composes authentication, navigation, account-scoped
+read signals, shared operational indicators, toast delivery and realtime transport.
+[Navigation](../frontend/src/app/navigation.tsx) owns URLs, labels and role gates;
+[routes](../frontend/src/app/routes.tsx) lazily compose feature views. Collections,
+queries, selected identities, cursors, errors and event predicates belong to their
+features rather than shell state or navigation requirements. The dashboard
+prototype is a separate fixture app.
 
 [API types and domain clients](../frontend/src/api/) define frontend contracts.
 Use [client.ts](../frontend/src/api/client.ts) for HTTP and the existing
 confirmation helpers for protected mutations. Backend permission and confirmation
 checks remain authoritative even when the UI hides an action.
 
-Directory pagination, search, selected-ID hydration and cancellation belong to
-[feature reads](../frontend/src/features/directory/reads.ts) and the
-[typed directory client](../frontend/src/api/directory.ts). The route boundary
-provides directory refresh context so nested selectors reload selected records
-outside the current page when shell data changes. Metadata refresh preserves
-local editor drafts, and selected chips remain separate from matching search rows.
-Dashboard resolves the
-identities needed for its visible data; Reports searches its subjects on the server.
-Report selection/preview/export and dashboard command receipts have dedicated
-feature hooks and components. Preserve those request and draft lifetimes when
-extending a view.
+The [read signal port](../frontend/src/lib/readSignals.ts) transports realtime
+messages and manual/connection refresh intent without selecting feature policy.
+Each owner selects events locally and awaits actual HTTP through
+[useCoordinatedRead](../frontend/src/lib/useCoordinatedRead.ts) and its independent
+[refresh coordinator](../frontend/src/lib/refreshCoordinator.ts). Relevant bursts
+retain the current read plus at most one trailing read per owner, with five-second
+coalescing. Manual local refresh cancels stale responses and awaits only the
+feature's required reads; the toolbar explicitly refreshes all mounted owners.
+Account replacement disposes subscriptions, timers and pending reads, and prevents
+old responses from publishing into the new session. Shared alerts, maintenance
+and gate controls have independent [operational owners](../frontend/src/app/operationalReads.ts).
 
-The shell's realtime modules select affected data and route refreshes; the
-[refresh coordinator](../frontend/src/app/refreshCoordinator.ts) serializes reads.
-Preserve account/request lifetime checks so stale responses cannot overwrite
-completed mutations. Show initial load failures separately from empty results,
-and retain usable data with an explicit stale state after refresh failure.
+Directory pagination, server search and selected-ID hydration belong to
+[feature reads](../frontend/src/features/directory/reads.ts) and the
+[typed directory client](../frontend/src/api/directory.ts). Fresh selected metadata
+wins over old page data; deleted selections never fall back to a seed. Refreshes
+preserve local drafts and selected chips outside matching search rows. Groups and
+schedules retain their existing unpaged catalog API contracts without client
+truncation; no bounded-response claim is made for those APIs. Dashboard full
+presence remains temporary until the P7 bounded summary migration; visible
+plate/owner metadata and active counts already use bounded directory queries.
+
+[History reads](../frontend/src/views/useHistoryPage.ts) preserve filters and the
+page-two as-of snapshot on realtime/connection signals, exposing new activity
+without jumping pages. Explicit latest refresh resets history. Reports search
+visitor subjects on the server with `q` and `limit=8`, then hydrate the selected
+ID. Preview identity uses subject IDs, range/options/folds and an explicit revision,
+independent of hydrated object-array identity. Report export and dashboard command
+receipts retain dedicated feature request lifetimes. Initial read failures appear
+separately from empty results; background failures retain usable data with an
+explicit stale/error state. Accepted mutations remain accepted when a later read
+fails.
 
 Shared editor lifecycle helpers in [ui/](../frontend/src/ui/) protect dirty drafts,
 prevent duplicate submission or dismissal while saving, and restore focus.
@@ -182,6 +199,7 @@ introduce shared abstractions only for demonstrated shared behavior.
 
 | Change | Extension point and invariants |
 | --- | --- |
+| Frontend read or invalidation | Put the typed query, result/error state and event predicate under its feature. Use the shared account signal/coordinator lifetime; test actual HTTP, cancellation, pagination, selected-ID metadata and dirty drafts. Keep pending navigation separate from displayed cursors. Do not add shell collections, route/event tables, numeric refresh tokens or seed props. |
 | Directory field or operation | Extend the [directory services](../backend/app/services/directory/), [schemas](../backend/app/schemas/directory.py) and [typed client](../frontend/src/api/directory.ts) as needed. Keep validation, assignment changes, audit and commit with the service owner; routes adapt HTTP and confirmation. Migrate every consumer of a changed contract together. |
 | Notification behavior | Use the [planner](../backend/app/services/notification_planning.py), [recipients](../backend/app/services/notification_recipients.py) or [authorization](../backend/app/services/notification_authorization.py) owner. Keep transport orchestration and durable delivery separate from policy. |
 | Automation action or trigger | Extend the [action definitions](../backend/app/services/workflows/action_definitions.py), generated contracts and explicit typed editor for actions, and the supported trigger catalog and [action handler](../backend/app/services/automation_actions.py), [webhook intake](../backend/app/services/automation_webhooks.py) or [time intake](../backend/app/services/automation_time_intake.py) owner. Preserve checked execution identities, deadlines, idempotency and uncertain outcomes; reuse command and authorization owners. |

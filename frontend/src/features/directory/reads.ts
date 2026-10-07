@@ -4,18 +4,16 @@ import { ApiError, isAbortError } from "../../api/client";
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import { directoryEventMatches } from "./invalidation";
 
-type DirectoryReadOptions = { query?: string; active?: boolean; groupId?: string; enabled?: boolean; refreshToken?: string | number };
-
-export function useDirectoryPage<K extends DirectoryKind>(kind: K, seedItems: DirectoryItem<K>[], options: DirectoryReadOptions = {}) {
+type DirectoryReadOptions = { query?: string; active?: boolean; groupId?: string; enabled?: boolean };
+export function useDirectoryPage<K extends DirectoryKind>(kind: K, options: DirectoryReadOptions = {}) {
   const { query = "", active, groupId, enabled = true } = options;
-  const refreshToken = options.refreshToken ?? 0;
-  const [page, setPage] = React.useState<DirectoryPage<DirectoryItem<K>>>({ items: seedItems, total: seedItems.length, next_cursor: null });
+  const [page, setPage] = React.useState<DirectoryPage<DirectoryItem<K>>>({ items: [], total: 0, next_cursor: null });
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [previous, setPrevious] = React.useState<(string | null)[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [ready, setReady] = React.useState(false);
   const [error, setError] = React.useState("");
-  // Store the page's query alongside its cursor so a changed search never reuses an old cursor.
+  // A changed query cannot reuse the previous query's cursor.
   const [scope, setScope] = React.useState({ query, active, groupId });
   const sameScope = scope.query === query && scope.active === active && scope.groupId === groupId;
   React.useEffect(() => {
@@ -32,60 +30,53 @@ export function useDirectoryPage<K extends DirectoryKind>(kind: K, seedItems: Di
       if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Unable to load directory");
       throw failure;
     } finally { if (!signal.aborted) setLoading(false); }
-  }, [kind, query, active, cursor, groupId, refreshToken]);
-  const refreshRead = useCoordinatedRead(read, eventMatches, enabled && sameScope, query ? 150 : 0);
-  const refresh = React.useCallback(() => { void refreshRead().catch(() => undefined); }, [refreshRead]);
+  }, [kind, query, active, cursor, groupId]);
+  const refresh = useCoordinatedRead(read, eventMatches, enabled && sameScope, query ? 150 : 0);
   return {
-    ...page, loading, ready, error, refresh, canPrevious: previous.length > 0,
+    ...page, loading, ready, error, refresh, removeAccepted: (id: string) => setPage((current) => ({ ...current, items: current.items.filter((item) => item.id !== id), total: Math.max(0, current.total - Number(current.items.some((item) => item.id === id))) })), canPrevious: previous.length > 0,
     next: () => { if (page.next_cursor) { setPrevious((current) => [...current, cursor]); setCursor(page.next_cursor); } },
     previous: () => { if (previous.length) { setCursor(previous[previous.length - 1]); setPrevious((current) => current.slice(0, -1)); } }
   };
 }
-
-export function useDirectoryIdentities<K extends DirectoryKind>(kind: K, seedItems: DirectoryItem<K>[], selectedIds: string[], providedRefreshToken?: string | number, enabled = true) {
-  const refreshToken = providedRefreshToken ?? 0;
-  const [selectedItems, setSelectedItems] = React.useState<DirectoryItem<K>[]>([]);
-  const [error, setError] = React.useState("");
+export function useDirectoryIdentities<K extends DirectoryKind>(kind: K, selectedIds: string[], enabled = true) {
   const key = [...new Set(selectedIds)].sort().join("|");
-  const seedSignature = JSON.stringify(seedItems);
-  const [resolvedKey, setResolvedKey] = React.useState<string | null>(null);
+  const identity = `${kind}:${key}`;
+  const [resolved, setResolved] = React.useState<{ identity: string; items: DirectoryItem<K>[] } | null>(null);
+  const [failure, setFailure] = React.useState<{ identity: string; message: string } | null>(null);
   const eventMatches = React.useCallback((event: Parameters<typeof directoryEventMatches>[1]) => directoryEventMatches(kind, event), [kind]);
   const read = React.useCallback(async (signal: AbortSignal) => {
-    setError("");
+    setFailure(null);
     try {
       const items = await lookupDirectory(kind, key.split("|"), { signal });
-      if (!signal.aborted) { setSelectedItems(items); setResolvedKey(key); }
-    } catch (failure) {
-      if (!signal.aborted && !isAbortError(failure)) {
-        setError(failure instanceof Error ? failure.message : "Unable to load selected directory records");
-        if (failure instanceof ApiError && failure.status === 404) { setSelectedItems([]); setResolvedKey(key); }
+      if (!signal.aborted) setResolved({ identity, items });
+    } catch (error) {
+      if (!signal.aborted && !isAbortError(error)) {
+        setFailure({ identity, message: error instanceof Error ? error.message : "Unable to load selected directory records" });
+        if (error instanceof ApiError && error.status === 404) setResolved({ identity, items: [] });
       }
-      throw failure;
+      throw error;
     }
-  }, [key, kind, seedSignature, refreshToken]);
-  useCoordinatedRead(read, eventMatches, enabled && Boolean(key));
-  const items = React.useMemo(() => {
-    const selected = new Set(selectedIds);
-    const merged = new Map<string, DirectoryItem<K>>();
-    for (const item of seedItems) if (resolvedKey !== key && selected.has(item.id)) merged.set(item.id, item);
-    for (const item of selectedItems) if (selected.has(item.id)) merged.set(item.id, item);
-    return [...merged.values()];
-  }, [seedItems, selectedItems, key, resolvedKey]);
-  const missingIds = resolvedKey === key ? selectedIds.filter((id) => !selectedItems.some((item) => item.id === id)) : [];
-  return { items, error, missingIds, ready: !key || resolvedKey === key };
+  }, [key, kind, identity]);
+  const refresh = useCoordinatedRead(read, eventMatches, enabled && Boolean(key));
+  const items = resolved?.identity === identity ? resolved.items : [];
+  const ready = !key || resolved?.identity === identity;
+  return { items, ready, refresh, error: enabled && key && failure?.identity === identity ? failure.message : "",
+    missingIds: ready ? selectedIds.filter((id) => !items.some((item) => item.id === id)) : [] };
 }
-
-export function useDirectoryOptions<K extends DirectoryKind>(kind: K, seedItems: DirectoryItem<K>[], selectedIds: string[] = [], enabled = true, providedRefreshToken?: string | number) {
-  const refreshToken = providedRefreshToken ?? 0;
+export function useDirectoryOptions<K extends DirectoryKind>(kind: K, selectedIds: string[] = [], enabled = true) {
   const [query, setQuery] = React.useState("");
-  const seedSignature = JSON.stringify(seedItems);
-  const page = useDirectoryPage(kind, seedItems, { query, enabled, refreshToken: `${refreshToken}:${seedSignature}` });
-  const selected = useDirectoryIdentities(kind, seedItems, selectedIds, refreshToken, enabled);
+  const page = useDirectoryPage(kind, { query, enabled });
+  const selected = useDirectoryIdentities(kind, selectedIds, enabled);
   const rows = React.useMemo(() => {
     const merged = new Map<string, DirectoryItem<K>>();
     for (const item of page.items) if (!selected.missingIds.includes(item.id)) merged.set(item.id, item);
     for (const item of selected.items) merged.set(item.id, item);
     return { items: [...merged.values()], pageItems: page.items.filter((item) => !selected.missingIds.includes(item.id)).map((item) => merged.get(item.id) ?? item) };
   }, [selected.items, selected.missingIds.join("|"), page.items]);
-  return { ...page, ...rows, query, setQuery, error: page.error || selected.error };
+  const refresh = React.useCallback(async () => {
+    const results = await Promise.allSettled([page.refresh(), selected.refresh()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }, [page.refresh, selected.refresh]);
+  return { ...page, ...rows, query, setQuery, refresh, error: page.error || selected.error };
 }

@@ -1,10 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import React from "react";
+import { api } from "../../api/client";
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
+import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { workflowApi, type AutomationCatalogResponse, type AutomationRule, type NotificationCatalogResponse, type NotificationRule } from "../../api/workflows";
 import type { UserAccount } from "../../api/types";
 import { AutomationsView } from "./AutomationsView";
 import { NotificationsView } from "./NotificationsView";
 
+beforeEach(() => { vi.spyOn(api, "get").mockResolvedValue([]); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const automation: AutomationRule = { id: "auto-one", name: "Test automation", description: "", is_active: false, triggers: [{ id: "t", type: "time.every_x", config: { interval: 5, unit: "minutes" } }], trigger_keys: ["time.every_x"], conditions: [], actions: [{ id: "a", type: "notification.run", config: { notification_rule_id: "notify-one" } }], run_count: 0 };
 const automationCatalog: AutomationCatalogResponse = { triggers: [], actions: [], conditions: [], variables: [], notification_rules: [], garage_doors: [], mock_context: {} };
@@ -16,10 +20,11 @@ it("retains notification edits during refresh and saves through the canonical AP
   vi.spyOn(workflowApi, "getNotificationData").mockResolvedValue({ rules: [notification], catalog: notificationCatalog });
   const cameras = vi.spyOn(workflowApi, "getNotificationCameras").mockResolvedValue([]);
   const save = vi.spyOn(workflowApi, "saveNotificationRule").mockResolvedValue(notification);
-  const { rerender } = render(<NotificationsView currentUser={currentUser} people={[]} schedules={[]} refreshToken={0} />);
+  const signals = createReadSignals("test");
+  render(<ReadSignalsContext.Provider value={signals}><NotificationsView currentUser={currentUser} /></ReadSignalsContext.Provider>);
   fireEvent.click(await screen.findByRole("button", { name: notification.name }));
   fireEvent.change(screen.getByLabelText("Workflow name"), { target: { value: "Keep this draft" } });
-  rerender(<NotificationsView currentUser={currentUser} people={[]} schedules={[]} refreshToken={1} />);
+  await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   await waitFor(() => expect(workflowApi.getNotificationData).toHaveBeenCalledTimes(2));
   expect(screen.getByLabelText("Workflow name")).toHaveValue("Keep this draft");
   fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
@@ -31,7 +36,7 @@ it("duplicates notification rules as paused drafts for review", async () => {
   vi.spyOn(workflowApi, "getNotificationData").mockResolvedValue({ rules: [notification], catalog: notificationCatalog });
   vi.spyOn(workflowApi, "getNotificationCameras").mockResolvedValue([]);
   const duplicate = vi.spyOn(workflowApi, "duplicateNotificationRule").mockResolvedValue({ ...notification, id: "copy", name: "Test notification Copy" });
-  await act(async () => { render(<NotificationsView currentUser={currentUser} people={[]} schedules={[]} refreshToken={0} />); });
+  await act(async () => { render(<NotificationsView currentUser={currentUser} />); });
   fireEvent.click(await screen.findByRole("button", { name: `Options for ${notification.name}` }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
   await waitFor(() => expect(duplicate).toHaveBeenCalledWith(expect.objectContaining({ name: "Test notification Copy", is_active: false })));
@@ -40,7 +45,7 @@ it("duplicates notification rules as paused drafts for review", async () => {
 it("saves automation edits and reports a subsequent read failure independently", async () => {
   const read = vi.spyOn(workflowApi, "getAutomationData").mockResolvedValueOnce({ rules: [automation], catalog: automationCatalog }).mockRejectedValueOnce(new Error("List offline"));
   const save = vi.spyOn(workflowApi, "saveAutomationRule").mockResolvedValue(automation);
-  render(<AutomationsView currentUser={currentUser} people={[]} vehicles={[]} refreshToken={0} />);
+  render(<AutomationsView currentUser={currentUser} />);
   fireEvent.click(await screen.findByRole("button", { name: automation.name }));
   fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Updated automation" } });
   fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
