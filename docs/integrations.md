@@ -182,6 +182,15 @@ is excluded from directory summaries. Client-submitted MOT/tax fields and lookup
 timestamps are no longer accepted by vehicle creation/update contracts.
 The old DVLA-only lookup and refresh routes have been retired.
 
+In Edit Vehicle, Admins can use **Refresh vehicle info** beside the registration
+to look up make, model, colour and fuel type using the existing coordinated setup
+lookup. Returned details replace those fields in the draft; missing values and
+edits made while the request is pending are retained. Other drafts, assignments
+and MOT/tax information are preserved. Save Changes persists the filled details.
+The separate Compliance refresh keeps its confirmed, audited behavior. Both
+actions show progress and cannot run together. Provider errors appear beside the
+registration, and lookup results still respect shared caching and backoff.
+
 Enabling the integration does not sweep existing vehicles. They refresh on the
 next eligible arrival, setup lookup or manual action. Deployment, production
 migration, enabling credentials and live provider tests require separate authorization.

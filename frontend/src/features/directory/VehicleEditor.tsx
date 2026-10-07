@@ -174,15 +174,13 @@ export function VehicleModal({
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const [dirty, setDirty] = React.useState(false);
-  const requestClose = useEditorDismiss(onClose, dirty, submitting || complianceRefreshing, "vehicle changes");
-  useModalFocus(modalRef, true, requestClose);
-
   const [information, setInformation] = React.useState<VehicleInformationSummary>(vehicle ?? {});
   const alive = React.useRef(true);
   const currentPlate = React.useRef(form.registration_number);
   currentPlate.current = form.registration_number;
   React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const editedFields = React.useRef(new Set<string>());
+  const detailsRefreshDraft = React.useRef(form);
   const initialRegistration = mode === "edit" ? vehicle?.registration_number ?? "" : null;
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => {
     setDirty(true);
@@ -197,8 +195,20 @@ export function VehicleModal({
         fuel_type: editedFields.current.has("fuel_type") ? current.fuel_type : "" };
     });
   };
-  const applyInformation = (result: VehicleInformation) => {
+  const applyInformation = (result: VehicleInformation, manual: boolean) => {
     if (normalizePlateInput(currentPlate.current) !== result.registration_number) return;
+    if (manual) {
+      const draft = detailsRefreshDraft.current;
+      setDirty(true);
+      for (const field of ["make", "model", "color", "fuel_type"]) editedFields.current.add(field);
+      setForm((current) => ({ ...current,
+        make: current.make === draft.make ? result.make ?? current.make : current.make,
+        model: current.model === draft.model ? result.model ?? current.model : current.model,
+        color: current.color === draft.color ? result.colour ?? current.color : current.color,
+        fuel_type: current.fuel_type === draft.fuel_type ? result.fuel_type ?? current.fuel_type : current.fuel_type
+      }));
+      return;
+    }
     setInformation({ ...result, information_outcome: result.providers });
     setForm((current) => {
       if (normalizePlateInput(current.registration_number) !== result.registration_number) return current;
@@ -228,6 +238,9 @@ export function VehicleModal({
     }
   }, [vehicle, form.registration_number]);
   const vehicleLookup = useVehicleInformation(form.registration_number, initialRegistration, applyInformation, canRefreshInformation);
+  const detailsRefreshing = vehicleLookup.manual && vehicleLookup.status === "loading";
+  const requestClose = useEditorDismiss(onClose, dirty, submitting || complianceRefreshing || detailsRefreshing, "vehicle changes");
+  useModalFocus(modalRef, true, requestClose);
 
   const toggleAssignedPerson = (personId: string) => {
     update(
@@ -290,7 +303,7 @@ export function VehicleModal({
 
     const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (submittingRef.current) return;
+    if (submittingRef.current || complianceRefreshing || detailsRefreshing) return;
     submittingRef.current = true;
     setError("");
     setPageError("");
@@ -408,19 +421,35 @@ export function VehicleModal({
             </button>
           ) : null}
         </div>
-        <label className="field">
-          <span>Vehicle Registration</span>
+        <div className="field vehicle-registration-field">
+          <div className="field-label-row">
+            <label htmlFor="vehicle-registration"><span>Vehicle Registration</span></label>
+            {mode === "edit" && canRefreshInformation ? (
+              <button
+                aria-label="Refresh vehicle info"
+                aria-busy={detailsRefreshing}
+                className="secondary-button vehicle-information-refresh"
+                disabled={complianceRefreshing || submitting || vehicleLookup.status === "loading" || normalizePlateInput(form.registration_number).length < 2}
+                onClick={() => { detailsRefreshDraft.current = form; vehicleLookup.refresh(); }}
+                title="Look up make, model, colour and fuel type for this registration"
+                type="button"
+              >
+                <RefreshCw aria-hidden="true" className={detailsRefreshing ? "spin" : undefined} size={14} />
+                {detailsRefreshing ? "Refreshing..." : "Refresh vehicle info"}
+              </button>
+            ) : null}
+          </div>
           <div className="field-control">
             <Car size={17} />
-            <input value={form.registration_number} onChange={(event) => update("registration_number", event.target.value.toUpperCase())} required />
+            <input id="vehicle-registration" value={form.registration_number} onChange={(event) => update("registration_number", event.target.value.toUpperCase())} required />
           </div>
           {vehicleLookup.status !== "idle" ? (
-            <small className={`field-hint dvla-lookup-hint ${vehicleLookup.status}`}>
+            <small className={`field-hint dvla-lookup-hint ${vehicleLookup.status}`} role="status">
               {vehicleLookup.status === "loading" ? <span className="inline-spinner" aria-hidden="true" /> : null}
               {vehicleLookup.message}
             </small>
           ) : null}
-        </label>
+        </div>
         <div className="field-grid">
           <label className="field">
             <span>Vehicle Make</span>
@@ -487,9 +516,9 @@ export function VehicleModal({
                 <button
                   aria-label="Refresh vehicle information"
                   className="icon-button vehicle-compliance-refresh"
-                  disabled={complianceRefreshing || submitting || normalizePlateInput(form.registration_number) !== normalizePlateInput(vehicle?.registration_number ?? "")}
+                  disabled={complianceRefreshing || submitting || detailsRefreshing || normalizePlateInput(form.registration_number) !== normalizePlateInput(vehicle?.registration_number ?? "")}
                   onClick={refreshCompliance}
-                  title="Refresh vehicle information"
+                  title="Refresh MOT and tax information"
                   type="button"
                 >
                   <RefreshCw className={complianceRefreshing ? "spin" : undefined} size={15} />
@@ -513,7 +542,7 @@ export function VehicleModal({
         {mode === "edit" && vehicle && normalizePlateInput(form.registration_number) === normalizePlateInput(vehicle.registration_number) && <MotHistory vehicleId={vehicle.id} revision={information.information_checked_at ?? null} />}
         <div className="modal-actions">
           <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
-          <button className="primary-button" disabled={submitting || complianceRefreshing} type="submit">
+          <button className="primary-button" disabled={submitting || complianceRefreshing || detailsRefreshing} type="submit">
             {mode === "edit" ? <Check size={16} /> : <Plus size={16} />}
             {submitting ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Vehicle"}
           </button>

@@ -923,6 +923,16 @@
   line-height: 1.35;
 }
 
+.vehicle-registration-field .field-label-row {
+  flex-wrap: wrap;
+}
+
+.vehicle-information-refresh {
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
 .vehicle-compliance-refresh {
   width: 30px;
   min-height: 30px;

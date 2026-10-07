@@ -25,6 +25,70 @@ function result(registration: string, make = "Lookup Make"): VehicleInformation 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
+it("refreshes the original plate's details without applying compliance, and saves the filled draft", async () => {
+  const lookup = deferred<VehicleInformation>();
+  const post = vi.spyOn(api, "post").mockReturnValueOnce(lookup.promise);
+  const patch = vi.spyOn(api, "patch").mockResolvedValue({});
+  modal({ id: "synthetic", registration_number: "ORIGINAL", make: "Original Make", model: "Original Model", color: "Red", description: "Original description", mot_status: "Valid", mot_expiry: "2027-10-06", tax_status: "Taxed" });
+  fireEvent.change(screen.getByLabelText("Vehicle Model"), { target: { value: "Replace this draft model" } });
+  fireEvent.change(screen.getByLabelText("Friendly description"), { target: { value: "Retained description" } });
+  const refresh = screen.getByRole("button", { name: "Refresh vehicle info" });
+  fireEvent.click(refresh);
+  await act(async () => { vi.advanceTimersByTime(0); });
+  expect(post).toHaveBeenCalledWith("/api/v1/integrations/vehicles/lookup", { registration_number: "ORIGINAL" }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(refresh).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Vehicle Make"), { target: { value: "Typed during lookup" } });
+  await act(async () => { lookup.resolve({ ...result("ORIGINAL"), mot_status: "Not valid", tax_status: "Untaxed" }); });
+  expect(screen.getByLabelText("Vehicle Make")).toHaveValue("Typed during lookup");
+  expect(screen.getByLabelText("Vehicle Model")).toHaveValue("Focus");
+  expect(screen.getByLabelText("Colour")).toHaveValue("Blue");
+  expect(screen.getByLabelText("Friendly description")).toHaveValue("Retained description");
+  expect(screen.getByText("Valid", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText("Taxed", { exact: true })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Save changes to keep them");
+  expect(refresh).toBeEnabled();
+  post.mockResolvedValueOnce({ confirmation_token: "synthetic-save" });
+  await act(async () => { fireEvent.submit(screen.getByRole("dialog")); });
+  expect(patch).toHaveBeenCalledWith("/api/v1/vehicles/synthetic", expect.objectContaining({ make: "Typed during lookup", model: "Focus", color: "Blue", fuel_type: "Petrol", description: "Retained description" }));
+  expect(patch.mock.calls[0][1]).not.toHaveProperty("mot_status");
+  expect(patch.mock.calls[0][1]).not.toHaveProperty("tax_status");
+});
+
+it("cancels a manual refresh when the plate changes, even when restored before completion", async () => {
+  const lookup = deferred<VehicleInformation>();
+  const post = vi.spyOn(api, "post").mockReturnValue(lookup.promise);
+  modal({ id: "synthetic", registration_number: "ORIGINAL", make: "Original Make", model: null, description: null });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh vehicle info" }));
+  await act(async () => { vi.advanceTimersByTime(0); });
+  const signal = post.mock.calls[0][2]?.signal;
+  const registration = screen.getByLabelText(/^Vehicle Registration/);
+  fireEvent.change(registration, { target: { value: "" } });
+  expect(signal?.aborted).toBe(true);
+  expect(screen.getByRole("button", { name: "Refresh vehicle info" })).toBeDisabled();
+  fireEvent.change(registration, { target: { value: "ORIGINAL" } });
+  await act(async () => { lookup.resolve(result("ORIGINAL", "Stale Make")); vi.advanceTimersByTime(850); });
+  expect(screen.getByLabelText("Vehicle Make")).toHaveValue("Original Make");
+  expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("retains details after a failed refresh and permits retrying the same plate", async () => {
+  const post = vi.spyOn(api, "post").mockRejectedValueOnce(new Error("Lookup temporarily unavailable")).mockResolvedValueOnce({ ...result("ORIGINAL"), make: null, colour: null });
+  modal({ id: "synthetic", registration_number: "ORIGINAL", make: "Original Make", model: null, color: "Red", description: null });
+  const refresh = screen.getByRole("button", { name: "Refresh vehicle info" });
+  fireEvent.click(refresh);
+  await act(async () => { vi.advanceTimersByTime(0); });
+  expect(screen.getByRole("status")).toHaveTextContent("Lookup temporarily unavailable");
+  expect(screen.getByLabelText("Vehicle Make")).toHaveValue("Original Make");
+  expect(refresh).toBeEnabled();
+  fireEvent.click(refresh);
+  await act(async () => { vi.advanceTimersByTime(0); });
+  expect(screen.getByLabelText("Vehicle Make")).toHaveValue("Original Make");
+  expect(screen.getByLabelText("Colour")).toHaveValue("Red");
+  expect(screen.getByLabelText("Vehicle Model")).toHaveValue("Focus");
+  expect(post).toHaveBeenCalledTimes(2);
+});
+
 it.each(["", "X"])("invalidates an in-flight lookup when the plate becomes %j", async (nextPlate) => {
   const lookup = deferred<VehicleInformation>();
   const post = vi.spyOn(api, "post").mockReturnValue(lookup.promise);

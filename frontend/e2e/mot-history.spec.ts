@@ -47,6 +47,54 @@ async function installDirectoryFixtures(page: Page, role = "admin") {
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 1180 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  test(`registration refresh fills vehicle details and preserves drafts at ${viewport.width}×${viewport.height}`, async ({ page }, testInfo) => {
+    const { unexpected } = await installDirectoryFixtures(page);
+    const lookups: unknown[] = [];
+    let finishRefresh!: () => void;
+    const pendingRefresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
+    const provider = { status: "found", checked_at: "2026-10-07T11:00:00Z", retry_at: null, error: null };
+    await page.route("**/api/v1/integrations/vehicles/lookup", async (route) => {
+      lookups.push(route.request().postDataJSON());
+      await pendingRefresh;
+      await route.fulfill({ json: { registration_number: "AB12CDE", make: "Toyota", model: "Corolla", colour: "Blue", fuel_type: "Petrol", mot_status: "Not valid", mot_expiry: "2025-10-06", tax_status: "Untaxed", tax_expiry: null, last_dvla_lookup_date: "2026-10-07", providers: { dvla: provider, dvsa: provider } } });
+    });
+    await page.setViewportSize(viewport);
+    await page.goto("/vehicles");
+    if (viewport.width === 820) await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+    const group = page.locator(".directory-group-header").first();
+    if (await group.getAttribute("aria-expanded") === "false") await group.click();
+    await page.getByRole("button", { name: "Edit vehicle AB12 CDE" }).click();
+    const refresh = page.getByRole("button", { name: "Refresh vehicle info", exact: true });
+    await expect(refresh).toBeVisible();
+    await expect(page.locator(".vehicle-registration-field")).toContainText("Refresh vehicle info");
+    await page.getByLabel("Vehicle Model").fill("Replace this model");
+    await page.getByLabel("Friendly description").fill("My retained description");
+    const savedCompliance = await page.locator(".vehicle-compliance-card").textContent() ?? "";
+    if (viewport.height < 500 || viewport.width < 500) await refresh.click();
+    else { await refresh.focus(); await refresh.press("Enter"); }
+    await expect(refresh).toBeDisabled();
+    await expect(refresh).toHaveText("Refreshing...");
+    await expect(page.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+    finishRefresh();
+    await expect(page.getByLabel("Vehicle Make")).toHaveValue("Toyota");
+    await expect(page.getByLabel("Colour")).toHaveValue("Blue");
+    await expect(page.getByLabel("Vehicle Model")).toHaveValue("Corolla");
+    await expect(page.getByLabel("Friendly description")).toHaveValue("My retained description");
+    await expect(page.getByLabel(/^Vehicle Registration/)).toHaveValue(vehicle.registration_number);
+    await expect(page.getByLabel("Access Schedule")).toHaveValue(schedule.id);
+    await expect(refresh).toBeEnabled();
+    await expect(page.locator(".vehicle-compliance-card")).toContainText("Valid");
+    await expect(page.locator(".vehicle-compliance-card")).not.toContainText("Untaxed");
+    await expect(page.locator(".vehicle-compliance-card")).toHaveText(savedCompliance);
+    await expect(page.getByRole("button", { name: "Refresh vehicle information", exact: true })).toBeEnabled();
+    await expect(page.getByRole("dialog").getByRole("status")).toContainText("Save changes to keep them");
+    expect(lookups).toEqual([{ registration_number: "AB12CDE" }]);
+    await refresh.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await page.screenshot({ path: testInfo.outputPath(`vehicle-info-refresh-${viewport.width}.png`), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    expect(unexpected).toEqual([]);
+  });
+
   test(`MOT history is lazy, paged and preserves drafts at ${viewport.width}×${viewport.height}`, async ({ page }, testInfo) => {
     const { unexpected, historyRequests } = await installDirectoryFixtures(page);
     await page.setViewportSize(viewport);
@@ -104,7 +152,8 @@ test("standard users can read history without starting provider lookups or refre
   if (await group.getAttribute("aria-expanded") === "false") await group.click();
   await expect(page.getByText("AB12 CDE", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "Edit vehicle AB12 CDE" }).click();
-  await expect(page.getByRole("button", { name: "Refresh vehicle information" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Refresh vehicle information", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Refresh vehicle info", exact: true })).toHaveCount(0);
   await page.getByText("MOT test history", { exact: true }).click();
   await expect(page.getByText("Failed", { exact: true })).toBeVisible();
   expect(historyRequests).toHaveLength(1);
