@@ -36,6 +36,7 @@ const listSettingKeys = new Set([
 ]);
 export function SettingField({
   action,
+  disabled = false,
   field,
   isConfiguredSecret = false,
   revealPasswordValue = false,
@@ -43,6 +44,7 @@ export function SettingField({
   onChange
 }: {
   action?: React.ReactNode;
+  disabled?: boolean;
   field: SettingFieldDefinition;
   isConfiguredSecret?: boolean;
   revealPasswordValue?: boolean;
@@ -64,15 +66,16 @@ export function SettingField({
         </span>
       )}
       {field.type === "textarea" ? (
-        <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={secretPlaceholder} rows={4} />
+        <textarea disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)} placeholder={secretPlaceholder} rows={4} />
       ) : field.type === "select" ? (
-        <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <select disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
           {field.options?.map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
       ) : (
         <div className="field-control">
           {field.type === "password" ? <Key size={17} /> : <SlidersHorizontal size={17} />}
           <input
+            disabled={disabled}
             min={field.min}
             max={field.max}
             step={field.step}
