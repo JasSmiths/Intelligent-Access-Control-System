@@ -1,3 +1,5 @@
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
+import { settingsEventMatches } from "./invalidation";
 import { Key, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import React from "react";
 
@@ -20,7 +22,7 @@ export type AuthSecretStatus = {
   action_contexts_invalidated?: number;
 };
 
-export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number }) {
+export function AuthSecretSecurityPanel() {
   const [status, setStatus] = React.useState<AuthSecretStatus | null>(null);
   const [customSecret, setCustomSecret] = React.useState("");
   const [confirmed, setConfirmed] = React.useState(false);
@@ -28,29 +30,22 @@ export function AuthSecretSecurityPanel({ refreshToken }: { refreshToken: number
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
-  const lastRefreshTokenRef = React.useRef(refreshToken);
 
-  const load = React.useCallback(async () => {
+  const read = React.useCallback(async (signal: AbortSignal) => {
     setLoading(true);
     setError("");
     try {
-      setStatus(await api.get<AuthSecretStatus>("/api/v1/settings/security/auth-secret"));
+      const next = await api.get<AuthSecretStatus>("/api/v1/settings/security/auth-secret", { signal });
+      if (!signal.aborted) setStatus(next);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load auth secret status.");
+      if (!signal.aborted) setError(loadError instanceof Error ? loadError.message : "Unable to load auth secret status.");
+      throw loadError;
     } finally {
-      setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
   }, []);
 
-  React.useEffect(() => {
-    load().catch(() => undefined);
-  }, [load]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    load().catch(() => undefined);
-  }, [load, refreshToken]);
+  const load = useCoordinatedRead(read, settingsEventMatches);
 
   const rotate = async () => {
     if (!confirmed || saving) return;

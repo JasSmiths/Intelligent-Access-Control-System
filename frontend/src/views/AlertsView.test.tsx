@@ -39,7 +39,7 @@ it("refreshes a dashboard-linked group by member UUID after resolving it", async
   });
   vi.stubGlobal("fetch", fetcher);
   const refreshDashboard = vi.fn().mockResolvedValue(undefined);
-  render(<AlertsView refreshDashboard={refreshDashboard} refreshToken={0} resetToken={0} targetId={memberId} />);
+  render(<AlertsView refreshDashboard={refreshDashboard} targetId={memberId} />);
   fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
   fireEvent.click(screen.getByRole("button", { name: "Resolve Alert" }));
   await screen.findByRole("button", { name: "Reopen" });
@@ -64,7 +64,7 @@ it("loads a second older alert from same-route search navigation", async () => {
     throw new Error(`Unexpected URL: ${path}`);
   });
   vi.stubGlobal("fetch", fetcher);
-  const props = { refreshDashboard: async () => undefined, refreshToken: 0, resetToken: 0 };
+  const props = { refreshDashboard: async () => undefined };
   const { rerender } = render(<AlertsView {...props} targetId={null} />);
   await waitFor(() => expect(screen.getByText("No alerts recorded yet.")).toBeInTheDocument());
   rerender(<AlertsView {...props} targetId="id-1" />);
@@ -80,7 +80,7 @@ it("supports keyboard navigation through status tabs and associates the result p
     items: [], next_cursor: null, as_of: "2026-10-04T12:00:00Z",
   })));
   vi.stubGlobal("fetch", fetcher);
-  render(<AlertsView refreshDashboard={async () => undefined} refreshToken={0} resetToken={0} targetId={null} />);
+  render(<AlertsView refreshDashboard={async () => undefined} targetId={null} />);
   await screen.findByText("No alerts recorded yet.");
 
   const open = screen.getByRole("tab", { name: "Open" });

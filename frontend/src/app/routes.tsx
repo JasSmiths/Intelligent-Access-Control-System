@@ -2,7 +2,6 @@ import { DoorOpen, Gauge, Lock, MapPinned, SlidersHorizontal, Warehouse } from "
 import React from "react";
 import { LoadingState } from "../ui/primitives";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
-import { DirectoryRefreshContext } from "../features/directory/reads";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
 const GroupsView = React.lazy(() => import("../views/GroupsView").then((module) => ({ default: module.GroupsView })));
@@ -43,9 +42,7 @@ export function View(props: {
   schedules: Schedule[];
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
-  latestRealtime: RealtimeMessage | null;
   dataRefreshToken: number;
-  historyResetToken: number;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
@@ -55,58 +52,58 @@ export function View(props: {
   let content: React.ReactNode;
   switch (props.view) {
     case "people":
-      content = <PeopleView refreshToken={props.dataRefreshToken} garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <PeopleView garageDoors={props.integrationStatus?.garage_door_entities ?? []} query={props.search} />;
       break;
     case "groups":
-      content = <GroupsView refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
+      content = <GroupsView query={props.search} />;
       break;
     case "schedules":
-      content = <SchedulesView schedules={props.schedules} query={props.search} refreshToken={props.dataRefreshToken} refresh={props.refresh} />;
+      content = <SchedulesView query={props.search} />;
       break;
     case "passes":
-      content = <PassesView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
+      content = <PassesView query={props.search} />;
       break;
     case "vehicles":
-      content = <VehiclesView canRefreshInformation={props.currentUser.role === "admin"} refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <VehiclesView canRefreshInformation={props.currentUser.role === "admin"} query={props.search} />;
       break;
     case "top_charts":
-      content = <TopChartsView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
+      content = <TopChartsView query={props.search} />;
       break;
     case "events":
-      content = <EventsView refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("event")} />;
+      content = <EventsView targetId={new URLSearchParams(props.locationSearch).get("event")} />;
       break;
     case "movements":
-      content = <MovementsView refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("movement")} />;
+      content = <MovementsView targetId={new URLSearchParams(props.locationSearch).get("movement")} />;
       break;
     case "alerts":
-      content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
+      content = <AlertsView refreshDashboard={props.refresh} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
       break;
     case "reports":
-      content = <ReportsView events={props.events} people={props.people} presence={props.presence} refreshToken={props.dataRefreshToken} />;
+      content = <ReportsView />;
       break;
     case "integrations":
-      content = <IntegrationsView currentUser={props.currentUser} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
+      content = <IntegrationsView currentUser={props.currentUser} />;
       break;
     case "logs":
-      content = <LogsView currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      content = <LogsView currentUser={props.currentUser} />;
       break;
     case "settings_general":
-      content = <DynamicSettingsView key={`${props.currentUser.id}:general`} category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:general`} category="general" title="General Settings" icon={SlidersHorizontal} currentUser={props.currentUser} maintenanceStatus={props.maintenanceStatus} onMaintenanceStatusChanged={props.onMaintenanceStatusChanged} />;
       break;
     case "settings_gates":
-      content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      content = <AccessDevicesSettingsView kind="gate" title="Gates" icon={DoorOpen} currentUser={props.currentUser} />;
       break;
     case "settings_garage_doors":
-      content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
+      content = <AccessDevicesSettingsView kind="garage_door" title="Garage Doors" icon={Warehouse} currentUser={props.currentUser} />;
       break;
     case "settings_missed_exit_recovery":
-      content = <MissedExitRecoveryView targetId={new URLSearchParams(props.locationSearch).get("attempt")} key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} refresh={props.refresh} />;
+      content = <MissedExitRecoveryView targetId={new URLSearchParams(props.locationSearch).get("attempt")} key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} refresh={props.refresh} />;
       break;
     case "settings_command_history":
       content = <CommandHistoryView currentUser={props.currentUser} targetId={new URLSearchParams(props.locationSearch).get("command")} />;
       break;
     case "settings_auth":
-      content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} />;
       break;
     case "settings_automations":
       content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;
@@ -115,28 +112,26 @@ export function View(props: {
       content = <NotificationsView currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} schedules={props.schedules} />;
       break;
     case "settings_lpr":
-      content = <DynamicSettingsView key={`${props.currentUser.id}:lpr`} category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
+      content = <DynamicSettingsView key={`${props.currentUser.id}:lpr`} category="lpr" title="LPR Tuning" icon={Gauge} currentUser={props.currentUser} />;
       break;
     case "settings_zones":
-      content = <ZonesSettingsView icon={MapPinned} refreshToken={props.dataRefreshToken} currentUser={props.currentUser} />;
+      content = <ZonesSettingsView icon={MapPinned} currentUser={props.currentUser} />;
       break;
     case "settings":
       content = <SettingsView currentUser={props.currentUser} navigateToView={props.navigateToView} />;
       break;
     case "users":
       content = props.currentUser.role === "admin"
-        ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} refreshToken={props.dataRefreshToken} />
+        ? <UsersView currentUser={props.currentUser} onCurrentUserUpdated={props.onCurrentUserUpdated} />
         : <div className="permission-state" role="alert">Administrator access required for Users.</div>;
       break;
     default:
-      content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} refreshToken={props.dataRefreshToken} />;
+      content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;
       break;
   }
   return (
     <RouteErrorBoundary view={props.view}>
-      <DirectoryRefreshContext.Provider value={props.dataRefreshToken}>
         <React.Suspense fallback={<RouteLoading />}>{content}</React.Suspense>
-      </DirectoryRefreshContext.Provider>
     </RouteErrorBoundary>
   );
 }

@@ -1,9 +1,10 @@
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as directory from "../../api/directory";
 import type { Person } from "../../api/types";
-import { DirectoryRefreshContext, useDirectoryOptions, useDirectoryPage } from "./reads";
+import { useDirectoryOptions, useDirectoryPage } from "./reads";
 
 const ash = { id: "ash", display_name: "Ash Smith" } as Person;
 const zoe = { id: "zoe", display_name: "Zoe Smith" } as Person;
@@ -78,18 +79,28 @@ it("refreshes a nested selector from route invalidation while retaining its quer
   const changed = { ...zoe, display_name: "Zoe Updated", is_active: false };
   const read = vi.spyOn(directory, "readDirectory").mockResolvedValue(page([ash]));
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...zoe, is_active: true }]).mockResolvedValue([changed]);
-  let routeToken = 0;
-  const wrapper = ({ children }: { children: React.ReactNode }) => <DirectoryRefreshContext.Provider value={routeToken}>{children}</DirectoryRefreshContext.Provider>;
+  const signals = createReadSignals("synthetic");
+  const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   const seed = [ash];
-  const { result, rerender } = renderHook(() => useDirectoryOptions("people", seed, ["zoe"]), { wrapper });
+  const { result } = renderHook(() => useDirectoryOptions("people", seed, ["zoe"]), { wrapper });
   await waitFor(() => expect(result.current.items.some((item) => item.display_name === "Zoe Smith")).toBe(true));
   act(() => result.current.setQuery("synthetic plate"));
   await waitFor(() => expect(read.mock.calls.at(-1)?.[1]?.q).toBe("synthetic plate"));
-  routeToken = 1;
-  rerender();
+  await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   await waitFor(() => expect(result.current.items.some((item) => item.display_name === "Zoe Updated")).toBe(true));
   expect(result.current.query).toBe("synthetic plate");
   expect(result.current.items.find((item) => item.id === zoe.id)?.is_active).toBe(false);
   expect(result.current.pageItems).toEqual([ash]);
   expect(directory.lookupDirectory).toHaveBeenCalledTimes(2);
+});
+
+it("treats selected deletion as authoritative even when an old page still contains that ID", async () => {
+  const signals = createReadSignals("test");
+  const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
+  vi.spyOn(directory, "readDirectory").mockResolvedValue(page([zoe]));
+  vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([zoe]).mockResolvedValue([]);
+  const { result } = renderHook(() => useDirectoryOptions("people", [], ["zoe"]), { wrapper });
+  await waitFor(() => expect(result.current.items).toEqual([zoe]));
+  await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
+  expect(result.current.items).toEqual([]); expect(result.current.pageItems).toEqual([]);
 });

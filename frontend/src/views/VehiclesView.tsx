@@ -1,39 +1,29 @@
 import { Car, Plus, Trash2 } from "lucide-react";
 import React from "react";
+import { useGroups } from "../features/directory/catalogs";
+import { useSchedules } from "../features/schedules/reads";
+import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryIdentities, useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
 import { useScheduleDefaultPolicyOptionLabel } from "../lib/format";
 import { Badge, EmptyState } from "../ui/primitives";
-import type { Group, Person, Schedule, Vehicle } from "../api/types";
+import type { Vehicle } from "../api/types";
 
 import { directoryGroupDefaultOpen, indexPeopleByVehicleId, ownerPeopleForVehicle, vehicleOwnerLabel, groupVehiclesByDirectoryGroup, vehicleTitle } from "../features/directory/model";
 import { useDirectoryGroupOpenState } from "../features/directory/hooks";
 import { DirectoryGroupAccordion, VehiclePhoto } from "../features/directory/components";
 import { VehicleModal } from "../features/directory/VehicleEditor";
 
-export function VehiclesView({
-  canRefreshInformation,
-  groups,
-  people,
-  query,
-  refresh,
-  refreshToken = 0,
-  schedules,
-  vehicles
-}: {
-  canRefreshInformation: boolean;
-  groups: Group[];
-  people: Person[];
-  query: string;
-  refresh: () => Promise<void>;
-  refreshToken?: number;
-  schedules: Schedule[];
-  vehicles: Vehicle[];
-}) {
-  const directoryPage = useDirectoryPage("vehicles", vehicles, { query, refreshToken });
-  const ownerOptions = useDirectoryIdentities("people", people, directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])), refreshToken);
+export function VehiclesView({ canRefreshInformation, query }: { canRefreshInformation: boolean; query: string }) {
+  const directoryPage = useDirectoryPage("vehicles", [], { query });
+  const ownerOptions = useDirectoryIdentities("people", [], directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])));
+  const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
+  const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
+  const referencesReady = groupCatalog.ready && scheduleCatalog.ready;
+  const signals = React.useContext(ReadSignalsContext);
+  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
@@ -77,7 +67,7 @@ export function VehiclesView({
       await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
         confirmation_token: confirmation.confirmation_token
       });
-      await refresh(); directoryPage.refresh();
+      await refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
     }
@@ -91,7 +81,7 @@ export function VehiclesView({
           <h1>Vehicles</h1>
           <p>Manage registered vehicles, photos, plates, and assigned drivers.</p>
         </div>
-        <button className="primary-button" onClick={openCreate} type="button">
+        <button className="primary-button" onClick={openCreate} disabled={!referencesReady} type="button">
           <Plus size={17} /> Add Vehicle
         </button>
       </div>
@@ -115,7 +105,7 @@ export function VehiclesView({
                 <div className="users-table vehicles-table">
                   {section.items.map((vehicle) => (
                     <article className="user-row vehicle-row" key={vehicle.id}>
-                      <button className="vehicle-row-open" onClick={() => openEdit(vehicle)} type="button" aria-label={`Edit vehicle ${vehicle.registration_number}`}>
+                      <button className="vehicle-row-open" disabled={!referencesReady} onClick={() => openEdit(vehicle)} type="button" aria-label={`Edit vehicle ${vehicle.registration_number}`}>
                       <VehiclePhoto vehicle={vehicle} />
                       <span className="vehicle-row-main directory-row-copy">
                         <strong>{vehicle.registration_number}</strong>
@@ -145,7 +135,7 @@ export function VehiclesView({
             ))}
           </div>
         ) : (
-          <EmptyState icon={Car} label="No vehicles match this view" description={query ? "Try another registration, owner, or vehicle name in search." : "Keep registration details and owners together for clear access records."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Register vehicle</button> : undefined} />
+          <EmptyState icon={Car} label="No vehicles match this view" description={query ? "Try another registration, owner, or vehicle name in search." : "Keep registration details and owners together for clear access records."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!referencesReady} type="button"><Plus size={15} /> Register vehicle</button> : undefined} />
         )}
       </div>
 
@@ -159,7 +149,7 @@ export function VehiclesView({
             onSaved={async () => {
               closeModal();
               setSaved("Vehicle saved.");
-              try { await refresh(); directoryPage.refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
+              try { await refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
             }}
             people={ownerOptions.items}
             refreshVehicles={refresh}

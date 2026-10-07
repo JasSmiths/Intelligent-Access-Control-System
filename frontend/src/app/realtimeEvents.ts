@@ -1,7 +1,6 @@
 import type React from "react";
-import type { AccessEvent, HomeAssistantManagedCover, IntegrationStatus, MaintenanceStatus, MovementSagaSummary, RealtimeMessage } from "../api/types";
+import type { HomeAssistantManagedCover, IntegrationStatus, MaintenanceStatus, RealtimeMessage } from "../api/types";
 import { isRecord, nullableString, numberPayload, stringPayload, titleCase } from "../lib/format";
-export const REALTIME_REFRESH_MIN_INTERVAL_MS = 5000;
 export const REALTIME_RECONNECT_DELAY_MS = 1500;
 export const REALTIME_RESUME_RECONNECT_AFTER_MS = 30000;
 export const REALTIME_CLIENT_PING_INTERVAL_MS = 25000;
@@ -121,70 +120,6 @@ export function applyIntegrationRealtimeEvent(
   }
   return false;
 }
-export function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
-  if (event.type !== "access_event.finalized") return null;
-  const eventId = stringPayload(event.payload.event_id);
-  const registrationNumber = stringPayload(event.payload.registration_number);
-  const direction = stringPayload(event.payload.direction);
-  const decision = stringPayload(event.payload.decision);
-  const source = stringPayload(event.payload.source);
-  const occurredAt = stringPayload(event.payload.occurred_at);
-  const timingClassification = stringPayload(event.payload.timing_classification);
-  if (!eventId || !registrationNumber || !isAccessDirection(direction) || !isAccessDecision(decision) || !source || !occurredAt) {
-    return null;
-  }
-  return {
-    id: eventId,
-    registration_number: registrationNumber,
-    direction,
-    decision,
-    confidence: numberPayload(event.payload.confidence),
-    source,
-    occurred_at: occurredAt,
-    timing_classification: timingClassification || "unknown",
-    anomaly_count: numberPayload(event.payload.anomaly_count),
-    visitor_pass_id: stringPayload(event.payload.visitor_pass_id) || null,
-    visitor_name: stringPayload(event.payload.visitor_name) || null,
-    visitor_pass_mode: stringPayload(event.payload.visitor_pass_mode) || null,
-    external_admission_mode: externalAdmissionMode(event.payload.external_admission_mode),
-    external_admission_source: stringPayload(event.payload.external_admission_source) || null,
-    snapshot_url: stringPayload(event.payload.snapshot_url) || null,
-    snapshot_captured_at: stringPayload(event.payload.snapshot_captured_at) || null,
-    snapshot_bytes: nullableNumber(event.payload.snapshot_bytes),
-    snapshot_width: nullableNumber(event.payload.snapshot_width),
-    snapshot_height: nullableNumber(event.payload.snapshot_height),
-    snapshot_camera: stringPayload(event.payload.snapshot_camera) || null,
-    movement_saga: movementSagaFromPayload(event.payload.movement_saga)
-  };
-}
-function externalAdmissionMode(value: unknown): "arrival" | "departure" | null {
-  const mode = stringPayload(value);
-  return mode === "arrival" || mode === "departure" ? mode : null;
-}
-function movementSagaFromPayload(value: unknown): MovementSagaSummary | null {
-  if (!isRecord(value)) return null;
-  const state = stringPayload(value.state);
-  if (!state) return null;
-  const gate = isRecord(value.gate) ? value.gate : null;
-  return {
-    id: stringPayload(value.id) || null,
-    state,
-    reconciliation_required: value.reconciliation_required === true,
-    gate_command_required: value.gate_command_required === true,
-    presence_committed: value.presence_committed === true,
-    failure_detail: stringPayload(value.failure_detail) || null,
-    updated_at: stringPayload(value.updated_at) || null,
-    detail: stringPayload(value.detail) || null,
-    gate: gate ? {
-      command_id: stringPayload(gate.command_id) || null,
-      accepted: typeof gate.accepted === "boolean" ? gate.accepted : null,
-      state: stringPayload(gate.state) || null,
-      detail: stringPayload(gate.detail) || null,
-      mechanically_confirmed: gate.mechanically_confirmed === true,
-      requires_reconciliation: gate.requires_reconciliation === true
-    } : null
-  };
-}
 export function notificationToastFromRealtime(event: RealtimeMessage): NotificationToast | null {
   if (event.type !== "notification.in_app") return null;
   const title = stringPayload(event.payload.title);
@@ -222,97 +157,8 @@ function notificationToastActions(value: unknown): NotificationToastAction[] {
     return action.id && action.label && action.method && action.path ? [action as NotificationToastAction] : [];
   });
 }
-export function realtimeMessageForRouteConsumers(event: RealtimeMessage): RealtimeMessage | null {
-  if (event.type.startsWith("visitor_pass.")) {
-    const visitorPass = isRecord(event.payload.visitor_pass) ? compactVisitorPassRealtimePayload(event.payload.visitor_pass) : null;
-    return {
-      type: event.type,
-      created_at: event.created_at,
-      payload: {
-        ...(visitorPass ? { visitor_pass: visitorPass } : {}),
-        source: stringPayload(event.payload.source)
-      }
-    };
-  }
-  if (event.type === "audit.log.created") {
-    const log = isRecord(event.payload.log) ? event.payload.log : event.payload;
-    const action = stringPayload(log.action);
-    const targetEntity = stringPayload(log.target_entity);
-    if (!action.startsWith("visitor_pass.") && targetEntity.toLowerCase() !== "visitorpass") return null;
-    return {
-      type: event.type,
-      created_at: event.created_at,
-      payload: {
-        log: {
-          action,
-          target_entity: targetEntity,
-          target_id: stringPayload(log.target_id)
-        }
-      }
-    };
-  }
-  if (event.type === "access_event.finalized" || event.type === "leaderboard_overtake") {
-    return { type: event.type, created_at: event.created_at, payload: {} };
-  }
-  if (event.type === "access_device.status") {
-    const payload = isRecord(event.payload.status) ? { status: event.payload.status } : event.payload;
-    return { type: event.type, created_at: event.created_at, payload };
-  }
-  if (event.type === "icloud_calendar.accounts_changed") {
-    return {
-      type: event.type,
-      created_at: event.created_at,
-      payload: Array.isArray(event.payload.accounts) ? { accounts: event.payload.accounts } : {}
-    };
-  }
-  if (event.type === "icloud_calendar.sync_completed") {
-    return {
-      type: event.type,
-      created_at: event.created_at,
-      payload: isRecord(event.payload.sync) ? { sync: event.payload.sync } : {}
-    };
-  }
-  return null;
-}
-function compactVisitorPassRealtimePayload(candidate: Record<string, unknown>) {
-  return {
-    id: stringPayload(candidate.id),
-    visitor_name: stringPayload(candidate.visitor_name),
-    pass_type: stringPayload(candidate.pass_type),
-    visitor_phone: stringPayload(candidate.visitor_phone),
-    expected_time: stringPayload(candidate.expected_time),
-    window_minutes: numberPayload(candidate.window_minutes),
-    valid_from: stringPayload(candidate.valid_from),
-    valid_until: stringPayload(candidate.valid_until),
-    window_start: stringPayload(candidate.window_start),
-    window_end: stringPayload(candidate.window_end),
-    status: stringPayload(candidate.status),
-    creation_source: stringPayload(candidate.creation_source),
-    source_reference: stringPayload(candidate.source_reference),
-    created_by_user_id: stringPayload(candidate.created_by_user_id),
-    created_by: stringPayload(candidate.created_by),
-    arrival_time: stringPayload(candidate.arrival_time),
-    departure_time: stringPayload(candidate.departure_time),
-    number_plate: stringPayload(candidate.number_plate),
-    vehicle_make: stringPayload(candidate.vehicle_make),
-    vehicle_colour: stringPayload(candidate.vehicle_colour),
-    duration_on_site_seconds: typeof candidate.duration_on_site_seconds === "number" ? candidate.duration_on_site_seconds : null,
-    duration_human: stringPayload(candidate.duration_human),
-    arrival_event_id: stringPayload(candidate.arrival_event_id),
-    departure_event_id: stringPayload(candidate.departure_event_id),
-    telemetry_trace_id: stringPayload(candidate.telemetry_trace_id),
-    created_at: stringPayload(candidate.created_at),
-    updated_at: stringPayload(candidate.updated_at)
-  };
-}
 function isNotificationSeverity(value: string): value is NotificationToast["severity"] {
   return ["info", "warning", "critical"].includes(value);
-}
-function isAccessDirection(value: string): value is AccessEvent["direction"] {
-  return ["entry", "exit", "denied"].includes(value);
-}
-function isAccessDecision(value: string): value is AccessEvent["decision"] {
-  return ["granted", "denied"].includes(value);
 }
 function doorStateKey(door: string) {
   const keys: Record<string, keyof IntegrationStatus> = {
@@ -326,7 +172,4 @@ function doorStateKey(door: string) {
 function updateManagedCoverState(entities: HomeAssistantManagedCover[] | undefined, entityId: string, state: string) {
   if (!entities?.length || !entityId) return entities;
   return entities.map((entity) => entity.entity_id === entityId ? { ...entity, state } : entity);
-}
-function nullableNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

@@ -1,7 +1,10 @@
+const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
+vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "" }) }));
+vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "" }) }));
 import * as directoryApi from "../api/directory";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AccessEvent, Anomaly, IntegrationStatus, UserAccount } from "../api/types";
+import type { AccessEvent, Anomaly, ExpectedPresenceSummary, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import { Dashboard } from "./DashboardView";
 
 const integrationStatus = { configured: true, connected: true, gate_entities: [], garage_door_entities: [] } as unknown as IntegrationStatus;
@@ -12,6 +15,7 @@ const props = {
   navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn()
 };
 beforeEach(() => {
+  Object.assign(testReads, { presence: [], expectedPresence: null, events: [], people: [], vehicles: [] });
   vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
   vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
   vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
@@ -63,10 +67,11 @@ it("connects overview navigation to the existing read-only views", () => {
 });
 
 it("labels feed source counts accurately and shows the actual recent event count", () => {
-  render(<Dashboard {...props} events={[{
+  testReads.events = [{
     id: "recent", source: "camera", occurred_at: new Date().toISOString(),
     registration_number: "TEST", direction: "entry", decision: "granted"
-  } as AccessEvent]} />);
+  } as AccessEvent];
+  render(<Dashboard {...props} />);
   expect(screen.getByText("Event sources")).toBeInTheDocument();
   expect(screen.queryByText("Live sources")).not.toBeInTheDocument();
   expect(screen.getByText("Latest 1 event from your feed")).toBeInTheDocument();

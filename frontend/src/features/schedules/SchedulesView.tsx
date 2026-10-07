@@ -1,3 +1,6 @@
+import { schedulesEventMatches } from "../directory/invalidation";
+import { useSchedules } from "./reads";
+import { ReadSignalsContext } from "../../lib/readSignals";
 import { CalendarDays, CheckCircle2, Clock3, Lock, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import React from "react";
 import { createActionConfirmation } from "../../api/client";
@@ -9,24 +12,17 @@ import { Badge, EmptyState } from "../../ui/primitives";
 import { scheduleDayHasBlocks, scheduleHasBlocks, scheduleIntervalLabels, scheduleSummary } from "./model";
 import { ScheduleEditor } from "./ScheduleEditor";
 
-export function SchedulesView({
-  schedules,
-  query,
-  refreshToken,
-  refresh
-}: {
-  schedules: Schedule[];
-  query: string;
-  refreshToken: number;
-  refresh: () => Promise<void>;
-}) {
+export function SchedulesView({ query }: { query: string }) {
+  const catalog = useSchedules(); const schedules = catalog.items;
+  const signals = React.useContext(ReadSignalsContext);
+  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? catalog.refresh(), [signals, catalog.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedSchedule, setSelectedSchedule] = React.useState<Schedule | null>(null);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
   const [policySaved, setPolicySaved] = React.useState("");
   const [policySaving, setPolicySaving] = React.useState(false);
-  const accessSettings = useSettings("access", refreshToken);
+  const accessSettings = useSettings("access", schedulesEventMatches);
   const defaultPolicy = String(accessSettings.values.schedule_default_policy ?? "allow").toLowerCase() === "deny" ? "deny" : "allow";
   const filtered = schedules.filter((schedule) =>
     matches(schedule.name, query) ||
@@ -97,7 +93,7 @@ export function SchedulesView({
             <h1>Schedules</h1>
             <p>Reusable weekly access templates for people, vehicles, gates, and garage doors.</p>
           </div>
-          <button className="primary-button" onClick={openCreate} type="button">
+          <button className="primary-button" onClick={openCreate} disabled={!catalog.ready} type="button">
             <Plus size={17} /> New Schedule
           </button>
         </div>
@@ -149,6 +145,7 @@ export function SchedulesView({
         </section>
       </div>
 
+      {catalog.error ? <div role="alert">{catalog.error}</div> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
       {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
@@ -190,7 +187,7 @@ export function SchedulesView({
           </article>
         )) : (
           <div className="card schedule-empty-card">
-            <EmptyState icon={Clock3} label="No schedules match this view" description={query ? "Try another schedule name, day, or time in search." : "Define weekly access windows, then assign them to people or vehicles."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create schedule</button> : undefined} />
+            <EmptyState icon={Clock3} label="No schedules match this view" description={query ? "Try another schedule name, day, or time in search." : "Define weekly access windows, then assign them to people or vehicles."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!catalog.ready} type="button"><Plus size={15} /> Create schedule</button> : undefined} />
           </div>
         )}
       </div>

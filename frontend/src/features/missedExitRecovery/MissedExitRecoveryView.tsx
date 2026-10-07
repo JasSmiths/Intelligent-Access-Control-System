@@ -1,20 +1,27 @@
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
+import { auditResource } from "../../lib/realtime";
+import type { RealtimeMessage } from "../../api/types";
+const recoveryEventMatches = (event: RealtimeMessage) => event.type.startsWith("missed_exit_recovery.") || event.type === "access_event.finalized" || event.type === "access_event.finalize_failed" || ["person", "settings"].includes(auditResource(event));
+import { useDirectoryOptions } from "../directory/reads";
+import { DirectoryPagination } from "../directory/DirectoryPagination";
 import { History, RefreshCw, X } from "lucide-react";
 import React from "react";
 import { isAbortError } from "../../api/client";
 import { missedExitRecoveryApi, type RecoveryAttempt, type RecoveryAttemptFilters, type RecoveryAttemptPage } from "../../api/missedExitRecovery";
-import type { Person, UserAccount } from "../../api/types";
+import type { UserAccount } from "../../api/types";
 import { formatDate } from "../../lib/format";
 import { Badge, Toolbar } from "../../ui/primitives";
 import { RecoveryConfiguration } from "./RecoveryConfiguration";
 import { filterDate, recoveryLabel, recoveryMethods, safeDiagnosticRows } from "./model";
 
-type Props = { targetId?: string | null; currentUser: UserAccount; people: Person[]; refreshToken: number; refresh: () => Promise<void> };
+type Props = { targetId?: string | null; currentUser: UserAccount; refresh: () => Promise<void> };
 export function MissedExitRecoveryView(props: Props) {
   if (props.currentUser.role !== "admin") return <section className="view-stack"><div className="permission-state" role="alert">Administrator access required for Missed Exit Recovery.</div></section>;
   return <RecoveryAdminView {...props} />;
 }
-function RecoveryAdminView({ people, refreshToken, refresh, targetId }: Props) {
+function RecoveryAdminView({ refresh, targetId }: Props) {
   const [draft, setDraft] = React.useState({ owner_id: "", registration_number: "", outcome: "", method: "", from_at: "", to_at: "" });
+  const owners = useDirectoryOptions("people", [], draft.owner_id ? [draft.owner_id] : []);
   const [filters, setFilters] = React.useState<RecoveryAttemptFilters>({ offset: 0, limit: 25 });
   const [page, setPage] = React.useState<RecoveryAttemptPage | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -24,27 +31,19 @@ function RecoveryAdminView({ people, refreshToken, refresh, targetId }: Props) {
   const [detail, setDetail] = React.useState<RecoveryAttempt | null>(null);
   const [detailError, setDetailError] = React.useState("");
   React.useEffect(() => { setSelectedId(targetId ?? null); }, [targetId]);
-  React.useEffect(() => {
-    const controller = new AbortController();
+  const readAttempts = React.useCallback(async (signal: AbortSignal) => {
     setLoading(true); setError(""); setPage(null);
-    missedExitRecoveryApi.attempts(filters, { signal: controller.signal }).then((result) => {
-      if (!controller.signal.aborted) setPage(result);
-    }).catch((cause) => {
-      if (!controller.signal.aborted && !isAbortError(cause)) setError(cause instanceof Error ? cause.message : "Unable to load recovery attempts");
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [filters, refreshToken, reload]);
-  React.useEffect(() => {
-    setDetail(null); setDetailError("");
-    if (!selectedId) return;
-    const controller = new AbortController();
-    missedExitRecoveryApi.attempt(selectedId, { signal: controller.signal }).then((result) => {
-      if (!controller.signal.aborted) setDetail(result);
-    }).catch((cause) => {
-      if (!controller.signal.aborted && !isAbortError(cause)) setDetailError(cause instanceof Error ? cause.message : "Unable to load attempt details");
-    });
-    return () => controller.abort();
-  }, [selectedId, refreshToken, reload]);
+    try { const result = await missedExitRecoveryApi.attempts(filters, { signal }); if (!signal.aborted) setPage(result); }
+    catch (cause) { if (!signal.aborted && !isAbortError(cause)) setError(cause instanceof Error ? cause.message : "Unable to load recovery attempts"); throw cause; }
+    finally { if (!signal.aborted) setLoading(false); }
+  }, [filters, reload]);
+  useCoordinatedRead(readAttempts, recoveryEventMatches);
+  const readDetail = React.useCallback(async (signal: AbortSignal) => {
+    setDetail(null); setDetailError(""); if (!selectedId) return;
+    try { const result = await missedExitRecoveryApi.attempt(selectedId, { signal }); if (!signal.aborted) setDetail(result); }
+    catch (cause) { if (!signal.aborted && !isAbortError(cause)) setDetailError(cause instanceof Error ? cause.message : "Unable to load attempt details"); throw cause; }
+  }, [selectedId, reload]);
+  useCoordinatedRead(readDetail, recoveryEventMatches, Boolean(selectedId));
   function applyFilters(event: React.FormEvent) {
     event.preventDefault();
     const from = filterDate(draft.from_at), to = filterDate(draft.to_at);
@@ -56,10 +55,10 @@ function RecoveryAdminView({ people, refreshToken, refresh, targetId }: Props) {
   return <section className="view-stack settings-page recovery-page">
     <Toolbar title="Missed Exit Recovery" icon={History} />
     <p className="muted">Testing / debug · Recovery requires global enablement and an owner opt-in. Decisions and verified physical commands are recorded separately.</p>
-    <RecoveryConfiguration people={people} refreshToken={refreshToken} refresh={refresh} />
+    <RecoveryConfiguration refresh={refresh} />
     <section className="card"><div className="toolbar"><h2>Recovery attempts</h2><button className="secondary-button" type="button" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCw size={15} /> Refresh attempts</button></div>
       <form onSubmit={applyFilters}><div className="recovery-fields">
-        <label className="field"><span>Owner filter</span><select value={draft.owner_id} onChange={(event) => setDraft({ ...draft, owner_id: event.target.value })}><option value="">All owners</option>{people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>
+        <label className="field"><span>Owner filter</span><input aria-label="Search owner filter" value={owners.query} onChange={(event) => owners.setQuery(event.target.value)} placeholder="Search directory people" /><DirectoryPagination page={owners} /><select value={draft.owner_id} onChange={(event) => setDraft({ ...draft, owner_id: event.target.value })}><option value="">All owners</option>{owners.items.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>
         <label className="field"><span>Plate filter</span><input value={draft.registration_number} onChange={(event) => setDraft({ ...draft, registration_number: event.target.value })} /></label>
         <label className="field"><span>Outcome filter</span><input value={draft.outcome} list="recovery-outcomes" placeholder="Exact outcome" onChange={(event) => setDraft({ ...draft, outcome: event.target.value })} /></label>
         <datalist id="recovery-outcomes">{["denied", "authorized", "awaiting_resident", "coalesced", "departure", "expired", "verified", "command_pending", "rejected"].map((outcome) => <option key={outcome} value={outcome}>{recoveryLabel(outcome)}</option>)}</datalist>

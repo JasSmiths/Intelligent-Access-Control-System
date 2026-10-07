@@ -146,14 +146,14 @@ export const integrationsApi = {
     api.get<GateCommandHistoryRecord>(`/api/v1/integrations/gate/commands/${encodeURIComponent(commandId)}`, options),
   getCoverCommand: (commandId: string, options: ApiRequestOptions = {}) =>
     api.get<DeviceCommandReceipt>(`/api/v1/integrations/cover/commands/${encodeURIComponent(commandId)}`, options),
-  getHomeAssistantStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status"),
+  getHomeAssistantStatus: (options: ApiRequestOptions = {}) => api.get<IntegrationStatus>("/api/v1/integrations/home-assistant/status", options),
   getHomeAssistantDiscovery: () => api.get<HomeAssistantDiscovery>("/api/v1/integrations/home-assistant/entities"),
   getRecoveryTrackers: (options: ApiRequestOptions = {}) => api.get<RecoveryTrackerDiscovery>("/api/v1/integrations/home-assistant/recovery-trackers", options),
-  getAccessDeviceStatus: () => api.get<IntegrationStatus>("/api/v1/integrations/gate/status"),
-  getProtectStatus: () => api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status"),
-  getProtectCameras: async (forceRefresh = false) => {
+  getAccessDeviceStatus: (options: ApiRequestOptions = {}) => api.get<IntegrationStatus>("/api/v1/integrations/gate/status", options),
+  getProtectStatus: (options: ApiRequestOptions = {}) => api.get<UnifiProtectStatus>("/api/v1/integrations/unifi-protect/status", options),
+  getProtectCameras: async (forceRefresh = false, options: ApiRequestOptions = {}) => {
     const refreshSuffix = forceRefresh ? "?refresh=true" : "";
-    const result = await api.get<{ cameras: UnifiProtectCamera[] }>(`/api/v1/integrations/unifi-protect/cameras${refreshSuffix}`);
+    const result = await api.get<{ cameras: UnifiProtectCamera[] }>(`/api/v1/integrations/unifi-protect/cameras${refreshSuffix}`, options);
     return result.cameras;
   },
   getProtectEvents: async (cameraId: string) => {
@@ -161,7 +161,7 @@ export const integrationsApi = {
     return result.events;
   },
   analyzeProtectSnapshot: (cameraId: string, prompt: string) => api.post<UnifiProtectAnalysis>(`/api/v1/integrations/unifi-protect/cameras/${encodeURIComponent(cameraId)}/analyze`, { prompt }),
-  getICloudCalendar: () => api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts"),
+  getICloudCalendar: (options: ApiRequestOptions = {}) => api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts", options),
   startICloudAuth: (appleId: string, password: string) => api.post<ICloudAuthStartResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/start", { apple_id: appleId, password }),
   verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
   syncICloudCalendar: () => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync"),

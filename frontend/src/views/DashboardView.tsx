@@ -1,3 +1,4 @@
+import { useDashboardReads } from "../features/dashboard/reads";
 import { AlertTriangle, CalendarDays, Car, Check, CheckCircle2, Clock3, Construction, HardHat, ShieldCheck } from "lucide-react";
 import React from "react";
 
@@ -13,7 +14,7 @@ import { api, createActionConfirmation } from "../api/client";
 import { activeManagedCovers, displayUserName, isActionableAlert, titleCase } from "../lib/format";
 
 import { EmptyState, PanelHeader } from "../ui/primitives";
-import type { AccessEvent, Anomaly, ExpectedPresenceSummary, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, UserAccount, Vehicle } from "../api/types";
+import type { Anomaly, IntegrationStatus, MaintenanceStatus, NavigateToView, UserAccount } from "../api/types";
 
 import { useModalFocus } from "../ui/useModalFocus";
 import { useModalClose } from "../ui/useModalClose";
@@ -23,36 +24,25 @@ export function Dashboard(props: Parameters<typeof DashboardSession>[0]) {
 }
 
 function DashboardSession({
-  presence,
-  expectedPresence,
-  events,
   anomalies,
   integrationStatus,
   maintenanceStatus,
-  people: seedPeople,
-  vehicles: seedVehicles,
-  refreshToken = 0,
   refresh,
   currentUser,
   navigateToView,
   onMaintenanceStatusChanged
 }: {
-  presence: Presence[];
-  expectedPresence: ExpectedPresenceSummary | null;
-  events: AccessEvent[];
   anomalies: Anomaly[];
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
-  people: Person[];
-  vehicles: Vehicle[];
-  refreshToken?: number;
   refresh: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
+  const { presence, expectedPresence, events, error: readError } = useDashboardReads();
   const { people, vehicles, activeVehicleCount, error: directoryError } = useDashboardDirectory({
-    presence, expectedPresence, events, people: seedPeople, vehicles: seedVehicles, refreshToken
+    presence, expectedPresence, events
   });
   const [now, setNow] = React.useState(() => new Date());
   const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
@@ -154,7 +144,7 @@ function DashboardSession({
 
   return (
     <section className="dashboard-page">
-      {directoryError ? <p className="auth-error inline-error" role="alert">{directoryError}</p> : null}
+      {readError || directoryError ? <p className="auth-error inline-error" role="alert">{readError || directoryError}</p> : null}
       <div className="dashboard-intro">
         <div>
           <h1>{greeting}, {firstName}</h1>

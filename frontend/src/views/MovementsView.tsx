@@ -73,7 +73,7 @@ const FILTERS: Array<{ key: MovementFilter; label: string }> = [
   ,{ key: "unknown", label: "Unknown" }
 ];
 
-export function MovementsView({ refreshToken, resetToken, targetId }: { refreshToken: number; resetToken: number; targetId: string | null }) {
+export function MovementsView({ targetId }: { targetId: string | null }) {
   const [query, setQuery] = React.useState("");
   const [from, setFrom] = React.useState("");
   const [to, setTo] = React.useState("");
@@ -99,7 +99,7 @@ export function MovementsView({ refreshToken, resetToken, targetId }: { refreshT
   if (from) filters.set("from", from);
   if (to) filters.set("to", to);
   if (filter !== "all") filters.set("category", filter);
-  const history = useHistoryPage<MovementRecord>("/api/v1/access/movements/history", filters, refreshToken, resetToken);
+  const history = useHistoryPage<MovementRecord>("/api/v1/access/movements/history", filters);
   React.useEffect(() => {
     if (!targetId) setSelected(null);
   }, [targetId]);

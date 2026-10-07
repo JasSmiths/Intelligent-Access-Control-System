@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { schedulesApi } from "../../api/schedules";
@@ -55,9 +56,9 @@ it("refreshes the schedule default policy through the existing settings owner", 
   const { api } = await import("../../api/client");
   const { SchedulesView } = await import("./SchedulesView");
   const read = vi.spyOn(api, "get").mockResolvedValue([]);
-  const { rerender } = render(<SchedulesView schedules={[]} query="" refresh={async () => {}} refreshToken={0} />);
-  await waitFor(() => expect(read).toHaveBeenCalledOnce());
-  rerender(<SchedulesView schedules={[]} query="" refresh={async () => {}} refreshToken={1} />);
+  const signals = createReadSignals("test");
+  render(<ReadSignalsContext.Provider value={signals}><SchedulesView query="" /></ReadSignalsContext.Provider>);
   await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-  expect(read.mock.calls.map(([url]) => url)).toEqual(["/api/v1/settings?category=access", "/api/v1/settings?category=access"]);
+  await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
+  expect(read.mock.calls.map(([url]) => url)).toEqual(["/api/v1/schedules", "/api/v1/settings?category=access", "/api/v1/schedules", "/api/v1/settings?category=access"]);
 });

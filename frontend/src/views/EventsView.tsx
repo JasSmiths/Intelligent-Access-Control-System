@@ -74,7 +74,7 @@ const EventSnapshotThumb = React.memo(function EventSnapshotThumb({ event }: { e
   );
 });
 
-export function EventsView({ refreshToken, resetToken, targetId }: { refreshToken: number; resetToken: number; targetId: string | null }) {
+export function EventsView({ targetId }: { targetId: string | null }) {
   const [query, setQuery] = React.useState("");
   const [from, setFrom] = React.useState("");
   const [to, setTo] = React.useState("");
@@ -87,7 +87,7 @@ export function EventsView({ refreshToken, resetToken, targetId }: { refreshToke
   if (from) filters.set("from", from);
   if (to) filters.set("to", to);
   if (decision) filters.set("decision", decision);
-  const history = useHistoryPage<AccessEvent>("/api/v1/events/history", filters, refreshToken, resetToken);
+  const history = useHistoryPage<AccessEvent>("/api/v1/events/history", filters);
   React.useEffect(() => {
     if (!targetId) { setFocused(null); return; }
     if (history.loading) return;

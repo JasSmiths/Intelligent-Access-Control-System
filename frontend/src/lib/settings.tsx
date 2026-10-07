@@ -1,3 +1,5 @@
+import { useCoordinatedRead } from "./useCoordinatedRead";
+import type { RealtimeMessage } from "../api/types";
 import { Key, SlidersHorizontal } from "lucide-react";
 import React from "react";
 import { api, isAbortError } from "../api/client";
@@ -86,7 +88,8 @@ export function SettingField({
     </label>
   );
 }
-export function useSettings(category?: string, refreshToken = 0) {
+const noSettingsEvents = () => false;
+export function useSettings(category?: string, eventMatches: (event: RealtimeMessage) => boolean = noSettingsEvents) {
   const [settingsRows, setSettingsRows] = React.useState<SystemSetting[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
@@ -98,12 +101,14 @@ export function useSettings(category?: string, refreshToken = 0) {
       return acc;
     }, {});
   }, [settingsRows]);
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (signal: AbortSignal) => {
     const sequence = loadSequenceRef.current + 1;
     loadSequenceRef.current = sequence;
     loadAbortRef.current?.abort();
     const controller = new AbortController();
     loadAbortRef.current = controller;
+    const abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
     setError("");
     setLoading(true);
     try {
@@ -113,20 +118,19 @@ export function useSettings(category?: string, refreshToken = 0) {
         setSettingsRows(rows);
       }
     } catch (loadError) {
-      if (!isAbortError(loadError) && loadSequenceRef.current === sequence) {
+      if (!controller.signal.aborted && !isAbortError(loadError) && loadSequenceRef.current === sequence) {
         setError(loadError instanceof Error ? loadError.message : "Unable to load settings");
       }
+      throw loadError;
     } finally {
-      if (loadSequenceRef.current === sequence) {
+      signal.removeEventListener("abort", abort);
+      if (!controller.signal.aborted && loadSequenceRef.current === sequence) {
         setLoading(false);
         if (loadAbortRef.current === controller) loadAbortRef.current = null;
       }
     }
   }, [category]);
-  React.useEffect(() => {
-    load().catch(() => undefined);
-    return () => loadAbortRef.current?.abort();
-  }, [load, refreshToken]);
+  const reload = useCoordinatedRead(load, eventMatches);
   const save = React.useCallback(async (updates: Record<string, unknown>, options: { confirmationToken?: string } = {}) => {
     const savedRows = await api.patch<SystemSetting[]>("/api/v1/settings", {
       values: updates,
@@ -144,7 +148,7 @@ export function useSettings(category?: string, refreshToken = 0) {
     loading,
     error,
     save,
-    reload: load
+    reload
   };
 }
 export function stringifySetting(value: unknown) {
