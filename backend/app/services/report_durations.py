@@ -149,4 +149,3 @@ def _verbose_duration(total_minutes: int) -> str:
 
 def _plural(value: int, singular: str) -> str:
     return f"{value} {singular}{'' if value == 1 else 's'}"
-
